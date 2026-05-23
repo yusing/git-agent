@@ -139,6 +139,13 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 	if errs := commitmsg.Validate(mode, result.Text); len(errs) > 0 {
 		return fmt.Errorf("validation failed after shaping: %v", errs)
 	}
+	if err := recorder.Write("final", map[string]any{
+		"text":         result.Text,
+		"tool_calls":   result.ToolCalls,
+		"repair_calls": result.RepairCalls,
+	}); err != nil {
+		return err
+	}
 	return a.writeResult(cfg, result)
 }
 
@@ -234,6 +241,13 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 		RepairOnValidator: true,
 	})
 	if err != nil {
+		return err
+	}
+	if err := recorder.Write("final", map[string]any{
+		"text":         result.Text,
+		"tool_calls":   result.ToolCalls,
+		"repair_calls": result.RepairCalls,
+	}); err != nil {
 		return err
 	}
 	return a.writeResult(cfg, result)

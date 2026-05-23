@@ -1,6 +1,7 @@
 package trace
 
 import (
+	"bufio"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -64,32 +65,140 @@ func TestRecorderWriteExpandsEmbeddedJSONStrings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := recorder.Write("request", map[string]any{
+		"model":        "test-model",
+		"instructions": "draft commit",
+		"input": []map[string]any{
+			{"type": "message", "role": "user", "content": "hello"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.Write("tool-call", map[string]any{
+		"id":        "fc_1",
+		"call_id":   "call_1",
+		"name":      "git_staged_paths",
+		"arguments": map[string]any{},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := recorder.Write("tool-output", map[string]any{
-		"output": `{"ok":true,"data":{"paths":["README.md"]}}`,
+		"call_id": "call_1",
+		"content": `{"ok":true,"data":{"paths":["README.md"]}}`,
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	files, err := filepath.Glob(filepath.Join(recorder.Dir(), "*.json"))
+	data, err := os.ReadFile(filepath.Join(recorder.Dir(), "session.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 {
-		t.Fatalf("files = %#v", files)
+	var got struct {
+		Items []map[string]any `json:"items"`
 	}
-	data, err := os.ReadFile(files[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got map[string]any
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatal(err)
 	}
-	output, ok := got["output"].(map[string]any)
+	if len(got.Items) != 3 {
+		t.Fatalf("items = %#v", got.Items)
+	}
+	output, ok := got.Items[2]["output"].(map[string]any)
 	if !ok {
-		t.Fatalf("output type = %T", got["output"])
+		t.Fatalf("output type = %T", got.Items[2]["output"])
 	}
 	if output["ok"] != true {
 		t.Fatalf("ok = %#v", output["ok"])
+	}
+}
+
+func TestRecorderWritesEventLogAndCompactSession(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	recorder, err := New(root, "commit-msg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.Write("session", map[string]any{
+		"command": "commit-msg",
+		"mode":    "normal",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.Write("request", map[string]any{
+		"model":        "test-model",
+		"instructions": "draft commit",
+		"input": []map[string]any{
+			{"type": "message", "role": "user", "content": "hello"},
+		},
+		"tools": []map[string]any{
+			{"name": "git_staged_paths"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.Write("response", map[string]any{
+		"id":          "resp_1",
+		"finish_kind": "completed",
+		"text":        "feat(trace): compact trace layout",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.Write("final", map[string]any{
+		"text": "feat(trace): compact trace layout",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionData, err := os.ReadFile(filepath.Join(recorder.Dir(), "session.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var session struct {
+		Version int              `json:"version"`
+		Session map[string]any   `json:"session"`
+		Static  map[string]any   `json:"static"`
+		Items   []map[string]any `json:"items"`
+		Steps   []map[string]any `json:"steps"`
+		Final   map[string]any   `json:"final"`
+	}
+	if err := json.Unmarshal(sessionData, &session); err != nil {
+		t.Fatal(err)
+	}
+	if session.Version != 2 {
+		t.Fatalf("version = %d", session.Version)
+	}
+	if session.Session["command"] != "commit-msg" {
+		t.Fatalf("session.command = %#v", session.Session["command"])
+	}
+	if session.Static["model"] != "test-model" {
+		t.Fatalf("static.model = %#v", session.Static["model"])
+	}
+	if len(session.Items) != 1 {
+		t.Fatalf("items = %#v", session.Items)
+	}
+	if len(session.Steps) != 1 {
+		t.Fatalf("steps = %#v", session.Steps)
+	}
+	if session.Final["text"] != "feat(trace): compact trace layout" {
+		t.Fatalf("final = %#v", session.Final)
+	}
+
+	eventsFile, err := os.Open(filepath.Join(recorder.Dir(), "events.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eventsFile.Close()
+
+	scanner := bufio.NewScanner(eventsFile)
+	var count int
+	for scanner.Scan() {
+		count++
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if count != 5 {
+		t.Fatalf("event count = %d", count)
 	}
 }

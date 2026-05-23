@@ -80,7 +80,7 @@ func TestCommitMsgPrintsOnlyProviderArtifact(t *testing.T) {
 	if len(sessions) != 1 {
 		t.Fatalf("sessions = %#v, want one", sessions)
 	}
-	for _, name := range []string{"001-session.json", "002-request.json", "003-response.json"} {
+	for _, name := range []string{"events.ndjson", "session.json"} {
 		if _, err := os.Stat(filepath.Join(sessions[0], name)); err != nil {
 			t.Fatalf("missing trace file %s: %v", name, err)
 		}

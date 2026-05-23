@@ -835,16 +835,32 @@ func assertTraceArtifacts(t *testing.T, repoDir, pattern string, minToolCalls in
 	if len(sessions) != 1 {
 		t.Fatalf("sessions = %#v, want one", sessions)
 	}
-	toolCalls, err := filepath.Glob(filepath.Join(sessions[0], "*-tool-call.json"))
+	for _, name := range []string{"events.ndjson", "session.json"} {
+		if _, err := os.Stat(filepath.Join(sessions[0], name)); err != nil {
+			t.Fatalf("missing trace file %s: %v", name, err)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(sessions[0], "session.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	toolOutputs, err := filepath.Glob(filepath.Join(sessions[0], "*-tool-output.json"))
-	if err != nil {
+	var session struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(data, &session); err != nil {
 		t.Fatal(err)
 	}
-	if len(toolCalls) < minToolCalls || len(toolOutputs) < minToolCalls {
-		t.Fatalf("trace missing tool artifacts: calls=%d outputs=%d session=%s", len(toolCalls), len(toolOutputs), sessions[0])
+	var toolCalls, toolOutputs int
+	for _, item := range session.Items {
+		switch item["type"] {
+		case "function_call":
+			toolCalls++
+		case "function_call_output":
+			toolOutputs++
+		}
+	}
+	if toolCalls < minToolCalls || toolOutputs < minToolCalls {
+		t.Fatalf("trace missing tool artifacts: calls=%d outputs=%d session=%s", toolCalls, toolOutputs, sessions[0])
 	}
 }
 
