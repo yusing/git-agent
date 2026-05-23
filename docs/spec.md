@@ -8,7 +8,8 @@
 binary that:
 
 - gathers Git and repository context without shelling out to ad hoc scripts
-- uses an OpenAI-compatible Responses API client
+- uses the official OpenAI Go SDK against an OpenAI-compatible Responses API
+  endpoint
 - runs a bounded, read-only, tool-calling agent loop
 - emits only the final commit message or release note on stdout
 - preserves project guidance behavior close to Codex for AGENTS-family files
@@ -25,7 +26,8 @@ v1 must not:
 
 - execute arbitrary shell commands on behalf of the model
 - merge AGENTS-family and CLAUDE-family guidance into the same prompt
-- implement provider-specific plugins beyond OpenAI-compatible HTTP
+- implement provider-specific plugins beyond OpenAI-compatible Responses API
+  options exposed through the official SDK
 - add write-capable repository tools
 - preserve exact raw `git` CLI output byte-for-byte when a typed Go equivalent
   is clearer and stable
@@ -80,7 +82,9 @@ Resolution order:
 
 - stdout: final generated artifact only
 - stderr: diagnostics, debug output, validation failures, provider/tool loop
-  traces when `--debug` is enabled
+  summaries when `--debug` is enabled
+- every command writes a JSON trace session under `.git-agent/sessions/`
+  regardless of `--debug`; `--debug` prints the session directory on stderr
 
 ### Exit behavior
 
@@ -93,6 +97,19 @@ Nonzero exit codes are returned for:
 - tool execution failures
 - validation failures that cannot be repaired
 
+### Build and install
+
+The repository provides a `Makefile` with:
+
+- `make build`: build `bin/git-agent`
+- `make test`: run `go test ./...`
+- `make install`: install the built binary to `$(DESTDIR)$(BINDIR)/git-agent`
+
+Defaults:
+
+- `PREFIX ?= ~/.local`
+- `BINDIR ?= $(PREFIX)/bin`
+
 ## 3. Architecture
 
 ### Package map
@@ -101,37 +118,71 @@ Nonzero exit codes are returned for:
 - `internal/cli`: argument parsing and command dispatch
 - `internal/config`: environment and flag materialization
 - `internal/agent`: bounded agent loop contract
-- `internal/openai`: OpenAI-compatible Responses API client
+- `internal/openai`: official OpenAI Go SDK adapter for the Responses API
 - `internal/guidance`: project guidance discovery and rendering
 - `internal/gitctx`: typed repository inspection
 - `internal/tools`: curated read-only tool registry
 - `internal/tasks/commitmsg`: commit message behavior
 - `internal/tasks/releasenote`: release note behavior
 - `internal/textutil`: shared normalization and output shaping helpers
+- `internal/trace`: JSON session recorder for requests, responses, tool calls,
+  and tool outputs
 
 ### Request assembly layers
 
-Every task request is assembled in this order:
+Every task request is assembled using Codex-style layering:
 
-1. system prompt
-2. developer-style project guidance block
-3. task-specific user prompt
-4. tool registry for that task
+1. top-level Responses `instructions` containing task-level system behavior
+2. developer message containing the read-only tool policy
+3. developer message containing environment context
+4. developer message containing project guidance
+5. task-specific user prompt
+6. strict function tool registry for that task
 
 The project guidance block is not treated as ordinary user text. It is a
 separate injected layer mirroring Codex’s style.
 
+Environment context includes:
+
+- current working directory
+- repository root
+- command name
+- mode or release range
+- selected guidance family
+- stdout contract
+
+Tool policy states that tools are read-only, cannot run arbitrary shell, cannot
+mutate files/index/refs/remotes/network/provider state, and return JSON
+envelopes with truncation metadata.
+
+The OpenAI adapter uses the official `github.com/openai/openai-go/v3` package.
+It converts internal request items into `responses.ResponseNewParams`,
+including:
+
+- `Instructions`
+- structured input message items
+- `function_call` items
+- `function_call_output` items
+- strict function tool definitions
+- `Store: false`
+- `ParallelToolCalls: false` when tools are present
+- `MaxToolCalls` when configured
+
 ### Agent loop lifecycle
 
 1. resolve config and repo context
-2. resolve project guidance for the task target path
-3. build task-specific system prompt and initial user prompt
-4. send request to the Responses API
-5. if the model requests tools, execute only registered read-only tools
-6. append tool results and continue until final text is returned
-7. validate output against task rules
-8. if invalid and repair budget remains, run exactly one repair pass
-9. print final text to stdout
+2. create a JSON trace session
+3. resolve project guidance for the task target path or staged paths
+4. build task-specific instructions, developer context, and initial user prompt
+5. send request to the Responses API through the official OpenAI Go SDK
+6. record each request and response as JSON trace files
+7. if the model requests tools, execute only registered read-only tools
+8. record each tool call and tool output as JSON trace files
+9. append function-call and function-call-output items and continue until final
+   text is returned
+10. validate output against task rules
+11. if invalid and repair budget remains, run exactly one repair pass
+12. print final text to stdout
 
 ### Bounded execution
 
@@ -142,6 +193,38 @@ The runtime must enforce:
 - maximum bytes/lines per tool result
 - per-request timeout
 - overall task timeout
+
+### Session trace format
+
+Each command stores a trace under:
+
+```text
+.git-agent/sessions/<timestamp>-<command>/
+```
+
+Trace files are monotonically numbered:
+
+```text
+001-session.json
+002-request.json
+003-response.json
+004-tool-call.json
+005-tool-output.json
+...
+```
+
+Trace contents include:
+
+- session metadata: command, mode/range, repository summary, staged paths when
+  relevant
+- every Responses request sent to the provider, with API keys redacted
+- every provider response, including raw response JSON when available from the
+  SDK
+- every model-requested tool call
+- every tool output returned to the model
+
+Trace files are written with `json.Encoder` and indentation. They are
+diagnostic artifacts and are ignored by Git via `/.git-agent/`.
 
 ## 4. Guidance resolution
 
@@ -208,11 +291,11 @@ The injected guidance block uses a Codex-style outer wrapper:
 # AGENTS.md instructions for /absolute/target/path
 
 <INSTRUCTIONS>
-<PROJECT_DOC path="/repo/AGENTS.md">
+<PROJECT_DOC path="AGENTS.md">
 ...
 </PROJECT_DOC>
 
-<PROJECT_DOC path="/repo/frontend/AGENTS.md">
+<PROJECT_DOC path="frontend/AGENTS.md">
 ...
 </PROJECT_DOC>
 </INSTRUCTIONS>
@@ -223,7 +306,8 @@ Notes:
 - the heading remains `AGENTS.md instructions for ...` for parity with Codex’s
   visible wrapper shape
 - the chosen family may still be CLAUDE-family under the hood
-- inner path tags preserve provenance and scoped boundaries
+- inner path tags preserve provenance and scoped boundaries using
+  repository-relative paths to avoid leaking absolute machine paths
 
 ### Guidance target path
 
@@ -232,9 +316,15 @@ cwd.
 
 Task defaults:
 
-- `commit-msg`: current worktree path / repository root context
+- `commit-msg`: staged paths when present; if no staged paths are available,
+  current repository root
 - `release-note`: current repository root unless a future `--path` override is
   added
+
+For `commit-msg`, guidance is resolved across all staged paths. Family
+selection remains global for the task: if any staged path has AGENTS-family
+guidance, AGENTS-family is selected and CLAUDE-family files are ignored for the
+whole request. Sources are de-duplicated while preserving root-to-leaf order.
 
 ## 5. Tool system
 
@@ -248,7 +338,7 @@ Task defaults:
 
 ### Shared repository tools
 
-Planned shared tools:
+Shared tools:
 
 - `repo_summary`
 - `list_files`
@@ -257,7 +347,7 @@ Planned shared tools:
 
 ### Commit message tools
 
-Planned commit message tools:
+Commit message tools:
 
 - `git_staged_paths`
 - `git_staged_status`
@@ -266,12 +356,13 @@ Planned commit message tools:
 - `git_recent_commits`
 - `git_head_show`
 - `git_diff_against_parent`
+- `git_final_amended_diff`
 - `git_amend_delta`
 - `git_show_file_at_rev`
 
 ### Release note tools
 
-Planned release-note tools:
+Release-note tools:
 
 - `resolve_ref`
 - `git_log_range`
@@ -286,9 +377,25 @@ Each tool definition must provide:
 
 - stable tool name
 - description
-- JSON schema for arguments
-- plain JSON or plain text result with stable fields
+- strict JSON schema for arguments using `additionalProperties: false`
+- required fields for mandatory arguments
+- bounds for numeric cap arguments
+- JSON result envelope with stable fields
 - explicit truncation metadata when output is capped
+
+Tool result envelope:
+
+```json
+{
+  "ok": true,
+  "tool": "git_staged_diff",
+  "data": {},
+  "truncated": false
+}
+```
+
+The tool loop records both the model's function-call arguments and the exact
+tool-output envelope sent back to the model.
 
 ### Limits
 
@@ -320,7 +427,9 @@ Output rules:
 - blank line before body only when body exists
 - no fences
 - no explanations
-- body lines wrapped to target width
+- body lines wrapped to target width (target width: 72 characters after output
+  shaping; long unbreakable tokens such as URLs may exceed the limit only when
+  they cannot be wrapped safely)
 
 ### Commit message: amend mode
 
@@ -328,8 +437,10 @@ Behavior:
 
 - describe the final amended commit as one commit versus its parent
 - never narrate the amended result as “previous commit plus extra changes”
-- treat the full amended diff versus parent as authoritative when available
-- use current HEAD and staged-vs-HEAD views only as diagnostic inputs
+- treat `git_final_amended_diff` as authoritative; it overlays staged changes
+  on current HEAD and compares the final amended result against the first parent
+- use current HEAD, HEAD-vs-parent, and staged-vs-HEAD views only as diagnostic
+  inputs
 
 Output rules:
 
@@ -369,6 +480,9 @@ Commit message validator checks at minimum:
 - no code fences
 - subject present
 - no stray commentary
+- amend mode does not use process/delta phrasing
+- body lines stay within the target width after output shaping (target width: 72
+  characters after shaping, except for long unbreakable tokens such as URLs)
 
 Release note validator checks at minimum:
 
@@ -400,6 +514,7 @@ If validation fails:
 - parse env and flags into `config.Config`
 - add shared error shaping
 - add debug plumbing
+- add Makefile build/test/install targets
 
 ### Phase 3: Git context layer
 
@@ -407,6 +522,7 @@ If validation fails:
 - collect branch/head metadata
 - implement staged and range inspection helpers
 - add submodule traversal helpers
+- use `github.com/go-git/go-git/v6`
 
 ### Phase 4: guidance resolver
 
@@ -417,23 +533,39 @@ If validation fails:
 
 ### Phase 5: OpenAI-compatible client
 
-- build Responses API request/response layer
+- build Responses API request/response layer on top of the official OpenAI Go
+  SDK
 - support tool calls
-- add timeout and retry boundaries where appropriate
+- support function-call-output continuation items
+- expose request trace marshaling with secrets redacted
+- add timeout boundaries
 
 ### Phase 6: tool loop
 
 - register typed tools
 - run bounded dispatch loop
 - append tool results back into the conversation
+- emit strict tool schemas
+- return stable JSON envelopes
+- record tool calls and outputs in session traces
 
 ### Phase 7: task validators and prompts
 
 - implement commit message prompts and validation
 - implement release note prompts and validation
 - add one-pass repair flow
+- inject tool policy and environment context
 
-### Phase 8: Fish migration
+### Phase 8: debuggability
+
+- create `.git-agent/sessions/<timestamp>-<command>/` per command
+- write session metadata
+- write every provider request and response
+- write every tool call and tool output
+- redact API keys in traces
+- print trace directory under `--debug`
+
+### Phase 9: Fish migration
 
 Outside this repo, update Fish wrappers to:
 
@@ -454,6 +586,9 @@ Unit coverage should include:
 - guidance scoped ordering
 - validator rules
 - truncation metadata
+- strict tool schemas
+- tool result envelopes
+- trace redaction and trace file creation
 
 ### Golden tests
 
@@ -472,6 +607,8 @@ Use a local fake OpenAI-compatible server to test:
 - finish states
 - validation repair pass behavior
 - malformed provider responses
+- official SDK request compatibility
+- stdout-only artifact behavior
 
 ### Integration tests
 
@@ -479,6 +616,7 @@ Use temporary repositories to test:
 
 - staged commit message generation scenarios
 - amend scenarios
+- staged-path guidance scoping
 - detached HEAD
 - root commit handling
 - release-note tag/range handling
@@ -503,9 +641,10 @@ details.
 
 Mitigation:
 
-- keep the client thin
-- isolate provider translation in `internal/openai`
+- keep the SDK adapter thin
+- isolate provider translation and SDK type conversion in `internal/openai`
 - test against a fake server and at least one real provider
+- keep full JSON session traces for request/response debugging
 
 ### Release-note formatting regressions
 
@@ -526,6 +665,19 @@ Mitigation:
 - strict tool output caps
 - encourage narrow follow-up reads
 
+### Trace data sensitivity risk
+
+Session traces intentionally store prompts, provider responses, tool arguments,
+and tool outputs. They are useful for debugging but may include repository
+content.
+
+Mitigation:
+
+- redact API keys from request traces
+- store traces under `.git-agent/`
+- ignore `.git-agent/` in Git
+- print trace directory only when `--debug` is enabled
+
 ## 10. Immediate acceptance criteria for the skeleton
 
 The skeleton phase is complete when:
@@ -536,3 +688,24 @@ The skeleton phase is complete when:
 - CLI entrypoint builds
 - internal package boundaries exist
 - `docs/spec.md` captures all locked architecture and migration decisions
+
+## 11. Current implementation acceptance criteria
+
+The current in-repository implementation, excluding Phase 9 Fish migration, is
+complete when:
+
+- `make build` succeeds and writes `bin/git-agent`
+- `make test` / `go test ./...` pass
+- `make install DESTDIR=<tmp> PREFIX=/usr/local` installs an executable binary
+- `git-agent commit-msg` and `git-agent commit-msg --amend` route through the
+  bounded SDK-backed agent loop
+- `git-agent release-note <base> <release>` resolves refs before generation
+- guidance rendering uses repository-relative `<PROJECT_DOC path="...">` tags
+- commit-message guidance resolves against staged paths
+- tools are read-only and exposed as strict function tools
+- tool outputs use the stable JSON envelope
+- every command writes a `.git-agent/sessions/<timestamp>-<command>/` trace
+- stdout contains only the final generated artifact
+
+The full end-to-end migration goal is complete only after Phase 9 is performed
+outside this repository and verified against the Fish wrapper environment.
