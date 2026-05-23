@@ -13,6 +13,8 @@ func TestResolveFlagEnvDefaultOrder(t *testing.T) {
 	cfg, err := Resolve(Options{
 		BaseURL:  "https://flag.example/v1",
 		Model:    "flag-model",
+		Fast:     true,
+		Medium:   true,
 		Timeout:  "3s",
 		MaxSteps: 2,
 	})
@@ -27,6 +29,12 @@ func TestResolveFlagEnvDefaultOrder(t *testing.T) {
 	}
 	if cfg.Model != "flag-model" {
 		t.Fatalf("Model = %q", cfg.Model)
+	}
+	if cfg.ServiceTier != "priority" {
+		t.Fatalf("ServiceTier = %q", cfg.ServiceTier)
+	}
+	if cfg.ThinkingEffort != "medium" {
+		t.Fatalf("ThinkingEffort = %q", cfg.ThinkingEffort)
 	}
 	if cfg.Timeout != 3*time.Second {
 		t.Fatalf("Timeout = %s", cfg.Timeout)
@@ -56,5 +64,19 @@ func TestResolveUsesRaisedDefaultMaxSteps(t *testing.T) {
 	}
 	if cfg.MaxSteps != 30 {
 		t.Fatalf("default MaxSteps = %d", cfg.MaxSteps)
+	}
+	if cfg.ServiceTier != "" {
+		t.Fatalf("ServiceTier = %q", cfg.ServiceTier)
+	}
+	if cfg.ThinkingEffort != "" {
+		t.Fatalf("ThinkingEffort = %q", cfg.ThinkingEffort)
+	}
+}
+
+func TestResolveRejectsConflictingThinkingFlags(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "env-key")
+
+	if _, err := Resolve(Options{Low: true, Medium: true}); err == nil {
+		t.Fatal("expected mutually exclusive thinking flags error")
 	}
 }

@@ -19,6 +19,8 @@ type Config struct {
 	APIKey         string
 	BaseURL        string
 	Model          string
+	ServiceTier    string
+	ThinkingEffort string
 	Timeout        time.Duration
 	MaxSteps       int
 	MaxToolCalls   int
@@ -30,6 +32,11 @@ type Options struct {
 	APIKey         string
 	BaseURL        string
 	Model          string
+	Fast           bool
+	Low            bool
+	Medium         bool
+	High           bool
+	XHigh          bool
 	Timeout        string
 	MaxSteps       int
 	GuidanceFamily string
@@ -56,16 +63,44 @@ func Resolve(opts Options) (Config, error) {
 		}
 		maxSteps = opts.MaxSteps
 	}
+	thinkingModeFlags := 0
+	for _, enabled := range []bool{opts.Low, opts.Medium, opts.High, opts.XHigh} {
+		if enabled {
+			thinkingModeFlags++
+		}
+	}
+	if thinkingModeFlags > 1 {
+		return Config{}, errors.New("--low, --medium, --high, and --xhigh are mutually exclusive")
+	}
 
 	apiKey := firstNonEmpty(opts.APIKey, os.Getenv("OPENAI_API_KEY"))
 	if apiKey == "" {
 		return Config{}, errors.New("missing OPENAI_API_KEY")
 	}
 
+	thinkingEffort := ""
+	switch {
+	case opts.Low:
+		thinkingEffort = "low"
+	case opts.Medium:
+		thinkingEffort = "medium"
+	case opts.XHigh:
+		thinkingEffort = "xhigh"
+	case opts.High:
+		thinkingEffort = "high"
+	}
+
+	serviceTier := ""
+	if opts.Fast {
+		serviceTier = "priority"
+	}
+
 	return Config{
 		APIKey:         apiKey,
 		BaseURL:        firstNonEmpty(opts.BaseURL, os.Getenv("OPENAI_BASE_URL"), DefaultBaseURL),
 		Model:          firstNonEmpty(opts.Model, os.Getenv("OPENAI_MODEL"), DefaultModel),
+		ServiceTier:    serviceTier,
+		ThinkingEffort: thinkingEffort,
 		Timeout:        timeout,
 		MaxSteps:       maxSteps,
 		MaxToolCalls:   DefaultMaxTools,

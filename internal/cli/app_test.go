@@ -143,6 +143,59 @@ func TestEnvironmentContextIncludesCurrentStepLimit(t *testing.T) {
 	}
 }
 
+func TestCommitMsgForwardsFastAndThinkingFlags(t *testing.T) {
+	repoDir := initRepo(t)
+	t.Chdir(repoDir)
+
+	var requests []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, payload)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: ")
+		fmt.Fprint(w, `{"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"test-model","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Add parser","annotations":[]}]}]}}`)
+		fmt.Fprint(w, "\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "test-model")
+
+	app := &App{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
+	if err := app.Run(context.Background(), []string{"commit-msg", "--fast", "--medium"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	if got := requests[0]["service_tier"]; got != "priority" {
+		t.Fatalf("service_tier = %#v", got)
+	}
+	reasoning, ok := requests[0]["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("reasoning = %#v", requests[0]["reasoning"])
+	}
+	if got := reasoning["effort"]; got != "medium" {
+		t.Fatalf("reasoning.effort = %#v", got)
+	}
+}
+
+func TestRunRejectsConflictingThinkingFlags(t *testing.T) {
+	app := &App{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
+	err := app.Run(context.Background(), []string{"commit-msg", "--high", "--xhigh"})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected mutually exclusive error, got %v", err)
+	}
+}
+
 func initRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()

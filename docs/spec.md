@@ -54,11 +54,25 @@ Generate a GitHub release body for the range from `<base>` to `<release>`.
 All subcommands reserve this shared flag surface:
 
 - `--model`
+- `--fast`
+- `--low`
+- `--medium`
+- `--high`
+- `--xhigh`
 - `--base-url`
 - `--timeout`
 - `--max-steps`
 - `--guidance-family`
 - `--debug`
+
+Flag behavior:
+
+- `--fast`: send `service_tier=priority`
+- `--low`: send `reasoning.effort=low`
+- `--medium`: send `reasoning.effort=medium`
+- `--high`: send `reasoning.effort=high`
+- `--xhigh`: send `reasoning.effort=xhigh`
+- default: omit both `service_tier` and `reasoning`
 
 `commit-msg` additionally supports:
 

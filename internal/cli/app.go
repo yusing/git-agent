@@ -241,6 +241,11 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 
 func registerSharedFlags(fs *flag.FlagSet, opts *config.Options) {
 	fs.StringVar(&opts.Model, "model", "", "override OPENAI_MODEL")
+	fs.BoolVar(&opts.Fast, "fast", false, "use priority service tier")
+	fs.BoolVar(&opts.Low, "low", false, "use low reasoning effort")
+	fs.BoolVar(&opts.Medium, "medium", false, "use medium reasoning effort")
+	fs.BoolVar(&opts.High, "high", false, "use high reasoning effort")
+	fs.BoolVar(&opts.XHigh, "xhigh", false, "use xhigh reasoning effort")
 	fs.StringVar(&opts.BaseURL, "base-url", "", "override OPENAI_BASE_URL")
 	fs.StringVar(&opts.Timeout, "timeout", "", "override default request timeout")
 	fs.IntVar(&opts.MaxSteps, "max-steps", 0, "override maximum agent steps")

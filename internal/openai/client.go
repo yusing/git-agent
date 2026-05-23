@@ -12,6 +12,7 @@ import (
 	openaisdk "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 	"github.com/yusing/git-agent/internal/trace"
 )
 
@@ -21,6 +22,8 @@ type Client interface {
 
 type Request struct {
 	Model        string     `json:"model"`
+	ServiceTier  string     `json:"service_tier,omitempty"`
+	ThinkingMode string     `json:"thinking_mode,omitempty"`
 	BaseURL      string     `json:"-"`
 	APIKey       string     `json:"-"`
 	Instructions string     `json:"instructions,omitempty"`
@@ -408,6 +411,12 @@ func (r Request) toSDKParams() (responses.ResponseNewParams, error) {
 	}
 	if len(tools) > 0 {
 		params.ParallelToolCalls = openaisdk.Bool(false)
+	}
+	if r.ServiceTier != "" {
+		params.ServiceTier = responses.ResponseNewParamsServiceTier(r.ServiceTier)
+	}
+	if r.ThinkingMode != "" {
+		params.Reasoning = shared.ReasoningParam{Effort: shared.ReasoningEffort(r.ThinkingMode)}
 	}
 	return params, nil
 }

@@ -22,11 +22,21 @@ CLI flags will override environment values.
 Common flags:
 
 - `--model`
+- `--fast`
+- `--low`
+- `--medium`
+- `--high`
+- `--xhigh`
 - `--base-url`
 - `--timeout`
 - `--max-steps`
 - `--guidance-family`
 - `--debug`
+
+Behavior defaults:
+
+- omit `service_tier` unless `--fast` is set
+- omit reasoning mode unless one of `--low`, `--medium`, `--high`, or `--xhigh` is set
 
 ## Build and install
 

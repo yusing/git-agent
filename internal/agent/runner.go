@@ -130,6 +130,8 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 	for step := 0; step < maxSteps; step++ {
 		req := openai.Request{
 			Model:        r.Config.Model,
+			ServiceTier:  r.Config.ServiceTier,
+			ThinkingMode: r.Config.ThinkingEffort,
 			BaseURL:      r.Config.BaseURL,
 			APIKey:       r.Config.APIKey,
 			Instructions: requestInstructions(instructions, toolSpecs),
@@ -241,12 +243,12 @@ func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions
 				nextTools += max(0, decision.ExtendToolCalls)
 			}
 			if err := r.Trace.Write("budget", map[string]any{
-				"kind":                  status.Kind,
-				"decision":              "extend",
-				"previous_max_steps":    status.MaxSteps,
+				"kind":                   status.Kind,
+				"decision":               "extend",
+				"previous_max_steps":     status.MaxSteps,
 				"previous_max_toolcalls": status.MaxToolCalls,
-				"next_max_steps":        nextSteps,
-				"next_max_toolcalls":    nextTools,
+				"next_max_steps":         nextSteps,
+				"next_max_toolcalls":     nextTools,
 			}); err != nil {
 				return Result{}, 0, 0, err
 			}
@@ -261,11 +263,11 @@ func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions
 	finalized.ToolCalls = current.ToolCalls
 	finalized.RepairCalls = current.RepairCalls
 	if err := r.Trace.Write("budget", map[string]any{
-		"kind":         status.Kind,
-		"decision":     "finalize",
-		"max_steps":    status.MaxSteps,
+		"kind":          status.Kind,
+		"decision":      "finalize",
+		"max_steps":     status.MaxSteps,
 		"max_toolcalls": status.MaxToolCalls,
-		"used":         status.Used,
+		"used":          status.Used,
 	}); err != nil {
 		return Result{}, 0, 0, err
 	}
@@ -276,6 +278,8 @@ func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions st
 	finalMessages := append(slices.Clone(messages), openai.NewMessage("developer", finalizationNotice(status)))
 	req := openai.Request{
 		Model:        r.Config.Model,
+		ServiceTier:  r.Config.ServiceTier,
+		ThinkingMode: r.Config.ThinkingEffort,
 		BaseURL:      r.Config.BaseURL,
 		APIKey:       r.Config.APIKey,
 		Instructions: finalArtifactInstructions(instructions),

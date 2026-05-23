@@ -15,6 +15,8 @@ func TestRequestConvertsToSDKStructuredInputAndTools(t *testing.T) {
 
 	params, err := Request{
 		Model:        "test-model",
+		ServiceTier:  "priority",
+		ThinkingMode: "xhigh",
 		Instructions: "follow spec",
 		Input: []Item{
 			NewMessage("developer", "guidance"),
@@ -42,6 +44,8 @@ func TestRequestConvertsToSDKStructuredInputAndTools(t *testing.T) {
 	for _, want := range []string{
 		`"instructions":"follow spec"`,
 		`"role":"developer"`,
+		`"service_tier":"priority"`,
+		`"reasoning":{"effort":"xhigh"}`,
 		`"type":"input_text"`,
 		`"type":"output_text"`,
 		`"type":"function_call"`,
@@ -56,6 +60,57 @@ func TestRequestConvertsToSDKStructuredInputAndTools(t *testing.T) {
 	}
 	if strings.Contains(got, `"max_tool_calls":`) {
 		t.Fatalf("SDK payload should omit max_tool_calls for provider compatibility: %s", got)
+	}
+}
+
+func TestRequestOmitsServiceTierAndThinkingModeByDefault(t *testing.T) {
+	t.Parallel()
+
+	params, err := Request{
+		Model: "test-model",
+		Input: []Item{
+			NewMessage("user", "task"),
+		},
+	}.toSDKParams()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, unwanted := range []string{
+		`"service_tier":`,
+		`"reasoning":`,
+	} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("SDK payload should omit %s: %s", unwanted, got)
+		}
+	}
+}
+
+func TestRequestSupportsLowThinkingMode(t *testing.T) {
+	t.Parallel()
+
+	params, err := Request{
+		Model:        "test-model",
+		ThinkingMode: "low",
+		Input: []Item{
+			NewMessage("user", "task"),
+		},
+	}.toSDKParams()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); !strings.Contains(got, `"reasoning":{"effort":"low"}`) {
+		t.Fatalf("SDK payload missing low reasoning effort: %s", got)
 	}
 }
 
