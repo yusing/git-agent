@@ -166,7 +166,7 @@ including:
 - strict function tool definitions
 - `Store: false`
 - `ParallelToolCalls: false` when tools are present
-- `MaxToolCalls` when configured
+- Never send `max_tool_calls` on `/responses`; this provider class rejects it. Enforce tool-call ceilings locally in the runner only, and do not re-add outbound `max_tool_calls`.
 
 ### Agent loop lifecycle
 

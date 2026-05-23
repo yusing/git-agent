@@ -27,3 +27,26 @@ Common flags:
 - `--max-steps`
 - `--guidance-family`
 - `--debug`
+
+## Build and install
+
+```sh
+make build
+make test
+make install PREFIX=/usr/local
+```
+
+`make install` also honors `DESTDIR` for package-style installs.
+
+## Debug sessions
+
+Every command stores a JSON trace under:
+
+```text
+.git-agent/sessions/<timestamp>-<command>/
+```
+
+Trace files include session metadata, every Responses request sent to the
+provider, every response received, each tool call, and the tool output returned
+to the model. API keys are redacted from request traces. `--debug` prints the
+trace directory to stderr.
