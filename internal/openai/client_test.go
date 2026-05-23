@@ -363,6 +363,55 @@ func TestCreateResponseRepairsIncompleteCompletedToolCallsFromStream(t *testing.
 	}
 }
 
+func TestCreateResponseFallsBackToNonStreamingOnMalformedStreamJSON(t *testing.T) {
+	t.Parallel()
+
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, marshalJSON(map[string]any{
+			"id":         "resp_fallback",
+			"object":     "response",
+			"created_at": 0,
+			"status":     "completed",
+			"model":      "test-model",
+			"output": []map[string]any{{
+				"id":     "msg_1",
+				"type":   "message",
+				"status": "completed",
+				"role":   "assistant",
+				"content": []map[string]any{{
+					"type":        "output_text",
+					"text":        "fallback text",
+					"annotations": []any{},
+				}},
+			}},
+		}))
+	}))
+	defer server.Close()
+
+	resp, err := NewHTTPClient(server.Client()).CreateResponse(context.Background(), Request{
+		Model:   "test-model",
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+	if resp.Text != "fallback text" {
+		t.Fatalf("text = %q", resp.Text)
+	}
+}
+
 func marshalJSON(v any) string {
 	data, err := json.Marshal(v)
 	if err != nil {

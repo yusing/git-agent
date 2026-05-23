@@ -3,7 +3,9 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -94,10 +96,13 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 		}
 	}
 	if err := stream.Err(); err != nil {
+		if shouldRetryWithoutStreaming(err) {
+			return fallbackWithoutStreaming(ctx, client, params, err)
+		}
 		return Response{}, err
 	}
 	if final == nil && !accum.hasContent() {
-		return Response{}, fmt.Errorf("provider stream ended without response.completed event")
+		return fallbackWithoutStreaming(ctx, client, params, fmt.Errorf("provider stream ended without response.completed event"))
 	}
 
 	result := accum.response()
@@ -296,6 +301,26 @@ func responseFromCompleted(final *responses.Response) Response {
 		})
 	}
 	return result
+}
+
+func shouldRetryWithoutStreaming(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unexpected end of json input") ||
+		strings.Contains(message, "unexpected eof")
+}
+
+func fallbackWithoutStreaming(ctx context.Context, client openaisdk.Client, params responses.ResponseNewParams, streamErr error) (Response, error) {
+	fallback, fallbackErr := client.Responses.New(ctx, params)
+	if fallbackErr == nil {
+		return responseFromCompleted(fallback), nil
+	}
+	return Response{}, errors.Join(streamErr, fallbackErr)
 }
 
 func mergeToolCalls(primary, streamed []ToolCall) []ToolCall {
