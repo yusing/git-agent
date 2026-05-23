@@ -62,12 +62,41 @@ func TestRequestConvertsToSDKStructuredInputAndTools(t *testing.T) {
 func TestMarshalTraceJSONRedactsAPIKey(t *testing.T) {
 	t.Parallel()
 
-	data, err := Request{Model: "m", APIKey: "secret", BaseURL: "http://example"}.MarshalTraceJSON()
+	data, err := Request{
+		Model:   "m",
+		APIKey:  "secret",
+		BaseURL: "http://example",
+		Input: []Item{
+			NewFunctionCallOutput("call_1", `{"ok":true,"data":{"paths":["README.md"]}}`),
+		},
+	}.MarshalTraceJSON()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(data), "secret") {
 		t.Fatalf("trace leaked API key: %s", data)
+	}
+	if strings.Contains(string(data), `\"ok\":true`) {
+		t.Fatalf("trace kept nested json as escaped text: %s", data)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	input, ok := got["input"].([]any)
+	if !ok || len(input) != 1 {
+		t.Fatalf("input = %#v", got["input"])
+	}
+	item, ok := input[0].(map[string]any)
+	if !ok {
+		t.Fatalf("item = %#v", input[0])
+	}
+	output, ok := item["output"].(map[string]any)
+	if !ok {
+		t.Fatalf("output type = %T", item["output"])
+	}
+	if output["ok"] != true {
+		t.Fatalf("output = %#v", output)
 	}
 }
 

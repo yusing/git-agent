@@ -12,6 +12,7 @@ import (
 	openaisdk "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
+	"github.com/yusing/git-agent/internal/trace"
 )
 
 type Client interface {
@@ -128,9 +129,9 @@ type streamAccumulator struct {
 
 func newStreamAccumulator() *streamAccumulator {
 	return &streamAccumulator{
-		callsByID: map[string]*ToolCall{},
+		callsByID:  map[string]*ToolCall{},
 		callsByIdx: map[int64]*ToolCall{},
-		textParts: map[string]string{},
+		textParts:  map[string]string{},
 	}
 }
 
@@ -476,8 +477,8 @@ func NewFunctionCallOutput(callID, output string) Item {
 
 func (r Request) MarshalTraceJSON() ([]byte, error) {
 	type traceRequest Request
-	trace := traceRequest(r)
-	trace.APIKey = ""
-	trace.BaseURL = r.BaseURL
-	return json.MarshalIndent(trace, "", "  ")
+	traceValue := traceRequest(r)
+	traceValue.APIKey = ""
+	traceValue.BaseURL = r.BaseURL
+	return json.MarshalIndent(trace.Normalize(traceValue), "", "  ")
 }

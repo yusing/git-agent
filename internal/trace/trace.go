@@ -1,8 +1,11 @@
 package trace
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -47,5 +50,58 @@ func (r *Recorder) Write(kind string, value any) error {
 
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
-	return encoder.Encode(value)
+	return encoder.Encode(Normalize(value))
+}
+
+func Normalize(value any) any {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return value
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var normalized any
+	if err := decoder.Decode(&normalized); err != nil {
+		return value
+	}
+	return expandJSONStrings(normalized)
+}
+
+func expandJSONStrings(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		for key, item := range value {
+			value[key] = expandJSONStrings(item)
+		}
+		return value
+	case []any:
+		for idx, item := range value {
+			value[idx] = expandJSONStrings(item)
+		}
+		return value
+	case string:
+		return expandJSONString(value)
+	default:
+		return value
+	}
+}
+
+func expandJSONString(value string) any {
+	trimmed := bytes.TrimSpace([]byte(value))
+	if len(trimmed) == 0 {
+		return value
+	}
+	if trimmed[0] != '{' && trimmed[0] != '[' {
+		return value
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	var expanded any
+	if err := decoder.Decode(&expanded); err != nil {
+		return value
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return value
+	}
+	return expandJSONStrings(expanded)
 }
