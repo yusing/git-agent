@@ -228,9 +228,7 @@ func (r *Recorder) appendEventLocked(kind string, value map[string]any) error {
 func (r *Recorder) applyLocked(kind string, value map[string]any) error {
 	switch kind {
 	case "session":
-		for key, item := range value {
-			r.snapshot.Session[key] = item
-		}
+		maps.Copy(r.snapshot.Session, value)
 	case "request":
 		return r.applyRequestLocked(value)
 	case "response":

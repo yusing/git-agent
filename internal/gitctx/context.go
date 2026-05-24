@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -646,9 +647,7 @@ func collectSubmoduleEntries(tree *object.Tree, prefix string) (map[string]strin
 			if err != nil {
 				return nil, err
 			}
-			for childPath, hash := range childEntries {
-				submodules[childPath] = hash
-			}
+			maps.Copy(submodules, childEntries)
 		}
 	}
 	return submodules, nil

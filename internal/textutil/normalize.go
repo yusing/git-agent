@@ -52,7 +52,7 @@ func WrapBody(text string, width int) string {
 	}
 
 	var out []string
-	for _, line := range strings.Split(strings.TrimSpace(text), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(text), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			out = append(out, "")
