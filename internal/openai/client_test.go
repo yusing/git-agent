@@ -114,6 +114,77 @@ func TestRequestSupportsLowThinkingMode(t *testing.T) {
 	}
 }
 
+func TestRequestSupportsStructuredJSONTextFormat(t *testing.T) {
+	t.Parallel()
+
+	params, err := Request{
+		Model: "test-model",
+		Input: []Item{
+			NewMessage("user", "task"),
+		},
+		TextFormat: &TextFormat{
+			Name:        "release_note",
+			Description: "Structured release note payload.",
+			Schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"title": map[string]any{"type": "string"},
+				},
+				"required":             []string{"title"},
+				"additionalProperties": false,
+			},
+			Strict: true,
+		},
+	}.toSDKParams()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	text, ok := got["text"].(map[string]any)
+	if !ok {
+		t.Fatalf("text = %#v", got["text"])
+	}
+	format, ok := text["format"].(map[string]any)
+	if !ok {
+		t.Fatalf("format = %#v", text["format"])
+	}
+	if format["type"] != "json_schema" {
+		t.Fatalf("format.type = %#v", format["type"])
+	}
+	if format["name"] != "release_note" {
+		t.Fatalf("format.name = %#v", format["name"])
+	}
+	if format["description"] != "Structured release note payload." {
+		t.Fatalf("format.description = %#v", format["description"])
+	}
+	if format["strict"] != true {
+		t.Fatalf("format.strict = %#v", format["strict"])
+	}
+	schema, ok := format["schema"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema = %#v", format["schema"])
+	}
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties = %#v", schema["properties"])
+	}
+	title, ok := properties["title"].(map[string]any)
+	if !ok {
+		t.Fatalf("title = %#v", properties["title"])
+	}
+	if title["type"] != "string" {
+		t.Fatalf("title.type = %#v", title["type"])
+	}
+}
+
 func TestMarshalTraceJSONRedactsAPIKey(t *testing.T) {
 	t.Parallel()
 

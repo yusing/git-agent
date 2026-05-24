@@ -22,14 +22,22 @@ type Client interface {
 }
 
 type Request struct {
-	Model        string     `json:"model"`
-	ServiceTier  string     `json:"service_tier,omitempty"`
-	ThinkingMode string     `json:"thinking_mode,omitempty"`
-	BaseURL      string     `json:"-"`
-	APIKey       string     `json:"-"`
-	Instructions string     `json:"instructions,omitempty"`
-	Input        []Item     `json:"input"`
-	Tools        []ToolSpec `json:"tools,omitempty"`
+	Model        string      `json:"model"`
+	ServiceTier  string      `json:"service_tier,omitempty"`
+	ThinkingMode string      `json:"thinking_mode,omitempty"`
+	BaseURL      string      `json:"-"`
+	APIKey       string      `json:"-"`
+	Instructions string      `json:"instructions,omitempty"`
+	Input        []Item      `json:"input"`
+	Tools        []ToolSpec  `json:"tools,omitempty"`
+	TextFormat   *TextFormat `json:"text_format,omitempty"`
+}
+
+type TextFormat struct {
+	Name        string         `json:"name"`
+	Schema      map[string]any `json:"schema"`
+	Description string         `json:"description,omitempty"`
+	Strict      bool           `json:"strict"`
 }
 
 type Item struct {
@@ -409,6 +417,17 @@ func (r Request) toSDKParams() (responses.ResponseNewParams, error) {
 		Instructions: openaisdk.String(r.Instructions),
 		Tools:        tools,
 		Store:        openaisdk.Bool(false),
+	}
+	if r.TextFormat != nil {
+		params.Text = responses.ResponseTextConfigParam{
+			Format: responses.ResponseFormatTextConfigParamOfJSONSchema(r.TextFormat.Name, r.TextFormat.Schema),
+		}
+		if r.TextFormat.Description != "" {
+			params.Text.Format.OfJSONSchema.Description = openaisdk.String(r.TextFormat.Description)
+		}
+		if r.TextFormat.Strict {
+			params.Text.Format.OfJSONSchema.Strict = openaisdk.Bool(true)
+		}
 	}
 	if len(tools) > 0 {
 		params.ParallelToolCalls = openaisdk.Bool(false)

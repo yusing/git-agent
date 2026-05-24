@@ -58,6 +58,37 @@ func TestRunnerRepairsInvalidOutputOnce(t *testing.T) {
 	}
 }
 
+func TestRunnerForwardsTextFormat(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeClient{responses: []openai.Response{
+		{Text: `{"sections":[]}`},
+	}}
+	runner := OpenAIRunner{
+		Config: config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1},
+		Client: client,
+	}
+
+	_, err := runner.Run(context.Background(), Request{
+		SystemPrompt: "system",
+		UserPrompt:   "user",
+		TextFormat: &openai.TextFormat{
+			Name:   "release_note",
+			Schema: map[string]any{"type": "object"},
+			Strict: true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(client.requests))
+	}
+	if client.requests[0].TextFormat == nil || client.requests[0].TextFormat.Name != "release_note" {
+		t.Fatalf("text format = %#v", client.requests[0].TextFormat)
+	}
+}
+
 func TestRunnerExecutesToolCallRoundTrip(t *testing.T) {
 	t.Parallel()
 

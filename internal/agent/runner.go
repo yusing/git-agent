@@ -22,6 +22,7 @@ type Request struct {
 	Environment       string
 	ProjectGuidance   string
 	UserPrompt        string
+	TextFormat        *openai.TextFormat
 	AllowedToolNames  []string
 	MaxSteps          int
 	RepairOnValidator bool
@@ -97,7 +98,7 @@ func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error)
 		toolSpecs = append(toolSpecs, openai.ToolSpec{Name: def.Name, Description: def.Description, Schema: def.Schema, Strict: def.Strict})
 	}
 
-	result, err := r.runUntilText(ctx, request.SystemPrompt, messages, toolSpecs, request.AllowedToolNames, request.MaxSteps)
+	result, err := r.runUntilText(ctx, request.SystemPrompt, messages, toolSpecs, request.AllowedToolNames, request.TextFormat, request.MaxSteps)
 	if err != nil {
 		return Result{}, err
 	}
@@ -109,7 +110,7 @@ func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error)
 			}
 			repairMessages := append(messages, openai.NewMessage("assistant", result.Text))
 			repairMessages = append(repairMessages, openai.NewMessage("user", fmt.Sprintf("Repair the output to satisfy these validation errors: %v\nReturn only the corrected final artifact.", errs)))
-			repaired, err := r.runUntilText(ctx, request.SystemPrompt, repairMessages, nil, nil, 1)
+			repaired, err := r.runUntilText(ctx, request.SystemPrompt, repairMessages, nil, nil, request.TextFormat, 1)
 			if err != nil {
 				return Result{}, err
 			}
@@ -123,7 +124,7 @@ func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error)
 	return result, nil
 }
 
-func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, messages []openai.Item, toolSpecs []openai.ToolSpec, allowedToolNames []string, maxSteps int) (Result, error) {
+func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, messages []openai.Item, toolSpecs []openai.ToolSpec, allowedToolNames []string, textFormat *openai.TextFormat, maxSteps int) (Result, error) {
 	var result Result
 	maxToolCalls := r.Config.MaxToolCalls
 	for step := 0; step < maxSteps; step++ {
@@ -136,6 +137,7 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 			Instructions: requestInstructions(instructions, toolSpecs),
 			Input:        messages,
 			Tools:        toolSpecs,
+			TextFormat:   textFormat,
 			// Do not ever add outbound max_tool_calls again.
 			// OpenAI-compatible providers in our target path reject it on /responses.
 			// The local runner already enforces the tool-call ceiling.

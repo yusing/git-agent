@@ -199,35 +199,19 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 		return err
 	}
 	registry := tools.NewRegistry(repo)
-	rangeCommits, err := repo.LogFrom(fs.Arg(0), fs.Arg(1), 1)
+	prepared, err := releasenote.PrepareContext(repo, fs.Arg(0), fs.Arg(1))
 	if err != nil {
 		return err
 	}
-	requireFullChangelog := len(rangeCommits) > 0
-	submoduleChanges, err := repo.SubmoduleGitlinkRange(fs.Arg(0), fs.Arg(1))
-	if err != nil {
-		return err
-	}
-	requiredSubmodules := make([]string, 0, len(submoduleChanges))
-	for _, change := range submoduleChanges {
-		if change.Old == "" || change.New == "" {
-			continue
-		}
-		requiredSubmodules = append(requiredSubmodules, change.Path)
-	}
+	const releaseNoteFallbackTools = "repo_summary"
 	runner := agent.OpenAIRunner{
 		Config:    cfg,
 		Client:    openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
 		Tools:     registry,
-		ToolSpecs: registry.Definitions(tools.ReleaseNoteToolNames()),
-		Validator: func(text string) []string {
-			return releasenote.ValidateWithOptions(text, releasenote.ValidationOptions{
-				RequireFullChangelog: requireFullChangelog,
-				RequiredSubmodules:   requiredSubmodules,
-			})
-		},
-		Trace:  recorder,
-		Budget: a.budgetHandler(),
+		ToolSpecs: registry.Definitions([]string{releaseNoteFallbackTools}),
+		Validator: releasenote.Validate,
+		Trace:     recorder,
+		Budget:    a.budgetHandler(),
 	}
 	environment := environmentContext(repo, "release-note", fs.Arg(0)+".."+fs.Arg(1), cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
 	result, err := runner.Run(taskCtx, agent.Request{
@@ -235,14 +219,27 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 		ToolPolicy:        toolPolicy(),
 		Environment:       environment,
 		ProjectGuidance:   renderedGuidance,
-		UserPrompt:        releasenote.UserPrompt(fs.Arg(0), fs.Arg(1), cfg.MaxSteps, cfg.MaxToolCalls),
-		AllowedToolNames:  tools.ReleaseNoteToolNames(),
+		UserPrompt:        releasenote.UserPrompt(prepared, cfg.MaxSteps, cfg.MaxToolCalls),
+		TextFormat:        releasenote.TextFormat(),
+		AllowedToolNames:  []string{releaseNoteFallbackTools},
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
 	})
 	if err != nil {
 		return err
 	}
+	doc, err := releasenote.BuildDocument(result.Text, prepared)
+	if err != nil {
+		return err
+	}
+	if errs := releasenote.ValidateDocument(doc, releasenote.ValidationOptions{
+		RequireFullChangelog: prepared.RequireFullChangelog,
+		RequiredSubmodules:   prepared.RequiredSubmoduleGroups,
+	}); len(errs) > 0 {
+		return fmt.Errorf("rendered release note validation failed: %v", errs)
+	}
+	rendered := releasenote.Render(doc)
+	result.Text = rendered
 	if err := recorder.Write("final", map[string]any{
 		"text":         result.Text,
 		"tool_calls":   result.ToolCalls,

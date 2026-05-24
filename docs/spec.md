@@ -48,6 +48,9 @@ note about the newly staged changes.
 #### `git-agent release-note <base> <release>`
 
 Generate a GitHub release body for the range from `<base>` to `<release>`.
+The command precomputes release-note evidence in Go before generation and then
+asks the model to write from that prepared context, with only minimal read-only
+fallback tools available for rare gaps.
 
 ### Flags
 
@@ -151,7 +154,7 @@ Every task request is assembled using Codex-style layering:
 3. developer message containing environment context
 4. developer message containing project guidance
 5. task-specific user prompt
-6. strict function tool registry for that task
+6. strict function tool registry for that task, if that task exposes tools
 
 The project guidance block is not treated as ordinary user text. It is a
 separate injected layer mirroring Codex’s style.
@@ -188,15 +191,19 @@ including:
 2. create a JSON trace session
 3. resolve project guidance for the task target path or staged paths
 4. build task-specific instructions, developer context, and initial user prompt
-5. send request to the Responses API through the official OpenAI Go SDK
-6. record each request and response as JSON trace files
-7. if the model requests tools, execute only registered read-only tools
-8. record each tool call and tool output as JSON trace files
-9. append function-call and function-call-output items and continue until final
-   text is returned
-10. validate output against task rules
-11. if invalid and repair budget remains, run exactly one repair pass
-12. print final text to stdout
+5. for `release-note`, precompute the requested range context in Go before the
+   first provider call, including resolved refs, parent commits, submodule
+   gitlink changes, submodule history when locally available, and repository
+   ownership/link hints
+6. send request to the Responses API through the official OpenAI Go SDK
+7. record each request and response as JSON trace files
+8. if the model requests tools, execute only registered read-only tools
+9. record each tool call and tool output as JSON trace files
+10. append function-call and function-call-output items and continue until final
+    text is returned
+11. validate output against task rules
+12. if invalid and repair budget remains, run exactly one repair pass
+13. print final text to stdout
 
 ### Bounded execution
 

@@ -15,7 +15,6 @@ import (
 	"testing"
 
 	"github.com/yusing/git-agent/internal/tasks/commitmsg"
-	"github.com/yusing/git-agent/internal/tasks/releasenote"
 )
 
 func TestCommitMsgEndToEndWithRealisticFixture(t *testing.T) {
@@ -165,72 +164,90 @@ func TestReleaseNoteEndToEndWithRealisticFixture(t *testing.T) {
 	fixture := buildReleaseNoteFixture(t)
 	t.Chdir(fixture.repoDir)
 
+	modelJSON := fmt.Sprintf(`{
+  "sections": [
+    {
+      "heading": "Breaking Changes",
+      "bullets": [
+        {
+          "summary": "Route configuration and API payloads no longer support path_patterns",
+          "refs": [{"type":"commit","value":"%s"}]
+        }
+      ]
+    },
+    {
+      "heading": "Bug Fixes",
+      "bullets": [
+        {
+          "label": "Core/Middleware",
+          "summary": "FileServer routes now apply middleware after routing rules settle",
+          "refs": [{"type":"commit","value":"%s"}],
+          "children": [
+            {"summary":"Static file routes now preserve middleware behavior after rules settle"},
+            {"summary":"Operator-visible handler behavior now matches FileServer route expectations"}
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Improvements",
+      "bullets": [
+        {
+          "summary": "Web UI docs and screenshots now align better with current operator flows",
+          "refs": [{"type":"commit","value":"%s"}]
+        }
+      ]
+    }
+  ]
+}`, fixture.parentRefactorSHA, fixture.parentFixSHA, fixture.webuiReleaseSHA)
+
 	mode, cleanup := configureE2EProvider(t, newScriptedResponsesServer(t, []func(string) string{
 		func(body string) string {
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(body), &payload); err != nil {
+				t.Fatalf("request body is not valid json: %v\n%s", err, body)
+			}
+			text, ok := payload["text"].(map[string]any)
+			if !ok {
+				t.Fatalf("request missing text config\n%s", body)
+			}
+			format, ok := text["format"].(map[string]any)
+			if !ok {
+				t.Fatalf("request missing text.format\n%s", body)
+			}
+			if format["type"] != "json_schema" {
+				t.Fatalf("text.format.type = %#v\n%s", format["type"], body)
+			}
+			if format["name"] != "release_note" {
+				t.Fatalf("text.format.name = %#v\n%s", format["name"], body)
+			}
 			for _, want := range []string{
-				`"resolve_ref"`,
-				`"git_log_range"`,
-				`"gitmodules_table"`,
-				`"submodule_gitlink_range"`,
-				`"submodule_log_range"`,
-				`"repo_kind"`,
 				`"repo_summary"`,
+				`\"required_submodule_groups\": [`,
+				`\"goutils\"`,
+				`\"webui\"`,
+				`\"parent_commits\": [`,
+				`\"sha\": \"` + fixture.parentFixSHA,
+				`\"path\": \"webui\"`,
+				`\"path\": \"goutils\"`,
+				`\"release_sha\": \"` + fixture.webuiReleaseSHA,
+				`\"release_sha\": \"` + fixture.goutilsReleaseSHA,
+				`\"group_heading\": \"[**webui**](https://github.com/example/webui)\"`,
+				`\"group_heading\": \"[**goutils**](https://github.com/example/goutils)\"`,
+				`\"local_history_available\": true`,
 			} {
 				if !strings.Contains(body, want) {
-					t.Fatalf("first request missing tool %s\n%s", want, body)
+					t.Fatalf("first request missing %q\n%s", want, body)
 				}
 			}
-			return responseWithToolCalls("resp_release_1",
-				toolCallSpec{ID: "fc_1", CallID: "call_1", Name: "resolve_ref", Arguments: fmt.Sprintf(`{"ref":%q}`, fixture.baseTag)},
-				toolCallSpec{ID: "fc_2", CallID: "call_2", Name: "resolve_ref", Arguments: fmt.Sprintf(`{"ref":%q}`, fixture.releaseTag)},
-				toolCallSpec{ID: "fc_3", CallID: "call_3", Name: "git_log_range", Arguments: fmt.Sprintf(`{"base":%q,"release":%q,"limit":50}`, fixture.baseTag, fixture.releaseTag)},
-				toolCallSpec{ID: "fc_4", CallID: "call_4", Name: "repo_kind", Arguments: `{}`},
-				toolCallSpec{ID: "fc_5", CallID: "call_5", Name: "repo_summary", Arguments: `{}`},
-				toolCallSpec{ID: "fc_6", CallID: "call_6", Name: "gitmodules_table", Arguments: `{}`},
-				toolCallSpec{ID: "fc_7", CallID: "call_7", Name: "submodule_gitlink_range", Arguments: fmt.Sprintf(`{"base":%q,"release":%q}`, fixture.baseTag, fixture.releaseTag)},
-				toolCallSpec{ID: "fc_8", CallID: "call_8", Name: "submodule_log_range", Arguments: fmt.Sprintf(`{"path":"webui","base":%q,"release":%q,"limit":50}`, fixture.webuiBaseSHA, fixture.webuiReleaseSHA)},
-				toolCallSpec{ID: "fc_9", CallID: "call_9", Name: "submodule_log_range", Arguments: fmt.Sprintf(`{"path":"goutils","base":%q,"release":%q,"limit":50}`, fixture.goutilsBaseSHA, fixture.goutilsReleaseSHA)},
-			)
-		},
-		func(body string) string {
-			for _, want := range []string{
-				`"type":"function_call_output"`,
-				`{\"path\":\"webui\"`,
-				`{\"path\":\"goutils\"`,
-				fixture.parentRefactorSHA,
-				fixture.parentFixSHA,
-			} {
-				if !strings.Contains(body, want) {
-					t.Fatalf("second request missing %q\n%s", want, body)
-				}
+			if strings.Contains(body, `"resolve_ref"`) ||
+				strings.Contains(body, `"git_log_range"`) ||
+				strings.Contains(body, `"submodule_log_range"`) ||
+				strings.Contains(body, `"submodule_gitlink_range"`) ||
+				strings.Contains(body, `"gitmodules_table"`) {
+				t.Fatalf("first request should not expose legacy release-note tools\n%s", body)
 			}
-			return responseWithText("resp_release_2", strings.Join([]string{
-				"### Breaking Changes",
-				"",
-				"- Route configuration and API payloads no longer support path_patterns.",
-				"",
-				"### Bug Fixes",
-				"",
-				"- FileServer routes now apply middleware after rules settle.",
-				"",
-				"### Improvements",
-				"",
-				"- Docs and shell install snippets now align better with current operator flows.",
-				"",
-				"### Full Changelog",
-				"",
-				fmt.Sprintf("- refactor(route): remove path_patterns (%s)", fixture.parentRefactorSHA),
-				"",
-				fmt.Sprintf("- fix(route): wrap FileServer handlers with middleware after rules (%s)", fixture.parentFixSHA),
-				"",
-				"[**webui**](https://github.com/example/webui)",
-				"",
-				fmt.Sprintf("  - docs: refresh routing reference (https://github.com/example/webui/commit/%s)", fixture.webuiReleaseSHA),
-				"",
-				"[**goutils**](https://github.com/example/goutils)",
-				"",
-				fmt.Sprintf("  - feat(http): run ModifyResponse before lazy buffering decision (https://github.com/example/goutils/commit/%s)", fixture.goutilsReleaseSHA),
-			}, "\n"))
+			return responseWithText("resp_release_1", modelJSON)
 		},
 	}))
 	defer cleanup()
@@ -246,22 +263,29 @@ func TestReleaseNoteEndToEndWithRealisticFixture(t *testing.T) {
 	if stderr.String() != "" {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
-	if errs := releasenote.ValidateWithRequirements(output, true); len(errs) > 0 {
-		t.Fatalf("release note validation failed: %v\n%s", errs, output)
-	}
 	if mode == providerModeFake {
 		for _, want := range []string{
 			"### Breaking Changes",
+			"- Route configuration and API payloads no longer support path_patterns (`" + fixture.parentRefactorSHA[:7] + "`)",
+			"### Bug Fixes",
+			"- **Core/Middleware**: FileServer routes now apply middleware after routing rules settle (`" + fixture.parentFixSHA[:7] + "`)",
+			"  - Static file routes now preserve middleware behavior after rules settle",
+			"  - Operator-visible handler behavior now matches FileServer route expectations",
+			"### Improvements",
+			"- Web UI docs and screenshots now align better with current operator flows (`" + fixture.webuiReleaseSHA[:7] + "`)",
 			"### Full Changelog",
-			"[**webui**]",
-			"[**goutils**]",
+			"[**webui**](https://github.com/example/webui)",
+			"[**goutils**](https://github.com/example/goutils)",
+			"`" + fixture.parentRefactorSHA[:7] + "`",
+			"`" + fixture.parentFixSHA[:7] + "`",
+			"`" + fixture.goutilsReleaseSHA[:7] + "`",
 		} {
 			if !strings.Contains(output, want) {
 				t.Fatalf("fake-provider release note missing %q:\n%s", want, output)
 			}
 		}
 	}
-	assertTraceArtifacts(t, fixture.repoDir, "*-release-note", 2)
+	assertTraceArtifacts(t, fixture.repoDir, "*-release-note", 0)
 }
 
 type providerMode string
@@ -607,6 +631,8 @@ func buildReleaseNoteFixture(t *testing.T) releaseNoteFixture {
 	}, "\n"))
 	runGit(t, repoDir, "-c", "protocol.file.allow=always", "submodule", "add", webuiRepo.dir, "webui")
 	runGit(t, repoDir, "-c", "protocol.file.allow=always", "submodule", "add", goutilsRepo.dir, "goutils")
+	runGit(t, filepath.Join(repoDir, "webui"), "remote", "set-url", "origin", "https://github.com/example/webui.git")
+	runGit(t, filepath.Join(repoDir, "goutils"), "remote", "set-url", "origin", "https://github.com/example/goutils.git")
 	runGit(t, filepath.Join(repoDir, "webui"), "checkout", webuiRepo.baseSHA)
 	runGit(t, filepath.Join(repoDir, "goutils"), "checkout", goutilsRepo.baseSHA)
 	runGit(t, repoDir, "add", ".")

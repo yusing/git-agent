@@ -106,7 +106,7 @@ func TestReleaseNoteRaisesStepAndTimeoutFloor(t *testing.T) {
 		requests = append(requests, payload)
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: ")
-		fmt.Fprint(w, `{"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"test-model","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"### Full Changelog\n\n- base","annotations":[]}]}]}}`)
+		fmt.Fprint(w, `{"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"test-model","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"{\"sections\":[]}","annotations":[]}]}]}}`)
 		fmt.Fprint(w, "\n\n")
 		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
