@@ -114,15 +114,32 @@ func (r *Recorder) Write(kind string, value any) error {
 		return nil
 	}
 
-	normalized := normalizeMapValue(value)
+	return r.writeMap(kind, normalizeMapValue(value))
+}
+
+func (r *Recorder) WriteStructured(kind string, value map[string]any) error {
+	if r == nil {
+		return nil
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if err := r.appendEventLocked(kind, normalized); err != nil {
+	return r.writeMapLocked(kind, value)
+}
+
+func (r *Recorder) writeMap(kind string, value map[string]any) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.writeMapLocked(kind, value)
+}
+
+func (r *Recorder) writeMapLocked(kind string, value map[string]any) error {
+	if err := r.appendEventLocked(kind, value); err != nil {
 		return err
 	}
-	if err := r.applyLocked(kind, normalized); err != nil {
+	if err := r.applyLocked(kind, value); err != nil {
 		return err
 	}
 	return r.writeSnapshotLocked()
@@ -204,6 +221,7 @@ func (r *Recorder) appendEventLocked(kind string, value map[string]any) error {
 		Value: value,
 	}
 	encoder := json.NewEncoder(file)
+	encoder.SetEscapeHTML(false)
 	return encoder.Encode(record)
 }
 
@@ -274,7 +292,7 @@ func (r *Recorder) appendRequestItemsLocked(input []any) error {
 	}
 	for idx := range existing {
 		if !reflect.DeepEqual(stripItemIndex(existing[idx]), input[idx]) {
-			return fmt.Errorf("trace request input diverged at item %d", idx)
+			return fmt.Errorf("trace request input diverged at item %d: have=%s want=%s", idx, mustJSON(stripItemIndex(existing[idx])), mustJSON(input[idx]))
 		}
 	}
 	for _, item := range input[len(existing):] {
@@ -387,11 +405,15 @@ func (r *Recorder) currentStepPtr() *step {
 }
 
 func (r *Recorder) writeSnapshotLocked() error {
-	data, err := json.MarshalIndent(r.snapshot, "", "  ")
-	if err != nil {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(r.snapshot); err != nil {
 		return err
 	}
 	tmpPath := r.sessionPath + ".tmp"
+	data := bytes.TrimSuffix(buf.Bytes(), []byte{'\n'})
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 		return err
 	}
@@ -411,4 +433,12 @@ func stringField(value map[string]any, key string) string {
 	}
 	text, _ := raw.(string)
 	return text
+}
+
+func mustJSON(value any) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Sprintf("%#v", value)
+	}
+	return string(data)
 }

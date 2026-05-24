@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -484,10 +485,108 @@ func NewFunctionCallOutput(callID, output string) Item {
 	return Item{Type: "function_call_output", CallID: callID, Output: output}
 }
 
-func (r Request) MarshalTraceJSON() ([]byte, error) {
+func (r Request) TraceValue() (map[string]any, error) {
 	type traceRequest Request
 	traceValue := traceRequest(r)
 	traceValue.APIKey = ""
 	traceValue.BaseURL = r.BaseURL
-	return json.MarshalIndent(trace.Normalize(traceValue), "", "  ")
+	normalized := sanitizeTraceRequestValue(trace.Normalize(traceValue))
+	root, ok := normalized.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("trace request normalized to %T, want object", normalized)
+	}
+	return root, nil
+}
+
+func (r Request) MarshalTraceJSON() ([]byte, error) {
+	traceValue, err := r.TraceValue()
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(traceValue); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte{'\n'}), nil
+}
+
+func sanitizeTraceRequestValue(value any) any {
+	root, ok := value.(map[string]any)
+	if !ok {
+		return value
+	}
+	if text, ok := root["instructions"].(string); ok {
+		root["instructions"] = sanitizeTracePromptText(text)
+	}
+	input, ok := root["input"].([]any)
+	if !ok {
+		return root
+	}
+	for idx, item := range input {
+		message, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if message["type"] != "message" {
+			continue
+		}
+		text, ok := message["content"].(string)
+		if !ok {
+			continue
+		}
+		message["content"] = sanitizeTracePromptText(text)
+		input[idx] = message
+	}
+	root["input"] = input
+	return root
+}
+
+func sanitizeTracePromptText(text string) string {
+	lines := strings.Split(text, "\n")
+	for len(lines) > 0 && isTraceWrapperLine(lines[0]) {
+		lines = lines[1:]
+	}
+	for len(lines) > 0 && isTraceWrapperLine(lines[len(lines)-1]) {
+		lines = lines[:len(lines)-1]
+	}
+
+	sanitized := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.NewReplacer("<", " ", ">", " ").Replace(line)
+		line = strings.Join(strings.Fields(line), " ")
+		sanitized = append(sanitized, line)
+	}
+	for len(sanitized) > 0 && sanitized[0] == "" {
+		sanitized = sanitized[1:]
+	}
+	for len(sanitized) > 0 && sanitized[len(sanitized)-1] == "" {
+		sanitized = sanitized[:len(sanitized)-1]
+	}
+	return strings.Join(sanitized, "\n")
+}
+
+func isTraceWrapperLine(line string) bool {
+	line = strings.TrimSpace(line)
+	if len(line) < 3 || line[0] != '<' || line[len(line)-1] != '>' {
+		return false
+	}
+	body := line[1 : len(line)-1]
+	if body == "" {
+		return false
+	}
+	if body[0] == '/' {
+		body = body[1:]
+	}
+	if body == "" {
+		return false
+	}
+	for _, r := range body {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != ':' && r != '-' {
+			return false
+		}
+	}
+	return true
 }

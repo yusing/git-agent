@@ -121,7 +121,18 @@ func TestMarshalTraceJSONRedactsAPIKey(t *testing.T) {
 		Model:   "m",
 		APIKey:  "secret",
 		BaseURL: "http://example",
+		Instructions: strings.Join([]string{
+			"<environment_context>",
+			"<cwd>/repo</cwd>",
+			"<mode>normal</mode>",
+			"</environment_context>",
+		}, "\n"),
 		Input: []Item{
+			NewMessage("developer", strings.Join([]string{
+				"<tool_policy>",
+				"Use read-only tools.",
+				"</tool_policy>",
+			}, "\n")),
 			NewFunctionCallOutput("call_1", `{"ok":true,"data":{"paths":["README.md"]}}`),
 		},
 	}.MarshalTraceJSON()
@@ -131,6 +142,14 @@ func TestMarshalTraceJSONRedactsAPIKey(t *testing.T) {
 	if strings.Contains(string(data), "secret") {
 		t.Fatalf("trace leaked API key: %s", data)
 	}
+	if strings.Contains(string(data), `\u003c`) {
+		t.Fatalf("trace kept escaped angle brackets: %s", data)
+	}
+	for _, forbidden := range []string{"<tool_policy>", "</tool_policy>", "<environment_context>", "</environment_context>"} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("trace kept wrapper tag %q: %s", forbidden, data)
+		}
+	}
 	if strings.Contains(string(data), `\"ok\":true`) {
 		t.Fatalf("trace kept nested json as escaped text: %s", data)
 	}
@@ -139,12 +158,22 @@ func TestMarshalTraceJSONRedactsAPIKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	input, ok := got["input"].([]any)
-	if !ok || len(input) != 1 {
+	if !ok || len(input) != 2 {
 		t.Fatalf("input = %#v", got["input"])
 	}
-	item, ok := input[0].(map[string]any)
+	if got["instructions"] != "cwd /repo /cwd\nmode normal /mode" {
+		t.Fatalf("instructions = %#v", got["instructions"])
+	}
+	message, ok := input[0].(map[string]any)
 	if !ok {
-		t.Fatalf("item = %#v", input[0])
+		t.Fatalf("message = %#v", input[0])
+	}
+	if message["content"] != "Use read-only tools." {
+		t.Fatalf("message content = %#v", message["content"])
+	}
+	item, ok := input[1].(map[string]any)
+	if !ok {
+		t.Fatalf("item = %#v", input[1])
 	}
 	output, ok := item["output"].(map[string]any)
 	if !ok {
@@ -152,6 +181,54 @@ func TestMarshalTraceJSONRedactsAPIKey(t *testing.T) {
 	}
 	if output["ok"] != true {
 		t.Fatalf("output = %#v", output)
+	}
+}
+
+func TestTraceValueReturnsStructuredSanitizedRequest(t *testing.T) {
+	t.Parallel()
+
+	value, err := Request{
+		Model:   "m",
+		APIKey:  "secret",
+		BaseURL: "http://example",
+		Instructions: strings.Join([]string{
+			"<environment_context>",
+			"<cwd>/repo</cwd>",
+			"</environment_context>",
+		}, "\n"),
+		Input: []Item{
+			NewMessage("developer", strings.Join([]string{
+				"<tool_policy>",
+				"Use read-only tools.",
+				"</tool_policy>",
+			}, "\n")),
+			NewFunctionCallOutput("call_1", `{"ok":true,"data":{"paths":["README.md"]}}`),
+		},
+	}.TraceValue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := value["api_key"]; ok {
+		t.Fatalf("trace leaked api_key field: %#v", value)
+	}
+	if value["instructions"] != "cwd /repo /cwd" {
+		t.Fatalf("instructions = %#v", value["instructions"])
+	}
+	input, ok := value["input"].([]any)
+	if !ok || len(input) != 2 {
+		t.Fatalf("input = %#v", value["input"])
+	}
+	message, ok := input[0].(map[string]any)
+	if !ok || message["content"] != "Use read-only tools." {
+		t.Fatalf("message = %#v", input[0])
+	}
+	item, ok := input[1].(map[string]any)
+	if !ok {
+		t.Fatalf("item = %#v", input[1])
+	}
+	output, ok := item["output"].(map[string]any)
+	if !ok || output["ok"] != true {
+		t.Fatalf("output = %#v", item["output"])
 	}
 }
 

@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -141,7 +140,7 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 			// OpenAI-compatible providers in our target path reject it on /responses.
 			// The local runner already enforces the tool-call ceiling.
 		}
-		if err := r.Trace.Write("request", traceRequest(req)); err != nil {
+		if err := writeTraceRequest(r.Trace, req); err != nil {
 			return Result{}, err
 		}
 		response, err := r.Client.CreateResponse(ctx, req)
@@ -285,7 +284,7 @@ func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions st
 		Instructions: finalArtifactInstructions(instructions),
 		Input:        finalMessages,
 	}
-	if err := r.Trace.Write("request", traceRequest(req)); err != nil {
+	if err := writeTraceRequest(r.Trace, req); err != nil {
 		return Result{}, err
 	}
 	response, err := r.Client.CreateResponse(ctx, req)
@@ -333,16 +332,15 @@ func toolAllowed(name string, toolSpecs []openai.ToolSpec, allowedToolNames []st
 	})
 }
 
-func traceRequest(request openai.Request) map[string]any {
-	data, err := request.MarshalTraceJSON()
+func writeTraceRequest(recorder *trace.Recorder, request openai.Request) error {
+	if recorder == nil {
+		return nil
+	}
+	value, err := request.TraceValue()
 	if err != nil {
-		return map[string]any{"error": err.Error()}
+		return recorder.WriteStructured("request", map[string]any{"error": err.Error()})
 	}
-	var value map[string]any
-	if err := json.Unmarshal(data, &value); err != nil {
-		return map[string]any{"error": err.Error()}
-	}
-	return value
+	return recorder.WriteStructured("request", value)
 }
 
 func requestInstructions(taskInstructions string, toolSpecs []openai.ToolSpec) string {
