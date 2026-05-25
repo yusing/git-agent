@@ -60,6 +60,8 @@ type SubmoduleChange struct {
 	New  string `json:"new,omitempty"`
 }
 
+const PullRequestBaseRef = "origin/HEAD"
+
 func Open(start string) (*Repository, error) {
 	root, err := discoverRoot(start)
 	if err != nil {
@@ -266,7 +268,7 @@ func (r *Repository) ShowFileAtRev(rev, path string, maxBytes, maxLines int) (st
 }
 
 func (r *Repository) ResolveRef(ref string) (string, error) {
-	hash, err := r.Repo.ResolveRevision(plumbing.Revision(ref))
+	hash, err := r.resolveRevision(ref)
 	if err != nil {
 		return "", err
 	}
@@ -274,43 +276,66 @@ func (r *Repository) ResolveRef(ref string) (string, error) {
 }
 
 func (r *Repository) ResolveCommit(ref string) (*object.Commit, error) {
-	hash, err := r.Repo.ResolveRevision(plumbing.Revision(ref))
+	hash, err := r.resolveRevision(ref)
 	if err != nil {
 		return nil, err
 	}
 	return r.Repo.CommitObject(*hash)
 }
 
-func (r *Repository) LogFrom(base, release string, limit int) ([]CommitInfo, error) {
-	var from plumbing.Hash
-	if release != "" {
-		hash, err := r.Repo.ResolveRevision(plumbing.Revision(release))
-		if err != nil {
-			return nil, err
-		}
-		from = *hash
+func (r *Repository) PullRequestBase() (CommitInfo, error) {
+	commit, err := r.ResolveCommit(PullRequestBaseRef)
+	if err != nil {
+		return CommitInfo{}, err
 	}
+	return commitInfo(commit), nil
+}
 
-	iter, err := r.Repo.Log(&git.LogOptions{From: from})
+func (r *Repository) PullRequestPaths() ([]string, error) {
+	patch, err := r.patchAgainstRef(PullRequestBaseRef)
 	if err != nil {
 		return nil, err
 	}
-	defer iter.Close()
+	return filePathsFromPatch(patch), nil
+}
 
-	var stop string
-	if base != "" {
-		hash, err := r.Repo.ResolveRevision(plumbing.Revision(base))
-		if err != nil {
-			return nil, err
-		}
-		stop = hash.String()
+func (r *Repository) PullRequestStat() ([]FileStat, error) {
+	patch, err := r.patchAgainstRef(PullRequestBaseRef)
+	if err != nil {
+		return nil, err
 	}
+	return fileStatsFromPatch(patch), nil
+}
+
+func (r *Repository) PullRequestDiff(maxBytes, maxLines int) (string, bool, error) {
+	patch, err := r.patchAgainstRef(PullRequestBaseRef)
+	if err != nil {
+		return "", false, err
+	}
+	limited, truncated := textutil.Limit(patch.String(), maxBytes, maxLines)
+	return limited, truncated, nil
+}
+
+func (r *Repository) PullRequestCommits(limit int) ([]CommitInfo, error) {
+	return r.LogFrom(PullRequestBaseRef, "HEAD", limit)
+}
+
+func (r *Repository) LogFrom(base, release string, limit int) ([]CommitInfo, error) {
+	from, err := r.resolveLogStart(release)
+	if err != nil {
+		return nil, err
+	}
+
+	excluded, err := r.reachableCommitSet(base)
+	if err != nil {
+		return nil, err
+	}
+
+	iter := object.NewCommitPreorderIter(from, excluded, nil)
+	defer iter.Close()
 
 	var commits []CommitInfo
 	err = iter.ForEach(func(commit *object.Commit) error {
-		if stop != "" && commit.Hash.String() == stop {
-			return stopeach{}
-		}
 		commits = append(commits, commitInfo(commit))
 		if limit > 0 && len(commits) >= limit {
 			return stopeach{}
@@ -321,6 +346,41 @@ func (r *Repository) LogFrom(base, release string, limit int) ([]CommitInfo, err
 		return commits, nil
 	}
 	return commits, err
+}
+
+func (r *Repository) resolveLogStart(ref string) (*object.Commit, error) {
+	if ref == "" {
+		head, err := r.Repo.Head()
+		if err != nil {
+			return nil, err
+		}
+		return r.Repo.CommitObject(head.Hash())
+	}
+	return r.ResolveCommit(ref)
+}
+
+func (r *Repository) reachableCommitSet(ref string) (map[plumbing.Hash]bool, error) {
+	if ref == "" {
+		return nil, nil
+	}
+
+	start, err := r.ResolveCommit(ref)
+	if err != nil {
+		return nil, err
+	}
+
+	reachable := map[plumbing.Hash]bool{}
+	iter := object.NewCommitPreorderIter(start, nil, nil)
+	defer iter.Close()
+
+	err = iter.ForEach(func(commit *object.Commit) error {
+		reachable[commit.Hash] = true
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return reachable, nil
 }
 
 func (r *Repository) SubmoduleGitlinkRange(base, release string) ([]SubmoduleChange, error) {
@@ -405,6 +465,22 @@ func (r *Repository) headCommit() (*object.Commit, error) {
 	return r.Repo.CommitObject(head.Hash())
 }
 
+func (r *Repository) resolveRevision(ref string) (*plumbing.Hash, error) {
+	hash, err := r.Repo.ResolveRevision(plumbing.Revision(ref))
+	if err == nil {
+		return hash, nil
+	}
+	if ref != PullRequestBaseRef {
+		return nil, err
+	}
+	remoteHead, refErr := r.Repo.Reference(plumbing.NewRemoteHEADReferenceName("origin"), true)
+	if refErr != nil {
+		return nil, err
+	}
+	resolved := remoteHead.Hash()
+	return &resolved, nil
+}
+
 func (r *Repository) diffIndexAgainstHead() (string, error) {
 	patch, err := r.patchIndexAgainstHead()
 	if err != nil {
@@ -486,6 +562,26 @@ func (r *Repository) patchIndexAgainstHead() (*object.Patch, error) {
 		return nil, err
 	}
 	return patchBetweenTrees(headTree, indexTree)
+}
+
+func (r *Repository) patchAgainstRef(baseRef string) (*object.Patch, error) {
+	base, err := r.ResolveCommit(baseRef)
+	if err != nil {
+		return nil, err
+	}
+	head, err := r.headCommit()
+	if err != nil {
+		return nil, err
+	}
+	baseTree, err := base.Tree()
+	if err != nil {
+		return nil, err
+	}
+	headTree, err := head.Tree()
+	if err != nil {
+		return nil, err
+	}
+	return patchBetweenTrees(baseTree, headTree)
 }
 
 func (r *Repository) finalAmendedTrees(head *object.Commit) (*object.Tree, *object.Tree, error) {
@@ -806,6 +902,23 @@ func fileStatsFromPatch(patch *object.Patch) []FileStat {
 		})
 	}
 	return out
+}
+
+func filePathsFromPatch(patch *object.Patch) []string {
+	if patch == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, filePatch := range patch.FilePatches() {
+		from, to := filePatch.Files()
+		if from != nil {
+			seen[from.Path()] = true
+		}
+		if to != nil {
+			seen[to.Path()] = true
+		}
+	}
+	return slices.Sorted(maps.Keys(seen))
 }
 
 func commitInfo(commit *object.Commit) CommitInfo {

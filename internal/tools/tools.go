@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/yusing/git-agent/internal/gitctx"
@@ -57,6 +57,11 @@ func NewRegistry(repo *gitctx.Repository) *Registry {
 		gitFinalAmendedDiffTool{repo: repo},
 		gitAmendDeltaTool{repo: repo},
 		gitShowFileAtRevTool{repo: repo},
+		gitPRBaseTool{repo: repo},
+		gitPRPathsTool{repo: repo},
+		gitPRStatTool{repo: repo},
+		gitPRDiffTool{repo: repo},
+		gitPRCommitsTool{repo: repo},
 		resolveRefTool{repo: repo},
 		gitLogRangeTool{repo: repo},
 		gitmodulesTableTool{repo: repo},
@@ -102,6 +107,22 @@ func CommitMessageToolNames() []string {
 		"git_diff_against_parent",
 		"git_final_amended_diff",
 		"git_amend_delta",
+		"git_show_file_at_rev",
+	}
+}
+
+func PRMessageToolNames() []string {
+	return []string{
+		"repo_summary",
+		"list_files",
+		"read_file",
+		"search_files",
+		"git_pr_base",
+		"git_pr_paths",
+		"git_pr_stat",
+		"git_pr_diff",
+		"git_pr_commits",
+		"git_recent_commits",
 		"git_show_file_at_rev",
 	}
 }
@@ -563,6 +584,96 @@ func (t gitShowFileAtRevTool) Execute(_ context.Context, invocation Invocation) 
 		return Result{}, err
 	}
 	return jsonResult("git_show_file_at_rev", map[string]any{"content": text}, truncated)
+}
+
+type gitPRBaseTool repoTool
+
+func (t gitPRBaseTool) Definition() Definition {
+	return Definition{Name: "git_pr_base", Description: "Return origin/HEAD base and current HEAD metadata for pr-message generation.", Schema: emptySchema(), Strict: true}
+}
+
+func (t gitPRBaseTool) Execute(context.Context, Invocation) (Result, error) {
+	base, err := t.repo.PullRequestBase()
+	if err != nil {
+		return Result{}, err
+	}
+	return jsonResult("git_pr_base", map[string]any{
+		"base_ref": gitctx.PullRequestBaseRef,
+		"base":     base,
+		"head_sha": t.repo.HeadSHA,
+		"branch":   t.repo.Branch,
+	}, false)
+}
+
+type gitPRPathsTool repoTool
+
+func (t gitPRPathsTool) Definition() Definition {
+	return Definition{Name: "git_pr_paths", Description: "List paths changed between origin/HEAD and current HEAD.", Schema: emptySchema(), Strict: true}
+}
+
+func (t gitPRPathsTool) Execute(context.Context, Invocation) (Result, error) {
+	paths, err := t.repo.PullRequestPaths()
+	if err != nil {
+		return Result{}, err
+	}
+	return jsonResult("git_pr_paths", map[string]any{"paths": paths}, false)
+}
+
+type gitPRStatTool repoTool
+
+func (t gitPRStatTool) Definition() Definition {
+	return Definition{Name: "git_pr_stat", Description: "Return diff line stats for current HEAD versus origin/HEAD.", Schema: emptySchema(), Strict: true}
+}
+
+func (t gitPRStatTool) Execute(context.Context, Invocation) (Result, error) {
+	stats, err := t.repo.PullRequestStat()
+	if err != nil {
+		return Result{}, err
+	}
+	return jsonResult("git_pr_stat", stats, false)
+}
+
+type gitPRDiffTool repoTool
+
+func (t gitPRDiffTool) Definition() Definition {
+	return Definition{Name: "git_pr_diff", Description: "Return current HEAD diff versus origin/HEAD with caps.", Schema: cappedSchema(), Strict: true}
+}
+
+func (t gitPRDiffTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
+	args, err := parseArgs[capArgs](invocation.Arguments)
+	if err != nil {
+		return Result{}, err
+	}
+	text, truncated, err := t.repo.PullRequestDiff(normalizeCaps(args.MaxBytes, args.MaxLines))
+	if err != nil {
+		return Result{}, err
+	}
+	return jsonResult("git_pr_diff", map[string]any{"diff": text}, truncated)
+}
+
+type gitPRCommitsTool repoTool
+
+func (t gitPRCommitsTool) Definition() Definition {
+	return Definition{Name: "git_pr_commits", Description: "Return commits reachable from current HEAD, stopping before origin/HEAD.", Schema: schema(map[string]any{
+		"limit": intProp("Maximum commits to return.", 1, 100),
+	}), Strict: true}
+}
+
+func (t gitPRCommitsTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
+	args, err := parseArgs[struct {
+		Limit int `json:"limit"`
+	}](invocation.Arguments)
+	if err != nil {
+		return Result{}, err
+	}
+	if args.Limit <= 0 {
+		args.Limit = 20
+	}
+	commits, err := t.repo.PullRequestCommits(args.Limit)
+	if err != nil {
+		return Result{}, err
+	}
+	return jsonResult("git_pr_commits", commits, len(commits) >= args.Limit)
 }
 
 type resolveRefTool repoTool

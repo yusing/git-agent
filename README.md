@@ -7,6 +7,7 @@ Git-related operations.
 
 - `git-agent commit-msg`
 - `git-agent commit-msg --amend`
+- `git-agent pr-message`
 - `git-agent release-note <base> <release>`
 
 ## Configuration

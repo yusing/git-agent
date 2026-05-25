@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/yusing/git-agent/internal/gitctx"
@@ -121,6 +122,48 @@ func TestParseArgsAllowsBOMAndOuterWhitespace(t *testing.T) {
 	}
 }
 
+func TestPRMessageToolsExposeOriginHeadComparison(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.name", "Test User")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	mustWriteFile(t, filepath.Join(dir, "app.txt"), "base\n")
+	runGit(t, dir, "add", "app.txt")
+	runGit(t, dir, "commit", "-m", "base")
+	runGit(t, dir, "update-ref", "refs/remotes/origin/HEAD", gitHead(t, dir))
+	mustWriteFile(t, filepath.Join(dir, "app.txt"), "branch\n")
+	runGit(t, dir, "add", "app.txt")
+	runGit(t, dir, "commit", "-m", "feat: branch change")
+
+	repo, err := gitctx.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry(repo)
+	defs := registry.Definitions(PRMessageToolNames())
+	if len(defs) != len(PRMessageToolNames()) {
+		t.Fatalf("defs = %d, want %d", len(defs), len(PRMessageToolNames()))
+	}
+
+	diffResult, err := registry.Execute(t.Context(), Invocation{Name: "git_pr_diff", Arguments: `{"max_bytes":4096,"max_lines":200}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diffResult.Content, "-base") || !strings.Contains(diffResult.Content, "+branch") {
+		t.Fatalf("git_pr_diff missing branch diff:\n%s", diffResult.Content)
+	}
+
+	commitsResult, err := registry.Execute(t.Context(), Invocation{Name: "git_pr_commits", Arguments: `{"limit":5}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(commitsResult.Content, "feat: branch change") || strings.Contains(commitsResult.Content, `"base"`) {
+		t.Fatalf("git_pr_commits content = %s", commitsResult.Content)
+	}
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
@@ -129,6 +172,17 @@ func runGit(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %v failed: %v\n%s", args, err, out)
 	}
+}
+
+func gitHead(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD failed: %v\n%s", err, out)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func mustWriteFile(t *testing.T, path, content string) {

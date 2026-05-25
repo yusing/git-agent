@@ -18,6 +18,7 @@ Primary initial workflows:
 
 - `git-agent commit-msg`
 - `git-agent commit-msg --amend`
+- `git-agent pr-message`
 - `git-agent release-note <base> <release>`
 
 ### Non-goals
@@ -44,6 +45,13 @@ Generate a commit message from the staged diff in the current repository.
 
 Generate a commit message for the final post-amend commit result, not a delta
 note about the newly staged changes.
+
+#### `git-agent pr-message`
+
+Generate a squash merge commit message for the current branch versus
+`origin/HEAD`. The command treats the diff from `origin/HEAD` to `HEAD` as the
+authoritative scope, precomputes branch evidence before generation, and uses
+branch commits as supporting evidence.
 
 #### `git-agent release-note <base> <release>`
 
@@ -339,6 +347,8 @@ Task defaults:
 
 - `commit-msg`: staged paths when present; if no staged paths are available,
   current repository root
+- `pr-message`: changed paths between `origin/HEAD` and `HEAD`; if no changed
+  paths are available, current repository root
 - `release-note`: current repository root unless a future `--path` override is
   added
 
@@ -346,6 +356,8 @@ For `commit-msg`, guidance is resolved across all staged paths. Family
 selection remains global for the task: if any staged path has AGENTS-family
 guidance, AGENTS-family is selected and CLAUDE-family files are ignored for the
 whole request. Sources are de-duplicated while preserving root-to-leaf order.
+`pr-message` uses the same family-selection behavior, but its target paths come
+from the current-branch diff against `origin/HEAD`.
 
 ## 5. Tool system
 
@@ -380,6 +392,10 @@ Commit message tools:
 - `git_final_amended_diff`
 - `git_amend_delta`
 - `git_show_file_at_rev`
+
+`pr-message` does not expose tools to the model. It precomputes `origin/HEAD`
+base metadata, changed paths, diff stats, branch commits, recent style commits,
+and a bounded full diff in Go before the first provider call.
 
 ### Release note tools
 
@@ -469,6 +485,28 @@ Output rules:
 - no delta/process phrasing such as “also”, “this amend”, or “in addition”
 - preserve task IDs or scope markers only when still supported by the final
   diff
+
+### PR message mode
+
+Behavior:
+
+- describe the current branch as one squash merge commit versus `origin/HEAD`
+- treat the `origin/HEAD` to `HEAD` diff as authoritative scope
+- use the prepared PR context as authoritative evidence without tool calls
+- use branch commits only as supporting evidence for intent, grouping, and task
+  IDs
+- ignore staged and unstaged work unless it is already committed at `HEAD`
+- do not emit pull request prose, review instructions, or release notes
+
+Output rules:
+
+- subject line first
+- blank line before body only when body exists
+- no fences
+- no explanations
+- no commit-by-commit changelog
+- body lines wrapped to target width using the same commit-message shaping
+  rules
 
 ### Release note generation
 
@@ -720,6 +758,9 @@ complete when:
 - `make install DESTDIR=<tmp> PREFIX=/usr/local` installs an executable binary
 - `git-agent commit-msg` and `git-agent commit-msg --amend` route through the
   bounded SDK-backed agent loop
+- `git-agent pr-message` routes through the bounded SDK-backed agent loop,
+  targets `origin/HEAD..HEAD`, and sends prepared branch context without
+  exposing model tools
 - `git-agent release-note <base> <release>` resolves refs before generation
 - guidance rendering uses repository-relative `<PROJECT_DOC path="...">` tags
 - commit-message guidance resolves against staged paths

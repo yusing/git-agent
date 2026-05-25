@@ -26,6 +26,9 @@ func TestPromptsNameRequiredScope(t *testing.T) {
 	if got := UserPrompt(ModeAmend, 12, 9); !containsAll(got, "Current limits: 12 total model steps, 9 total tool calls.", "How to read the evidence", "authoritative", "do not dual-narrate", "tone / scope / task IDs") {
 		t.Fatalf("amend user prompt missing evidence framing: %s", got)
 	}
+	if got := UserPrompt(ModePR, 12, 9); !containsAll(got, "Current limits: 12 total model steps, 9 total tool calls.", "squash merge commit message", "origin/HEAD", "git_pr_diff", "branch commits") {
+		t.Fatalf("pr prompt missing branch scope: %s", got)
+	}
 }
 
 func TestShapeWrapsBodyAndKeepsSubject(t *testing.T) {
@@ -53,6 +56,9 @@ func TestPromptsReflectExampleStyleExpectations(t *testing.T) {
 	}
 	if got := UserPrompt(ModeAmend, 30, 24); !containsAll(got, "Previous HEAD message is reference only", "polish wording only") {
 		t.Fatalf("amend prompt missing example-aligned reuse guidance: %s", got)
+	}
+	if got := SystemPrompt(ModePR); !containsAll(got, "current branch versus origin/HEAD", "one coherent commit", "squash merge") {
+		t.Fatalf("pr system prompt missing squash framing: %s", got)
 	}
 }
 

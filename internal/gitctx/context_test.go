@@ -166,6 +166,105 @@ func TestFinalAmendedDiffForRootCommitIncludesUnchangedNestedFiles(t *testing.T)
 	}
 }
 
+func TestPullRequestDiffComparesHeadToOriginHead(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "app.txt"), "base\n")
+	runGit(t, repoDir, "add", "app.txt")
+	runGit(t, repoDir, "commit", "-m", "Initial commit")
+	baseSHA := gitHead(t, repoDir)
+	runGit(t, repoDir, "update-ref", "refs/remotes/origin/HEAD", baseSHA)
+
+	writeFile(t, filepath.Join(repoDir, "app.txt"), "branch\n")
+	writeFile(t, filepath.Join(repoDir, "docs", "note.md"), "new doc\n")
+	runGit(t, repoDir, "add", "app.txt", "docs/note.md")
+	runGit(t, repoDir, "commit", "-m", "feat: update branch files")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := repo.PullRequestBase()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.SHA != baseSHA {
+		t.Fatalf("base SHA = %s, want %s", base.SHA, baseSHA)
+	}
+	paths, err := repo.PullRequestPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(paths, ",") != "app.txt,docs/note.md" {
+		t.Fatalf("paths = %#v", paths)
+	}
+	diff, truncated, err := repo.PullRequestDiff(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if truncated {
+		t.Fatal("unexpected truncation")
+	}
+	for _, want := range []string{
+		"diff --git a/app.txt b/app.txt",
+		"-base",
+		"+branch",
+		"diff --git a/docs/note.md b/docs/note.md",
+		"+new doc",
+	} {
+		if !strings.Contains(diff, want) {
+			t.Fatalf("pr diff missing %q:\n%s", want, diff)
+		}
+	}
+	commits, err := repo.PullRequestCommits(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commits) != 1 || commits[0].Summary != "feat: update branch files" {
+		t.Fatalf("commits = %#v", commits)
+	}
+}
+
+func TestPullRequestCommitsExcludeOriginHeadReachableHistoryWhenBaseAdvanced(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "app.txt"), "base\n")
+	runGit(t, repoDir, "add", "app.txt")
+	runGit(t, repoDir, "commit", "-m", "Initial commit")
+	baseSHA := gitHead(t, repoDir)
+
+	runGit(t, repoDir, "checkout", "-b", "feature")
+	writeFile(t, filepath.Join(repoDir, "feature.txt"), "feature\n")
+	runGit(t, repoDir, "add", "feature.txt")
+	runGit(t, repoDir, "commit", "-m", "feat: branch change")
+
+	runGit(t, repoDir, "checkout", "-B", "main", baseSHA)
+	writeFile(t, filepath.Join(repoDir, "main.txt"), "main\n")
+	runGit(t, repoDir, "add", "main.txt")
+	runGit(t, repoDir, "commit", "-m", "chore: advance default branch")
+	advancedMainSHA := gitHead(t, repoDir)
+	runGit(t, repoDir, "update-ref", "refs/remotes/origin/HEAD", advancedMainSHA)
+
+	runGit(t, repoDir, "checkout", "feature")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commits, err := repo.PullRequestCommits(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commits) != 1 {
+		t.Fatalf("commits = %#v, want only feature branch commit", commits)
+	}
+	if commits[0].Summary != "feat: branch change" {
+		t.Fatalf("commit summary = %q, want feature branch commit", commits[0].Summary)
+	}
+}
+
 func TestStagedDiffWithoutHeadUsesInitialCommitStylePatch(t *testing.T) {
 	t.Parallel()
 

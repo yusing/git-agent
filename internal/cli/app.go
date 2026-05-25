@@ -47,6 +47,8 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "commit-msg":
 		return a.runCommitMsg(ctx, args[1:])
+	case "pr-message":
+		return a.runPRMessage(ctx, args[1:])
 	case "release-note":
 		return a.runReleaseNote(ctx, args[1:])
 	case "-h", "--help", "help":
@@ -137,6 +139,89 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 	}
 	result.Text = commitmsg.Shape(result.Text)
 	if errs := commitmsg.Validate(mode, result.Text); len(errs) > 0 {
+		return fmt.Errorf("validation failed after shaping: %v", errs)
+	}
+	if err := recorder.Write("final", map[string]any{
+		"text":         result.Text,
+		"tool_calls":   result.ToolCalls,
+		"repair_calls": result.RepairCalls,
+	}); err != nil {
+		return err
+	}
+	return a.writeResult(cfg, result)
+}
+
+func (a *App) runPRMessage(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("pr-message", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	var opts config.Options
+	registerSharedFlags(fs, &opts)
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("pr-message does not accept positional arguments")
+	}
+
+	cfg, err := config.Resolve(opts)
+	if err != nil {
+		return err
+	}
+	taskCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+
+	repo, err := gitctx.Open(".")
+	if err != nil {
+		return err
+	}
+	prepared, err := commitmsg.PreparePRContext(repo)
+	if err != nil {
+		return err
+	}
+	renderedGuidance, err := resolveGuidanceForPaths(repo, cfg.GuidanceFamily, prepared.ChangedPaths)
+	if err != nil {
+		return err
+	}
+	recorder, err := trace.New(repo.RootPath, "pr-message")
+	if err != nil {
+		return err
+	}
+	if cfg.Debug {
+		fmt.Fprintf(a.stderr, "trace_dir=%s\n", recorder.Dir())
+	}
+	if err := recorder.Write("session", map[string]any{
+		"command":       "pr-message",
+		"mode":          commitmsg.ModePR,
+		"repo":          repo.Summary(),
+		"base_ref":      gitctx.PullRequestBaseRef,
+		"changed_paths": prepared.ChangedPaths,
+		"prepared":      prepared,
+	}); err != nil {
+		return err
+	}
+	runner := agent.OpenAIRunner{
+		Config:    cfg,
+		Client:    openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
+		Validator: func(text string) []string { return commitmsg.Validate(commitmsg.ModePR, text) },
+		Trace:     recorder,
+		Budget:    a.budgetHandler(),
+	}
+	environment := environmentContext(repo, "pr-message", gitctx.PullRequestBaseRef+"..HEAD", cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
+	result, err := runner.Run(taskCtx, agent.Request{
+		SystemPrompt:      commitmsg.SystemPrompt(commitmsg.ModePR),
+		Environment:       environment,
+		ProjectGuidance:   renderedGuidance,
+		UserPrompt:        commitmsg.UserPromptWithPreparedPRContext(prepared, cfg.MaxSteps, cfg.MaxToolCalls),
+		MaxSteps:          cfg.MaxSteps,
+		RepairOnValidator: true,
+	})
+	if err != nil {
+		return err
+	}
+	result.Text = commitmsg.Shape(result.Text)
+	if errs := commitmsg.Validate(commitmsg.ModePR, result.Text); len(errs) > 0 {
 		return fmt.Errorf("validation failed after shaping: %v", errs)
 	}
 	if err := recorder.Write("final", map[string]any{
@@ -376,6 +461,7 @@ func usageError(prefix string) error {
 	}
 	b.WriteString("usage:\n")
 	b.WriteString("  git-agent commit-msg [--amend] [flags]\n")
+	b.WriteString("  git-agent pr-message [flags]\n")
 	b.WriteString("  git-agent release-note <base> <release> [flags]\n")
 	return errors.New(b.String())
 }

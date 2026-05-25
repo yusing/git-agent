@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/yusing/git-agent/internal/tasks/commitmsg"
 )
@@ -158,6 +159,69 @@ response shape.`)
 		t.Fatalf("fake-provider amend output regressed to delta narration:\n%s", output)
 	}
 	assertTraceArtifacts(t, fixture.repoDir, "*-commit-msg", 1)
+}
+
+func TestPRMessageEndToEndWithRealisticFixture(t *testing.T) {
+	fixture := buildPRMessageFixture(t)
+	t.Chdir(fixture.repoDir)
+
+	mode, cleanup := configureE2EProvider(t, newScriptedResponsesServer(t, []func(string) string{
+		func(body string) string {
+			for _, want := range []string{
+				`prepared_pr_context`,
+				`origin/HEAD`,
+				`internal/auth/policy.go`,
+				`internal/auth/session.go`,
+				`docs/policies.md`,
+				`feat(auth): include decision reasons in policy checks`,
+				`test(auth): cover strict session policy outcomes`,
+				`+type DecisionReason string`,
+				`+func EvaluateSessionPolicy`,
+				`<command>pr-message</command>`,
+				`<mode>origin/HEAD..HEAD</mode>`,
+			} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("first request missing %s\n%s", want, body)
+				}
+			}
+			if strings.Contains(body, `"git_pr_`) || strings.Contains(body, `"read_file"`) {
+				t.Fatalf("pr-message request should not expose tools\n%s", body)
+			}
+			return responseWithText("resp_pr_1", `feat(auth): add strict session policy reasons
+
+Return structured allow/deny reasons from policy evaluation and apply them to
+session checks.
+
+Document the strict-mode outcomes and cover denied, expired, and missing-session
+cases in tests.`)
+		},
+	}))
+	defer cleanup()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	args := []string{"pr-message"}
+	if mode == providerModeReal {
+		args = append(args, "--timeout", "6m")
+	}
+	start := time.Now()
+	if err := app.Run(t.Context(), args); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(start)
+	output := strings.TrimSpace(stdout.String())
+	t.Logf("provider=%s pr-message elapsed=%s output:\n%s", mode, elapsed, output)
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if errs := commitmsg.Validate(commitmsg.ModePR, output); len(errs) > 0 {
+		t.Fatalf("pr message validation failed: %v\n%s", errs, output)
+	}
+	if mode == providerModeFake && !strings.Contains(output, "feat(auth): add strict session policy reasons") {
+		t.Fatalf("unexpected fake-provider pr message:\n%s", output)
+	}
+	assertTraceArtifacts(t, fixture.repoDir, "*-pr-message", 0)
 }
 
 func TestReleaseNoteEndToEndWithRealisticFixture(t *testing.T) {
@@ -502,6 +566,139 @@ func buildCommitMsgFixture(t *testing.T) commitMsgFixture {
 	runGit(t, repoDir, "add", "internal/route/do_parser.go", "internal/route/do_types.go", "README.md", "docs/routing.md")
 
 	return commitMsgFixture{repoDir: repoDir}
+}
+
+type prMessageFixture struct {
+	repoDir string
+}
+
+func buildPRMessageFixture(t *testing.T) prMessageFixture {
+	t.Helper()
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "config", "user.name", "Test User")
+	runGit(t, repoDir, "config", "user.email", "test@example.com")
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/example/auth-gateway.git")
+
+	writeFixtureFile(t, filepath.Join(repoDir, "README.md"), strings.Join([]string{
+		"# Auth Gateway",
+		"",
+		"HTTP middleware for tenant session validation and policy checks.",
+	}, "\n"))
+	writeFixtureFile(t, filepath.Join(repoDir, "internal", "auth", "policy.go"), strings.Join([]string{
+		"package auth",
+		"",
+		"type Decision struct {",
+		"\tAllowed bool",
+		"}",
+		"",
+		"func EvaluatePolicy(token string) Decision {",
+		"\treturn Decision{Allowed: token != \"\"}",
+		"}",
+	}, "\n"))
+	writeFixtureFile(t, filepath.Join(repoDir, "internal", "auth", "middleware.go"), strings.Join([]string{
+		"package auth",
+		"",
+		"type Request struct {",
+		"\tToken string",
+		"}",
+		"",
+		"func Authorize(request Request) Decision {",
+		"\treturn EvaluatePolicy(request.Token)",
+		"}",
+	}, "\n"))
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-m", "feat(auth): add policy evaluator")
+
+	writeFixtureFile(t, filepath.Join(repoDir, "docs", "policies.md"), strings.Join([]string{
+		"# Policies",
+		"",
+		"Session policy checks currently return allow/deny only.",
+	}, "\n"))
+	runGit(t, repoDir, "add", "docs/policies.md")
+	runGit(t, repoDir, "commit", "-m", "docs(auth): describe policy decisions")
+	baseSHA := gitHead(t, repoDir)
+	runGit(t, repoDir, "update-ref", "refs/remotes/origin/HEAD", baseSHA)
+
+	writeFixtureFile(t, filepath.Join(repoDir, "internal", "auth", "policy.go"), strings.Join([]string{
+		"package auth",
+		"",
+		"type DecisionReason string",
+		"",
+		"const (",
+		"\tDecisionReasonAllowed DecisionReason = \"allowed\"",
+		"\tDecisionReasonMissing DecisionReason = \"missing_token\"",
+		"\tDecisionReasonExpired DecisionReason = \"expired_session\"",
+		")",
+		"",
+		"type Decision struct {",
+		"\tAllowed bool",
+		"\tReason  DecisionReason",
+		"}",
+		"",
+		"func EvaluatePolicy(token string) Decision {",
+		"\tif token == \"\" {",
+		"\t\treturn Decision{Allowed: false, Reason: DecisionReasonMissing}",
+		"\t}",
+		"\treturn Decision{Allowed: true, Reason: DecisionReasonAllowed}",
+		"}",
+	}, "\n"))
+	writeFixtureFile(t, filepath.Join(repoDir, "internal", "auth", "session.go"), strings.Join([]string{
+		"package auth",
+		"",
+		"type Session struct {",
+		"\tToken   string",
+		"\tExpired bool",
+		"}",
+		"",
+		"func EvaluateSessionPolicy(session Session, strict bool) Decision {",
+		"\tif session.Expired && strict {",
+		"\t\treturn Decision{Allowed: false, Reason: DecisionReasonExpired}",
+		"\t}",
+		"\treturn EvaluatePolicy(session.Token)",
+		"}",
+	}, "\n"))
+	writeFixtureFile(t, filepath.Join(repoDir, "docs", "policies.md"), strings.Join([]string{
+		"# Policies",
+		"",
+		"Session policy checks return allow/deny plus a machine-readable reason.",
+		"",
+		"Strict mode denies expired sessions before token checks.",
+	}, "\n"))
+	runGit(t, repoDir, "add", "internal/auth/policy.go", "internal/auth/session.go", "docs/policies.md")
+	runGit(t, repoDir, "commit", "-m", "feat(auth): include decision reasons in policy checks")
+
+	writeFixtureFile(t, filepath.Join(repoDir, "internal", "auth", "policy_test.go"), strings.Join([]string{
+		"package auth",
+		"",
+		"import \"testing\"",
+		"",
+		"func TestEvaluateSessionPolicyStrictOutcomes(t *testing.T) {",
+		"\tcases := []struct {",
+		"\t\tname string",
+		"\t\tsession Session",
+		"\t\tstrict bool",
+		"\t\twant DecisionReason",
+		"\t}{",
+		"\t\t{name: \"missing\", strict: true, want: DecisionReasonMissing},",
+		"\t\t{name: \"expired\", session: Session{Token: \"ok\", Expired: true}, strict: true, want: DecisionReasonExpired},",
+		"\t\t{name: \"allowed\", session: Session{Token: \"ok\"}, strict: true, want: DecisionReasonAllowed},",
+		"\t}",
+		"\tfor _, tc := range cases {",
+		"\t\tt.Run(tc.name, func(t *testing.T) {",
+		"\t\t\tgot := EvaluateSessionPolicy(tc.session, tc.strict)",
+		"\t\t\tif got.Reason != tc.want {",
+		"\t\t\t\tt.Fatalf(\"reason = %s, want %s\", got.Reason, tc.want)",
+		"\t\t\t}",
+		"\t\t})",
+		"\t}",
+		"}",
+	}, "\n"))
+	runGit(t, repoDir, "add", "internal/auth/policy_test.go")
+	runGit(t, repoDir, "commit", "-m", "test(auth): cover strict session policy outcomes")
+
+	return prMessageFixture{repoDir: repoDir}
 }
 
 func buildCommitMsgAmendFixture(t *testing.T) commitMsgFixture {

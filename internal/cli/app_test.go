@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -84,6 +85,71 @@ func TestCommitMsgPrintsOnlyProviderArtifact(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(sessions[0], name)); err != nil {
 			t.Fatalf("missing trace file %s: %v", name, err)
 		}
+	}
+}
+
+func TestPRMessageUsesPreparedOriginHeadContextAndPrintsArtifact(t *testing.T) {
+	repoDir := initRepo(t)
+	runGit(t, repoDir, "commit", "-m", "base")
+	runGit(t, repoDir, "update-ref", "refs/remotes/origin/HEAD", gitHead(t, repoDir))
+	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("branch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "add", "app.txt")
+	runGit(t, repoDir, "commit", "-m", "feat: branch change")
+	t.Chdir(repoDir)
+
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, string(body))
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: ")
+		fmt.Fprint(w, `{"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"test-model","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"feat: update app from branch","annotations":[]}]}]}}`)
+		fmt.Fprint(w, "\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "test-model")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(context.Background(), []string{"pr-message"}); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "feat: update app from branch\n" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if len(requests) != 1 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	for _, want := range []string{"prepared_pr_context", "origin/HEAD", "app.txt", "-content", "+branch", "<command>pr-message</command>", "<mode>origin/HEAD..HEAD</mode>"} {
+		if !strings.Contains(requests[0], want) {
+			t.Fatalf("pr-message request missing %q:\n%s", want, requests[0])
+		}
+	}
+	if strings.Contains(requests[0], "git_pr_") {
+		t.Fatalf("pr-message request should not expose PR tools:\n%s", requests[0])
+	}
+	sessions, err := filepath.Glob(filepath.Join(repoDir, ".git-agent", "sessions", "*-pr-message"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %#v, want one", sessions)
 	}
 }
 

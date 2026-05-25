@@ -1,9 +1,11 @@
 package commitmsg
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
+	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/textutil"
 )
 
@@ -12,16 +14,31 @@ type Mode string
 const (
 	ModeNormal Mode = "normal"
 	ModeAmend  Mode = "amend"
+	ModePR     Mode = "pr"
 )
 
 type Request struct {
 	Mode Mode
 }
 
+type PreparedPRContext struct {
+	Range         string              `json:"range"`
+	BaseRef       string              `json:"base_ref"`
+	Base          gitctx.CommitInfo   `json:"base"`
+	HeadSHA       string              `json:"head_sha"`
+	Branch        string              `json:"branch,omitempty"`
+	ChangedPaths  []string            `json:"changed_paths"`
+	Stats         []gitctx.FileStat   `json:"stats"`
+	BranchCommits []gitctx.CommitInfo `json:"branch_commits"`
+	RecentCommits []gitctx.CommitInfo `json:"recent_commits"`
+	Diff          string              `json:"diff"`
+	DiffTruncated bool                `json:"diff_truncated"`
+}
+
 func SystemPrompt(mode Mode) string {
 	common := `
 You draft high-signal Git commit messages that match repository history and the actual diff evidence.
-Use tools to inspect repository state before writing.
+Use provided context and, when tools are available, tools to inspect repository state before writing.
 Return only the final commit message.
 No Markdown fences. No explanations.
 Subject line first. Blank line before body only when body exists.
@@ -42,6 +59,17 @@ Do not sound like an addendum, follow-up, or layered update.
 Never tell the story as previous HEAD plus extra staged changes.
 Avoid "also", "this amend", "in addition", and similar process phrasing.
 Preserve task IDs or scope markers only when supported by the final diff.
+`)
+	}
+	if mode == ModePR {
+		return textutil.NormalizePrompt(common + `
+PR message mode:
+Draft a squash merge commit message for the current branch versus origin/HEAD.
+Describe the branch result as one coherent commit, not as a list of individual commits.
+Treat the current-branch diff against origin/HEAD as authoritative for what changed.
+Use branch commits as supporting evidence for intent and grouping only.
+Do not write pull-request prose, review instructions, or release notes.
+Avoid process phrasing such as "this PR" unless it is part of an existing task ID or literal code.
 `)
 	}
 	return textutil.NormalizePrompt(common + `
@@ -69,6 +97,30 @@ If staged content already matches the final amended story, polish wording only.
 Return only the commit message.
 `)
 	}
+	if mode == ModePR {
+		return textutil.NormalizePrompt(budget + `
+Generate a squash merge commit message for the current branch versus origin/HEAD.
+Mission: describe the final branch change as one commit.
+Rules:
+- origin/HEAD is the base branch ref
+- HEAD is the current branch tip
+- changed paths between origin/HEAD and HEAD are authoritative scope
+- branch commits explain intent and grouping, but do not emit a commit-by-commit changelog
+- ignore staged/unstaged work unless it is already part of HEAD
+- preserve task IDs when branch commits and diff support them
+Structured context to gather:
+- current directory
+- current branch
+- origin/HEAD base SHA and HEAD SHA
+- changed paths
+- branch commits
+- diff stats
+- full current-branch diff against origin/HEAD
+Prefer the same style family as recent history: concise conventional subject, then focused rationale/details only when they add signal.
+Start with git_pr_base, git_pr_paths, git_pr_commits, git_pr_stat, git_pr_diff, and git_recent_commits.
+Return only the commit message.
+`)
+	}
 	return textutil.NormalizePrompt(budget + `
 Generate a commit message from the staged diff.
 Mission: describe only staged changes.
@@ -89,6 +141,75 @@ Prefer the same style family as recent history: concise conventional subject, th
 Start with git_staged_paths, git_staged_status, git_staged_stat, git_staged_diff, and git_recent_commits.
 Return only the commit message.
 `)
+}
+
+func PreparePRContext(repo *gitctx.Repository) (PreparedPRContext, error) {
+	base, err := repo.PullRequestBase()
+	if err != nil {
+		return PreparedPRContext{}, err
+	}
+	paths, err := repo.PullRequestPaths()
+	if err != nil {
+		return PreparedPRContext{}, err
+	}
+	stats, err := repo.PullRequestStat()
+	if err != nil {
+		return PreparedPRContext{}, err
+	}
+	branchCommits, err := repo.PullRequestCommits(50)
+	if err != nil {
+		return PreparedPRContext{}, err
+	}
+	recentCommits, err := repo.RecentCommits(10)
+	if err != nil {
+		return PreparedPRContext{}, err
+	}
+	diff, diffTruncated, err := repo.PullRequestDiff(48*1024, 1200)
+	if err != nil {
+		return PreparedPRContext{}, err
+	}
+	return PreparedPRContext{
+		Range:         gitctx.PullRequestBaseRef + "..HEAD",
+		BaseRef:       gitctx.PullRequestBaseRef,
+		Base:          base,
+		HeadSHA:       repo.HeadSHA,
+		Branch:        repo.Branch,
+		ChangedPaths:  paths,
+		Stats:         stats,
+		BranchCommits: branchCommits,
+		RecentCommits: recentCommits,
+		Diff:          diff,
+		DiffTruncated: diffTruncated,
+	}, nil
+}
+
+func (c PreparedPRContext) Render() string {
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return fmt.Sprintf(`{"range":%q}`, c.Range)
+	}
+	return string(data)
+}
+
+func UserPromptWithPreparedPRContext(prepared PreparedPRContext, maxSteps, maxToolCalls int) string {
+	return textutil.NormalizePrompt(fmt.Sprintf(`
+Current limits: %d total model steps, %d total tool calls. Spend budget carefully and finish within it.
+
+Generate a squash merge commit message for the current branch versus origin/HEAD.
+Mission: describe the final branch change as one coherent commit.
+Rules:
+- prepared_pr_context is authoritative
+- changed_paths and diff define the output scope
+- branch_commits explain intent and grouping, but do not emit a commit-by-commit changelog
+- ignore staged/unstaged work unless it is already part of HEAD
+- preserve task IDs when branch commits and diff support them
+- if diff_truncated is true, stay conservative and describe only visible evidence
+Return only the commit message.
+
+<prepared_pr_context>
+%s
+</prepared_pr_context>
+`, maxSteps, maxToolCalls, prepared.Render()))
 }
 
 func Validate(mode Mode, output string) []string {
