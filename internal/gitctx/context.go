@@ -189,34 +189,28 @@ func (r *Repository) HeadShow(maxBytes, maxLines int) (string, bool, error) {
 }
 
 func (r *Repository) DiffAgainstParent(maxBytes, maxLines int) (string, bool, error) {
-	head, err := r.headCommit()
+	patch, err := r.patchHeadAgainstParent()
 	if err != nil {
 		return "", false, err
 	}
-	var diff string
-	if head.NumParents() == 0 {
-		tree, err := head.Tree()
-		if err != nil {
-			return "", false, err
-		}
-		patch, err := (&object.Tree{}).Patch(tree)
-		if err != nil {
-			return "", false, err
-		}
-		diff = patch.String()
-	} else {
-		parent, err := head.Parent(0)
-		if err != nil {
-			return "", false, err
-		}
-		patch, err := parent.Patch(head)
-		if err != nil {
-			return "", false, err
-		}
-		diff = patch.String()
-	}
-	limited, truncated := textutil.Limit(diff, maxBytes, maxLines)
+	limited, truncated := textutil.Limit(patch.String(), maxBytes, maxLines)
 	return limited, truncated, nil
+}
+
+func (r *Repository) DiffAgainstParentPaths() ([]string, error) {
+	patch, err := r.patchHeadAgainstParent()
+	if err != nil {
+		return nil, err
+	}
+	return filePathsFromPatch(patch), nil
+}
+
+func (r *Repository) DiffAgainstParentStat() ([]FileStat, error) {
+	patch, err := r.patchHeadAgainstParent()
+	if err != nil {
+		return nil, err
+	}
+	return fileStatsFromPatch(patch), nil
 }
 
 func (r *Repository) AmendDelta(maxBytes, maxLines int) (string, bool, error) {
@@ -562,6 +556,25 @@ func (r *Repository) patchIndexAgainstHead() (*object.Patch, error) {
 		return nil, err
 	}
 	return patchBetweenTrees(headTree, indexTree)
+}
+
+func (r *Repository) patchHeadAgainstParent() (*object.Patch, error) {
+	head, err := r.headCommit()
+	if err != nil {
+		return nil, err
+	}
+	if head.NumParents() == 0 {
+		tree, err := head.Tree()
+		if err != nil {
+			return nil, err
+		}
+		return (&object.Tree{}).Patch(tree)
+	}
+	parent, err := head.Parent(0)
+	if err != nil {
+		return nil, err
+	}
+	return parent.Patch(head)
 }
 
 func (r *Repository) patchAgainstRef(baseRef string) (*object.Patch, error) {

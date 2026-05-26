@@ -458,12 +458,18 @@ Behavior:
 - inspect the staged diff only
 - treat staged paths as authoritative scope
 - precompute staged context before generation, with changed paths, status,
-  stats, recent style commits, and full bounded staged diff
+  stats, recent style commits, previous HEAD paths/stats/diff for contrast,
+  and full bounded staged diff
 - use recent commit history as style reference only
+- use previous HEAD paths/stats/diff only as contrast to understand what was
+  already done, not as current staged scope; for large previous diffs, paths
+  and stats preserve contrast shape even when the previous diff text is capped
 - allow the model to request extra related file reads when the diff is
   ambiguous
 - cover each distinct high-signal staged change cluster present in the staged
   diff, rather than letting a dominant cluster hide a secondary behavior change
+- avoid copying phrasing from recent commits or previous HEAD diff as if it
+  were current staged work
 
 Output rules:
 

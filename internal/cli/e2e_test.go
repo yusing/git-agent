@@ -27,6 +27,9 @@ func TestCommitMsgEndToEndWithRealisticFixture(t *testing.T) {
 			for _, want := range []string{
 				`prepared_commit_context`,
 				`staged_stats`,
+				`previous_head_paths`,
+				`previous_head_stats`,
+				`previous_head_diff`,
 				`diff_truncated`,
 				`"git_staged_paths"`,
 				`"git_staged_status"`,

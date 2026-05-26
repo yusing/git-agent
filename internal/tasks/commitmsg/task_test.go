@@ -25,6 +25,9 @@ func TestPromptsNameRequiredScope(t *testing.T) {
 	if got := SystemPrompt(ModeNormal); !containsAll(got, "staged paths", "authoritative scope", "distinct high-signal staged change cluster") {
 		t.Fatalf("normal system prompt missing cluster coverage: %s", got)
 	}
+	if got := SystemPrompt(ModeNormal); !containsAll(got, "previous HEAD diff", "contrast", "avoid restating previous work") {
+		t.Fatalf("normal system prompt missing previous-diff contrast guard: %s", got)
+	}
 	if got := SystemPrompt(ModeAmend); !containsAll(got, "final amended commit", "versus its parent", "one commit", "Do not narrate a delta or process") {
 		t.Fatalf("amend prompt missing final commit scope: %s", got)
 	}
@@ -40,17 +43,29 @@ func TestPreparedCommitPromptUsesStagedDiffAsAuthoritativeScope(t *testing.T) {
 	t.Parallel()
 
 	prepared := PreparedCommitContext{
-		Mode:          ModeNormal,
-		StagedPaths:   []string{"internal/web/uc/phoneconfig/common.go", "internal/web/uc/schedtask/task.go"},
-		StagedStats:   []gitctx.FileStat{{Path: "internal/web/uc/schedtask/task.go", Adds: 6, Deletes: 1}},
-		Diff:          "diff --git a/internal/web/uc/schedtask/task.go b/internal/web/uc/schedtask/task.go\n+json.Valid(task.Parameter)",
-		DiffTruncated: false,
+		Mode:        ModeNormal,
+		StagedPaths: []string{"internal/web/uc/phoneconfig/common.go", "internal/web/uc/schedtask/task.go"},
+		StagedStats: []gitctx.FileStat{{Path: "internal/web/uc/schedtask/task.go", Adds: 6, Deletes: 1}},
+		PreviousHeadPaths: []string{
+			"tools/database/go_types_generator/main_test.go",
+			"tools/database/go_types_generator/typedef.go.tmpl",
+		},
+		PreviousHeadStats:         []gitctx.FileStat{{Path: "tools/database/go_types_generator/typedef.go.tmpl", Adds: 42, Deletes: 1}},
+		PreviousHeadDiff:          "diff --git a/tools/database/go_types_generator/typedef.go.tmpl b/tools/database/go_types_generator/typedef.go.tmpl\n+func (q {{$structName}}Query) By{{.FieldName}}Str(v string)",
+		PreviousHeadDiffTruncated: true,
+		Diff:                      "diff --git a/internal/web/uc/schedtask/task.go b/internal/web/uc/schedtask/task.go\n+json.Valid(task.Parameter)",
+		DiffTruncated:             false,
 	}
 	got := UserPromptWithPreparedCommitContext(prepared, 30, 24)
 	if !containsAll(got,
 		"prepared_commit_context is authoritative",
 		"staged_paths, staged_status, and staged_stats summarize",
 		"cover every distinct staged-diff change cluster",
+		"previous_head_paths, previous_head_stats, and previous_head_diff are contrast only",
+		"rely on previous_head_paths/stats for contrast shape",
+		"describe only the new staged delta",
+		"do not copy phrasing from recent commits or previous_head_diff",
+		"go_types_generator/typedef.go.tmpl",
 		"internal/web/uc/schedtask/task.go",
 		"json.Valid(task.Parameter)",
 	) {

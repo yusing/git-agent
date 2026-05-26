@@ -39,13 +39,17 @@ type PreparedPRContext struct {
 }
 
 type PreparedCommitContext struct {
-	Mode          Mode                `json:"mode"`
-	StagedPaths   []string            `json:"staged_paths"`
-	StagedStatus  []gitctx.PathChange `json:"staged_status"`
-	StagedStats   []gitctx.FileStat   `json:"staged_stats"`
-	RecentCommits []gitctx.CommitInfo `json:"recent_commits"`
-	Diff          string              `json:"diff"`
-	DiffTruncated bool                `json:"diff_truncated"`
+	Mode                      Mode                `json:"mode"`
+	StagedPaths               []string            `json:"staged_paths"`
+	StagedStatus              []gitctx.PathChange `json:"staged_status"`
+	StagedStats               []gitctx.FileStat   `json:"staged_stats"`
+	RecentCommits             []gitctx.CommitInfo `json:"recent_commits"`
+	PreviousHeadPaths         []string            `json:"previous_head_paths,omitempty"`
+	PreviousHeadStats         []gitctx.FileStat   `json:"previous_head_stats,omitempty"`
+	PreviousHeadDiff          string              `json:"previous_head_diff,omitempty"`
+	PreviousHeadDiffTruncated bool                `json:"previous_head_diff_truncated,omitempty"`
+	Diff                      string              `json:"diff"`
+	DiffTruncated             bool                `json:"diff_truncated"`
 }
 
 func SystemPrompt(mode Mode) string {
@@ -92,6 +96,7 @@ Treat staged paths as authoritative scope.
 Ignore unstaged and untracked work.
 Match recent repo commit style when possible, including existing task IDs when still supported.
 Cover each distinct high-signal staged change cluster that appears in the diff.
+Use previous HEAD diff only as contrast to avoid restating previous work as current staged work.
 Use related file reads only when the staged diff is ambiguous.
 `)
 }
@@ -143,6 +148,7 @@ Rules:
 - ignore unstaged and untracked work
 - preserve task IDs when recent history and staged diff support them
 - cover every distinct staged-diff change cluster; do not drop a secondary file/behavior just because another cluster dominates the diff
+- use recent commits and previous HEAD diff only as style/contrast; do not restate previous work as current staged work
 - inspect related files only if the staged diff is ambiguous
 Structured context to gather:
 - current directory
@@ -172,19 +178,26 @@ func PrepareCommitContext(repo *gitctx.Repository) (PreparedCommitContext, error
 		return PreparedCommitContext{}, err
 	}
 	recentCommits, _ := repo.RecentCommits(10)
+	previousHeadPaths, _ := repo.DiffAgainstParentPaths()
+	previousHeadStats, _ := repo.DiffAgainstParentStat()
+	previousHeadDiff, previousHeadDiffTruncated, _ := repo.DiffAgainstParent(24*1024, 700)
 	diff, diffTruncated, err := repo.StagedDiff(48*1024, 1200)
 	if err != nil {
 		return PreparedCommitContext{}, err
 	}
 
 	return PreparedCommitContext{
-		Mode:          ModeNormal,
-		StagedPaths:   stagedPaths,
-		StagedStatus:  stagedStatus,
-		StagedStats:   stagedStats,
-		RecentCommits: recentCommits,
-		Diff:          diff,
-		DiffTruncated: diffTruncated,
+		Mode:                      ModeNormal,
+		StagedPaths:               stagedPaths,
+		StagedStatus:              stagedStatus,
+		StagedStats:               stagedStats,
+		RecentCommits:             recentCommits,
+		PreviousHeadPaths:         previousHeadPaths,
+		PreviousHeadStats:         previousHeadStats,
+		PreviousHeadDiff:          previousHeadDiff,
+		PreviousHeadDiffTruncated: previousHeadDiffTruncated,
+		Diff:                      diff,
+		DiffTruncated:             diffTruncated,
 	}, nil
 }
 
@@ -207,7 +220,10 @@ Rules:
 - staged_paths, staged_status, and staged_stats summarize the authoritative staged scope
 - diff defines the output scope; ignore unstaged and untracked work
 - recent_commits are style reference only
+- previous_head_paths, previous_head_stats, and previous_head_diff are contrast only; use them to understand what was already done in HEAD, then describe only the new staged delta
+- if previous_head_diff_truncated is true, rely on previous_head_paths/stats for contrast shape instead of assuming omitted hunks
 - cover every distinct staged-diff change cluster; account for small outlier files when they carry behavior changes
+- do not copy phrasing from recent commits or previous_head_diff as if it were current staged work
 - if diff_truncated is true, stay conservative and describe only visible evidence
 Return only the commit message.
 
