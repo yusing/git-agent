@@ -134,7 +134,7 @@ func (r *Repository) StagedStatus() ([]PathChange, error) {
 	changes := make([]PathChange, 0, len(paths))
 	for _, path := range paths {
 		file := status[path]
-		if file.Staging == git.Unmodified && file.Worktree == git.Unmodified {
+		if file.Staging == git.Unmodified || file.Staging == git.Untracked {
 			continue
 		}
 		changes = append(changes, PathChange{

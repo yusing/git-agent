@@ -44,6 +44,39 @@ func TestOpenAndInspectStagedChanges(t *testing.T) {
 	}
 }
 
+func TestStagedStatusExcludesUnstagedOnlyChanges(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "staged.txt"), "old\n")
+	writeFile(t, filepath.Join(repoDir, "unstaged_deleted.txt"), "delete me\n")
+	writeFile(t, filepath.Join(repoDir, "unstaged_modified.txt"), "old\n")
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-m", "Initial commit")
+
+	writeFile(t, filepath.Join(repoDir, "staged.txt"), "new\n")
+	runGit(t, repoDir, "add", "staged.txt")
+	if err := os.Remove(filepath.Join(repoDir, "unstaged_deleted.txt")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(repoDir, "unstaged_modified.txt"), "new\n")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := repo.StagedStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status) != 1 {
+		t.Fatalf("status = %#v, want only staged path", status)
+	}
+	if status[0].Path != "staged.txt" {
+		t.Fatalf("status = %#v, want staged.txt only", status)
+	}
+}
+
 func TestFinalAmendedDiffOverlaysStagedChangesOnHead(t *testing.T) {
 	t.Parallel()
 
