@@ -25,6 +25,9 @@ func TestCommitMsgEndToEndWithRealisticFixture(t *testing.T) {
 	mode, cleanup := configureE2EProvider(t, newScriptedResponsesServer(t, []func(string) string{
 		func(body string) string {
 			for _, want := range []string{
+				`prepared_commit_context`,
+				`staged_stats`,
+				`diff_truncated`,
 				`"git_staged_paths"`,
 				`"git_staged_status"`,
 				`"git_staged_stat"`,

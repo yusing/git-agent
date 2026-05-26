@@ -19,8 +19,11 @@ func TestValidateRejectsFencesAndAmendProcessPhrasing(t *testing.T) {
 func TestPromptsNameRequiredScope(t *testing.T) {
 	t.Parallel()
 
-	if got := UserPrompt(ModeNormal, 30, 24); !containsAll(got, "Current limits: 30 total model steps, 24 total tool calls.", "staged diff", "git_staged_diff", "ignore unstaged", "task IDs") {
+	if got := UserPrompt(ModeNormal, 30, 24); !containsAll(got, "Current limits: 30 total model steps, 24 total tool calls.", "staged diff", "git_staged_diff", "ignore unstaged", "task IDs", "cover every distinct staged-diff change cluster") {
 		t.Fatalf("normal prompt missing staged scope: %s", got)
+	}
+	if got := SystemPrompt(ModeNormal); !containsAll(got, "staged paths", "authoritative scope", "distinct high-signal staged change cluster") {
+		t.Fatalf("normal system prompt missing cluster coverage: %s", got)
 	}
 	if got := SystemPrompt(ModeAmend); !containsAll(got, "final amended commit", "versus its parent", "one commit", "Do not narrate a delta or process") {
 		t.Fatalf("amend prompt missing final commit scope: %s", got)
@@ -30,6 +33,31 @@ func TestPromptsNameRequiredScope(t *testing.T) {
 	}
 	if got := UserPrompt(ModePR, 12, 9); !containsAll(got, "Current limits: 12 total model steps, 9 total tool calls.", "squash merge commit message", "origin/HEAD", "git_pr_diff", "branch commits") {
 		t.Fatalf("pr prompt missing branch scope: %s", got)
+	}
+}
+
+func TestPreparedCommitPromptUsesStagedDiffAsAuthoritativeScope(t *testing.T) {
+	t.Parallel()
+
+	prepared := PreparedCommitContext{
+		Mode:          ModeNormal,
+		StagedPaths:   []string{"internal/web/uc/phoneconfig/common.go", "internal/web/uc/schedtask/task.go"},
+		StagedStats:   []gitctx.FileStat{{Path: "internal/web/uc/schedtask/task.go", Adds: 6, Deletes: 1}},
+		Diff:          "diff --git a/internal/web/uc/schedtask/task.go b/internal/web/uc/schedtask/task.go\n+json.Valid(task.Parameter)",
+		DiffTruncated: false,
+	}
+	got := UserPromptWithPreparedCommitContext(prepared, 30, 24)
+	if !containsAll(got,
+		"prepared_commit_context is authoritative",
+		"staged_paths, staged_status, and staged_stats summarize",
+		"cover every distinct staged-diff change cluster",
+		"internal/web/uc/schedtask/task.go",
+		"json.Valid(task.Parameter)",
+	) {
+		t.Fatalf("prepared commit prompt missing staged authority framing:\n%s", got)
+	}
+	if !strings.Contains(got, `"diff_truncated": false`) {
+		t.Fatalf("prepared commit prompt missing truncation signal:\n%s", got)
 	}
 }
 

@@ -40,6 +40,9 @@ v1 must not:
 #### `git-agent commit-msg`
 
 Generate a commit message from the staged diff in the current repository.
+The command precomputes staged paths, status, stats, recent style commits, and
+the bounded staged diff before generation so the authoritative staged scope is
+visible before any optional follow-up tool calls.
 
 #### `git-agent commit-msg --amend`
 
@@ -454,9 +457,13 @@ Behavior:
 
 - inspect the staged diff only
 - treat staged paths as authoritative scope
+- precompute staged context before generation, with changed paths, status,
+  stats, recent style commits, and full bounded staged diff
 - use recent commit history as style reference only
 - allow the model to request extra related file reads when the diff is
   ambiguous
+- cover each distinct high-signal staged change cluster present in the staged
+  diff, rather than letting a dominant cluster hide a secondary behavior change
 
 Output rules:
 

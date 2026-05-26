@@ -94,6 +94,16 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	userPrompt := commitmsg.UserPrompt(mode, cfg.MaxSteps, cfg.MaxToolCalls)
+	var preparedCommit *commitmsg.PreparedCommitContext
+	if mode == commitmsg.ModeNormal {
+		prepared, err := commitmsg.PrepareCommitContext(repo)
+		if err != nil {
+			return err
+		}
+		preparedCommit = &prepared
+		userPrompt = commitmsg.UserPromptWithPreparedCommitContext(prepared, cfg.MaxSteps, cfg.MaxToolCalls)
+	}
 	renderedGuidance, err := resolveGuidanceForPaths(repo, cfg.GuidanceFamily, stagedPaths)
 	if err != nil {
 		return err
@@ -105,12 +115,16 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 	if cfg.Debug {
 		fmt.Fprintf(a.stderr, "trace_dir=%s\n", recorder.Dir())
 	}
-	if err := recorder.Write("session", map[string]any{
+	session := map[string]any{
 		"command":      "commit-msg",
 		"mode":         mode,
 		"repo":         repo.Summary(),
 		"staged_paths": stagedPaths,
-	}); err != nil {
+	}
+	if preparedCommit != nil {
+		session["prepared_commit_context"] = preparedCommit
+	}
+	if err := recorder.Write("session", session); err != nil {
 		return err
 	}
 	registry := tools.NewRegistry(repo)
@@ -129,7 +143,7 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 		ToolPolicy:        toolPolicy(),
 		Environment:       environment,
 		ProjectGuidance:   renderedGuidance,
-		UserPrompt:        commitmsg.UserPrompt(mode, cfg.MaxSteps, cfg.MaxToolCalls),
+		UserPrompt:        userPrompt,
 		AllowedToolNames:  tools.CommitMessageToolNames(),
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
