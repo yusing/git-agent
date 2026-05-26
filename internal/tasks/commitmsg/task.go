@@ -376,5 +376,55 @@ func PreserveTaskIDSuffix(output string, references []gitctx.CommitInfo) string 
 		lines[0] = subject + referenceSubject[suffixLocation[0]:]
 		return strings.Join(lines, "\n")
 	}
+	if suffix := dominantRecentTaskIDSuffix(subject, references); suffix != "" {
+		lines[0] = subject + suffix
+		return strings.Join(lines, "\n")
+	}
 	return trimmed
+}
+
+func dominantRecentTaskIDSuffix(subject string, references []gitctx.CommitInfo) string {
+	var suffix string
+	var sameSuffixRun []string
+	for _, reference := range references {
+		referenceSubject := strings.TrimSpace(reference.Summary)
+		suffixLocation := taskIDSuffixPattern.FindStringIndex(referenceSubject)
+		if suffixLocation == nil {
+			break
+		}
+		referenceSuffix := referenceSubject[suffixLocation[0]:]
+		if suffix == "" {
+			suffix = referenceSuffix
+		}
+		if referenceSuffix != suffix {
+			break
+		}
+		sameSuffixRun = append(sameSuffixRun, referenceSubject)
+	}
+	if len(sameSuffixRun) < 2 {
+		return ""
+	}
+
+	subjectScope := conventionalScope(subject)
+	if subjectScope == "" {
+		return suffix
+	}
+	for _, referenceSubject := range sameSuffixRun {
+		if conventionalScope(referenceSubject) == subjectScope {
+			return suffix
+		}
+	}
+	return ""
+}
+
+func conventionalScope(subject string) string {
+	prefix, _, ok := strings.Cut(subject, ":")
+	if !ok {
+		return ""
+	}
+	open := strings.Index(prefix, "(")
+	if open < 0 || !strings.HasSuffix(prefix, ")") {
+		return ""
+	}
+	return prefix[open+1 : len(prefix)-1]
 }
