@@ -88,6 +88,41 @@ func TestCommitMsgPrintsOnlyProviderArtifact(t *testing.T) {
 	}
 }
 
+func TestCommitMsgRestoresMatchingRecentTaskIDSuffix(t *testing.T) {
+	repoDir := initRepo(t)
+	runGit(t, repoDir, "commit", "-m", "fix(schedtask): log skipped duplicate task creation (T46571)")
+	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("updated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "add", "app.txt")
+	t.Chdir(repoDir)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: ")
+		fmt.Fprint(w, `{"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"test-model","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"fix(schedtask): log skipped duplicate task creation\n\nLog duplicate task payloads before returning.","annotations":[]}]}]}}`)
+		fmt.Fprint(w, "\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "test-model")
+
+	var stdout bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &bytes.Buffer{}}
+	if err := app.Run(context.Background(), []string{"commit-msg"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(stdout.String(), "fix(schedtask): log skipped duplicate task creation (T46571)\n\n") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
 func TestPRMessageUsesPreparedOriginHeadContextAndPrintsArtifact(t *testing.T) {
 	repoDir := initRepo(t)
 	runGit(t, repoDir, "commit", "-m", "base")

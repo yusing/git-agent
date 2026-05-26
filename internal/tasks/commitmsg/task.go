@@ -3,6 +3,7 @@ package commitmsg
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/yusing/git-agent/internal/gitctx"
@@ -20,6 +21,8 @@ const (
 type Request struct {
 	Mode Mode
 }
+
+var taskIDSuffixPattern = regexp.MustCompile(`(?:\s+\(T\d+\))+$`)
 
 type PreparedPRContext struct {
 	Range         string              `json:"range"`
@@ -261,4 +264,30 @@ func Shape(output string) string {
 	}
 	body := textutil.WrapBody(parts[1], 72)
 	return subject + "\n\n" + body
+}
+
+func PreserveTaskIDSuffix(output string, references []gitctx.CommitInfo) string {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return ""
+	}
+	lines := strings.Split(trimmed, "\n")
+	subject := strings.TrimSpace(lines[0])
+	if subject == "" || taskIDSuffixPattern.MatchString(subject) {
+		return trimmed
+	}
+	for _, reference := range references {
+		referenceSubject := strings.TrimSpace(reference.Summary)
+		suffixLocation := taskIDSuffixPattern.FindStringIndex(referenceSubject)
+		if suffixLocation == nil {
+			continue
+		}
+		baseSubject := strings.TrimSpace(referenceSubject[:suffixLocation[0]])
+		if subject != baseSubject {
+			continue
+		}
+		lines[0] = subject + referenceSubject[suffixLocation[0]:]
+		return strings.Join(lines, "\n")
+	}
+	return trimmed
 }

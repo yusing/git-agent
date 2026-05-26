@@ -138,6 +138,9 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 		return err
 	}
 	result.Text = commitmsg.Shape(result.Text)
+	if recent, err := repo.RecentCommits(10); err == nil {
+		result.Text = commitmsg.PreserveTaskIDSuffix(result.Text, recent)
+	}
 	if errs := commitmsg.Validate(mode, result.Text); len(errs) > 0 {
 		return fmt.Errorf("validation failed after shaping: %v", errs)
 	}

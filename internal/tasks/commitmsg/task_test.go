@@ -3,6 +3,8 @@ package commitmsg
 import (
 	"strings"
 	"testing"
+
+	"github.com/yusing/git-agent/internal/gitctx"
 )
 
 func TestValidateRejectsFencesAndAmendProcessPhrasing(t *testing.T) {
@@ -42,6 +44,31 @@ func TestShapeWrapsBodyAndKeepsSubject(t *testing.T) {
 		if len(line) > 72 {
 			t.Fatalf("line too long: %d %q", len(line), line)
 		}
+	}
+}
+
+func TestPreserveTaskIDSuffixRestoresExactRecentSubjectMatch(t *testing.T) {
+	t.Parallel()
+
+	got := PreserveTaskIDSuffix(`fix(schedtask): log skipped duplicate task creation
+
+Log duplicate task payloads before returning.`, []gitctx.CommitInfo{
+		{Summary: "fix(schedtask): log skipped duplicate task creation (T46571)"},
+	})
+	if !strings.HasPrefix(got, "fix(schedtask): log skipped duplicate task creation (T46571)\n") {
+		t.Fatalf("missing restored task ID suffix:\n%s", got)
+	}
+}
+
+func TestPreserveTaskIDSuffixKeepsUnrelatedSubjectsUntouched(t *testing.T) {
+	t.Parallel()
+
+	output := "fix(schedtask): validate task creation"
+	got := PreserveTaskIDSuffix(output, []gitctx.CommitInfo{
+		{Summary: "fix(schedtask): log skipped duplicate task creation (T46571)"},
+	})
+	if got != output {
+		t.Fatalf("unexpected task ID suffix restore: %q", got)
 	}
 }
 
