@@ -10,6 +10,9 @@ Git-related operations.
 - `git-agent pr-message`
 - `git-agent release-note <base> <release>`
 
+Mermaid execution-flow graphs for each subcommand are documented in
+[`docs/spec.md`](docs/spec.md#subcommand-execution-flow-graphs).
+
 ## Configuration
 
 v1 uses standard OpenAI-compatible environment variables:

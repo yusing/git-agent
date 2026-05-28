@@ -216,6 +216,148 @@ including:
 12. if invalid and repair budget remains, run exactly one repair pass
 13. print final text to stdout
 
+### Subcommand execution flow graphs
+
+#### `git-agent commit-msg`
+
+```mermaid
+flowchart TD
+    Start([git-agent commit-msg]) --> Parse[Parse shared flags]
+    Parse --> Resolve[Resolve config from flags, env, defaults]
+    Resolve --> Timeout[Create task timeout context]
+    Timeout --> OpenRepo[Open repository]
+    OpenRepo --> StagedPaths[Collect staged paths]
+    StagedPaths --> Prepare[Precompute staged commit context]
+    Prepare --> Guidance[Resolve project guidance for staged paths]
+    Guidance --> Trace[Create .git-agent session trace]
+    Trace --> Registry[Register read-only commit-message tools]
+    Registry --> Runner[Build OpenAI runner with validator and tool specs]
+    Runner --> Request[Assemble request layers]
+    Request --> Model[Call Responses API]
+    Model --> ToolDecision{Tool calls?}
+    ToolDecision -- yes --> ToolBudget{Within tool budget?}
+    ToolBudget -- yes --> ExecuteTools[Execute allowed read-only tools]
+    ExecuteTools --> RecordTools[Trace tool call and output]
+    RecordTools --> Continue[Append function call and output items]
+    Continue --> Model
+    ToolBudget -- no --> Budget[Extend interactively or force final artifact]
+    Budget --> Model
+    ToolDecision -- no --> Validate[Validate commit message]
+    Validate --> Valid{Valid?}
+    Valid -- no --> Repair[Run one repair pass]
+    Repair --> Revalidate[Revalidate repaired output]
+    Revalidate --> Shape[Shape body wrapping]
+    Valid -- yes --> Shape
+    Shape --> Preserve[Preserve supported task ID suffix]
+    Preserve --> FinalValidate[Validate shaped output]
+    FinalValidate --> FinalTrace[Trace final artifact]
+    FinalTrace --> Stdout([Print artifact only to stdout])
+```
+
+#### `git-agent commit-msg --amend`
+
+```mermaid
+flowchart TD
+    Start([git-agent commit-msg --amend]) --> Parse[Parse --amend and shared flags]
+    Parse --> Resolve[Resolve config from flags, env, defaults]
+    Resolve --> Timeout[Create task timeout context]
+    Timeout --> OpenRepo[Open repository]
+    OpenRepo --> StagedPaths[Collect staged paths]
+    StagedPaths --> Guidance[Resolve project guidance for staged paths]
+    Guidance --> Trace[Create .git-agent session trace with amend mode]
+    Trace --> Registry[Register read-only commit-message tools]
+    Registry --> Runner[Build OpenAI runner with amend validator and tool specs]
+    Runner --> Request[Assemble amend request layers]
+    Request --> Model[Call Responses API]
+    Model --> ToolDecision{Tool calls?}
+    ToolDecision -- yes --> ToolBudget{Within tool budget?}
+    ToolBudget -- yes --> ExecuteTools[Execute allowed read-only tools]
+    ExecuteTools --> FinalDiff[Model uses git_final_amended_diff as authoritative evidence]
+    FinalDiff --> RecordTools[Trace tool call and output]
+    RecordTools --> Continue[Append function call and output items]
+    Continue --> Model
+    ToolBudget -- no --> Budget[Extend interactively or force final artifact]
+    Budget --> Model
+    ToolDecision -- no --> Validate[Validate amended commit message]
+    Validate --> Valid{Valid?}
+    Valid -- no --> Repair[Run one repair pass]
+    Repair --> Revalidate[Revalidate repaired output]
+    Revalidate --> Shape[Shape body wrapping]
+    Valid -- yes --> Shape
+    Shape --> Preserve[Preserve supported task ID suffix]
+    Preserve --> FinalValidate[Reject delta or process phrasing]
+    FinalValidate --> FinalTrace[Trace final artifact]
+    FinalTrace --> Stdout([Print artifact only to stdout])
+```
+
+#### `git-agent pr-message`
+
+```mermaid
+flowchart TD
+    Start([git-agent pr-message]) --> Parse[Parse shared flags]
+    Parse --> Resolve[Resolve config from flags, env, defaults]
+    Resolve --> Timeout[Create task timeout context]
+    Timeout --> OpenRepo[Open repository]
+    OpenRepo --> Prepare[Precompute PR context for origin/HEAD..HEAD]
+    Prepare --> Evidence[Collect base, changed paths, stats, branch commits, recent commits, bounded diff]
+    Evidence --> Guidance[Resolve project guidance for changed paths]
+    Guidance --> Trace[Create .git-agent session trace]
+    Trace --> Runner[Build OpenAI runner without model tools]
+    Runner --> Request[Assemble request layers with prepared PR context]
+    Request --> Model[Call Responses API]
+    Model --> ToolGuard{Tool calls returned?}
+    ToolGuard -- yes --> Error[Fail: no tool registry configured for pr-message]
+    ToolGuard -- no --> Validate[Validate squash commit message]
+    Validate --> Valid{Valid?}
+    Valid -- no --> Repair[Run one repair pass without tools]
+    Repair --> Revalidate[Revalidate repaired output]
+    Revalidate --> Shape[Shape body wrapping]
+    Valid -- yes --> Shape
+    Shape --> FinalValidate[Validate shaped output]
+    FinalValidate --> FinalTrace[Trace final artifact]
+    FinalTrace --> Stdout([Print artifact only to stdout])
+```
+
+#### `git-agent release-note <base> <release>`
+
+```mermaid
+flowchart TD
+    Start([git-agent release-note base release]) --> Parse[Parse shared flags and two refs]
+    Parse --> Resolve[Resolve config from flags, env, defaults]
+    Resolve --> Floors[Raise max steps and timeout to release-note minimums]
+    Floors --> Timeout[Create task timeout context]
+    Timeout --> OpenRepo[Open repository]
+    OpenRepo --> Guidance[Resolve project guidance for repository root]
+    Guidance --> Trace[Create .git-agent session trace]
+    Trace --> Registry[Register repo_summary fallback tool]
+    Registry --> Prepare[Precompute release-note context]
+    Prepare --> Refs[Resolve base and release refs]
+    Refs --> ParentLog[Collect parent repository commits]
+    ParentLog --> Submodules[Inspect submodule gitlink changes]
+    Submodules --> SubHistory[Collect local submodule history when available]
+    SubHistory --> Runner[Build OpenAI runner with release-note validator and JSON format]
+    Runner --> Request[Assemble request layers with prepared release context]
+    Request --> Model[Call Responses API]
+    Model --> ToolDecision{Fallback tool call?}
+    ToolDecision -- yes --> ToolBudget{Within tool budget?}
+    ToolBudget -- yes --> ExecuteTool[Execute repo_summary fallback tool]
+    ExecuteTool --> RecordTools[Trace tool call and output]
+    RecordTools --> Continue[Append function call and output items]
+    Continue --> Model
+    ToolBudget -- no --> Budget[Extend interactively or force final artifact]
+    Budget --> Model
+    ToolDecision -- no --> ValidateJSON[Validate structured release-note JSON]
+    ValidateJSON --> Valid{Valid?}
+    Valid -- no --> Repair[Run one repair pass]
+    Repair --> Revalidate[Revalidate repaired JSON]
+    Revalidate --> BuildDoc[Build Markdown document locally]
+    Valid -- yes --> BuildDoc
+    BuildDoc --> ValidateDoc[Validate rendered document requirements]
+    ValidateDoc --> Render[Render final Markdown]
+    Render --> FinalTrace[Trace final artifact]
+    FinalTrace --> Stdout([Print artifact only to stdout])
+```
+
 ### Bounded execution
 
 The runtime must enforce:
