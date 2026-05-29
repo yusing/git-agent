@@ -370,6 +370,7 @@ func configureE2EProvider(t *testing.T, fakeServer *httptest.Server) (providerMo
 
 	switch mode := normalizeProviderMode(os.Getenv("GIT_AGENT_E2E_PROVIDER")); mode {
 	case providerModeFake:
+		t.Setenv("HOME", t.TempDir())
 		t.Setenv("OPENAI_API_KEY", "test-key")
 		t.Setenv("OPENAI_BASE_URL", fakeServer.URL)
 		t.Setenv("OPENAI_MODEL", "test-model")

@@ -15,13 +15,37 @@ Mermaid execution-flow graphs for each subcommand are documented in
 
 ## Configuration
 
-v1 uses standard OpenAI-compatible environment variables:
+By default, `git-agent` uses ChatGPT/Codex auth from:
+
+```text
+~/.codex/auth.json
+```
+
+The auth file must include:
+
+```json
+{
+  "auth_mode": "chatgpt",
+  "tokens": {
+    "access_token": "...",
+    "account_id": "..."
+  }
+}
+```
+
+ChatGPT auth sends requests to `https://chatgpt.com/backend-api/codex` with
+`Authorization: Bearer <access_token>` and `ChatGPT-Account-ID: <account_id>`.
+
+`OPENAI_API_KEY` is a legacy fallback when `~/.codex/auth.json` is absent.
+`OPENAI_BASE_URL` only applies to that legacy API-key path; ChatGPT auth uses
+the ChatGPT backend unless `--base-url` is passed explicitly.
+Supported environment variables:
 
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
 
-CLI flags will override environment values.
+CLI flags override environment values.
 
 Common flags:
 

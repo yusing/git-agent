@@ -92,9 +92,21 @@ Flag behavior:
 
 - `--amend`
 
-### Environment variables
+### Authentication and environment variables
 
-v1 uses only standard OpenAI-compatible environment variables:
+Default auth uses ChatGPT/Codex credentials from `~/.codex/auth.json`.
+The file must set `"auth_mode": "chatgpt"` and include
+`tokens.access_token` plus `tokens.account_id`. ChatGPT auth defaults the
+provider base URL to `https://chatgpt.com/backend-api/codex` and sends
+`Authorization: Bearer <access_token>` plus
+`ChatGPT-Account-ID: <account_id>`.
+
+`OPENAI_API_KEY` is a legacy fallback for OpenAI-compatible providers when
+`~/.codex/auth.json` is absent.
+`OPENAI_BASE_URL` applies only to that legacy API-key path; ChatGPT auth uses
+`https://chatgpt.com/backend-api/codex` unless `--base-url` is passed
+explicitly.
+Supported environment variables:
 
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
@@ -103,8 +115,9 @@ v1 uses only standard OpenAI-compatible environment variables:
 Resolution order:
 
 1. explicit CLI flag
-2. environment variable
-3. internal default when defined by that subsystem
+2. `~/.codex/auth.json` ChatGPT auth
+3. environment variable fallback, including `OPENAI_API_KEY` auth
+4. internal default when defined by that subsystem
 
 ### stdout / stderr contract
 

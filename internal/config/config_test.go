@@ -1,11 +1,15 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestResolveFlagEnvDefaultOrder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("OPENAI_API_KEY", "env-key")
 	t.Setenv("OPENAI_BASE_URL", "https://env.example/v1")
 	t.Setenv("OPENAI_MODEL", "env-model")
@@ -23,6 +27,12 @@ func TestResolveFlagEnvDefaultOrder(t *testing.T) {
 	}
 	if cfg.APIKey != "env-key" {
 		t.Fatalf("APIKey = %q", cfg.APIKey)
+	}
+	if cfg.AuthMode != AuthModeAPIKey {
+		t.Fatalf("AuthMode = %q", cfg.AuthMode)
+	}
+	if cfg.AuthAccountID != "" {
+		t.Fatalf("AuthAccountID = %q", cfg.AuthAccountID)
 	}
 	if cfg.BaseURL != "https://flag.example/v1" {
 		t.Fatalf("BaseURL = %q", cfg.BaseURL)
@@ -44,15 +54,128 @@ func TestResolveFlagEnvDefaultOrder(t *testing.T) {
 	}
 }
 
-func TestResolveRequiresAPIKey(t *testing.T) {
+func TestResolveRequiresAuth(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("HOME", t.TempDir())
 
 	if _, err := Resolve(Options{}); err == nil {
-		t.Fatal("expected missing API key error")
+		t.Fatal("expected missing auth error")
+	}
+}
+
+func TestResolveUsesChatGPTAuthFileByDefault(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_BASE_URL", "http://legacy.example/v1")
+	t.Setenv("OPENAI_MODEL", "")
+	writeCodexAuth(t, `{
+		"auth_mode": "chatgpt",
+		"tokens": {
+			"access_token": "access-token",
+			"account_id": "workspace-123"
+		}
+	}`)
+
+	cfg, err := Resolve(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AuthMode != AuthModeChatGPT {
+		t.Fatalf("AuthMode = %q", cfg.AuthMode)
+	}
+	if cfg.APIKey != "access-token" {
+		t.Fatalf("APIKey = %q", cfg.APIKey)
+	}
+	if cfg.AuthAccountID != "workspace-123" {
+		t.Fatalf("AuthAccountID = %q", cfg.AuthAccountID)
+	}
+	if cfg.BaseURL != DefaultChatGPTBaseURL {
+		t.Fatalf("BaseURL = %q", cfg.BaseURL)
+	}
+}
+
+func TestResolveAllowsBaseURLFlagToOverrideChatGPTDefault(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_BASE_URL", "http://legacy.example/v1")
+	writeCodexAuth(t, `{
+		"auth_mode": "chatgpt",
+		"tokens": {
+			"access_token": "access-token",
+			"account_id": "workspace-123"
+		}
+	}`)
+
+	cfg, err := Resolve(Options{BaseURL: "http://flag.example/codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BaseURL != "http://flag.example/codex" {
+		t.Fatalf("BaseURL = %q", cfg.BaseURL)
+	}
+}
+
+func TestResolvePrefersChatGPTAuthFileOverAPIKey(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "env-key")
+	t.Setenv("OPENAI_BASE_URL", "http://legacy.example/v1")
+	t.Setenv("OPENAI_MODEL", "")
+	writeCodexAuth(t, `{
+		"auth_mode": "chatgpt",
+		"tokens": {
+			"access_token": "access-token",
+			"account_id": "workspace-123"
+		}
+	}`)
+
+	cfg, err := Resolve(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AuthMode != AuthModeChatGPT {
+		t.Fatalf("AuthMode = %q", cfg.AuthMode)
+	}
+	if cfg.APIKey != "access-token" {
+		t.Fatalf("APIKey = %q", cfg.APIKey)
+	}
+}
+
+func TestResolveFallsBackToAPIKeyWhenAuthFileModeIsNotChatGPT(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "env-key")
+	writeCodexAuth(t, `{
+		"auth_mode": "apikey",
+		"tokens": {
+			"access_token": "access-token",
+			"account_id": "workspace-123"
+		}
+	}`)
+
+	cfg, err := Resolve(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AuthMode != AuthModeAPIKey {
+		t.Fatalf("AuthMode = %q", cfg.AuthMode)
+	}
+	if cfg.APIKey != "env-key" {
+		t.Fatalf("APIKey = %q", cfg.APIKey)
+	}
+}
+
+func TestResolveRejectsIncompleteChatGPTAuthFile(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	writeCodexAuth(t, `{
+		"auth_mode": "chatgpt",
+		"tokens": {
+			"access_token": "access-token"
+		}
+	}`)
+
+	_, err := Resolve(Options{})
+	if err == nil || !strings.Contains(err.Error(), "missing tokens.account_id") {
+		t.Fatalf("expected account id error, got %v", err)
 	}
 }
 
 func TestResolveUsesRaisedDefaultMaxSteps(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("OPENAI_API_KEY", "env-key")
 
 	cfg, err := Resolve(Options{})
@@ -74,9 +197,23 @@ func TestResolveUsesRaisedDefaultMaxSteps(t *testing.T) {
 }
 
 func TestResolveRejectsConflictingThinkingFlags(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("OPENAI_API_KEY", "env-key")
 
 	if _, err := Resolve(Options{Low: true, Medium: true}); err == nil {
 		t.Fatal("expected mutually exclusive thinking flags error")
+	}
+}
+
+func writeCodexAuth(t *testing.T, content string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

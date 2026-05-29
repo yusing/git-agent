@@ -28,11 +28,12 @@ func TestRunCommitMsgRequiresAPIKey(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("OPENAI_BASE_URL", "")
 	t.Setenv("OPENAI_MODEL", "")
+	t.Setenv("HOME", t.TempDir())
 
 	app := &App{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
 	err := app.Run(context.Background(), []string{"commit-msg"})
-	if err == nil || !strings.Contains(err.Error(), "missing OPENAI_API_KEY") {
-		t.Fatalf("expected missing API key error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "missing ~/.codex/auth.json and OPENAI_API_KEY") {
+		t.Fatalf("expected missing auth error, got %v", err)
 	}
 }
 
@@ -85,6 +86,49 @@ func TestCommitMsgPrintsOnlyProviderArtifact(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(sessions[0], name)); err != nil {
 			t.Fatalf("missing trace file %s: %v", name, err)
 		}
+	}
+}
+
+func TestCommitMsgUsesChatGPTAuthFileByDefault(t *testing.T) {
+	repoDir := initRepo(t)
+	t.Chdir(repoDir)
+	writeCodexAuth(t, `{
+		"auth_mode": "chatgpt",
+		"tokens": {
+			"access_token": "access-token",
+			"account_id": "workspace-123"
+		}
+	}`)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer access-token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		if got := r.Header.Get("ChatGPT-Account-ID"); got != "workspace-123" {
+			t.Fatalf("ChatGPT-Account-ID = %q", got)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: ")
+		fmt.Fprint(w, `{"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"test-model","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Add parser","annotations":[]}]}]}}`)
+		fmt.Fprint(w, "\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_BASE_URL", "http://legacy.example/v1")
+	t.Setenv("OPENAI_MODEL", "test-model")
+
+	var stdout bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &bytes.Buffer{}}
+	if err := app.Run(context.Background(), []string{"commit-msg", "--base-url", server.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "Add parser\n" {
+		t.Fatalf("stdout = %q", stdout.String())
 	}
 }
 
@@ -299,6 +343,7 @@ func TestRunRejectsConflictingThinkingFlags(t *testing.T) {
 
 func initRepo(t *testing.T) string {
 	t.Helper()
+	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	runGit(t, dir, "init")
 	runGit(t, dir, "config", "user.name", "Test User")
@@ -317,5 +362,18 @@ func runGit(t *testing.T, dir string, args ...string) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+}
+
+func writeCodexAuth(t *testing.T, content string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

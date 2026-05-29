@@ -129,15 +129,16 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 	maxToolCalls := r.Config.MaxToolCalls
 	for step := 0; step < maxSteps; step++ {
 		req := openai.Request{
-			Model:        r.Config.Model,
-			ServiceTier:  r.Config.ServiceTier,
-			ThinkingMode: r.Config.ThinkingEffort,
-			BaseURL:      r.Config.BaseURL,
-			APIKey:       r.Config.APIKey,
-			Instructions: requestInstructions(instructions, toolSpecs),
-			Input:        messages,
-			Tools:        toolSpecs,
-			TextFormat:   textFormat,
+			Model:         r.Config.Model,
+			ServiceTier:   r.Config.ServiceTier,
+			ThinkingMode:  r.Config.ThinkingEffort,
+			BaseURL:       r.Config.BaseURL,
+			APIKey:        r.Config.APIKey,
+			AuthAccountID: r.Config.AuthAccountID,
+			Instructions:  requestInstructions(instructions, toolSpecs),
+			Input:         messages,
+			Tools:         toolSpecs,
+			TextFormat:    textFormat,
 			// Do not ever add outbound max_tool_calls again.
 			// OpenAI-compatible providers in our target path reject it on /responses.
 			// The local runner already enforces the tool-call ceiling.
@@ -278,13 +279,14 @@ func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions
 func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions string, messages []openai.Item, status BudgetStatus) (Result, error) {
 	finalMessages := append(slices.Clone(messages), openai.NewMessage("developer", finalizationNotice(status)))
 	req := openai.Request{
-		Model:        r.Config.Model,
-		ServiceTier:  r.Config.ServiceTier,
-		ThinkingMode: r.Config.ThinkingEffort,
-		BaseURL:      r.Config.BaseURL,
-		APIKey:       r.Config.APIKey,
-		Instructions: finalArtifactInstructions(instructions),
-		Input:        finalMessages,
+		Model:         r.Config.Model,
+		ServiceTier:   r.Config.ServiceTier,
+		ThinkingMode:  r.Config.ThinkingEffort,
+		BaseURL:       r.Config.BaseURL,
+		APIKey:        r.Config.APIKey,
+		AuthAccountID: r.Config.AuthAccountID,
+		Instructions:  finalArtifactInstructions(instructions),
+		Input:         finalMessages,
 	}
 	if err := writeTraceRequest(r.Trace, req); err != nil {
 		return Result{}, err

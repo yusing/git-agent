@@ -3,11 +3,13 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRequestConvertsToSDKStructuredInputAndTools(t *testing.T) {
@@ -114,6 +116,98 @@ func TestRequestSupportsLowThinkingMode(t *testing.T) {
 	}
 }
 
+func TestCreateResponseAddsChatGPTAccountIDHeader(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer access-token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		if got := r.Header.Get("ChatGPT-Account-ID"); got != "workspace-123" {
+			t.Fatalf("ChatGPT-Account-ID = %q", got)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: ")
+		fmt.Fprint(w, `{"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"test-model","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"hello","annotations":[]}]}]}}`)
+		fmt.Fprint(w, "\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	resp, err := NewHTTPClient(server.Client()).CreateResponse(context.Background(), Request{
+		Model:         "test-model",
+		BaseURL:       server.URL,
+		APIKey:        "access-token",
+		AuthAccountID: "workspace-123",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Text != "hello" {
+		t.Fatalf("text = %q", resp.Text)
+	}
+}
+
+func TestNewHTTPClientInstallsBoundedDialTransport(t *testing.T) {
+	t.Parallel()
+
+	raw := &http.Client{Timeout: time.Minute}
+	client := NewHTTPClient(raw).HTTPClient
+
+	if client == raw {
+		t.Fatal("NewHTTPClient should clone the supplied client before adding transport defaults")
+	}
+	if raw.Transport != nil {
+		t.Fatal("NewHTTPClient mutated the supplied client")
+	}
+	if client.Timeout != time.Minute {
+		t.Fatalf("Timeout = %v, want %v", client.Timeout, time.Minute)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport = %T, want *http.Transport", client.Transport)
+	}
+	if transport.DialContext == nil {
+		t.Fatal("DialContext is nil")
+	}
+}
+
+func TestNewHTTPClientPreservesCustomTransport(t *testing.T) {
+	t.Parallel()
+
+	custom := &errorRoundTripper{err: errors.New("boom")}
+	client := NewHTTPClient(&http.Client{Transport: custom}).HTTPClient
+
+	if client.Transport != custom {
+		t.Fatalf("Transport = %#v, want custom transport", client.Transport)
+	}
+}
+
+func TestCreateResponseReportsUpstreamFailure(t *testing.T) {
+	t.Parallel()
+
+	upstreamErr := errors.New("dial tcp: i/o timeout")
+	client := NewHTTPClient(&http.Client{Transport: &errorRoundTripper{err: upstreamErr}})
+
+	_, err := client.CreateResponse(context.Background(), Request{
+		Model:   "test-model",
+		BaseURL: "http://upstream.invalid",
+		APIKey:  "test-key",
+		Input: []Item{
+			NewMessage("user", "task"),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected upstream failure")
+	}
+	if !strings.Contains(err.Error(), "upstream request failed") {
+		t.Fatalf("error = %q, want upstream failure context", err)
+	}
+	if !errors.Is(err, upstreamErr) {
+		t.Fatalf("error does not wrap upstream cause: %v", err)
+	}
+}
+
 func TestRequestSupportsStructuredJSONTextFormat(t *testing.T) {
 	t.Parallel()
 
@@ -183,6 +277,14 @@ func TestRequestSupportsStructuredJSONTextFormat(t *testing.T) {
 	if title["type"] != "string" {
 		t.Fatalf("title.type = %#v", title["type"])
 	}
+}
+
+type errorRoundTripper struct {
+	err error
+}
+
+func (r *errorRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, r.err
 }
 
 func TestMarshalTraceJSONRedactsAPIKey(t *testing.T) {

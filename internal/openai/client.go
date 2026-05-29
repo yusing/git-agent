@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	openaisdk "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -22,15 +24,16 @@ type Client interface {
 }
 
 type Request struct {
-	Model        string      `json:"model"`
-	ServiceTier  string      `json:"service_tier,omitempty"`
-	ThinkingMode string      `json:"thinking_mode,omitempty"`
-	BaseURL      string      `json:"-"`
-	APIKey       string      `json:"-"`
-	Instructions string      `json:"instructions,omitempty"`
-	Input        []Item      `json:"input"`
-	Tools        []ToolSpec  `json:"tools,omitempty"`
-	TextFormat   *TextFormat `json:"text_format,omitempty"`
+	Model         string      `json:"model"`
+	ServiceTier   string      `json:"service_tier,omitempty"`
+	ThinkingMode  string      `json:"thinking_mode,omitempty"`
+	BaseURL       string      `json:"-"`
+	APIKey        string      `json:"-"`
+	AuthAccountID string      `json:"-"`
+	Instructions  string      `json:"instructions,omitempty"`
+	Input         []Item      `json:"input"`
+	Tools         []ToolSpec  `json:"tools,omitempty"`
+	TextFormat    *TextFormat `json:"text_format,omitempty"`
 }
 
 type TextFormat struct {
@@ -77,14 +80,19 @@ type SDKClient struct {
 	HTTPClient *http.Client
 }
 
+const DefaultDialTimeout = 5 * time.Second
+
 func NewHTTPClient(client *http.Client) *SDKClient {
-	return &SDKClient{HTTPClient: client}
+	return &SDKClient{HTTPClient: withDefaultDialTimeout(client)}
 }
 
 func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Response, error) {
 	opts := []option.RequestOption{
 		option.WithAPIKey(request.APIKey),
 		option.WithBaseURL(request.BaseURL),
+	}
+	if request.AuthAccountID != "" {
+		opts = append(opts, option.WithHeader("ChatGPT-Account-ID", request.AuthAccountID))
 	}
 	if c.HTTPClient != nil {
 		opts = append(opts, option.WithHTTPClient(c.HTTPClient))
@@ -110,12 +118,20 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 	}
 	if err := stream.Err(); err != nil {
 		if shouldRetryWithoutStreaming(err) {
-			return fallbackWithoutStreaming(ctx, client, params, err)
+			response, fallbackErr := fallbackWithoutStreaming(ctx, client, params, err)
+			if fallbackErr != nil {
+				return Response{}, upstreamError(fallbackErr)
+			}
+			return response, nil
 		}
-		return Response{}, err
+		return Response{}, upstreamError(err)
 	}
 	if final == nil && !accum.hasContent() {
-		return fallbackWithoutStreaming(ctx, client, params, fmt.Errorf("provider stream ended without response.completed event"))
+		response, err := fallbackWithoutStreaming(ctx, client, params, fmt.Errorf("provider stream ended without response.completed event"))
+		if err != nil {
+			return Response{}, upstreamError(err)
+		}
+		return response, nil
 	}
 
 	result := accum.response()
@@ -127,6 +143,33 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 		result.ToolCalls = mergeToolCalls(result.ToolCalls, accum.toolCalls())
 	}
 	return result, nil
+}
+
+func withDefaultDialTimeout(client *http.Client) *http.Client {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	cloned := *client
+	if cloned.Transport == nil {
+		cloned.Transport = newTransportWithDialTimeout(DefaultDialTimeout)
+	}
+	return &cloned
+}
+
+func newTransportWithDialTimeout(timeout time.Duration) *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{
+		Timeout:   timeout,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	return transport
+}
+
+func upstreamError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("upstream request failed: %w", err)
 }
 
 type streamAccumulator struct {

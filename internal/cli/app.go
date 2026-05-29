@@ -359,7 +359,7 @@ func registerSharedFlags(fs *flag.FlagSet, opts *config.Options) {
 	fs.BoolVar(&opts.Medium, "medium", false, "use medium reasoning effort")
 	fs.BoolVar(&opts.High, "high", false, "use high reasoning effort")
 	fs.BoolVar(&opts.XHigh, "xhigh", false, "use xhigh reasoning effort")
-	fs.StringVar(&opts.BaseURL, "base-url", "", "override OPENAI_BASE_URL")
+	fs.StringVar(&opts.BaseURL, "base-url", "", "override provider base URL")
 	fs.StringVar(&opts.Timeout, "timeout", "", "override default request timeout")
 	fs.IntVar(&opts.MaxSteps, "max-steps", 0, "override maximum agent steps")
 	fs.StringVar(&opts.GuidanceFamily, "guidance-family", "", "force guidance family")
