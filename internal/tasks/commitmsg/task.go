@@ -380,7 +380,23 @@ func PreserveTaskIDSuffix(output string, references []gitctx.CommitInfo) string 
 		lines[0] = subject + suffix
 		return strings.Join(lines, "\n")
 	}
+	if suffix := latestRecentTaskIDSuffix(references); suffix != "" {
+		lines[0] = subject + suffix
+		return strings.Join(lines, "\n")
+	}
 	return trimmed
+}
+
+func latestRecentTaskIDSuffix(references []gitctx.CommitInfo) string {
+	if len(references) == 0 {
+		return ""
+	}
+	referenceSubject := strings.TrimSpace(references[0].Summary)
+	suffixLocation := taskIDSuffixPattern.FindStringIndex(referenceSubject)
+	if suffixLocation == nil {
+		return ""
+	}
+	return referenceSubject[suffixLocation[0]:]
 }
 
 func dominantRecentTaskIDSuffix(subject string, references []gitctx.CommitInfo) string {

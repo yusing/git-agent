@@ -103,15 +103,16 @@ Log duplicate task payloads before returning.`, []gitctx.CommitInfo{
 	}
 }
 
-func TestPreserveTaskIDSuffixKeepsUnrelatedSubjectsUntouched(t *testing.T) {
+func TestPreserveTaskIDSuffixUsesLatestRecentTaskIDForNewSubject(t *testing.T) {
 	t.Parallel()
 
-	output := "fix(schedtask): validate task creation"
+	output := "feat(orm): preserve where insertion order and expose condition formatters"
 	got := PreserveTaskIDSuffix(output, []gitctx.CommitInfo{
-		{Summary: "fix(schedtask): log skipped duplicate task creation (T46571)"},
+		{Summary: "feat(typegen): keep generated Col field helpers when referenced (T46750)"},
+		{Summary: "feat(orm): expose query tx and cloned state accessors (T46571)"},
 	})
-	if got != output {
-		t.Fatalf("unexpected task ID suffix restore: %q", got)
+	if want := output + " (T46750)"; got != want {
+		t.Fatalf("task ID suffix = %q, want %q", got, want)
 	}
 }
 
@@ -132,11 +133,12 @@ string and int filters.`, []gitctx.CommitInfo{
 	}
 }
 
-func TestPreserveTaskIDSuffixDoesNotUseDominantRecentTaskIDForDifferentScope(t *testing.T) {
+func TestPreserveTaskIDSuffixDoesNotUseOlderTaskIDWhenLatestHasNone(t *testing.T) {
 	t.Parallel()
 
 	output := "docs(readme): update install guide"
 	got := PreserveTaskIDSuffix(output, []gitctx.CommitInfo{
+		{Summary: "docs(readme): clarify install flow"},
 		{Summary: "fix(uc): switch generated query call sites to typed By helpers (T46571)"},
 		{Summary: "chore(types): regenerate db types (T46571)"},
 	})
