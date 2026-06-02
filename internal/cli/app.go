@@ -94,6 +94,9 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if len(stagedPaths) == 0 {
+		return errors.New("commit-msg requires staged changes")
+	}
 	userPrompt := commitmsg.UserPrompt(mode, cfg.MaxSteps, cfg.MaxToolCalls)
 	var preparedCommit *commitmsg.PreparedCommitContext
 	if mode == commitmsg.ModeNormal {

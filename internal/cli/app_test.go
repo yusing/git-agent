@@ -132,6 +132,40 @@ func TestCommitMsgUsesChatGPTAuthFileByDefault(t *testing.T) {
 	}
 }
 
+func TestCommitMsgRequiresStagedChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "normal", args: []string{"commit-msg"}},
+		{name: "amend", args: []string{"commit-msg", "--amend"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repoDir := initRepo(t)
+			runGit(t, repoDir, "commit", "-m", "base")
+			t.Chdir(repoDir)
+
+			t.Setenv("OPENAI_API_KEY", "test-key")
+			t.Setenv("OPENAI_BASE_URL", "")
+			t.Setenv("OPENAI_MODEL", "")
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			app := &App{stdout: &stdout, stderr: &stderr}
+			err := app.Run(context.Background(), tc.args)
+			if err == nil || !strings.Contains(err.Error(), "commit-msg requires staged changes") {
+				t.Fatalf("expected staged changes error, got %v", err)
+			}
+			if stdout.String() != "" {
+				t.Fatalf("stdout = %q", stdout.String())
+			}
+			if stderr.String() != "" {
+				t.Fatalf("stderr = %q", stderr.String())
+			}
+		})
+	}
+}
+
 func TestCommitMsgRestoresMatchingRecentTaskIDSuffix(t *testing.T) {
 	repoDir := initRepo(t)
 	runGit(t, repoDir, "commit", "-m", "fix(schedtask): log skipped duplicate task creation (T46571)")
