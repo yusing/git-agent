@@ -22,7 +22,10 @@ type Request struct {
 	Mode Mode
 }
 
-var taskIDSuffixPattern = regexp.MustCompile(`(?:\s+\(T\d+\))+$`)
+var (
+	taskIDSuffixPattern              = regexp.MustCompile(`(?:\s+\(T\d+\))+$`)
+	conventionalSubjectPrefixPattern = regexp.MustCompile(`^[a-z]+(?:\([^)]+\))?!?$`)
+)
 
 type PreparedPRContext struct {
 	Range         string              `json:"range"`
@@ -344,13 +347,74 @@ func Shape(output string) string {
 	if trimmed == "" {
 		return ""
 	}
-	parts := strings.SplitN(trimmed, "\n", 2)
-	subject := strings.TrimSpace(parts[0])
-	if len(parts) == 1 || strings.TrimSpace(parts[1]) == "" {
+
+	subject, body := splitSubjectAndBody(trimmed)
+	if body == "" {
 		return subject
 	}
-	body := textutil.WrapBody(parts[1], 72)
-	return subject + "\n\n" + body
+	return subject + "\n\n" + textutil.WrapBody(body, 72)
+}
+
+func splitSubjectAndBody(text string) (string, string) {
+	parts := strings.SplitN(text, "\n\n", 2)
+	firstParagraph := strings.Split(parts[0], "\n")
+	if shouldUnwrapSubjectContinuation(firstParagraph) {
+		subject := joinTrimmedLines(firstParagraph)
+		if len(parts) == 1 {
+			return subject, ""
+		}
+		return subject, parts[1]
+	}
+
+	subjectParts := strings.SplitN(text, "\n", 2)
+	subject := strings.TrimSpace(subjectParts[0])
+	if len(subjectParts) == 1 {
+		return subject, ""
+	}
+	return subject, strings.TrimSpace(subjectParts[1])
+}
+
+func shouldUnwrapSubjectContinuation(lines []string) bool {
+	if len(lines) < 2 {
+		return false
+	}
+
+	first := strings.TrimSpace(lines[0])
+	second := strings.TrimSpace(lines[1])
+	return endsWithSubjectConnector(first) ||
+		(len(first) >= 50 && looksLikeConventionalSubject(first) && startsLowercase(second))
+}
+
+func endsWithSubjectConnector(text string) bool {
+	for _, suffix := range []string{" and", " or", " to", " for", " with", " across", ","} {
+		if strings.HasSuffix(text, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeConventionalSubject(text string) bool {
+	prefix, summary, ok := strings.Cut(text, ":")
+	return ok && summary != "" && conventionalSubjectPrefixPattern.MatchString(prefix)
+}
+
+func startsLowercase(text string) bool {
+	for _, r := range text {
+		return r >= 'a' && r <= 'z'
+	}
+	return false
+}
+
+func joinTrimmedLines(lines []string) string {
+	trimmed := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			trimmed = append(trimmed, line)
+		}
+	}
+	return strings.Join(trimmed, " ")
 }
 
 func PreserveTaskIDSuffix(output string, references []gitctx.CommitInfo) string {

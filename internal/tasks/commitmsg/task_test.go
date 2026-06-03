@@ -90,6 +90,73 @@ func TestShapeWrapsBodyAndKeepsSubject(t *testing.T) {
 	}
 }
 
+func TestShapeRepairsWrappedSubjectContinuation(t *testing.T) {
+	t.Parallel()
+
+	output := `refactor(uc): adopt typed query helpers across asterisk, IM and
+phoneconfig (T46750)
+
+Switch staged UC packages from model-based query building to typed
+query helpers and generated accessors.`
+
+	got := Shape(output)
+	want := `refactor(uc): adopt typed query helpers across asterisk, IM and phoneconfig (T46750)
+
+Switch staged UC packages from model-based query building to typed
+query helpers and generated accessors.`
+	if got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestPreserveTaskIDSuffixDoesNotLeaveWrappedSubjectShardInBody(t *testing.T) {
+	t.Parallel()
+
+	output := `refactor(uc): adopt typed query helpers across asterisk, IM and
+phoneconfig
+
+Switch staged UC packages from model-based query building to typed
+query helpers and generated accessors.`
+
+	shaped := Shape(output)
+	got := PreserveTaskIDSuffix(shaped, []gitctx.CommitInfo{
+		{Summary: "feat(typegen): keep generated Col field helpers when referenced (T46750)"},
+	})
+	want := `refactor(uc): adopt typed query helpers across asterisk, IM and phoneconfig (T46750)
+
+Switch staged UC packages from model-based query building to typed
+query helpers and generated accessors.`
+	if got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestShapeDoesNotMergeLowercaseBodyForPlainSubject(t *testing.T) {
+	t.Parallel()
+
+	got := Shape(`Add parser
+fixes lexer crashes when rules are empty`)
+	want := `Add parser
+
+fixes lexer crashes when rules are empty`
+	if got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestShapeDoesNotMergeLowercaseBodyForShortConventionalSubject(t *testing.T) {
+	t.Parallel()
+
+	got := Shape(`fix(parser): handle empty rules
+fixes lexer crashes when rules are empty`)
+	want := `fix(parser): handle empty rules
+
+fixes lexer crashes when rules are empty`
+	if got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
 func TestPreserveTaskIDSuffixRestoresExactRecentSubjectMatch(t *testing.T) {
 	t.Parallel()
 
