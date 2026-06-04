@@ -88,11 +88,11 @@ Rules:
 - each section heading must be one of: "Breaking Changes", "Security", "New Features", "Improvements", "Bug Fixes"
 - prefer the recommended section order from the prepared context
 - omit empty sections
-- use optional "label" when a bullet naturally groups under a stable area such as "Core/Middleware" or "WebUI/Dashboard"
+- set "label" to a concise stable area such as "Core/Middleware" or "WebUI/Dashboard" when natural; otherwise use null
 - every bullet must use a concise operator-facing summary in "summary"
 - put references only in "refs"; do not embed commit SHAs, PR numbers, or issue numbers into "summary"
 - each bullet must include at least one ref
-- use optional "children" only for short subordinate outcomes, fixes, or clarifications that belong under the parent bullet
+- set "children" to short subordinate outcomes, fixes, or clarifications that belong under the parent bullet; otherwise use null
 - child bullets must be plain summaries without refs
 - ref type must be one of: "commit", "pr", "issue"
 - use "commit" refs for commit SHAs and "pr"/"issue" refs for numeric identifiers without the leading #
@@ -136,7 +136,7 @@ func OutputSchema() map[string]any {
 								"type": "object",
 								"properties": map[string]any{
 									"label": map[string]any{
-										"type": "string",
+										"type": []string{"string", "null"},
 									},
 									"summary": map[string]any{
 										"type": "string",
@@ -160,7 +160,7 @@ func OutputSchema() map[string]any {
 										},
 									},
 									"children": map[string]any{
-										"type": "array",
+										"type": []string{"array", "null"},
 										"items": map[string]any{
 											"type": "object",
 											"properties": map[string]any{
@@ -173,7 +173,7 @@ func OutputSchema() map[string]any {
 										},
 									},
 								},
-								"required":             []string{"summary", "refs"},
+								"required":             []string{"label", "summary", "refs", "children"},
 								"additionalProperties": false,
 							},
 						},

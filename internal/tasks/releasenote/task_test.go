@@ -1,6 +1,7 @@
 package releasenote
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -77,6 +78,46 @@ func TestValidateRejectsEmptyChildBullet(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsNullablePracticalOptionalBulletFields(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+  "sections": [
+    {
+      "heading":"Improvements",
+      "bullets":[
+        {
+          "label": null,
+          "summary":"Refresh operator docs",
+          "refs":[{"type":"commit","value":"cafebabe"}],
+          "children": null
+        }
+      ]
+    }
+  ]
+}`
+	if errs := Validate(raw); len(errs) > 0 {
+		t.Fatalf("Validate() errors = %v", errs)
+	}
+
+	doc, err := BuildDocument(raw, PreparedContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := Render(doc)
+	if want := "- Refresh operator docs (`cafebab`)"; !strings.Contains(rendered, want) {
+		t.Fatalf("render missing %q:\n%s", want, rendered)
+	}
+}
+
+func TestOutputSchemaSatisfiesStrictRequiredProperties(t *testing.T) {
+	t.Parallel()
+
+	if errs := validateStrictSchemaRequired(OutputSchema(), "$"); len(errs) > 0 {
+		t.Fatalf("schema is not strict-compatible:\n%s", strings.Join(errs, "\n"))
+	}
+}
+
 func TestBuildDocumentSortsSectionsAndAttachesChangelog(t *testing.T) {
 	t.Parallel()
 
@@ -147,6 +188,89 @@ func TestBuildDocumentSortsSectionsAndAttachesChangelog(t *testing.T) {
 	}
 	if len(doc.Submodules) != 1 || doc.Submodules[0].Path != "webui" {
 		t.Fatalf("submodules = %#v", doc.Submodules)
+	}
+}
+
+func validateStrictSchemaRequired(node any, path string) []string {
+	schema, ok := node.(map[string]any)
+	if !ok {
+		return nil
+	}
+
+	var errs []string
+	if schemaTypeIncludes(schema["type"], "object") {
+		properties, _ := schema["properties"].(map[string]any)
+		required, ok := schemaRequiredSet(schema["required"])
+		if !ok {
+			errs = append(errs, fmt.Sprintf("%s: object schema missing required array", path))
+		}
+		for name := range properties {
+			if !required[name] {
+				errs = append(errs, fmt.Sprintf("%s: required missing property %q", path, name))
+			}
+		}
+		for name := range required {
+			if _, ok := properties[name]; !ok {
+				errs = append(errs, fmt.Sprintf("%s: required has unknown property %q", path, name))
+			}
+		}
+		for name, prop := range properties {
+			errs = append(errs, validateStrictSchemaRequired(prop, path+"."+name)...)
+		}
+	}
+
+	if items, ok := schema["items"]; ok {
+		errs = append(errs, validateStrictSchemaRequired(items, path+"[]")...)
+	}
+	if variants, ok := schema["anyOf"].([]any); ok {
+		for i, variant := range variants {
+			errs = append(errs, validateStrictSchemaRequired(variant, fmt.Sprintf("%s.anyOf[%d]", path, i))...)
+		}
+	}
+
+	return errs
+}
+
+func schemaTypeIncludes(value any, want string) bool {
+	switch v := value.(type) {
+	case string:
+		return v == want
+	case []string:
+		for _, typ := range v {
+			if typ == want {
+				return true
+			}
+		}
+	case []any:
+		for _, typ := range v {
+			if typ == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func schemaRequiredSet(value any) (map[string]bool, bool) {
+	switch required := value.(type) {
+	case []string:
+		set := make(map[string]bool, len(required))
+		for _, name := range required {
+			set[name] = true
+		}
+		return set, true
+	case []any:
+		set := make(map[string]bool, len(required))
+		for _, name := range required {
+			text, ok := name.(string)
+			if !ok {
+				return nil, false
+			}
+			set[text] = true
+		}
+		return set, true
+	default:
+		return nil, false
 	}
 }
 
