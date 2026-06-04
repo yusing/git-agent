@@ -240,6 +240,7 @@ func TestReleaseNoteEndToEndWithRealisticFixture(t *testing.T) {
       "heading": "Breaking Changes",
       "bullets": [
         {
+          "label": null,
           "summary": "Route configuration and API payloads no longer support path_patterns",
           "refs": [{"type":"commit","value":"%s"}]
         }
@@ -250,12 +251,8 @@ func TestReleaseNoteEndToEndWithRealisticFixture(t *testing.T) {
       "bullets": [
         {
           "label": "Core/Middleware",
-          "summary": "FileServer routes now apply middleware after routing rules settle",
-          "refs": [{"type":"commit","value":"%s"}],
-          "children": [
-            {"summary":"Static file routes now preserve middleware behavior after rules settle"},
-            {"summary":"Operator-visible handler behavior now matches FileServer route expectations"}
-          ]
+          "summary": "FileServer routes now apply middleware after routing rules settle, preserving operator-visible handler behavior for static file routes",
+          "refs": [{"type":"commit","value":"%s"}]
         }
       ]
     },
@@ -263,6 +260,7 @@ func TestReleaseNoteEndToEndWithRealisticFixture(t *testing.T) {
       "heading": "Improvements",
       "bullets": [
         {
+          "label": null,
           "summary": "Web UI docs and screenshots now align better with current operator flows",
           "refs": [{"type":"commit","value":"%s"}]
         }
@@ -336,19 +334,17 @@ func TestReleaseNoteEndToEndWithRealisticFixture(t *testing.T) {
 	if mode == providerModeFake {
 		for _, want := range []string{
 			"### Breaking Changes",
-			"- Route configuration and API payloads no longer support path_patterns (`" + fixture.parentRefactorSHA[:7] + "`)",
+			"- Route configuration and API payloads no longer support path_patterns (" + fixture.parentRefactorSHA[:7] + ")",
 			"### Bug Fixes",
-			"- **Core/Middleware**: FileServer routes now apply middleware after routing rules settle (`" + fixture.parentFixSHA[:7] + "`)",
-			"  - Static file routes now preserve middleware behavior after rules settle",
-			"  - Operator-visible handler behavior now matches FileServer route expectations",
+			"- **Core/Middleware**: FileServer routes now apply middleware after routing rules settle, preserving operator-visible handler behavior for static file routes (" + fixture.parentFixSHA[:7] + ")",
 			"### Improvements",
-			"- Web UI docs and screenshots now align better with current operator flows (`" + fixture.webuiReleaseSHA[:7] + "`)",
+			"- Web UI docs and screenshots now align better with current operator flows (" + fixture.webuiReleaseSHA[:7] + ")",
 			"### Full Changelog",
 			"[**webui**](https://github.com/example/webui)",
 			"[**goutils**](https://github.com/example/goutils)",
-			"`" + fixture.parentRefactorSHA[:7] + "`",
-			"`" + fixture.parentFixSHA[:7] + "`",
-			"`" + fixture.goutilsReleaseSHA[:7] + "`",
+			fixture.parentRefactorSHA[:7],
+			fixture.parentFixSHA[:7],
+			fixture.goutilsReleaseSHA[:7],
 		} {
 			if !strings.Contains(output, want) {
 				t.Fatalf("fake-provider release note missing %q:\n%s", want, output)

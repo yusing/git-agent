@@ -55,7 +55,7 @@ func TestValidateRejectsInvalidRef(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsEmptyChildBullet(t *testing.T) {
+func TestValidateRejectsChildBullets(t *testing.T) {
 	t.Parallel()
 
 	errs := Validate(`{
@@ -74,7 +74,7 @@ func TestValidateRejectsEmptyChildBullet(t *testing.T) {
   ]
 }`)
 	if len(errs) == 0 {
-		t.Fatal("expected empty child bullet error")
+		t.Fatal("expected child bullet error")
 	}
 }
 
@@ -89,8 +89,7 @@ func TestValidateAcceptsNullablePracticalOptionalBulletFields(t *testing.T) {
         {
           "label": null,
           "summary":"Refresh operator docs",
-          "refs":[{"type":"commit","value":"cafebabe"}],
-          "children": null
+          "refs":[{"type":"commit","value":"cafebabe"}]
         }
       ]
     }
@@ -105,7 +104,7 @@ func TestValidateAcceptsNullablePracticalOptionalBulletFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	rendered := Render(doc)
-	if want := "- Refresh operator docs (`cafebab`)"; !strings.Contains(rendered, want) {
+	if want := "- Refresh operator docs (cafebab)"; !strings.Contains(rendered, want) {
 		t.Fatalf("render missing %q:\n%s", want, rendered)
 	}
 }
@@ -115,6 +114,14 @@ func TestOutputSchemaSatisfiesStrictRequiredProperties(t *testing.T) {
 
 	if errs := validateStrictSchemaRequired(OutputSchema(), "$"); len(errs) > 0 {
 		t.Fatalf("schema is not strict-compatible:\n%s", strings.Join(errs, "\n"))
+	}
+}
+
+func TestOutputSchemaDoesNotRequestChildBullets(t *testing.T) {
+	t.Parallel()
+
+	if schemaHasProperty(OutputSchema(), "children") {
+		t.Fatal("schema should not expose children; release notes should stay flat")
 	}
 }
 
@@ -274,6 +281,27 @@ func schemaRequiredSet(value any) (map[string]bool, bool) {
 	}
 }
 
+func schemaHasProperty(node any, name string) bool {
+	schema, ok := node.(map[string]any)
+	if !ok {
+		return false
+	}
+	if properties, ok := schema["properties"].(map[string]any); ok {
+		if _, ok := properties[name]; ok {
+			return true
+		}
+		for _, prop := range properties {
+			if schemaHasProperty(prop, name) {
+				return true
+			}
+		}
+	}
+	if items, ok := schema["items"]; ok && schemaHasProperty(items, name) {
+		return true
+	}
+	return false
+}
+
 func TestRenderBuildsCanonicalMarkdown(t *testing.T) {
 	t.Parallel()
 
@@ -299,10 +327,6 @@ func TestRenderBuildsCanonicalMarkdown(t *testing.T) {
 						Summary: "Run FileServer middleware after rules settle",
 						Refs: []Reference{
 							{Type: "pr", Value: "230"},
-						},
-						Children: []ChildBullet{
-							{Summary: "Streaming now works correctly for POST-based SSE endpoints"},
-							{Summary: "Large streaming responses no longer buffer unnecessarily"},
 						},
 					},
 				},
@@ -332,19 +356,47 @@ func TestRenderBuildsCanonicalMarkdown(t *testing.T) {
 
 	for _, want := range []string{
 		"### Breaking Changes",
-		"- Remove path_patterns from route config (`deadbee`, #218)",
+		"- Remove path_patterns from route config (deadbee, #218)",
 		"### Bug Fixes",
 		"- **Core/Middleware**: Run FileServer middleware after rules settle (#230)",
-		"  - Streaming now works correctly for POST-based SSE endpoints",
-		"  - Large streaming responses no longer buffer unnecessarily",
 		"### Full Changelog",
-		"- [`deadbee`](https://github.com/example/godoxy/commit/deadbeefdeadbeefdeadbeefdeadbeefdeadbeef) refactor(route): remove path_patterns",
+		"- [deadbee](https://github.com/example/godoxy/commit/deadbeefdeadbeefdeadbeefdeadbeefdeadbeef) refactor(route): remove path_patterns",
 		"[**webui**](https://github.com/example/webui)",
-		"  - [`cafebab`](https://github.com/example/webui/commit/cafebabecafebabecafebabecafebabecafebabe) docs: refresh routing reference",
+		"  - [cafebab](https://github.com/example/webui/commit/cafebabecafebabecafebabecafebabecafebabe) docs: refresh routing reference",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("render missing %q:\n%s", want, rendered)
 		}
+	}
+}
+
+func TestRenderOmitsChildBullets(t *testing.T) {
+	t.Parallel()
+
+	rendered := Render(Document{
+		Sections: []Section{
+			{
+				Heading: "Bug Fixes",
+				Bullets: []Bullet{
+					{
+						Label:   "Core/Proxy",
+						Summary: "Reverse proxy routes now close idle upstream connections when canceled",
+						Refs:    []Reference{{Type: "commit", Value: "c4cec0a"}},
+						Children: []ChildBullet{
+							{Summary: "Helps avoid stale reverse-proxy idle connections lingering after route shutdown"},
+							{Summary: "Route shutdown no longer depends on idle upstream cleanup timing"},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	if strings.Contains(rendered, "  - ") {
+		t.Fatalf("rendered child bullet:\n%s", rendered)
+	}
+	if want := "- **Core/Proxy**: Reverse proxy routes now close idle upstream connections when canceled (c4cec0a)"; !strings.Contains(rendered, want) {
+		t.Fatalf("render missing %q:\n%s", want, rendered)
 	}
 }
 
@@ -424,7 +476,6 @@ func TestUserPromptContainsSchemaInstructionsAndPreparedContext(t *testing.T) {
 		`"required_submodule_groups": [`,
 		`"path": "webui"`,
 		`"label"`,
-		`"children"`,
 		`"refs"`,
 		`ref type must be one of: "commit", "pr", "issue"`,
 		"only use fallback tools if the prepared context is missing information you need",

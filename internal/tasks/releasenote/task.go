@@ -92,8 +92,7 @@ Rules:
 - every bullet must use a concise operator-facing summary in "summary"
 - put references only in "refs"; do not embed commit SHAs, PR numbers, or issue numbers into "summary"
 - each bullet must include at least one ref
-- set "children" to short subordinate outcomes, fixes, or clarifications that belong under the parent bullet; otherwise use null
-- child bullets must be plain summaries without refs
+- do not emit sub-bullets; keep each release-note item as one complete top-level bullet
 - ref type must be one of: "commit", "pr", "issue"
 - use "commit" refs for commit SHAs and "pr"/"issue" refs for numeric identifiers without the leading #
 - preserve parent/submodule ownership of references
@@ -159,21 +158,8 @@ func OutputSchema() map[string]any {
 											"additionalProperties": false,
 										},
 									},
-									"children": map[string]any{
-										"type": []string{"array", "null"},
-										"items": map[string]any{
-											"type": "object",
-											"properties": map[string]any{
-												"summary": map[string]any{
-													"type": "string",
-												},
-											},
-											"required":             []string{"summary"},
-											"additionalProperties": false,
-										},
-									},
 								},
-								"required":             []string{"label", "summary", "refs", "children"},
+								"required":             []string{"label", "summary", "refs"},
 								"additionalProperties": false,
 							},
 						},
@@ -261,9 +247,6 @@ func Render(doc Document) string {
 		out = append(out, "### "+sec.Heading, "")
 		for _, bullet := range sec.Bullets {
 			out = append(out, "- "+renderBullet(bullet))
-			for _, child := range bullet.Children {
-				out = append(out, "  - "+strings.TrimSpace(child.Summary))
-			}
 		}
 		out = append(out, "")
 	}
@@ -357,7 +340,7 @@ func renderRefs(refs []Reference) []string {
 	for _, ref := range refs {
 		switch ref.Type {
 		case "commit":
-			rendered = append(rendered, "`"+shortSHA(ref.Value)+"`")
+			rendered = append(rendered, shortSHA(ref.Value))
 		case "pr", "issue":
 			rendered = append(rendered, "#"+strings.TrimSpace(ref.Value))
 		}
@@ -368,9 +351,9 @@ func renderRefs(refs []Reference) []string {
 func renderEntry(entry ChangelogEntry) string {
 	short := shortSHA(entry.SHA)
 	if entry.URL != "" {
-		return fmt.Sprintf("[`%s`](%s) %s", short, entry.URL, entry.Summary)
+		return fmt.Sprintf("[%s](%s) %s", short, entry.URL, entry.Summary)
 	}
-	return fmt.Sprintf("`%s` %s", short, entry.Summary)
+	return fmt.Sprintf("%s %s", short, entry.Summary)
 }
 
 func shortSHA(sha string) string {
@@ -437,7 +420,7 @@ func validateChildBullets(heading string, bullet Bullet) []string {
 	if len(bullet.Children) == 0 {
 		return nil
 	}
-	var errs []string
+	errs := []string{fmt.Sprintf("section %q bullet %q has sub-bullets; fold child details into the parent summary or split them into separate top-level bullets", heading, bullet.Summary)}
 	for _, child := range bullet.Children {
 		if strings.TrimSpace(child.Summary) == "" {
 			errs = append(errs, fmt.Sprintf("section %q bullet %q has empty child summary", heading, bullet.Summary))
