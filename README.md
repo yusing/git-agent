@@ -76,6 +76,13 @@ make install PREFIX=/usr/local
 
 `make install` also honors `DESTDIR` for package-style installs.
 
+If `$(FISH_CONFIG_DIR)` exists, `make install` also installs fish completions to
+`$(FISH_COMPLETIONS_DIR)/git-agent.fish`. Defaults:
+
+- `XDG_CONFIG_HOME ?= $(HOME)/.config`
+- `FISH_CONFIG_DIR ?= $(XDG_CONFIG_HOME)/fish`
+- `FISH_COMPLETIONS_DIR ?= $(FISH_CONFIG_DIR)/completions`
+
 ## Debug sessions
 
 Every command stores a JSON trace under:

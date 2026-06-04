@@ -145,11 +145,15 @@ The repository provides a `Makefile` with:
 - `make build`: build `bin/git-agent`
 - `make test`: run `go test ./...`
 - `make install`: install the built binary to `$(DESTDIR)$(BINDIR)/git-agent`
+  and, if the fish config dir exists, install fish completions
 
 Defaults:
 
 - `PREFIX ?= ~/.local`
 - `BINDIR ?= $(PREFIX)/bin`
+- `XDG_CONFIG_HOME ?= $(HOME)/.config`
+- `FISH_CONFIG_DIR ?= $(XDG_CONFIG_HOME)/fish`
+- `FISH_COMPLETIONS_DIR ?= $(FISH_CONFIG_DIR)/completions`
 
 ## 3. Architecture
 
