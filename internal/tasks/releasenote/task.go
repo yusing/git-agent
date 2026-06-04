@@ -45,6 +45,7 @@ type ChildBullet struct {
 type Reference struct {
 	Type  string `json:"type"`
 	Value string `json:"value"`
+	URL   string `json:"url,omitempty"`
 }
 
 type ChangelogEntry struct {
@@ -205,6 +206,7 @@ func BuildDocument(raw string, prepared PreparedContext) (Document, error) {
 	}
 
 	doc.Sections = sortSections(doc.Sections, prepared.RecommendedSections)
+	enrichNarrativeCommitRefs(&doc, prepared)
 	doc.ParentChangelog = make([]ChangelogEntry, 0, len(prepared.ParentCommits))
 	for _, commit := range prepared.ParentCommits {
 		doc.ParentChangelog = append(doc.ParentChangelog, ChangelogEntry{
@@ -321,6 +323,66 @@ func sortSections(sections []Section, recommended []string) []Section {
 	return ordered
 }
 
+func enrichNarrativeCommitRefs(doc *Document, prepared PreparedContext) {
+	if doc == nil {
+		return
+	}
+	submoduleURLs := submoduleCommitURLs(prepared)
+	if len(submoduleURLs) == 0 {
+		return
+	}
+	for sectionIdx := range doc.Sections {
+		for bulletIdx := range doc.Sections[sectionIdx].Bullets {
+			for refIdx := range doc.Sections[sectionIdx].Bullets[bulletIdx].Refs {
+				ref := &doc.Sections[sectionIdx].Bullets[bulletIdx].Refs[refIdx]
+				if ref.Type != "commit" || ref.URL != "" {
+					continue
+				}
+				if url := resolveCommitURL(ref.Value, submoduleURLs); url != "" {
+					ref.URL = url
+				}
+			}
+		}
+	}
+}
+
+func submoduleCommitURLs(prepared PreparedContext) map[string]string {
+	urls := map[string]string{}
+	for _, submodule := range prepared.Submodules {
+		for _, commit := range submodule.Commits {
+			if commit.SHA == "" || commit.URL == "" {
+				continue
+			}
+			urls[strings.ToLower(commit.SHA)] = commit.URL
+		}
+	}
+	return urls
+}
+
+func resolveCommitURL(ref string, urls map[string]string) string {
+	ref = strings.ToLower(strings.TrimSpace(ref))
+	if ref == "" {
+		return ""
+	}
+	if url := urls[ref]; url != "" {
+		return url
+	}
+	if len(ref) < 7 {
+		return ""
+	}
+	matchedURL := ""
+	for sha, url := range urls {
+		if !strings.HasPrefix(sha, ref) {
+			continue
+		}
+		if matchedURL != "" && matchedURL != url {
+			return ""
+		}
+		matchedURL = url
+	}
+	return matchedURL
+}
+
 func renderBullet(bullet Bullet) string {
 	var b strings.Builder
 	if label := strings.TrimSpace(bullet.Label); label != "" {
@@ -340,6 +402,10 @@ func renderRefs(refs []Reference) []string {
 	for _, ref := range refs {
 		switch ref.Type {
 		case "commit":
+			if ref.URL != "" {
+				rendered = append(rendered, ref.URL)
+				continue
+			}
 			rendered = append(rendered, shortSHA(ref.Value))
 		case "pr", "issue":
 			rendered = append(rendered, "#"+strings.TrimSpace(ref.Value))

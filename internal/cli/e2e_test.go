@@ -338,7 +338,7 @@ func TestReleaseNoteEndToEndWithRealisticFixture(t *testing.T) {
 			"### Bug Fixes",
 			"- **Core/Middleware**: FileServer routes now apply middleware after routing rules settle, preserving operator-visible handler behavior for static file routes (" + fixture.parentFixSHA[:7] + ")",
 			"### Improvements",
-			"- Web UI docs and screenshots now align better with current operator flows (" + fixture.webuiReleaseSHA[:7] + ")",
+			"- Web UI docs and screenshots now align better with current operator flows (https://github.com/example/webui/commit/" + fixture.webuiReleaseSHA + ")",
 			"### Full Changelog",
 			"[**webui**](https://github.com/example/webui)",
 			"[**goutils**](https://github.com/example/goutils)",

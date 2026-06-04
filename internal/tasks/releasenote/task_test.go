@@ -196,6 +196,64 @@ func TestBuildDocumentSortsSectionsAndAttachesChangelog(t *testing.T) {
 	if len(doc.Submodules) != 1 || doc.Submodules[0].Path != "webui" {
 		t.Fatalf("submodules = %#v", doc.Submodules)
 	}
+	if got := doc.Sections[1].Bullets[0].Refs[0].URL; got != "https://github.com/example/webui/commit/cafebabecafebabecafebabecafebabecafebabe" {
+		t.Fatalf("submodule narrative ref URL = %q", got)
+	}
+}
+
+func TestBuildDocumentRendersSubmoduleNarrativeRefsAsCommitURLs(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+  "sections": [
+    {
+      "heading": "New Features",
+      "bullets": [
+        {
+          "label": "Routing/Rules",
+          "summary": "Route rule handling adds do-command option blocks with ordered help, and the WebUI gains matching typing support for option-block and pass/bypass variants",
+          "refs": [
+            {"type":"commit","value":"344a6db"},
+            {"type":"commit","value":"d58bdde"}
+          ]
+        }
+      ]
+    }
+  ]
+}`
+
+	doc, err := BuildDocument(raw, PreparedContext{
+		ParentCommits: []PreparedCommit{
+			{
+				SHA:     "344a6db344a6db344a6db344a6db344a6db344a",
+				Summary: "feat(route): add do-command option blocks",
+				URL:     "https://github.com/yusing/godoxy/commit/344a6db344a6db344a6db344a6db344a6db344a",
+			},
+		},
+		Submodules: []PreparedSubmodule{
+			{
+				Path:                  "webui",
+				GroupHeading:          "[**webui**](https://github.com/yusing/godoxy-webui)",
+				LocalHistoryAvailable: true,
+				Commits: []PreparedCommit{
+					{
+						SHA:     "d58bdde52a992f323e865d5002a3f6dac043068b",
+						Summary: "feat(webui): add RuleDo option-block typing and pass/bypass variants",
+						URL:     "https://github.com/yusing/godoxy-webui/commit/d58bdde52a992f323e865d5002a3f6dac043068b",
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rendered := Render(doc)
+	want := "- **Routing/Rules**: Route rule handling adds do-command option blocks with ordered help, and the WebUI gains matching typing support for option-block and pass/bypass variants (344a6db, https://github.com/yusing/godoxy-webui/commit/d58bdde52a992f323e865d5002a3f6dac043068b)"
+	if !strings.Contains(rendered, want) {
+		t.Fatalf("render missing %q:\n%s", want, rendered)
+	}
 }
 
 func validateStrictSchemaRequired(node any, path string) []string {
