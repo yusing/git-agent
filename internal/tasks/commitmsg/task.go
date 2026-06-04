@@ -3,6 +3,7 @@ package commitmsg
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -46,6 +47,7 @@ type PreparedCommitContext struct {
 	StagedPaths               []string            `json:"staged_paths"`
 	StagedStatus              []gitctx.PathChange `json:"staged_status"`
 	StagedStats               []gitctx.FileStat   `json:"staged_stats"`
+	StagedSubmodules          []PreparedSubmodule `json:"staged_submodules,omitempty"`
 	RecentCommits             []gitctx.CommitInfo `json:"recent_commits"`
 	PreviousHeadPaths         []string            `json:"previous_head_paths,omitempty"`
 	PreviousHeadStats         []gitctx.FileStat   `json:"previous_head_stats,omitempty"`
@@ -53,6 +55,15 @@ type PreparedCommitContext struct {
 	PreviousHeadDiffTruncated bool                `json:"previous_head_diff_truncated,omitempty"`
 	Diff                      string              `json:"diff"`
 	DiffTruncated             bool                `json:"diff_truncated"`
+}
+
+type PreparedSubmodule struct {
+	Path                  string              `json:"path"`
+	OldSHA                string              `json:"old_sha,omitempty"`
+	NewSHA                string              `json:"new_sha,omitempty"`
+	LocalHistoryAvailable bool                `json:"local_history_available"`
+	AvailabilityError     string              `json:"availability_error,omitempty"`
+	Commits               []gitctx.CommitInfo `json:"commits,omitempty"`
 }
 
 func SystemPrompt(mode Mode) string {
@@ -68,6 +79,7 @@ Describe only supported changes. Do not invent motivations unsupported by the di
 Infer accurate type, scope, and impact from the evidence.
 Body optional. When present, keep it concise, naturally wrapped, and within three short paragraphs.
 When useful, the body may include compact nested detail blocks for submodule updates or grouped follow-up facts, but only when the diff clearly supports them.
+When submodule commit summaries are provided, describe their actual changes instead of only saying the submodule ref moved.
 `
 	if mode == ModeAmend {
 		return textutil.NormalizePrompt(common + `
@@ -180,6 +192,10 @@ func PrepareCommitContext(repo *gitctx.Repository) (PreparedCommitContext, error
 	if err != nil {
 		return PreparedCommitContext{}, err
 	}
+	stagedSubmodules, err := prepareStagedSubmodules(repo)
+	if err != nil {
+		return PreparedCommitContext{}, err
+	}
 	recentCommits, _ := repo.RecentCommits(10)
 	previousHeadPaths, _ := repo.DiffAgainstParentPaths()
 	previousHeadStats, _ := repo.DiffAgainstParentStat()
@@ -194,6 +210,7 @@ func PrepareCommitContext(repo *gitctx.Repository) (PreparedCommitContext, error
 		StagedPaths:               stagedPaths,
 		StagedStatus:              stagedStatus,
 		StagedStats:               stagedStats,
+		StagedSubmodules:          stagedSubmodules,
 		RecentCommits:             recentCommits,
 		PreviousHeadPaths:         previousHeadPaths,
 		PreviousHeadStats:         previousHeadStats,
@@ -226,6 +243,7 @@ Rules:
 - previous_head_paths, previous_head_stats, and previous_head_diff are contrast only; use them to understand what was already done in HEAD, then describe only the new staged delta
 - if previous_head_diff_truncated is true, rely on previous_head_paths/stats for contrast shape instead of assuming omitted hunks
 - cover every distinct staged-diff change cluster; account for small outlier files when they carry behavior changes
+- if staged_submodules contains commits, use those submodule commit summaries as staged evidence; do not collapse them to a generic "newer submodule refs" message
 - do not copy phrasing from recent commits or previous_head_diff as if it were current staged work
 - if diff_truncated is true, stay conservative and describe only visible evidence
 Return only the commit message.
@@ -234,6 +252,41 @@ Return only the commit message.
 %s
 </prepared_commit_context>
 `, maxSteps, maxToolCalls, prepared.Render()))
+}
+
+func prepareStagedSubmodules(repo *gitctx.Repository) ([]PreparedSubmodule, error) {
+	changes, err := repo.StagedSubmoduleChanges()
+	if err != nil {
+		return nil, err
+	}
+	submodules := make([]PreparedSubmodule, 0, len(changes))
+	for _, change := range changes {
+		submodule := PreparedSubmodule{
+			Path:   change.Path,
+			OldSHA: change.Old,
+			NewSHA: change.New,
+		}
+		if change.Old == "" || change.New == "" {
+			submodules = append(submodules, submodule)
+			continue
+		}
+		subRepo, err := gitctx.Open(filepath.Join(repo.RootPath, change.Path))
+		if err != nil {
+			submodule.AvailabilityError = err.Error()
+			submodules = append(submodules, submodule)
+			continue
+		}
+		commits, err := subRepo.LogFrom(change.Old, change.New, 50)
+		if err != nil {
+			submodule.AvailabilityError = err.Error()
+			submodules = append(submodules, submodule)
+			continue
+		}
+		submodule.LocalHistoryAvailable = true
+		submodule.Commits = commits
+		submodules = append(submodules, submodule)
+	}
+	return submodules, nil
 }
 
 func PreparePRContext(repo *gitctx.Repository) (PreparedPRContext, error) {

@@ -1,6 +1,9 @@
 package commitmsg
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -73,6 +76,66 @@ func TestPreparedCommitPromptUsesStagedDiffAsAuthoritativeScope(t *testing.T) {
 	}
 	if !strings.Contains(got, `"diff_truncated": false`) {
 		t.Fatalf("prepared commit prompt missing truncation signal:\n%s", got)
+	}
+}
+
+func TestPrepareCommitContextIncludesStagedSubmoduleCommits(t *testing.T) {
+	t.Parallel()
+
+	subDir := filepath.Join(t.TempDir(), "webui")
+	initGitRepo(t, subDir)
+	writeFile(t, filepath.Join(subDir, "ui.txt"), "v1\n")
+	runGit(t, subDir, "add", "ui.txt")
+	runGit(t, subDir, "commit", "-m", "feat(webui): initial")
+	baseSHA := gitHead(t, subDir)
+	writeFile(t, filepath.Join(subDir, "ui.txt"), "v2\n")
+	runGit(t, subDir, "add", "ui.txt")
+	runGit(t, subDir, "commit", "-m", "fix(webui): repair login redirect")
+	writeFile(t, filepath.Join(subDir, "profile.txt"), "menu\n")
+	runGit(t, subDir, "add", "profile.txt")
+	runGit(t, subDir, "commit", "-m", "feat(webui): add profile menu")
+	releaseSHA := gitHead(t, subDir)
+
+	repoDir := filepath.Join(t.TempDir(), "parent")
+	initGitRepo(t, repoDir)
+	runGit(t, repoDir, "-c", "protocol.file.allow=always", "submodule", "add", subDir, "webui")
+	runGit(t, filepath.Join(repoDir, "webui"), "checkout", baseSHA)
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-m", "feat: add webui submodule")
+
+	runGit(t, filepath.Join(repoDir, "webui"), "checkout", releaseSHA)
+	runGit(t, repoDir, "add", "webui")
+
+	repo, err := gitctx.Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareCommitContext(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prepared.StagedSubmodules) != 1 {
+		t.Fatalf("staged submodules = %#v", prepared.StagedSubmodules)
+	}
+	submodule := prepared.StagedSubmodules[0]
+	if submodule.Path != "webui" || submodule.OldSHA != baseSHA || submodule.NewSHA != releaseSHA {
+		t.Fatalf("submodule = %#v", submodule)
+	}
+	if !submodule.LocalHistoryAvailable {
+		t.Fatalf("expected local history, got %#v", submodule)
+	}
+	if !commitSummariesContain(submodule.Commits, "fix(webui): repair login redirect", "feat(webui): add profile menu") {
+		t.Fatalf("submodule commits = %#v", submodule.Commits)
+	}
+
+	prompt := UserPromptWithPreparedCommitContext(prepared, 30, 24)
+	if !containsAll(prompt,
+		"staged_submodules",
+		"fix(webui): repair login redirect",
+		"feat(webui): add profile menu",
+		"do not collapse them to a generic \"newer submodule refs\" message",
+	) {
+		t.Fatalf("prompt missing staged submodule evidence:\n%s", prompt)
 	}
 }
 
@@ -238,4 +301,58 @@ func containsAll(text string, needles ...string) bool {
 		}
 	}
 	return true
+}
+
+func commitSummariesContain(commits []gitctx.CommitInfo, summaries ...string) bool {
+	seen := map[string]bool{}
+	for _, commit := range commits {
+		seen[commit.Summary] = true
+	}
+	for _, summary := range summaries {
+		if !seen[summary] {
+			return false
+		}
+	}
+	return true
+}
+
+func initGitRepo(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.name", "Test User")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+}
+
+func gitHead(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD failed: %v\n%s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }

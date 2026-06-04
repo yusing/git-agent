@@ -163,6 +163,18 @@ func (r *Repository) StagedStat() ([]FileStat, error) {
 	return fileStatsFromPatch(patch), nil
 }
 
+func (r *Repository) StagedSubmoduleChanges() ([]SubmoduleChange, error) {
+	headTree, err := r.headTree()
+	if err != nil {
+		return nil, err
+	}
+	indexTree, err := r.indexTree()
+	if err != nil {
+		return nil, err
+	}
+	return submoduleChangesBetweenTrees(headTree, indexTree)
+}
+
 func (r *Repository) RecentCommits(limit int) ([]CommitInfo, error) {
 	return r.LogFrom("", "", limit)
 }
@@ -394,6 +406,10 @@ func (r *Repository) SubmoduleGitlinkRange(base, release string) ([]SubmoduleCha
 	if err != nil {
 		return nil, err
 	}
+	return submoduleChangesBetweenTrees(baseTree, releaseTree)
+}
+
+func submoduleChangesBetweenTrees(baseTree, releaseTree *object.Tree) ([]SubmoduleChange, error) {
 	baseSubs, err := collectSubmoduleEntries(baseTree, "")
 	if err != nil {
 		return nil, err

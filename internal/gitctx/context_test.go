@@ -430,6 +430,51 @@ func TestSubmoduleGitlinkRangeDetectsMovedSubmodulePointers(t *testing.T) {
 	}
 }
 
+func TestStagedSubmoduleChangesDetectsMovedIndexPointers(t *testing.T) {
+	t.Parallel()
+
+	subDir := filepath.Join(t.TempDir(), "webui")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, subDir, "init")
+	runGit(t, subDir, "config", "user.name", "Test User")
+	runGit(t, subDir, "config", "user.email", "test@example.com")
+	writeFile(t, filepath.Join(subDir, "ui.txt"), "v1\n")
+	runGit(t, subDir, "add", "ui.txt")
+	runGit(t, subDir, "commit", "-m", "feat(webui): initial")
+	baseSHA := gitHead(t, subDir)
+	writeFile(t, filepath.Join(subDir, "ui.txt"), "v2\n")
+	runGit(t, subDir, "add", "ui.txt")
+	runGit(t, subDir, "commit", "-m", "fix(webui): refresh login")
+	releaseSHA := gitHead(t, subDir)
+
+	repoDir := initTempRepo(t)
+	runGit(t, repoDir, "-c", "protocol.file.allow=always", "submodule", "add", subDir, "webui")
+	runGit(t, filepath.Join(repoDir, "webui"), "checkout", baseSHA)
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-m", "feat: add webui submodule")
+
+	runGit(t, filepath.Join(repoDir, "webui"), "checkout", releaseSHA)
+	runGit(t, repoDir, "add", "webui")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, err := repo.StagedSubmoduleChanges()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("changes = %#v", changes)
+	}
+	change := changes[0]
+	if change.Path != "webui" || change.Old != baseSHA || change.New != releaseSHA {
+		t.Fatalf("change = %#v", change)
+	}
+}
+
 func initTempRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
