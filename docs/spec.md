@@ -4,8 +4,8 @@
 
 ### Purpose
 
-`git-agent` replaces shell-heavy Fish `gen_*` wrappers with a standalone Go
-binary that:
+`git-agent` is a standalone Go binary for Git-related generation workflows.
+It:
 
 - gathers Git and repository context without shelling out to ad hoc scripts
 - uses the official OpenAI Go SDK against an OpenAI-compatible Responses API
@@ -16,7 +16,7 @@ binary that:
 - can optionally create the Git commit after generating a message
 - preserves project guidance behavior close to Codex for AGENTS-family files
 
-Primary initial workflows:
+Supported workflows:
 
 - `git-agent commit-msg`
 - `git-agent commit-msg --amend`
@@ -27,7 +27,7 @@ Primary initial workflows:
 
 ### Non-goals
 
-v1 must not:
+`git-agent` must not:
 
 - execute arbitrary shell commands on behalf of the model
 - merge AGENTS-family and CLAUDE-family guidance into the same prompt
@@ -554,17 +554,15 @@ Default family selection:
 
 ### Family membership
 
-Initial AGENTS-family candidates:
+AGENTS-family candidates:
 
 - `AGENTS.override.md`
 - `AGENTS.md`
 
-Initial CLAUDE-family candidates:
+CLAUDE-family candidates:
 
 - `CLAUDE.md`
 
-Future fallback filenames may be added per family, but each family keeps its own
-precedence chain.
 
 ### Scope discovery
 
@@ -628,8 +626,7 @@ Task defaults:
   for `--amend`; if no task paths are available, current repository root
 - `pr-message`: changed paths between `origin/HEAD` and `HEAD`; if no changed
   paths are available, current repository root
-- `release-note`: current repository root unless a future `--path` override is
-  added
+- `release-note`: current repository root
 
 For `commit-msg`, guidance is resolved across all task paths. Normal mode uses
 staged paths; amend mode uses the final amended paths so guidance can cover the
@@ -870,81 +867,7 @@ If validation fails:
 3. revalidate
 4. return an error if still invalid
 
-## 7. Implementation phases
-
-### Phase 1: skeleton and spec
-
-- create module and directory structure
-- define CLI surface
-- document package boundaries
-- author this spec
-
-### Phase 2: config and CLI materialization
-
-- parse env and flags into `config.Config`
-- add shared error shaping
-- add debug plumbing
-- add Makefile build/test/install targets
-
-### Phase 3: Git context layer
-
-- open repository/worktree
-- collect branch/head metadata
-- implement staged and range inspection helpers
-- add submodule traversal helpers
-- use `github.com/go-git/go-git/v6`
-
-### Phase 4: guidance resolver
-
-- implement family selection
-- implement scoped discovery
-- implement Codex-style rendering
-- add provenance-aware tests
-
-### Phase 5: OpenAI-compatible client
-
-- build Responses API request/response layer on top of the official OpenAI Go
-  SDK
-- support tool calls
-- support function-call-output continuation items
-- expose request trace marshaling with secrets redacted
-- add timeout boundaries
-
-### Phase 6: tool loop
-
-- register typed tools
-- run bounded dispatch loop
-- append tool results back into the conversation
-- emit strict tool schemas
-- return stable JSON envelopes
-- record tool calls and outputs in session traces
-
-### Phase 7: task validators and prompts
-
-- implement commit message prompts and validation
-- implement release note prompts and validation
-- add one-pass repair flow
-- inject tool policy and environment context
-
-### Phase 8: debuggability
-
-- create `.git-agent/sessions/<timestamp>-<command>/` per command
-- write session metadata
-- write every provider request and response
-- write every tool call and tool output
-- redact API keys in traces
-- print trace directory under `--debug`
-
-### Phase 9: Fish migration
-
-Outside this repo, update Fish wrappers to:
-
-- point default `gen-*` commands to `git-agent`
-- rename old defaults to `*-claude`
-- remove `*-codex`
-- keep temporary `*-agent` compatibility shims if desired
-
-## 8. Testing strategy
+## 7. Testing strategy
 
 ### Unit tests
 
@@ -992,7 +915,7 @@ Use temporary repositories to test:
 - release-note tag/range handling
 - submodule gitlink movement and missing checkout cases
 
-## 9. Risks and open constraints
+## 8. Risks and open constraints
 
 ### go-git fidelity risk
 
@@ -1020,7 +943,7 @@ Mitigation:
 
 ### Release-note formatting regressions
 
-Current Fish prompts encode many hard-earned formatting constraints.
+Release-note output has strict deployer-facing formatting constraints.
 
 Mitigation:
 
@@ -1054,21 +977,9 @@ Mitigation:
 - document that commit-command stdout may contain repository context and should
   be handled like trace data
 
-## 10. Immediate acceptance criteria for the skeleton
+## 9. Current acceptance criteria
 
-The skeleton phase is complete when:
-
-- repository exists at `~/projects/git-agent`
-- module path is `github.com/yusing/git-agent`
-- `go test ./...` passes
-- CLI entrypoint builds
-- internal package boundaries exist
-- `docs/spec.md` captures all locked architecture and migration decisions
-
-## 11. Current implementation acceptance criteria
-
-The current in-repository implementation, excluding Phase 9 Fish migration, is
-complete when:
+The in-repository implementation is complete when:
 
 - `make build` succeeds and writes `bin/git-agent`
 - `make test` / `go test ./...` pass
@@ -1091,6 +1002,3 @@ complete when:
 - generation-only commands write a `.git-agent/sessions/<timestamp>-<command>/`
   trace
 - generation-only stdout contains only the final generated artifact
-
-The full end-to-end migration goal is complete only after Phase 9 is performed
-outside this repository and verified against the Fish wrapper environment.
