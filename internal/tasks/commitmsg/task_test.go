@@ -106,6 +106,125 @@ func TestPreparedCommitPromptUsesStagedDiffAsAuthoritativeScope(t *testing.T) {
 	}
 }
 
+func TestPreparedAmendPromptIncludesHeadContextBeforeToolCalls(t *testing.T) {
+	t.Parallel()
+
+	prepared := PreparedAmendContext{
+		Mode: ModeAmend,
+		OriginalHeadMessage: `fix(agent): persist verified providers
+
+Store verified providers in config after successful verification.`,
+		Head: gitctx.CommitInfo{Summary: "fix(agent): persist verified providers"},
+		FinalPaths: []string{
+			"docs/verify.md",
+			"internal/agent/verify.go",
+		},
+		FinalStats: []gitctx.FileStat{
+			{Path: "internal/agent/verify.go", Adds: 8, Deletes: 1},
+			{Path: "docs/verify.md", Adds: 2, Deletes: 1},
+		},
+		FinalDiff:   "diff --git a/internal/agent/verify.go b/internal/agent/verify.go\n+type VerifyResponse struct {\n+\tProviders []string\n+}\ndiff --git a/docs/verify.md b/docs/verify.md\n+Verification now returns providers.",
+		HeadPaths:   []string{"internal/agent/verify.go"},
+		HeadStats:   []gitctx.FileStat{{Path: "internal/agent/verify.go", Adds: 8, Deletes: 1}},
+		HeadDiff:    "diff --git a/internal/agent/verify.go b/internal/agent/verify.go\n+type VerifyResponse struct {\n+\tProviders []string\n+}",
+		StagedPaths: []string{"docs/verify.md"},
+		StagedStats: []gitctx.FileStat{{Path: "docs/verify.md", Adds: 2, Deletes: 1}},
+		AmendDelta:  "diff --git a/docs/verify.md b/docs/verify.md\n+Verification now returns providers.",
+	}
+
+	got := UserPromptWithPreparedAmendContext(prepared, 30, 24)
+	if !containsAll(got,
+		"prepared_amend_context is authoritative initial evidence",
+		"latest HEAD commit being amended",
+		"original_head_message is the default answer and anchor",
+		"final_paths, final_stats, final_context_pack, and final_diff describe the final amended commit",
+		"head, head_paths, head_stats, head_context_pack, and head_diff describe the current HEAD/latest commit being amended",
+		"staged_paths, staged_status, staged_stats, staged_context_pack, staged_submodules, and amend_delta are diagnostics only",
+		"never base the subject or narrative on staged changes alone",
+		"fix(agent): persist verified providers",
+		"internal/agent/verify.go",
+		"docs/verify.md",
+		"Providers []string",
+	) {
+		t.Fatalf("prepared amend prompt missing HEAD/final context framing:\n%s", got)
+	}
+}
+
+func TestPrepareAmendContextIncludesHeadAndFinalDiff(t *testing.T) {
+	t.Parallel()
+
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	initGitRepo(t, repoDir)
+	writeFile(t, filepath.Join(repoDir, "internal", "agent", "verify.go"), strings.Join([]string{
+		"package agent",
+		"",
+		"type VerifyResponse struct {",
+		"\tSuccess bool",
+		"}",
+		"",
+		"func VerifyProvider(host string) VerifyResponse {",
+		"\treturn VerifyResponse{Success: host != \"\"}",
+		"}",
+	}, "\n"))
+	writeFile(t, filepath.Join(repoDir, "docs", "verify.md"), "Verification returns success.\n")
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-m", "feat(agent): verify provider config")
+
+	writeFile(t, filepath.Join(repoDir, "internal", "agent", "verify.go"), strings.Join([]string{
+		"package agent",
+		"",
+		"type VerifyResponse struct {",
+		"\tSuccess   bool",
+		"\tProviders []string",
+		"}",
+		"",
+		"func VerifyProvider(host string) VerifyResponse {",
+		"\tif host == \"\" {",
+		"\t\treturn VerifyResponse{Success: false}",
+		"\t}",
+		"\treturn VerifyResponse{Success: true, Providers: []string{host}}",
+		"}",
+	}, "\n"))
+	runGit(t, repoDir, "add", "internal/agent/verify.go")
+	runGit(t, repoDir, "commit", "-m", "fix(agent): persist verified providers")
+
+	writeFile(t, filepath.Join(repoDir, "docs", "verify.md"), "Verification returns the current provider list.\n")
+	runGit(t, repoDir, "add", "docs/verify.md")
+
+	repo, err := gitctx.Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareAmendContext(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.OriginalHeadMessage != "fix(agent): persist verified providers" {
+		t.Fatalf("original head message = %q", prepared.OriginalHeadMessage)
+	}
+	if prepared.Head.Summary != "fix(agent): persist verified providers" {
+		t.Fatalf("head summary = %#v", prepared.Head)
+	}
+	if !containsAll(strings.Join(prepared.HeadPaths, "\n"), "internal/agent/verify.go") {
+		t.Fatalf("head paths = %#v", prepared.HeadPaths)
+	}
+	if !containsAll(prepared.HeadDiff, "Providers []string", "VerifyProvider") {
+		t.Fatalf("head diff missing HEAD context:\n%s", prepared.HeadDiff)
+	}
+	if !containsAll(strings.Join(prepared.StagedPaths, "\n"), "docs/verify.md") {
+		t.Fatalf("staged paths = %#v", prepared.StagedPaths)
+	}
+	if !containsAll(prepared.AmendDelta, "docs/verify.md", "+Verification returns the current provider list.") {
+		t.Fatalf("amend delta missing staged diagnostic:\n%s", prepared.AmendDelta)
+	}
+	if !containsAll(strings.Join(prepared.FinalPaths, "\n"), "docs/verify.md", "internal/agent/verify.go") {
+		t.Fatalf("final paths = %#v", prepared.FinalPaths)
+	}
+	if !containsAll(prepared.FinalDiff, "Providers []string", "+Verification returns the current provider list.") {
+		t.Fatalf("final diff missing HEAD plus staged evidence:\n%s", prepared.FinalDiff)
+	}
+}
+
 func TestPreparedCommitPromptUsesContextPackForLargeGeneratedDiffs(t *testing.T) {
 	t.Parallel()
 

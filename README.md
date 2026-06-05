@@ -115,4 +115,8 @@ including the final event for the generated message. The final error includes
 the generated message and Git error so the user can commit manually.
 In amend mode, the current HEAD commit message is treated as the message anchor:
 small staged cleanups or refinements must preserve the original subject instead
-of replacing the commit with a narrow delta description.
+of replacing the commit with a narrow delta description. The amend request is
+seeded with prepared context for the latest commit being amended, including its
+HEAD-vs-parent diff, the final amended diff versus the parent, staged
+diagnostics, and recent style commits before the model can ask for narrower
+read-only follow-up tools.

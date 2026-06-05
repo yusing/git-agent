@@ -231,6 +231,14 @@ func (r *Repository) RecentCommits(limit int) ([]CommitInfo, error) {
 	return r.LogFrom("", "", limit)
 }
 
+func (r *Repository) HeadInfo() (CommitInfo, error) {
+	head, err := r.headCommit()
+	if err != nil {
+		return CommitInfo{}, err
+	}
+	return commitInfo(head), nil
+}
+
 func (r *Repository) HeadShow(maxBytes, maxLines int) (string, bool, error) {
 	head, err := r.headCommit()
 	if err != nil {
@@ -295,20 +303,28 @@ func (r *Repository) AmendDelta(maxBytes, maxLines int) (string, bool, error) {
 }
 
 func (r *Repository) FinalAmendedDiff(maxBytes, maxLines int) (string, bool, error) {
-	head, err := r.headCommit()
-	if err != nil {
-		return "", false, err
-	}
-	parentTree, finalTree, err := r.finalAmendedTrees(head)
-	if err != nil {
-		return "", false, err
-	}
-	patch, err := patchBetweenTrees(parentTree, finalTree)
+	patch, err := r.patchFinalAmended()
 	if err != nil {
 		return "", false, err
 	}
 	limited, truncated := textutil.Limit(patch.String(), maxBytes, maxLines)
 	return limited, truncated, nil
+}
+
+func (r *Repository) FinalAmendedPaths() ([]string, error) {
+	patch, err := r.patchFinalAmended()
+	if err != nil {
+		return nil, err
+	}
+	return filePathsFromPatch(patch), nil
+}
+
+func (r *Repository) FinalAmendedStat() ([]FileStat, error) {
+	patch, err := r.patchFinalAmended()
+	if err != nil {
+		return nil, err
+	}
+	return fileStatsFromPatch(patch), nil
 }
 
 func (r *Repository) ShowFileAtRev(rev, path string, maxBytes, maxLines int) (string, bool, error) {
@@ -681,6 +697,18 @@ func (r *Repository) patchHeadAgainstParent() (*object.Patch, error) {
 		return nil, err
 	}
 	return parent.Patch(head)
+}
+
+func (r *Repository) patchFinalAmended() (*object.Patch, error) {
+	head, err := r.headCommit()
+	if err != nil {
+		return nil, err
+	}
+	parentTree, finalTree, err := r.finalAmendedTrees(head)
+	if err != nil {
+		return nil, err
+	}
+	return patchBetweenTrees(parentTree, finalTree)
 }
 
 func (r *Repository) patchAgainstRef(baseRef string) (*object.Patch, error) {

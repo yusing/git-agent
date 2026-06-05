@@ -57,7 +57,11 @@ Generate a commit message for the final post-amend commit result, not a delta
 note about the newly staged changes. The current HEAD commit message is the
 anchor for subject, scope, task IDs, and high-level intent; staged cleanups or
 refinements must not replace a broad original message with a narrow delta
-message.
+message. The command precomputes amend context before generation: original HEAD
+message, latest HEAD commit metadata, HEAD-vs-parent paths/stats/diff, staged
+diagnostics, recent style commits, and the bounded final amended diff versus
+HEAD's first parent. This gives the model enough latest-commit context before
+any optional follow-up tool calls.
 
 #### `git-agent commit`
 
@@ -86,7 +90,9 @@ success stdout contract matches `git-agent commit`: human console trace lines
 followed by Git's raw commit summary.
 Amend mode preserves the original HEAD author and uses the current configured
 committer. The original HEAD subject is validated as the amend message anchor so
-model output cannot silently replace it with a staged-delta-only subject.
+model output cannot silently replace it with a staged-delta-only subject. The
+message-generation request is seeded with the same prepared amend context as
+`commit-msg --amend`.
 
 #### `git-agent pr-message`
 
@@ -267,15 +273,17 @@ including:
 ### Agent loop lifecycle
 
 1. resolve config and repo context
-2. for `commit` / `commit --amend`, collect staged paths
+2. for commit-message tasks, collect staged paths
 3. create a JSON trace session, or a stdout-streaming human console trace for
    `commit` / `commit --amend`
-4. resolve project guidance for the task target path or staged paths
-5. build task-specific instructions, developer context, and initial user prompt
-6. for `release-note`, precompute the requested range context in Go before the
-   first provider call, including resolved refs, parent commits, submodule
-   gitlink changes, submodule history when locally available, and repository
-   ownership/link hints
+4. precompute task context before the first provider call: staged context for
+   normal commit messages, amend context for `--amend`, PR context for
+   `pr-message`, or release-note context for `release-note` including resolved
+   refs, parent commits, submodule gitlink changes, submodule history when
+   locally available, and repository ownership/link hints
+5. resolve project guidance for the task target paths, after context prep when
+   prepared paths define the target scope
+6. build task-specific instructions, developer context, and initial user prompt
 7. send request to the Responses API through the official OpenAI Go SDK
 8. record each request and response in the active trace
 9. if the model requests tools, execute only registered read-only tools
@@ -335,16 +343,18 @@ flowchart TD
     Resolve --> Timeout[Create task timeout context]
     Timeout --> OpenRepo[Open repository]
     OpenRepo --> StagedPaths[Collect staged paths]
-    StagedPaths --> Guidance[Resolve project guidance for staged paths]
+    StagedPaths --> Prepare[Precompute amend context]
+    Prepare --> Evidence[Collect original HEAD message, HEAD diff, final amended diff, staged diagnostics]
+    Evidence --> Guidance[Resolve project guidance for final amended paths]
     Guidance --> Trace[Create .git-agent session trace with amend mode]
     Trace --> Registry[Register read-only commit-message tools]
     Registry --> Runner[Build OpenAI runner with amend validator and tool specs]
-    Runner --> Request[Assemble amend request layers]
+    Runner --> Request[Assemble amend request layers with prepared amend context]
     Request --> Model[Call Responses API]
     Model --> ToolDecision{Tool calls?}
     ToolDecision -- yes --> ToolBudget{Within tool budget?}
     ToolBudget -- yes --> ExecuteTools[Execute allowed read-only tools]
-    ExecuteTools --> FinalDiff[Model uses git_final_amended_diff as authoritative evidence]
+    ExecuteTools --> FinalDiff[Model uses prepared final diff or narrower git_final_amended_diff as authoritative evidence]
     FinalDiff --> RecordTools[Trace tool call and output]
     RecordTools --> Continue[Append function call and output items]
     Continue --> Model
@@ -373,7 +383,8 @@ flowchart TD
     OpenRepo --> StagedPaths[Collect staged paths]
     StagedPaths --> Mode{Amend?}
     Mode -- no --> Prepare[Precompute staged commit context]
-    Mode -- yes --> Guidance[Resolve project guidance for staged paths]
+    Mode -- yes --> PrepareAmend[Precompute amend context]
+    PrepareAmend --> Guidance[Resolve project guidance for final amended paths]
     Prepare --> Guidance
     Guidance --> Trace[Create stdout-streaming console trace]
     Trace --> Registry[Register read-only commit-message tools]
@@ -613,17 +624,19 @@ cwd.
 
 Task defaults:
 
-- `commit-msg`: staged paths when present; if no staged paths are available,
-  current repository root
+- `commit-msg`: staged paths when present in normal mode; final amended paths
+  for `--amend`; if no task paths are available, current repository root
 - `pr-message`: changed paths between `origin/HEAD` and `HEAD`; if no changed
   paths are available, current repository root
 - `release-note`: current repository root unless a future `--path` override is
   added
 
-For `commit-msg`, guidance is resolved across all staged paths. Family
-selection remains global for the task: if any staged path has AGENTS-family
-guidance, AGENTS-family is selected and CLAUDE-family files are ignored for the
-whole request. Sources are de-duplicated while preserving root-to-leaf order.
+For `commit-msg`, guidance is resolved across all task paths. Normal mode uses
+staged paths; amend mode uses the final amended paths so guidance can cover the
+latest HEAD commit being amended as well as staged refinements. Family selection
+remains global for the task: if any task path has AGENTS-family guidance,
+AGENTS-family is selected and CLAUDE-family files are ignored for the whole
+request. Sources are de-duplicated while preserving root-to-leaf order.
 `pr-message` uses the same family-selection behavior, but its target paths come
 from the current-branch diff against `origin/HEAD`.
 
@@ -755,13 +768,25 @@ Behavior:
 
 - describe the final amended commit as one commit versus its parent
 - never narrate the amended result as “previous commit plus extra changes”
+- precompute prepared amend context before generation, including original HEAD
+  message, latest HEAD commit metadata, HEAD-vs-parent paths/stats/diff,
+  staged paths/status/stats/diff diagnostics, submodule diagnostics when
+  present, recent style commits, and final amended paths/stats/diff versus
+  HEAD's first parent
+- expose the latest HEAD commit context in the initial request so the model
+  does not have to infer the commit being amended from an empty prompt or from
+  staged-delta tools alone
 - treat `git_final_amended_diff` as authoritative; it overlays staged changes
   on current HEAD and compares the final amended result against the first parent
+- treat prepared final amended diff fields as authoritative initial evidence;
+  use `git_final_amended_diff` only for narrower follow-up when the prepared
+  diff is truncated or ambiguous
 - treat the current HEAD message as the output anchor; preserve its subject and
   high-level story, revising body details only when the final amended diff
   proves them false
 - use current HEAD, HEAD-vs-parent, and staged-vs-HEAD views only as diagnostic
   inputs
+- never base the subject or narrative on staged paths or staged delta alone
 
 Output rules:
 
@@ -1059,7 +1084,8 @@ complete when:
   exposing model tools
 - `git-agent release-note <base> <release>` resolves refs before generation
 - guidance rendering uses repository-relative `<PROJECT_DOC path="...">` tags
-- commit-message guidance resolves against staged paths
+- normal commit-message guidance resolves against staged paths, while amend
+  guidance resolves against the final amended paths
 - tools are read-only and exposed as strict function tools
 - tool outputs use the stable JSON envelope
 - generation-only commands write a `.git-agent/sessions/<timestamp>-<command>/`

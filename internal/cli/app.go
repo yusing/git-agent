@@ -179,7 +179,9 @@ func parseCommitFlags(command string, args []string) (commitmsg.Mode, config.Opt
 func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo *gitctx.Repository, stagedPaths []string, mode commitmsg.Mode, command string, recorder *trace.Recorder) (agent.Result, error) {
 	userPrompt := commitmsg.UserPrompt(mode, cfg.MaxSteps, cfg.MaxToolCalls)
 	var preparedCommit *commitmsg.PreparedCommitContext
+	var preparedAmend *commitmsg.PreparedAmendContext
 	var originalAmendMessage string
+	guidancePaths := stagedPaths
 	if mode == commitmsg.ModeNormal {
 		prepared, err := commitmsg.PrepareCommitContext(repo)
 		if err != nil {
@@ -188,14 +190,18 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 		preparedCommit = &prepared
 		userPrompt = commitmsg.UserPromptWithPreparedCommitContext(prepared, cfg.MaxSteps, cfg.MaxToolCalls)
 	} else if mode == commitmsg.ModeAmend {
-		message, err := repo.HeadMessage()
+		prepared, err := commitmsg.PrepareAmendContext(repo)
 		if err != nil {
 			return agent.Result{}, err
 		}
-		originalAmendMessage = message
-		userPrompt = commitmsg.UserPromptWithOriginalAmendMessage(message, cfg.MaxSteps, cfg.MaxToolCalls)
+		preparedAmend = &prepared
+		originalAmendMessage = prepared.OriginalHeadMessage
+		userPrompt = commitmsg.UserPromptWithPreparedAmendContext(prepared, cfg.MaxSteps, cfg.MaxToolCalls)
+		if len(prepared.FinalPaths) > 0 {
+			guidancePaths = prepared.FinalPaths
+		}
 	}
-	renderedGuidance, err := resolveGuidanceForPaths(repo, cfg.GuidanceFamily, stagedPaths)
+	renderedGuidance, err := resolveGuidanceForPaths(repo, cfg.GuidanceFamily, guidancePaths)
 	if err != nil {
 		return agent.Result{}, err
 	}
@@ -207,6 +213,9 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 	}
 	if preparedCommit != nil {
 		session["prepared_commit_context"] = preparedCommit.TraceValue()
+	}
+	if preparedAmend != nil {
+		session["prepared_amend_context"] = preparedAmend.TraceValue()
 	}
 	if originalAmendMessage != "" {
 		session["original_head_message"] = originalAmendMessage

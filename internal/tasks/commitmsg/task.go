@@ -62,6 +62,30 @@ type PreparedCommitContext struct {
 	DiffTruncated             bool                    `json:"diff_truncated"`
 }
 
+type PreparedAmendContext struct {
+	Mode                Mode                    `json:"mode"`
+	OriginalHeadMessage string                  `json:"original_head_message"`
+	Head                gitctx.CommitInfo       `json:"head"`
+	RecentCommits       []gitctx.CommitInfo     `json:"recent_commits"`
+	FinalPaths          []string                `json:"final_paths"`
+	FinalStats          []gitctx.FileStat       `json:"final_stats"`
+	FinalContextPack    contextpack.ContextPack `json:"final_context_pack"`
+	FinalDiff           string                  `json:"final_diff"`
+	FinalDiffTruncated  bool                    `json:"final_diff_truncated"`
+	HeadPaths           []string                `json:"head_paths"`
+	HeadStats           []gitctx.FileStat       `json:"head_stats"`
+	HeadContextPack     contextpack.ContextPack `json:"head_context_pack"`
+	HeadDiff            string                  `json:"head_diff"`
+	HeadDiffTruncated   bool                    `json:"head_diff_truncated"`
+	StagedPaths         []string                `json:"staged_paths"`
+	StagedStatus        []gitctx.PathChange     `json:"staged_status"`
+	StagedStats         []gitctx.FileStat       `json:"staged_stats"`
+	StagedSubmodules    []PreparedSubmodule     `json:"staged_submodules,omitempty"`
+	StagedContextPack   contextpack.ContextPack `json:"staged_context_pack"`
+	AmendDelta          string                  `json:"amend_delta"`
+	AmendDeltaTruncated bool                    `json:"amend_delta_truncated"`
+}
+
 type PreparedSubmodule struct {
 	Path                  string              `json:"path"`
 	OldSHA                string              `json:"old_sha,omitempty"`
@@ -135,6 +159,7 @@ How to read the evidence:
 - HEAD vs staged views are diagnostic only; do not dual-narrate them.
 Use git_final_amended_diff as authoritative.
 Use git_head_show, git_diff_against_parent, and git_amend_delta only as diagnostics.
+When prepared_amend_context is provided, read it before making tool calls; it already contains the latest HEAD commit being amended plus the final amended diff.
 If staged content already matches the final amended story, preserve the original message or polish wording only.
 Return only the commit message.
 `)
@@ -268,6 +293,86 @@ func PrepareCommitContext(repo *gitctx.Repository) (PreparedCommitContext, error
 	}, nil
 }
 
+func PrepareAmendContext(repo *gitctx.Repository) (PreparedAmendContext, error) {
+	originalMessage, err := repo.HeadMessage()
+	if err != nil {
+		return PreparedAmendContext{}, err
+	}
+	head, err := repo.HeadInfo()
+	if err != nil {
+		return PreparedAmendContext{}, err
+	}
+	stagedPaths, err := repo.StagedPaths()
+	if err != nil {
+		return PreparedAmendContext{}, err
+	}
+	stagedStatus, err := repo.StagedStatus()
+	if err != nil {
+		return PreparedAmendContext{}, err
+	}
+	stagedStats, err := repo.StagedStat()
+	if err != nil {
+		return PreparedAmendContext{}, err
+	}
+	stagedSubmodules, err := prepareStagedSubmodules(repo)
+	if err != nil {
+		return PreparedAmendContext{}, err
+	}
+	finalPaths, err := repo.FinalAmendedPaths()
+	if err != nil {
+		return PreparedAmendContext{}, err
+	}
+	finalStats, err := repo.FinalAmendedStat()
+	if err != nil {
+		return PreparedAmendContext{}, err
+	}
+	finalDiff, finalDiffTruncated, err := repo.FinalAmendedDiff(48*1024, 1200)
+	if err != nil {
+		return PreparedAmendContext{}, err
+	}
+	headPaths, err := repo.DiffAgainstParentPaths()
+	if err != nil {
+		return PreparedAmendContext{}, err
+	}
+	headStats, err := repo.DiffAgainstParentStat()
+	if err != nil {
+		return PreparedAmendContext{}, err
+	}
+	headDiff, headDiffTruncated, err := repo.DiffAgainstParent(24*1024, 700)
+	if err != nil {
+		return PreparedAmendContext{}, err
+	}
+	amendDelta, amendDeltaTruncated, err := repo.AmendDelta(24*1024, 700)
+	if err != nil {
+		return PreparedAmendContext{}, err
+	}
+	recentCommits, _ := repo.RecentCommits(10)
+
+	return PreparedAmendContext{
+		Mode:                ModeAmend,
+		OriginalHeadMessage: strings.TrimSpace(originalMessage),
+		Head:                head,
+		RecentCommits:       recentCommits,
+		FinalPaths:          finalPaths,
+		FinalStats:          finalStats,
+		FinalContextPack:    prepareIndexContextPack(repo, finalPaths, finalStats, "final"),
+		FinalDiff:           finalDiff,
+		FinalDiffTruncated:  finalDiffTruncated,
+		HeadPaths:           headPaths,
+		HeadStats:           headStats,
+		HeadContextPack:     prepareRevisionContextPack(repo, "HEAD", headPaths, headStats),
+		HeadDiff:            headDiff,
+		HeadDiffTruncated:   headDiffTruncated,
+		StagedPaths:         stagedPaths,
+		StagedStatus:        stagedStatus,
+		StagedStats:         stagedStats,
+		StagedSubmodules:    stagedSubmodules,
+		StagedContextPack:   prepareContextPack(repo, stagedPaths, stagedStatus, stagedStats),
+		AmendDelta:          amendDelta,
+		AmendDeltaTruncated: amendDeltaTruncated,
+	}, nil
+}
+
 func prepareOutlierDiff(repo *gitctx.Repository, pack contextpack.ContextPack) (string, bool, error) {
 	if !contextpack.IsLargeGeneratedHeavy(pack) || len(pack.Outliers) == 0 {
 		return "", false, nil
@@ -285,6 +390,22 @@ func (c PreparedCommitContext) Render() string {
 		return fmt.Sprintf(`{"mode":%q}`, c.Mode)
 	}
 	return string(data)
+}
+
+func (c PreparedAmendContext) Render() string {
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return fmt.Sprintf(`{"mode":%q}`, c.Mode)
+	}
+	return string(data)
+}
+
+func (c PreparedAmendContext) RenderForPrompt() string {
+	return c.Render()
+}
+
+func (c PreparedAmendContext) TraceValue() any {
+	return c
 }
 
 func (c PreparedCommitContext) RenderForPrompt() string {
@@ -401,6 +522,37 @@ Return only the commit message.
 	`, maxSteps, maxToolCalls, prepared.RenderForPrompt()))
 }
 
+func UserPromptWithPreparedAmendContext(prepared PreparedAmendContext, maxSteps, maxToolCalls int) string {
+	return textutil.NormalizePrompt(fmt.Sprintf(`
+Current limits: %d total model steps, %d total tool calls. Spend budget carefully and finish within it.
+
+Generate a commit message for the final post-amend commit result represented by prepared_amend_context.
+Mission: describe the final amended commit as one commit, not the staged delta.
+Rules:
+- prepared_amend_context is authoritative initial evidence; it includes the latest HEAD commit being amended before any tool calls
+- original_head_message is the default answer and anchor for subject, type/scope, task IDs, and high-level intent
+- keep the original subject
+- final_paths, final_stats, final_context_pack, and final_diff describe the final amended commit vs its first parent and are the authoritative support check
+- head, head_paths, head_stats, head_context_pack, and head_diff describe the current HEAD/latest commit being amended; use them to preserve the original high-level story
+- staged_paths, staged_status, staged_stats, staged_context_pack, staged_submodules, and amend_delta are diagnostics only; never base the subject or narrative on staged changes alone
+- when staged changes are cleanup/refinement around the existing commit, preserve the original message wording instead of rewriting the commit around the staged delta
+- use final amended evidence only to correct unsupported details or polish the existing message
+- if final_diff_truncated, head_diff_truncated, or amend_delta_truncated is true, stay conservative and request narrower tool context before changing broad claims
+- if evidence remains incomplete or ambiguous, return original_head_message unchanged
+- never replace a broad original commit message with a narrow message about only staged cleanup, tests, docs, or formatting
+- no delta/process phrasing such as "also", "this amend", or "in addition"
+Tools remain available for narrow follow-up inspection when prepared evidence is truncated or ambiguous:
+- git_final_amended_diff is the authoritative extra diff tool
+- git_head_show and git_diff_against_parent inspect HEAD diagnostics
+- git_amend_delta inspects staged-vs-HEAD diagnostics
+Return only the commit message.
+
+<prepared_amend_context>
+%s
+</prepared_amend_context>
+`, maxSteps, maxToolCalls, prepared.RenderForPrompt()))
+}
+
 func prepareContextPack(repo *gitctx.Repository, paths []string, status []gitctx.PathChange, stats []gitctx.FileStat) contextpack.ContextPack {
 	statusByPath := map[string]string{}
 	for _, change := range status {
@@ -421,6 +573,31 @@ func prepareContextPack(repo *gitctx.Repository, paths []string, status []gitctx
 		files = append(files, contextpack.FileFact{
 			Path:     path,
 			Status:   statusByPath[path],
+			Adds:     stat.Adds,
+			Deletes:  stat.Deletes,
+			IsBinary: stat.IsBinary,
+			Header:   header,
+		})
+	}
+	return contextpack.Build(files, contextpack.Options{})
+}
+
+func prepareIndexContextPack(repo *gitctx.Repository, paths []string, stats []gitctx.FileStat, status string) contextpack.ContextPack {
+	statsByPath := map[string]gitctx.FileStat{}
+	for _, stat := range stats {
+		statsByPath[stat.Path] = stat
+	}
+
+	files := make([]contextpack.FileFact, 0, len(paths))
+	for _, path := range paths {
+		stat := statsByPath[path]
+		header := ""
+		if filepath.Ext(path) == ".go" {
+			header, _, _ = repo.StagedFilePrefix(path, 8*1024)
+		}
+		files = append(files, contextpack.FileFact{
+			Path:     path,
+			Status:   status,
 			Adds:     stat.Adds,
 			Deletes:  stat.Deletes,
 			IsBinary: stat.IsBinary,

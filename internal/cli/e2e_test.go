@@ -105,6 +105,15 @@ func TestCommitMsgAmendEndToEndWithRealisticFixture(t *testing.T) {
 	mode, cleanup := configureE2EProvider(t, newScriptedResponsesServer(t, []func(string) string{
 		func(body string) string {
 			for _, want := range []string{
+				`prepared_amend_context`,
+				`original_head_message`,
+				`final_diff`,
+				`head_diff`,
+				`head_paths`,
+				`staged_paths`,
+				`internal/agent/verify.go`,
+				`docs/verify.md`,
+				`fix(agent): persist verified providers`,
 				`"git_final_amended_diff"`,
 				`"git_head_show"`,
 				`"git_diff_against_parent"`,
@@ -187,7 +196,14 @@ response shape.`)
 	if mode == providerModeFake && !strings.HasPrefix(output, "fix(agent): persist verified providers\n") {
 		t.Fatalf("fake-provider amend output did not preserve original subject:\n%s", output)
 	}
-	assertTraceArtifacts(t, fixture.repoDir, "*-commit-msg", 1)
+	minToolCalls := 1
+	if mode == providerModeReal {
+		// Prepared amend context should be sufficient for a real model to finish
+		// without extra tools; the fake provider path still exercises tool
+		// round-trips.
+		minToolCalls = 0
+	}
+	assertTraceArtifacts(t, fixture.repoDir, "*-commit-msg", minToolCalls)
 }
 
 func TestPRMessageEndToEndWithRealisticFixture(t *testing.T) {
