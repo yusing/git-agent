@@ -2,6 +2,8 @@ package trace
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,8 +12,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 type Recorder struct {
@@ -68,6 +72,11 @@ type eventRecord struct {
 	Kind  string         `json:"kind"`
 	Value map[string]any `json:"value,omitempty"`
 }
+
+const (
+	largeStringArtifactThreshold = 16 * 1024
+	artifactPreviewBytes         = 1200
+)
 
 func New(root, command string) (*Recorder, error) {
 	now := time.Now().UTC()
@@ -214,11 +223,15 @@ func (r *Recorder) appendEventLocked(kind string, value map[string]any) error {
 	}
 	defer file.Close()
 
+	eventValue, err := r.compactedMapValueLocked(value)
+	if err != nil {
+		return err
+	}
 	record := eventRecord{
 		Seq:   r.seq,
 		At:    time.Now().UTC().Format(time.RFC3339Nano),
 		Kind:  kind,
-		Value: value,
+		Value: eventValue,
 	}
 	encoder := json.NewEncoder(file)
 	encoder.SetEscapeHTML(false)
@@ -403,11 +416,16 @@ func (r *Recorder) currentStepPtr() *step {
 }
 
 func (r *Recorder) writeSnapshotLocked() error {
+	snapshotValue, err := r.compactedSnapshotValueLocked()
+	if err != nil {
+		return err
+	}
+
 	var buf bytes.Buffer
 	encoder := json.NewEncoder(&buf)
 	encoder.SetEscapeHTML(false)
 	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(r.snapshot); err != nil {
+	if err := encoder.Encode(snapshotValue); err != nil {
 		return err
 	}
 	tmpPath := r.sessionPath + ".tmp"
@@ -416,6 +434,102 @@ func (r *Recorder) writeSnapshotLocked() error {
 		return err
 	}
 	return os.Rename(tmpPath, r.sessionPath)
+}
+
+func (r *Recorder) compactedSnapshotValueLocked() (any, error) {
+	return r.compactedValueLocked(r.snapshot)
+}
+
+func (r *Recorder) compactedMapValueLocked(value map[string]any) (map[string]any, error) {
+	compacted, err := r.compactedValueLocked(value)
+	if err != nil {
+		return nil, err
+	}
+	mapped, ok := compacted.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("compacted trace event normalized to %T, want object", compacted)
+	}
+	return mapped, nil
+}
+
+func (r *Recorder) compactedValueLocked(value any) (any, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var normalized any
+	if err := decoder.Decode(&normalized); err != nil {
+		return nil, err
+	}
+	return r.compactLargeStringsLocked(normalized)
+}
+
+func (r *Recorder) compactLargeStringsLocked(value any) (any, error) {
+	switch value := value.(type) {
+	case map[string]any:
+		for key, item := range value {
+			compacted, err := r.compactLargeStringsLocked(item)
+			if err != nil {
+				return nil, err
+			}
+			value[key] = compacted
+		}
+		return value, nil
+	case []any:
+		for idx, item := range value {
+			compacted, err := r.compactLargeStringsLocked(item)
+			if err != nil {
+				return nil, err
+			}
+			value[idx] = compacted
+		}
+		return value, nil
+	case string:
+		if len(value) < largeStringArtifactThreshold {
+			return value, nil
+		}
+		return r.writeStringArtifactLocked(value)
+	default:
+		return value, nil
+	}
+}
+
+func (r *Recorder) writeStringArtifactLocked(value string) (map[string]any, error) {
+	sum := sha256.Sum256([]byte(value))
+	hash := hex.EncodeToString(sum[:])
+	relativePath := filepath.ToSlash(filepath.Join("artifacts", hash+".txt"))
+	path := filepath.Join(r.dir, relativePath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"artifact_ref": "artifact://sha256/" + hash,
+		"path":         relativePath,
+		"sha256":       hash,
+		"bytes":        len(value),
+		"preview":      stringPreview(value, artifactPreviewBytes),
+		"truncated":    true,
+	}, nil
+}
+
+func stringPreview(value string, maxBytes int) string {
+	if len(value) <= maxBytes {
+		return value
+	}
+	preview := value[:maxBytes]
+	for !utf8.ValidString(preview) && len(preview) > 0 {
+		preview = preview[:len(preview)-1]
+	}
+	return strings.TrimRight(preview, "\n") + "\n[artifact truncated]\n"
 }
 
 func stripItemIndex(item map[string]any) map[string]any {

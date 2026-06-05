@@ -17,6 +17,7 @@ import (
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
+	fdiff "github.com/go-git/go-git/v6/plumbing/format/diff"
 	"github.com/go-git/go-git/v6/plumbing/format/index"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/storer"
@@ -155,6 +156,35 @@ func (r *Repository) StagedDiff(maxBytes, maxLines int) (string, bool, error) {
 	return limited, truncated, nil
 }
 
+func (r *Repository) StagedDiffForPaths(paths []string, maxBytes, maxLines int) (string, bool, error) {
+	if len(paths) == 0 {
+		return "", false, nil
+	}
+	patch, err := r.patchIndexAgainstHead()
+	if err != nil {
+		return "", false, err
+	}
+	pathSet := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		pathSet[filepath.ToSlash(path)] = true
+	}
+	selected := make([]fdiff.FilePatch, 0, len(paths))
+	for _, filePatch := range patch.FilePatches() {
+		if filePatchMatchesAnyPath(filePatch, pathSet) {
+			selected = append(selected, filePatch)
+		}
+	}
+	if len(selected) == 0 {
+		return "", false, nil
+	}
+	var b bytes.Buffer
+	if err := fdiff.NewUnifiedEncoder(&b, fdiff.DefaultContextLines).Encode(filePatchSet{patches: selected}); err != nil {
+		return "", false, err
+	}
+	limited, truncated := textutil.Limit(b.String(), maxBytes, maxLines)
+	return limited, truncated, nil
+}
+
 func (r *Repository) StagedStat() ([]FileStat, error) {
 	patch, err := r.patchIndexAgainstHead()
 	if err != nil {
@@ -173,6 +203,28 @@ func (r *Repository) StagedSubmoduleChanges() ([]SubmoduleChange, error) {
 		return nil, err
 	}
 	return submoduleChangesBetweenTrees(headTree, indexTree)
+}
+
+type filePatchSet struct {
+	patches []fdiff.FilePatch
+}
+
+func (p filePatchSet) FilePatches() []fdiff.FilePatch {
+	return p.patches
+}
+
+func (p filePatchSet) Message() string {
+	return ""
+}
+
+func filePatchMatchesAnyPath(patch fdiff.FilePatch, paths map[string]bool) bool {
+	from, to := patch.Files()
+	for _, file := range []fdiff.File{from, to} {
+		if file != nil && paths[filepath.ToSlash(file.Path())] {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Repository) RecentCommits(limit int) ([]CommitInfo, error) {
@@ -270,6 +322,36 @@ func (r *Repository) ShowFileAtRev(rev, path string, maxBytes, maxLines int) (st
 		return "", false, err
 	}
 	limited, truncated := textutil.Limit(b.String(), maxBytes, maxLines)
+	return limited, truncated, nil
+}
+
+func (r *Repository) StagedFilePrefix(path string, maxBytes int) (string, bool, error) {
+	if maxBytes <= 0 {
+		content, err := r.indexFileContent(path)
+		return content, false, err
+	}
+	idx, err := r.Repo.Storer.Index()
+	if err != nil {
+		return "", false, err
+	}
+	entry, err := idx.Entry(path)
+	if err != nil {
+		return "", false, err
+	}
+	obj, err := r.Repo.BlobObject(entry.Hash)
+	if err != nil {
+		return "", false, err
+	}
+	reader, err := obj.Reader()
+	if err != nil {
+		return "", false, err
+	}
+	defer reader.Close()
+	var b bytes.Buffer
+	if _, err := io.Copy(&b, io.LimitReader(reader, int64(maxBytes)+1)); err != nil {
+		return "", false, err
+	}
+	limited, truncated := textutil.Limit(b.String(), maxBytes, 0)
 	return limited, truncated, nil
 }
 

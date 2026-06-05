@@ -125,7 +125,7 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 		"staged_paths": stagedPaths,
 	}
 	if preparedCommit != nil {
-		session["prepared_commit_context"] = preparedCommit
+		session["prepared_commit_context"] = preparedCommit.TraceValue()
 	}
 	if err := recorder.Write("session", session); err != nil {
 		return err

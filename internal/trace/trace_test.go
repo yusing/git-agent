@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -200,5 +201,63 @@ func TestRecorderWritesEventLogAndCompactSession(t *testing.T) {
 	}
 	if count != 5 {
 		t.Fatalf("event count = %d", count)
+	}
+}
+
+func TestRecorderStoresLargeSnapshotStringsAsArtifacts(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	recorder, err := New(root, "commit-msg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	large := strings.Repeat("diff --git a/file.go b/file.go\n+line\n", 700)
+	if err := recorder.Write("session", map[string]any{
+		"prepared_commit_context": map[string]any{
+			"diff": large,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.Write("request", map[string]any{
+		"model":        "test-model",
+		"instructions": "draft commit",
+		"input": []map[string]any{
+			{"type": "message", "role": "user", "content": large},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(recorder.Dir(), "session.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(data), "diff --git") > 100 {
+		t.Fatalf("large diff was copied into session snapshot:\n%s", data[:min(len(data), 2000)])
+	}
+	events, err := os.ReadFile(filepath.Join(recorder.Dir(), "events.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(events), "diff --git") > 100 {
+		t.Fatalf("large diff was copied into event log:\n%s", events[:min(len(events), 2000)])
+	}
+
+	var session map[string]any
+	if err := json.Unmarshal(data, &session); err != nil {
+		t.Fatal(err)
+	}
+	sessionRoot := session["session"].(map[string]any)
+	prepared := sessionRoot["prepared_commit_context"].(map[string]any)
+	diffRef := prepared["diff"].(map[string]any)
+	artifactPath := filepath.Join(recorder.Dir(), diffRef["path"].(string))
+	artifactData, err := os.ReadFile(artifactPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(artifactData) != large {
+		t.Fatalf("artifact mismatch")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/yusing/git-agent/internal/contextpack"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/textutil"
 )
@@ -43,18 +44,22 @@ type PreparedPRContext struct {
 }
 
 type PreparedCommitContext struct {
-	Mode                      Mode                `json:"mode"`
-	StagedPaths               []string            `json:"staged_paths"`
-	StagedStatus              []gitctx.PathChange `json:"staged_status"`
-	StagedStats               []gitctx.FileStat   `json:"staged_stats"`
-	StagedSubmodules          []PreparedSubmodule `json:"staged_submodules,omitempty"`
-	RecentCommits             []gitctx.CommitInfo `json:"recent_commits"`
-	PreviousHeadPaths         []string            `json:"previous_head_paths,omitempty"`
-	PreviousHeadStats         []gitctx.FileStat   `json:"previous_head_stats,omitempty"`
-	PreviousHeadDiff          string              `json:"previous_head_diff,omitempty"`
-	PreviousHeadDiffTruncated bool                `json:"previous_head_diff_truncated,omitempty"`
-	Diff                      string              `json:"diff"`
-	DiffTruncated             bool                `json:"diff_truncated"`
+	Mode                      Mode                    `json:"mode"`
+	StagedPaths               []string                `json:"staged_paths"`
+	StagedStatus              []gitctx.PathChange     `json:"staged_status"`
+	StagedStats               []gitctx.FileStat       `json:"staged_stats"`
+	StagedSubmodules          []PreparedSubmodule     `json:"staged_submodules,omitempty"`
+	ContextPack               contextpack.ContextPack `json:"context_pack,omitempty"`
+	RecentCommits             []gitctx.CommitInfo     `json:"recent_commits"`
+	PreviousHeadPaths         []string                `json:"previous_head_paths,omitempty"`
+	PreviousHeadStats         []gitctx.FileStat       `json:"previous_head_stats,omitempty"`
+	PreviousHeadContextPack   contextpack.ContextPack `json:"previous_head_context_pack,omitempty"`
+	PreviousHeadDiff          string                  `json:"previous_head_diff,omitempty"`
+	PreviousHeadDiffTruncated bool                    `json:"previous_head_diff_truncated,omitempty"`
+	OutlierDiff               string                  `json:"outlier_diff,omitempty"`
+	OutlierDiffTruncated      bool                    `json:"outlier_diff_truncated,omitempty"`
+	Diff                      string                  `json:"diff"`
+	DiffTruncated             bool                    `json:"diff_truncated"`
 }
 
 type PreparedSubmodule struct {
@@ -204,6 +209,12 @@ func PrepareCommitContext(repo *gitctx.Repository) (PreparedCommitContext, error
 	if err != nil {
 		return PreparedCommitContext{}, err
 	}
+	contextPack := prepareContextPack(repo, stagedPaths, stagedStatus, stagedStats)
+	previousHeadContextPack := prepareRevisionContextPack(repo, "HEAD", previousHeadPaths, previousHeadStats)
+	outlierDiff, outlierDiffTruncated, err := prepareOutlierDiff(repo, contextPack)
+	if err != nil {
+		return PreparedCommitContext{}, err
+	}
 
 	return PreparedCommitContext{
 		Mode:                      ModeNormal,
@@ -211,14 +222,29 @@ func PrepareCommitContext(repo *gitctx.Repository) (PreparedCommitContext, error
 		StagedStatus:              stagedStatus,
 		StagedStats:               stagedStats,
 		StagedSubmodules:          stagedSubmodules,
+		ContextPack:               contextPack,
 		RecentCommits:             recentCommits,
 		PreviousHeadPaths:         previousHeadPaths,
 		PreviousHeadStats:         previousHeadStats,
+		PreviousHeadContextPack:   previousHeadContextPack,
 		PreviousHeadDiff:          previousHeadDiff,
 		PreviousHeadDiffTruncated: previousHeadDiffTruncated,
+		OutlierDiff:               outlierDiff,
+		OutlierDiffTruncated:      outlierDiffTruncated,
 		Diff:                      diff,
 		DiffTruncated:             diffTruncated,
 	}, nil
+}
+
+func prepareOutlierDiff(repo *gitctx.Repository, pack contextpack.ContextPack) (string, bool, error) {
+	if !contextpack.IsLargeGeneratedHeavy(pack) || len(pack.Outliers) == 0 {
+		return "", false, nil
+	}
+	paths := make([]string, 0, len(pack.Outliers))
+	for _, outlier := range pack.Outliers {
+		paths = append(paths, outlier.Path)
+	}
+	return repo.StagedDiffForPaths(paths, 48*1024, 1200)
 }
 
 func (c PreparedCommitContext) Render() string {
@@ -229,29 +255,200 @@ func (c PreparedCommitContext) Render() string {
 	return string(data)
 }
 
+func (c PreparedCommitContext) RenderForPrompt() string {
+	if !c.useCompactPrompt() {
+		return c.Render()
+	}
+	view := map[string]any{
+		"mode":              c.Mode,
+		"recent_commits":    c.RecentCommits,
+		"staged_submodules": c.StagedSubmodules,
+	}
+	if c.compactCurrentForPrompt() {
+		view["context_pack"] = c.ContextPack
+		view["diff_ref"] = "prepared_commit_context.diff"
+		view["diff_truncated"] = c.DiffTruncated
+		if c.OutlierDiff != "" {
+			view["outlier_diff"] = c.OutlierDiff
+			view["outlier_diff_truncated"] = c.OutlierDiffTruncated
+		}
+	} else {
+		view["staged_paths"] = c.StagedPaths
+		view["staged_status"] = c.StagedStatus
+		view["staged_stats"] = c.StagedStats
+		view["context_pack"] = c.ContextPack
+		view["diff"] = c.Diff
+		view["diff_truncated"] = c.DiffTruncated
+	}
+	if c.compactPreviousForPrompt() {
+		view["previous_head_ref"] = "prepared_commit_context.previous_head_diff"
+		view["previous_head_context_pack"] = c.PreviousHeadContextPack
+		view["previous_head_summary"] = summarizePreviousHead(c.PreviousHeadPaths, c.PreviousHeadStats, c.PreviousHeadDiffTruncated)
+	} else {
+		view["previous_head_paths"] = c.PreviousHeadPaths
+		view["previous_head_stats"] = c.PreviousHeadStats
+		view["previous_head_context_pack"] = c.PreviousHeadContextPack
+		view["previous_head_diff"] = c.PreviousHeadDiff
+		view["previous_head_diff_truncated"] = c.PreviousHeadDiffTruncated
+	}
+	data, err := json.MarshalIndent(view, "", "  ")
+	if err != nil {
+		return fmt.Sprintf(`{"mode":%q}`, c.Mode)
+	}
+	return string(data)
+}
+
+func (c PreparedCommitContext) TraceValue() any {
+	if len(c.PreviousHeadPaths) <= 100 && len(c.StagedPaths) <= 100 {
+		return c
+	}
+	view := map[string]any{
+		"mode":                         c.Mode,
+		"staged_submodules":            c.StagedSubmodules,
+		"context_pack":                 c.ContextPack,
+		"recent_commits":               c.RecentCommits,
+		"previous_head_summary":        summarizePreviousHead(c.PreviousHeadPaths, c.PreviousHeadStats, c.PreviousHeadDiffTruncated),
+		"previous_head_context_pack":   c.PreviousHeadContextPack,
+		"previous_head_diff":           c.PreviousHeadDiff,
+		"previous_head_diff_truncated": c.PreviousHeadDiffTruncated,
+		"diff":                         c.Diff,
+		"diff_truncated":               c.DiffTruncated,
+	}
+	if c.OutlierDiff != "" {
+		view["outlier_diff"] = c.OutlierDiff
+		view["outlier_diff_truncated"] = c.OutlierDiffTruncated
+	}
+	if len(c.StagedPaths) > 100 {
+		view["staged_summary"] = summarizeStaged(c.StagedPaths, c.StagedStats, c.DiffTruncated)
+	} else {
+		view["staged_paths"] = c.StagedPaths
+		view["staged_status"] = c.StagedStatus
+		view["staged_stats"] = c.StagedStats
+	}
+	return view
+}
+
+func (c PreparedCommitContext) useCompactPrompt() bool {
+	return c.compactCurrentForPrompt() || c.compactPreviousForPrompt()
+}
+
+func (c PreparedCommitContext) compactCurrentForPrompt() bool {
+	return contextpack.IsLargeGeneratedHeavy(c.ContextPack)
+}
+
+func (c PreparedCommitContext) compactPreviousForPrompt() bool {
+	return len(c.PreviousHeadPaths) > 100 ||
+		contextpack.IsLargeGeneratedHeavy(c.PreviousHeadContextPack)
+}
+
 func UserPromptWithPreparedCommitContext(prepared PreparedCommitContext, maxSteps, maxToolCalls int) string {
 	return textutil.NormalizePrompt(fmt.Sprintf(`
 Current limits: %d total model steps, %d total tool calls. Spend budget carefully and finish within it.
 
 Generate a commit message from the staged diff.
-Mission: describe only prepared_commit_context.diff.
+Mission: describe only the staged changes represented by prepared_commit_context.
 Rules:
 - prepared_commit_context is authoritative
-- staged_paths, staged_status, and staged_stats summarize the authoritative staged scope
-- diff defines the output scope; ignore unstaged and untracked work
+- context_pack summarizes the authoritative staged scope when present
+- staged_paths, staged_status, and staged_stats summarize the authoritative staged scope when present
+- diff defines the output scope when present; otherwise use context_pack plus refs and stay conservative
+- outlier_diff contains authoritative raw staged hunks for small outlier files when dominant generated hunks are compacted
 - recent_commits are style reference only
-- previous_head_paths, previous_head_stats, and previous_head_diff are contrast only; use them to understand what was already done in HEAD, then describe only the new staged delta
+- previous_head_paths, previous_head_stats, previous_head_diff, previous_head_summary, and previous_head_context_pack are contrast only; use them to understand what was already done in HEAD, then describe only the new staged delta
 - if previous_head_diff_truncated is true, rely on previous_head_paths/stats for contrast shape instead of assuming omitted hunks
 - cover every distinct staged-diff change cluster; account for small outlier files when they carry behavior changes
 - if staged_submodules contains commits, use those submodule commit summaries as staged evidence; do not collapse them to a generic "newer submodule refs" message
 - do not copy phrasing from recent commits or previous_head_diff as if it were current staged work
 - if diff_truncated is true, stay conservative and describe only visible evidence
+- if outlier_diff_truncated is true, stay conservative for outlier details beyond visible hunks
 Return only the commit message.
 
 <prepared_commit_context>
 %s
 </prepared_commit_context>
-`, maxSteps, maxToolCalls, prepared.Render()))
+	`, maxSteps, maxToolCalls, prepared.RenderForPrompt()))
+}
+
+func prepareContextPack(repo *gitctx.Repository, paths []string, status []gitctx.PathChange, stats []gitctx.FileStat) contextpack.ContextPack {
+	statusByPath := map[string]string{}
+	for _, change := range status {
+		statusByPath[change.Path] = change.Staging
+	}
+	statsByPath := map[string]gitctx.FileStat{}
+	for _, stat := range stats {
+		statsByPath[stat.Path] = stat
+	}
+
+	files := make([]contextpack.FileFact, 0, len(paths))
+	for _, path := range paths {
+		stat := statsByPath[path]
+		header := ""
+		if filepath.Ext(path) == ".go" {
+			header, _, _ = repo.StagedFilePrefix(path, 8*1024)
+		}
+		files = append(files, contextpack.FileFact{
+			Path:     path,
+			Status:   statusByPath[path],
+			Adds:     stat.Adds,
+			Deletes:  stat.Deletes,
+			IsBinary: stat.IsBinary,
+			Header:   header,
+		})
+	}
+	return contextpack.Build(files, contextpack.Options{})
+}
+
+func prepareRevisionContextPack(repo *gitctx.Repository, rev string, paths []string, stats []gitctx.FileStat) contextpack.ContextPack {
+	statsByPath := map[string]gitctx.FileStat{}
+	for _, stat := range stats {
+		statsByPath[stat.Path] = stat
+	}
+
+	files := make([]contextpack.FileFact, 0, len(paths))
+	for _, path := range paths {
+		stat := statsByPath[path]
+		header := ""
+		if filepath.Ext(path) == ".go" {
+			header, _, _ = repo.ShowFileAtRev(rev, path, 8*1024, 0)
+		}
+		files = append(files, contextpack.FileFact{
+			Path:     path,
+			Status:   "changed",
+			Adds:     stat.Adds,
+			Deletes:  stat.Deletes,
+			IsBinary: stat.IsBinary,
+			Header:   header,
+		})
+	}
+	return contextpack.Build(files, contextpack.Options{})
+}
+
+func summarizePreviousHead(paths []string, stats []gitctx.FileStat, truncated bool) map[string]any {
+	summary := summarizeFileSet(paths, stats)
+	summary["diff_truncated"] = truncated
+	return summary
+}
+
+func summarizeStaged(paths []string, stats []gitctx.FileStat, truncated bool) map[string]any {
+	summary := summarizeFileSet(paths, stats)
+	summary["diff_truncated"] = truncated
+	return summary
+}
+
+func summarizeFileSet(paths []string, stats []gitctx.FileStat) map[string]any {
+	summary := map[string]any{"paths": len(paths)}
+	var adds, deletes int
+	for _, stat := range stats {
+		adds += stat.Adds
+		deletes += stat.Deletes
+	}
+	summary["adds"] = adds
+	summary["deletes"] = deletes
+	if len(paths) > 0 {
+		limit := min(5, len(paths))
+		summary["sample_paths"] = paths[:limit]
+	}
+	return summary
 }
 
 func prepareStagedSubmodules(repo *gitctx.Repository) ([]PreparedSubmodule, error) {
