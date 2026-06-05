@@ -91,6 +91,9 @@ When submodule commit summaries are provided, describe their actual changes inst
 Amend mode:
 Describe the final amended commit as one commit versus its parent.
 Treat the final amended diff as authoritative for what changed.
+Treat the original HEAD commit message as the anchor, not disposable context.
+Preserve the original subject and high-level story; revise body details only when the final amended diff proves them false.
+Small staged cleanups, tests, docs, or formatter changes must not replace a broad original commit message with a narrow delta message.
 Do not narrate a delta or process.
 Do not sound like an addendum, follow-up, or layered update.
 Never tell the story as previous HEAD plus extra staged changes.
@@ -128,11 +131,11 @@ func UserPrompt(mode Mode, maxSteps, maxToolCalls int) string {
 Generate a commit message for the final post-amend commit result.
 How to read the evidence:
 - Full amended commit vs parent comes first and is authoritative for what to describe.
-- Previous HEAD message is reference only for tone / scope / task IDs when still supported.
+- Previous HEAD message is the anchor for subject, tone, scope, and task IDs when still supported.
 - HEAD vs staged views are diagnostic only; do not dual-narrate them.
 Use git_final_amended_diff as authoritative.
 Use git_head_show, git_diff_against_parent, and git_amend_delta only as diagnostics.
-If staged content already matches the final amended story, polish wording only.
+If staged content already matches the final amended story, preserve the original message or polish wording only.
 Return only the commit message.
 `)
 	}
@@ -182,6 +185,35 @@ Prefer the same style family as recent history: concise conventional subject, th
 Start with git_staged_paths, git_staged_status, git_staged_stat, git_staged_diff, and git_recent_commits.
 Return only the commit message.
 `)
+}
+
+func UserPromptWithOriginalAmendMessage(originalMessage string, maxSteps, maxToolCalls int) string {
+	return textutil.NormalizePrompt(fmt.Sprintf(`
+Current limits: %d total model steps, %d total tool calls. Spend budget carefully and finish within it.
+
+Generate a commit message for the final post-amend commit result.
+Start from original_head_message. It is the default answer and the message to preserve.
+Rules:
+- original_head_message is the anchor for subject, type/scope, task IDs, and high-level intent
+- keep the original subject
+- when staged changes are cleanup/refinement around the existing commit, preserve the original message wording instead of rewriting the commit around the staged delta
+- use final amended evidence only to correct unsupported details or polish the existing message
+- if evidence is incomplete or ambiguous, return original_head_message unchanged
+- never replace a broad original commit message with a narrow message about only staged cleanup, tests, docs, or formatting
+
+Evidence order:
+1. original_head_message: anchor and default
+2. final amended commit vs parent: authoritative support check
+3. staged-vs-HEAD diagnostics: useful only to identify what changed during the amend
+
+Use git_final_amended_diff as the authoritative support check.
+Use git_head_show, git_diff_against_parent, and git_amend_delta only as diagnostics.
+Return only the commit message.
+
+<original_head_message>
+%s
+</original_head_message>
+`, maxSteps, maxToolCalls, strings.TrimSpace(originalMessage)))
 }
 
 func PrepareCommitContext(repo *gitctx.Repository) (PreparedCommitContext, error) {
@@ -590,6 +622,29 @@ func Validate(mode Mode, output string) []string {
 		}
 	}
 	return errs
+}
+
+func ValidateAmendAgainstOriginal(originalMessage, output string) []string {
+	errs := Validate(ModeAmend, output)
+	originalSubject := firstSubjectLine(originalMessage)
+	if originalSubject == "" {
+		return errs
+	}
+	subject := firstSubjectLine(output)
+	if subject != originalSubject {
+		errs = append(errs, fmt.Sprintf("amend output must preserve original HEAD subject %q, got %q", originalSubject, subject))
+	}
+	return errs
+}
+
+func firstSubjectLine(message string) string {
+	for line := range strings.SplitSeq(strings.TrimSpace(message), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 func Shape(output string) string {

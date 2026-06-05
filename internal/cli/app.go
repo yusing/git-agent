@@ -179,6 +179,7 @@ func parseCommitFlags(command string, args []string) (commitmsg.Mode, config.Opt
 func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo *gitctx.Repository, stagedPaths []string, mode commitmsg.Mode, command string, recorder *trace.Recorder) (agent.Result, error) {
 	userPrompt := commitmsg.UserPrompt(mode, cfg.MaxSteps, cfg.MaxToolCalls)
 	var preparedCommit *commitmsg.PreparedCommitContext
+	var originalAmendMessage string
 	if mode == commitmsg.ModeNormal {
 		prepared, err := commitmsg.PrepareCommitContext(repo)
 		if err != nil {
@@ -186,6 +187,13 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 		}
 		preparedCommit = &prepared
 		userPrompt = commitmsg.UserPromptWithPreparedCommitContext(prepared, cfg.MaxSteps, cfg.MaxToolCalls)
+	} else if mode == commitmsg.ModeAmend {
+		message, err := repo.HeadMessage()
+		if err != nil {
+			return agent.Result{}, err
+		}
+		originalAmendMessage = message
+		userPrompt = commitmsg.UserPromptWithOriginalAmendMessage(message, cfg.MaxSteps, cfg.MaxToolCalls)
 	}
 	renderedGuidance, err := resolveGuidanceForPaths(repo, cfg.GuidanceFamily, stagedPaths)
 	if err != nil {
@@ -200,8 +208,17 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 	if preparedCommit != nil {
 		session["prepared_commit_context"] = preparedCommit.TraceValue()
 	}
+	if originalAmendMessage != "" {
+		session["original_head_message"] = originalAmendMessage
+	}
 	if err := recorder.Write("session", session); err != nil {
 		return agent.Result{}, err
+	}
+	validator := func(text string) []string { return commitmsg.Validate(mode, text) }
+	if mode == commitmsg.ModeAmend {
+		validator = func(text string) []string {
+			return commitmsg.ValidateAmendAgainstOriginal(originalAmendMessage, text)
+		}
 	}
 	registry := tools.NewRegistry(repo)
 	runner := agent.OpenAIRunner{
@@ -209,7 +226,7 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 		Client:    openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
 		Tools:     registry,
 		ToolSpecs: registry.Definitions(tools.CommitMessageToolNames()),
-		Validator: func(text string) []string { return commitmsg.Validate(mode, text) },
+		Validator: validator,
 		Trace:     recorder,
 		Budget:    a.budgetHandler(),
 	}
@@ -231,7 +248,7 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 	if recent, err := repo.RecentCommits(10); err == nil {
 		result.Text = commitmsg.PreserveTaskIDSuffix(result.Text, recent)
 	}
-	if errs := commitmsg.Validate(mode, result.Text); len(errs) > 0 {
+	if errs := validator(result.Text); len(errs) > 0 {
 		return agent.Result{}, fmt.Errorf("validation failed after shaping: %v", errs)
 	}
 	if err := recorder.Write("final", map[string]any{

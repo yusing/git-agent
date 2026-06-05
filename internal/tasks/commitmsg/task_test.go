@@ -22,6 +22,27 @@ func TestValidateRejectsFencesAndAmendProcessPhrasing(t *testing.T) {
 	}
 }
 
+func TestValidateAmendAgainstOriginalPreservesHeadSubject(t *testing.T) {
+	t.Parallel()
+
+	original := `feat(cli): add commit command
+
+	Add commit creation after message generation.`
+	errs := ValidateAmendAgainstOriginal(original, `feat(trace): switch streamed commit traces
+
+	Rewrite console trace formatting.`)
+	if len(errs) == 0 || !strings.Contains(strings.Join(errs, "\n"), `preserve original HEAD subject "feat(cli): add commit command"`) {
+		t.Fatalf("expected original subject validation error, got %v", errs)
+	}
+
+	errs = ValidateAmendAgainstOriginal(original, `feat(cli): add commit command
+
+	Add commit creation after message generation and keep trace output readable.`)
+	if len(errs) != 0 {
+		t.Fatalf("expected preserved subject to pass, got %v", errs)
+	}
+}
+
 func TestPromptsNameRequiredScope(t *testing.T) {
 	t.Parallel()
 
@@ -37,8 +58,11 @@ func TestPromptsNameRequiredScope(t *testing.T) {
 	if got := SystemPrompt(ModeAmend); !containsAll(got, "final amended commit", "versus its parent", "one commit", "Do not narrate a delta or process") {
 		t.Fatalf("amend prompt missing final commit scope: %s", got)
 	}
-	if got := UserPrompt(ModeAmend, 12, 9); !containsAll(got, "Current limits: 12 total model steps, 9 total tool calls.", "How to read the evidence", "authoritative", "do not dual-narrate", "tone / scope / task IDs") {
+	if got := UserPrompt(ModeAmend, 12, 9); !containsAll(got, "Current limits: 12 total model steps, 9 total tool calls.", "How to read the evidence", "authoritative", "do not dual-narrate", "subject, tone, scope, and task IDs") {
 		t.Fatalf("amend user prompt missing evidence framing: %s", got)
+	}
+	if got := UserPromptWithOriginalAmendMessage("feat(cli): add commit command", 12, 9); !containsAll(got, "original_head_message is the anchor", "keep the original subject", "return original_head_message unchanged", "feat(cli): add commit command") {
+		t.Fatalf("amend original-message prompt missing preservation framing: %s", got)
 	}
 	if got := UserPrompt(ModePR, 12, 9); !containsAll(got, "Current limits: 12 total model steps, 9 total tool calls.", "squash merge commit message", "origin/HEAD", "git_pr_diff", "branch commits") {
 		t.Fatalf("pr prompt missing branch scope: %s", got)
@@ -445,7 +469,7 @@ func TestPromptsReflectExampleStyleExpectations(t *testing.T) {
 	if got := UserPrompt(ModeNormal, 30, 24); !containsAll(got, "git_staged_status", "recent commits", "full staged diff") {
 		t.Fatalf("normal user prompt missing structured context guidance: %s", got)
 	}
-	if got := UserPrompt(ModeAmend, 30, 24); !containsAll(got, "Previous HEAD message is reference only", "polish wording only") {
+	if got := UserPrompt(ModeAmend, 30, 24); !containsAll(got, "Previous HEAD message is the anchor", "preserve the original message or polish wording only") {
 		t.Fatalf("amend prompt missing example-aligned reuse guidance: %s", got)
 	}
 	if got := SystemPrompt(ModePR); !containsAll(got, "current branch versus origin/HEAD", "one coherent commit", "squash merge") {

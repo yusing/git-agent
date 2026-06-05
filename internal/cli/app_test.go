@@ -134,7 +134,7 @@ func TestCommitStreamsTraceThenPrintsGitSummary(t *testing.T) {
 
 func TestCommitAmendAmendsHead(t *testing.T) {
 	repoDir := initRepo(t)
-	runGit(t, repoDir, "commit", "-m", "base")
+	runGit(t, repoDir, "commit", "-m", "feat: amend app")
 	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("amended\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -175,11 +175,46 @@ func TestCommitAmendAmendsHead(t *testing.T) {
 	}
 }
 
+func TestCommitAmendRepairsMessageThatDropsOriginalSubject(t *testing.T) {
+	repoDir := initRepo(t)
+	runGit(t, repoDir, "commit", "-m", "feat(cli): add commit command", "-m", "Add commit creation after message generation.")
+	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("amended\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "add", "app.txt")
+	t.Chdir(repoDir)
+	server := commitMessageSequenceServer(t,
+		"feat(trace): switch streamed commit traces to custom console output\n\nRewrite console trace formatting.",
+		"feat(cli): add commit command\n\nAdd commit creation after message generation and keep trace output readable.",
+	)
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "test-model")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"commit", "--amend"}); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if got := strings.TrimSpace(gitOutputString(t, repoDir, "log", "-1", "--pretty=%s")); got != "feat(cli): add commit command" {
+		t.Fatalf("commit subject = %q", got)
+	}
+	if body := gitOutputString(t, repoDir, "log", "-1", "--pretty=%b"); !strings.Contains(strings.Join(strings.Fields(body), " "), "keep trace output readable") {
+		t.Fatalf("commit body = %q", body)
+	}
+}
+
 func TestCommitAmendPreservesOriginalAuthor(t *testing.T) {
 	repoDir := initRepo(t)
 	runGit(t, repoDir, "config", "user.name", "Original Author")
 	runGit(t, repoDir, "config", "user.email", "original@example.com")
-	runGit(t, repoDir, "commit", "-m", "base")
+	runGit(t, repoDir, "commit", "-m", "feat: amend app")
 	runGit(t, repoDir, "config", "user.name", "Current Committer")
 	runGit(t, repoDir, "config", "user.email", "current@example.com")
 	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("amended\n"), 0o644); err != nil {
@@ -607,17 +642,32 @@ func gitOutputString(t *testing.T, dir string, args ...string) string {
 
 func commitMessageServer(t *testing.T, message string) *httptest.Server {
 	t.Helper()
-	escaped, err := json.Marshal(message)
-	if err != nil {
-		t.Fatal(err)
+	return commitMessageSequenceServer(t, message)
+}
+
+func commitMessageSequenceServer(t *testing.T, messages ...string) *httptest.Server {
+	t.Helper()
+	if len(messages) == 0 {
+		t.Fatal("commit message sequence must not be empty")
 	}
+	var responses []string
+	for _, message := range messages {
+		escaped, err := json.Marshal(message)
+		if err != nil {
+			t.Fatal(err)
+		}
+		responses = append(responses, string(escaped))
+	}
+	var requestCount int
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/responses" {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
+		idx := min(requestCount, len(responses)-1)
+		requestCount++
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: ")
-		fmt.Fprintf(w, `{"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"test-model","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":%s,"annotations":[]}]}]}}`, escaped)
+		fmt.Fprintf(w, `{"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"test-model","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":%s,"annotations":[]}]}]}}`, responses[idx])
 		fmt.Fprint(w, "\n\n")
 		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))

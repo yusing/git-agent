@@ -113,3 +113,6 @@ message generation, including because signing fails or a key is locked, the
 command exits nonzero and stdout still contains the streamed trace lines,
 including the final event for the generated message. The final error includes
 the generated message and Git error so the user can commit manually.
+In amend mode, the current HEAD commit message is treated as the message anchor:
+small staged cleanups or refinements must preserve the original subject instead
+of replacing the commit with a narrow delta description.

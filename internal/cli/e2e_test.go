@@ -144,6 +144,26 @@ write is in flight.
 Return the updated provider list and refresh API docs for the new verify
 response shape.`)
 		},
+		func(body string) string {
+			for _, want := range []string{
+				`Repair the output`,
+				`preserve original HEAD subject`,
+				`fix(agent): persist verified providers`,
+				`feat(agent): persist verified providers on verify`,
+				`"type":"function_call_output"`,
+			} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("repair request missing %q\n%s", want, body)
+				}
+			}
+			return responseWithText("resp_amend_3", `fix(agent): persist verified providers
+
+Store verified providers in config and suppress the matching reload while the
+write is in flight.
+
+Return the updated provider list and refresh API docs for the new verify
+response shape.`)
+		},
 	}))
 	defer cleanup()
 
@@ -163,6 +183,9 @@ response shape.`)
 	}
 	if mode == providerModeFake && strings.Contains(strings.ToLower(output), "also") {
 		t.Fatalf("fake-provider amend output regressed to delta narration:\n%s", output)
+	}
+	if mode == providerModeFake && !strings.HasPrefix(output, "fix(agent): persist verified providers\n") {
+		t.Fatalf("fake-provider amend output did not preserve original subject:\n%s", output)
 	}
 	assertTraceArtifacts(t, fixture.repoDir, "*-commit-msg", 1)
 }

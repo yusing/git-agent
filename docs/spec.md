@@ -54,7 +54,10 @@ clusters.
 #### `git-agent commit-msg --amend`
 
 Generate a commit message for the final post-amend commit result, not a delta
-note about the newly staged changes.
+note about the newly staged changes. The current HEAD commit message is the
+anchor for subject, scope, task IDs, and high-level intent; staged cleanups or
+refinements must not replace a broad original message with a narrow delta
+message.
 
 #### `git-agent commit`
 
@@ -82,7 +85,8 @@ Generate the final amended commit message using the same semantics as
 success stdout contract matches `git-agent commit`: human console trace lines
 followed by Git's raw commit summary.
 Amend mode preserves the original HEAD author and uses the current configured
-committer.
+committer. The original HEAD subject is validated as the amend message anchor so
+model output cannot silently replace it with a staged-delta-only subject.
 
 #### `git-agent pr-message`
 
@@ -753,12 +757,16 @@ Behavior:
 - never narrate the amended result as “previous commit plus extra changes”
 - treat `git_final_amended_diff` as authoritative; it overlays staged changes
   on current HEAD and compares the final amended result against the first parent
+- treat the current HEAD message as the output anchor; preserve its subject and
+  high-level story, revising body details only when the final amended diff
+  proves them false
 - use current HEAD, HEAD-vs-parent, and staged-vs-HEAD views only as diagnostic
   inputs
 
 Output rules:
 
 - one narrative only
+- the original HEAD subject must be preserved by validation
 - no delta/process phrasing such as “also”, “this amend”, or “in addition”
 - preserve task IDs or scope markers only when still supported by the final
   diff
@@ -817,6 +825,7 @@ Commit message validator checks at minimum:
 - subject present
 - no stray commentary
 - amend mode does not use process/delta phrasing
+- amend mode preserves the original HEAD subject
 - body lines stay within the target width after output shaping (target width: 72
   characters after shaping, except for long unbreakable tokens such as URLs)
 

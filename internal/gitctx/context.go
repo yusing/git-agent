@@ -252,6 +252,14 @@ func (r *Repository) HeadShow(maxBytes, maxLines int) (string, bool, error) {
 	return limited, truncated, nil
 }
 
+func (r *Repository) HeadMessage() (string, error) {
+	head, err := r.headCommit()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(head.Message), nil
+}
+
 func (r *Repository) DiffAgainstParent(maxBytes, maxLines int) (string, bool, error) {
 	patch, err := r.patchHeadAgainstParent()
 	if err != nil {

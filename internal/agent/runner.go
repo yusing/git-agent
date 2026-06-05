@@ -32,6 +32,7 @@ type Result struct {
 	Text        string
 	ToolCalls   int
 	RepairCalls int
+	messages    []openai.Item
 }
 
 type Validator func(string) []string
@@ -108,7 +109,10 @@ func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error)
 			if !request.RepairOnValidator {
 				return Result{}, fmt.Errorf("validation failed: %v", errs)
 			}
-			repairMessages := append(messages, openai.NewMessage("assistant", result.Text))
+			repairMessages := slices.Clone(result.messages)
+			if len(repairMessages) == 0 {
+				repairMessages = append(slices.Clone(messages), openai.NewMessage("assistant", result.Text))
+			}
 			repairMessages = append(repairMessages, openai.NewMessage("user", fmt.Sprintf("Repair the output to satisfy these validation errors: %v\nReturn only the corrected final artifact.", errs)))
 			repaired, err := r.runUntilText(ctx, request.SystemPrompt, repairMessages, nil, nil, request.TextFormat, 1)
 			if err != nil {
@@ -158,6 +162,7 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 				return Result{}, errors.New("provider returned no text and no tool calls")
 			}
 			result.Text = response.Text
+			result.messages = append(slices.Clone(messages), openai.NewMessage("assistant", response.Text))
 			return result, nil
 		}
 		if r.Tools == nil {
@@ -304,7 +309,10 @@ func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions st
 	if response.Text == "" {
 		return Result{}, errors.New("provider returned no text during forced finalization")
 	}
-	return Result{Text: response.Text}, nil
+	return Result{
+		Text:     response.Text,
+		messages: append(slices.Clone(finalMessages), openai.NewMessage("assistant", response.Text)),
+	}, nil
 }
 
 func finalizationNotice(status BudgetStatus) string {
