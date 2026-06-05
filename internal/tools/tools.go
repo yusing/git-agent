@@ -51,6 +51,7 @@ func NewRegistry(repo *gitctx.Repository) *Registry {
 		gitStagedStatusTool{repo: repo},
 		gitStagedStatTool{repo: repo},
 		gitStagedDiffTool{repo: repo},
+		gitStagedDiffForPathsTool{repo: repo},
 		gitRecentCommitsTool{repo: repo},
 		gitHeadShowTool{repo: repo},
 		gitDiffAgainstParentTool{repo: repo},
@@ -102,6 +103,7 @@ func CommitMessageToolNames() []string {
 		"git_staged_status",
 		"git_staged_stat",
 		"git_staged_diff",
+		"git_staged_diff_for_paths",
 		"git_recent_commits",
 		"git_head_show",
 		"git_diff_against_parent",
@@ -211,6 +213,14 @@ func parseArgs[T any](raw string) (T, error) {
 
 func stringProp(description string) map[string]any {
 	return map[string]any{"type": "string", "description": description}
+}
+
+func stringArrayProp(description string) map[string]any {
+	return map[string]any{
+		"type":        "array",
+		"description": description,
+		"items":       map[string]any{"type": "string"},
+	}
 }
 
 func intProp(description string, min, max int) map[string]any {
@@ -458,6 +468,36 @@ func (t gitStagedDiffTool) Execute(_ context.Context, invocation Invocation) (Re
 		return Result{}, err
 	}
 	return jsonResult("git_staged_diff", map[string]any{"diff": text}, truncated)
+}
+
+type gitStagedDiffForPathsTool repoTool
+
+func (t gitStagedDiffForPathsTool) Definition() Definition {
+	return Definition{Name: "git_staged_diff_for_paths", Description: "Return staged diff versus HEAD for selected repository-relative paths with caps.", Schema: schema(map[string]any{
+		"paths":     stringArrayProp("Repository-relative staged paths to include."),
+		"max_bytes": intProp("Maximum bytes to return.", 1, 65536),
+		"max_lines": intProp("Maximum lines to return.", 1, 2000),
+	}, "paths"), Strict: true}
+}
+
+func (t gitStagedDiffForPathsTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
+	args, err := parseArgs[struct {
+		Paths    []string `json:"paths"`
+		MaxBytes int      `json:"max_bytes"`
+		MaxLines int      `json:"max_lines"`
+	}](invocation.Arguments)
+	if err != nil {
+		return Result{}, err
+	}
+	if len(args.Paths) == 0 {
+		return Result{}, fmt.Errorf("paths is required")
+	}
+	maxBytes, maxLines := normalizeCaps(args.MaxBytes, args.MaxLines)
+	text, truncated, err := t.repo.StagedDiffForPaths(args.Paths, maxBytes, maxLines)
+	if err != nil {
+		return Result{}, err
+	}
+	return jsonResult("git_staged_diff_for_paths", map[string]any{"paths": args.Paths, "diff": text}, truncated)
 }
 
 type gitRecentCommitsTool repoTool

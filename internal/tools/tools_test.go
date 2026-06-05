@@ -164,6 +164,43 @@ func TestPRMessageToolsExposeOriginHeadComparison(t *testing.T) {
 	}
 }
 
+func TestStagedDiffForPathsReturnsSelectedStagedPatch(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.name", "Test User")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	mustWriteFile(t, filepath.Join(dir, "one.txt"), "old one\n")
+	mustWriteFile(t, filepath.Join(dir, "two.txt"), "old two\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "base")
+	mustWriteFile(t, filepath.Join(dir, "one.txt"), "new one\n")
+	mustWriteFile(t, filepath.Join(dir, "two.txt"), "new two\n")
+	runGit(t, dir, "add", ".")
+
+	repo, err := gitctx.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry(repo)
+	defs := registry.Definitions(CommitMessageToolNames())
+	if len(defs) != len(CommitMessageToolNames()) {
+		t.Fatalf("defs = %d, want %d", len(defs), len(CommitMessageToolNames()))
+	}
+
+	result, err := registry.Execute(t.Context(), Invocation{Name: "git_staged_diff_for_paths", Arguments: `{"paths":["two.txt"],"max_bytes":4096,"max_lines":200}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, "diff --git a/two.txt b/two.txt") || !strings.Contains(result.Content, "+new two") {
+		t.Fatalf("selected patch missing two.txt diff:\n%s", result.Content)
+	}
+	if strings.Contains(result.Content, "one.txt") || strings.Contains(result.Content, "+new one") {
+		t.Fatalf("selected patch leaked one.txt diff:\n%s", result.Content)
+	}
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

@@ -585,14 +585,82 @@ func TestPromptsReflectExampleStyleExpectations(t *testing.T) {
 	if got := SystemPrompt(ModeNormal); !containsAll(got, "type, scope, and impact", "Body optional", "three short paragraphs") {
 		t.Fatalf("normal system prompt missing style guidance: %s", got)
 	}
+	if got := SystemPrompt(ModeNormal); !containsAll(got, "Choose 'refactor'", "moves, extracts, centralizes, or reorganizes existing behavior", "Choose 'feat' only", "prefer verbs such as \"extract\"") {
+		t.Fatalf("normal system prompt missing refactor-vs-feat guidance: %s", got)
+	}
 	if got := UserPrompt(ModeNormal, 30, 24); !containsAll(got, "git_staged_status", "recent commits", "full staged diff") {
 		t.Fatalf("normal user prompt missing structured context guidance: %s", got)
+	}
+	if got := UserPrompt(ModeNormal, 30, 24); !containsAll(got, "git_staged_diff_for_paths", "large or truncated", "classify extraction/move-only work as refactor, not feat") {
+		t.Fatalf("normal user prompt missing large-refactor follow-up guidance: %s", got)
 	}
 	if got := UserPrompt(ModeAmend, 30, 24); !containsAll(got, "Previous HEAD message is the anchor", "preserve the original message or polish wording only") {
 		t.Fatalf("amend prompt missing example-aligned reuse guidance: %s", got)
 	}
 	if got := SystemPrompt(ModePR); !containsAll(got, "current branch versus origin/HEAD", "one coherent commit", "squash merge") {
 		t.Fatalf("pr system prompt missing squash framing: %s", got)
+	}
+}
+
+func TestPreparedCommitPromptGuidesLargeExtractionRefactors(t *testing.T) {
+	t.Parallel()
+
+	prepared := PreparedCommitContext{
+		Mode: ModeNormal,
+		StagedPaths: []string{
+			"internal/session/shadow.go",
+			"internal/treecopy/copy.go",
+			"internal/treecopy/overlay.go",
+			"internal/lineedit/editor.go",
+		},
+		StagedStats: []gitctx.FileStat{
+			{Path: "internal/session/shadow.go", Adds: 4, Deletes: 337},
+			{Path: "internal/treecopy/overlay.go", Adds: 347},
+			{Path: "internal/treecopy/copy.go", Adds: 67},
+			{Path: "internal/lineedit/editor.go", Adds: 224},
+		},
+		Diff:          "diff --git a/internal/session/shadow.go b/internal/session/shadow.go\n-func syncOverlayTree() {}\n+return treecopy.SyncOverlayTree()",
+		DiffTruncated: true,
+	}
+
+	got := UserPromptWithPreparedCommitContext(prepared, 30, 24)
+	if !containsAll(got,
+		"git_staged_diff_for_paths",
+		"diff_truncated is true",
+		"choose refactor when staged evidence shows extraction",
+		"choose feat only for genuinely new user-visible capability/API/command/config behavior",
+		"do not default to \"add\" phrasing because files are new",
+		"internal/treecopy/overlay.go",
+		"internal/session/shadow.go",
+	) {
+		t.Fatalf("prepared prompt missing large extraction refactor guidance:\n%s", got)
+	}
+}
+
+func TestFocusDiffPathsPreferOmittedHighChurnFiles(t *testing.T) {
+	t.Parallel()
+
+	pack := contextpack.ContextPack{Groups: []contextpack.ChangeGroup{{
+		TopChurn: []contextpack.FileSummary{
+			{Path: "internal/treecopy/overlay.go", Adds: 347},
+			{Path: "internal/session/shadow.go", Deletes: 337},
+			{Path: "internal/sshserver/server.go", Deletes: 220},
+		},
+		Samples: []contextpack.FileSummary{
+			{Path: "internal/lineedit/editor.go", Adds: 224},
+		},
+	}}}
+	diff := strings.Join([]string{
+		"diff --git a/internal/session/shadow.go b/internal/session/shadow.go",
+		"--- a/internal/session/shadow.go",
+		"+++ b/internal/session/shadow.go",
+		"+return treecopy.SyncOverlayTree()",
+	}, "\n")
+
+	got := focusDiffPaths(pack, diff, 2)
+	want := []string{"internal/treecopy/overlay.go", "internal/lineedit/editor.go"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("focus paths = %#v, want %#v", got, want)
 	}
 }
 

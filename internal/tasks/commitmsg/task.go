@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/yusing/git-agent/internal/contextpack"
@@ -56,6 +57,9 @@ type PreparedCommitContext struct {
 	PreviousHeadContextPack   contextpack.ContextPack `json:"previous_head_context_pack"`
 	PreviousHeadDiff          string                  `json:"previous_head_diff,omitempty"`
 	PreviousHeadDiffTruncated bool                    `json:"previous_head_diff_truncated,omitempty"`
+	FocusDiff                 string                  `json:"focus_diff,omitempty"`
+	FocusDiffPaths            []string                `json:"focus_diff_paths,omitempty"`
+	FocusDiffTruncated        bool                    `json:"focus_diff_truncated,omitempty"`
 	OutlierDiff               string                  `json:"outlier_diff,omitempty"`
 	OutlierDiffTruncated      bool                    `json:"outlier_diff_truncated,omitempty"`
 	Diff                      string                  `json:"diff"`
@@ -106,6 +110,9 @@ Wrap body lines around 72 columns.
 Recent commits are style reference only.
 Describe only supported changes. Do not invent motivations unsupported by the diff.
 Infer accurate type, scope, and impact from the evidence.
+Choose 'refactor' when the staged diff mainly moves, extracts, centralizes, or reorganizes existing behavior, even if helper packages/files/tests are added.
+Choose 'feat' only when the staged diff introduces a user-visible capability, API, command, config option, or behavior that did not exist before.
+For extraction-heavy changes, prefer verbs such as "extract", "move", "centralize", "consolidate", or "reuse" over defaulting to "add" because files are new.
 Body optional. When present, keep it concise, naturally wrapped, and within three short paragraphs.
 When useful, the body may include compact nested detail blocks for submodule updates or grouped follow-up facts, but only when the diff clearly supports them.
 When submodule commit summaries are provided, describe their actual changes instead of only saying the submodule ref moved.
@@ -198,6 +205,8 @@ Rules:
 - cover every distinct staged-diff change cluster; do not drop a secondary file/behavior just because another cluster dominates the diff
 - use recent commits and previous HEAD diff only as style/contrast; do not restate previous work as current staged work
 - inspect related files only if the staged diff is ambiguous
+- if the staged diff is large or truncated, use path-filtered staged diffs for omitted or high-churn clusters before finalizing broad claims
+- classify extraction/move-only work as refactor, not feat, even when new helper files appear
 Structured context to gather:
 - current directory
 - current branch
@@ -206,6 +215,7 @@ Structured context to gather:
 - git status
 - git stats
 - full staged diff
+Useful follow-up for large diffs: git_staged_diff_for_paths on specific staged paths or clusters.
 Prefer the same style family as recent history: concise conventional subject, then focused rationale/details only when they add signal.
 Start with git_staged_paths, git_staged_status, git_staged_stat, git_staged_diff, and git_recent_commits.
 Return only the commit message.
@@ -268,6 +278,10 @@ func PrepareCommitContext(repo *gitctx.Repository) (PreparedCommitContext, error
 	}
 	contextPack := prepareContextPack(repo, stagedPaths, stagedStatus, stagedStats)
 	previousHeadContextPack := prepareRevisionContextPack(repo, "HEAD", previousHeadPaths, previousHeadStats)
+	focusDiff, focusDiffPaths, focusDiffTruncated, err := prepareFocusDiff(repo, contextPack, diff, diffTruncated)
+	if err != nil {
+		return PreparedCommitContext{}, err
+	}
 	outlierDiff, outlierDiffTruncated, err := prepareOutlierDiff(repo, contextPack)
 	if err != nil {
 		return PreparedCommitContext{}, err
@@ -286,6 +300,9 @@ func PrepareCommitContext(repo *gitctx.Repository) (PreparedCommitContext, error
 		PreviousHeadContextPack:   previousHeadContextPack,
 		PreviousHeadDiff:          previousHeadDiff,
 		PreviousHeadDiffTruncated: previousHeadDiffTruncated,
+		FocusDiff:                 focusDiff,
+		FocusDiffPaths:            focusDiffPaths,
+		FocusDiffTruncated:        focusDiffTruncated,
 		OutlierDiff:               outlierDiff,
 		OutlierDiffTruncated:      outlierDiffTruncated,
 		Diff:                      diff,
@@ -384,6 +401,82 @@ func prepareOutlierDiff(repo *gitctx.Repository, pack contextpack.ContextPack) (
 	return repo.StagedDiffForPaths(paths, 48*1024, 1200)
 }
 
+func prepareFocusDiff(repo *gitctx.Repository, pack contextpack.ContextPack, diff string, diffTruncated bool) (string, []string, bool, error) {
+	if !diffTruncated || contextpack.IsLargeGeneratedHeavy(pack) {
+		return "", nil, false, nil
+	}
+	paths := focusDiffPaths(pack, diff, 5)
+	if len(paths) == 0 {
+		return "", nil, false, nil
+	}
+	focusDiff, truncated, err := repo.StagedDiffForPaths(paths, 64*1024, 1600)
+	if err != nil {
+		return "", nil, false, err
+	}
+	return focusDiff, paths, truncated, nil
+}
+
+func focusDiffPaths(pack contextpack.ContextPack, diff string, limit int) []string {
+	candidates := focusDiffCandidates(pack)
+	if len(candidates) == 0 || limit <= 0 {
+		return nil
+	}
+	var paths []string
+	for _, candidate := range candidates {
+		if diffMentionsPath(diff, candidate.Path) {
+			continue
+		}
+		paths = append(paths, candidate.Path)
+		if len(paths) >= limit {
+			return paths
+		}
+	}
+	if len(paths) == 0 {
+		paths = append(paths, candidates[0].Path)
+	}
+	return paths
+}
+
+func focusDiffCandidates(pack contextpack.ContextPack) []contextpack.FileSummary {
+	seen := map[string]bool{}
+	var candidates []contextpack.FileSummary
+	add := func(file contextpack.FileSummary) {
+		if file.Path == "" || seen[file.Path] {
+			return
+		}
+		seen[file.Path] = true
+		candidates = append(candidates, file)
+	}
+	for _, group := range pack.Groups {
+		for _, file := range group.TopChurn {
+			add(file)
+		}
+		for _, file := range group.Samples {
+			add(file)
+		}
+	}
+	for _, file := range pack.Outliers {
+		add(file)
+	}
+	slices.SortFunc(candidates, func(a, b contextpack.FileSummary) int {
+		left := a.Adds + a.Deletes
+		right := b.Adds + b.Deletes
+		if left != right {
+			return right - left
+		}
+		return strings.Compare(a.Path, b.Path)
+	})
+	return candidates
+}
+
+func diffMentionsPath(diff, path string) bool {
+	path = filepath.ToSlash(path)
+	return strings.Contains(diff, " b/"+path) ||
+		strings.Contains(diff, " a/"+path) ||
+		strings.Contains(diff, "+++ b/"+path) ||
+		strings.Contains(diff, "--- a/"+path)
+}
+
 func (c PreparedCommitContext) Render() string {
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
@@ -471,6 +564,11 @@ func (c PreparedCommitContext) TraceValue() any {
 		view["outlier_diff"] = c.OutlierDiff
 		view["outlier_diff_truncated"] = c.OutlierDiffTruncated
 	}
+	if c.FocusDiff != "" {
+		view["focus_diff_paths"] = c.FocusDiffPaths
+		view["focus_diff"] = c.FocusDiff
+		view["focus_diff_truncated"] = c.FocusDiffTruncated
+	}
 	if len(c.StagedPaths) > 100 {
 		view["staged_summary"] = summarizeStaged(c.StagedPaths, c.StagedStats, c.DiffTruncated)
 	} else {
@@ -505,11 +603,16 @@ Rules:
 - context_pack summarizes the authoritative staged scope when present
 - staged_paths, staged_status, and staged_stats summarize the authoritative staged scope when present
 - diff defines the output scope when present; otherwise use context_pack plus refs and stay conservative
+- focus_diff contains extra authoritative staged hunks for high-churn paths omitted or cut off by a truncated bounded diff
 - outlier_diff contains authoritative raw staged hunks for small outlier files when dominant generated hunks are compacted
 - recent_commits are style reference only
 - previous_head_paths, previous_head_stats, previous_head_diff, previous_head_summary, and previous_head_context_pack are contrast only; use them to understand what was already done in HEAD, then describe only the new staged delta
 - if previous_head_diff_truncated is true, rely on previous_head_paths/stats for contrast shape instead of assuming omitted hunks
 - cover every distinct staged-diff change cluster; account for small outlier files when they carry behavior changes
+- if diff_truncated is true or broad clusters are represented only by paths/stats/context_pack, use git_staged_diff_for_paths for omitted or high-churn clusters before finalizing broad claims
+- if focus_diff is present, use it together with diff and context_pack; focus_diff_paths explains which omitted or cut-off paths it covers
+- choose refactor when staged evidence shows extraction, relocation, deduplication, or internal reorganization of existing behavior; choose feat only for genuinely new user-visible capability/API/command/config behavior
+- do not default to "add" phrasing because files are new; for extraction-heavy changes prefer "extract", "move", "centralize", "consolidate", or "reuse"
 - if staged_submodules contains commits, use those submodule commit summaries as staged evidence; do not collapse them to a generic "newer submodule refs" message
 - do not copy phrasing from recent commits or previous_head_diff as if it were current staged work
 - if diff_truncated is true, stay conservative and describe only visible evidence

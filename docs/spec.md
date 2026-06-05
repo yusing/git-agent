@@ -49,7 +49,9 @@ the bounded staged diff before generation so the authoritative staged scope is
 visible before any optional follow-up tool calls. For generated-heavy staged
 changes, the request may compact dominant generated hunks into a context pack,
 but it must still include raw outlier diffs for small handwritten change
-clusters.
+clusters. Large or capped staged diffs expose a path-filtered staged-diff tool
+so the model can inspect omitted high-churn or secondary clusters without
+reading unrelated hunks.
 
 #### `git-agent commit-msg --amend`
 
@@ -664,6 +666,7 @@ Commit message tools:
 - `git_staged_status`
 - `git_staged_stat`
 - `git_staged_diff`
+- `git_staged_diff_for_paths`
 - `git_recent_commits`
 - `git_head_show`
 - `git_diff_against_parent`
@@ -735,6 +738,9 @@ Behavior:
 - precompute staged context before generation, with changed paths, status,
   stats, recent style commits, previous HEAD paths/stats/diff for contrast,
   and a bounded staged diff
+- when the bounded staged diff is truncated, precompute an additional focus
+  diff for high-churn paths that were omitted or cut off, unless the change is
+  handled by generated-heavy compaction/outlier rules
 - compact generated-heavy staged changes with a context pack only when raw
   outlier diffs for small handwritten change clusters remain visible in the
   initial request
@@ -744,10 +750,17 @@ Behavior:
   and stats preserve contrast shape even when the previous diff text is capped
 - allow the model to request extra related file reads when the diff is
   ambiguous
+- allow the model to request path-filtered staged diffs for omitted or
+  high-churn clusters when the bounded full staged diff is large or truncated
 - cover each distinct high-signal staged change cluster present in the staged
   diff, rather than letting a dominant cluster hide a secondary behavior change
 - avoid copying phrasing from recent commits or previous HEAD diff as if it
   were current staged work
+- prefer `refactor` when staged evidence shows extraction, relocation,
+  deduplication, or internal reorganization of existing behavior, even if new
+  helper files or tests are added
+- use `feat` only when the staged diff introduces a genuinely new user-visible
+  capability, API, command, config option, or behavior
 
 Output rules:
 
