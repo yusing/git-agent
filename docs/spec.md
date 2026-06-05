@@ -42,7 +42,10 @@ v1 must not:
 Generate a commit message from the staged diff in the current repository.
 The command precomputes staged paths, status, stats, recent style commits, and
 the bounded staged diff before generation so the authoritative staged scope is
-visible before any optional follow-up tool calls.
+visible before any optional follow-up tool calls. For generated-heavy staged
+changes, the request may compact dominant generated hunks into a context pack,
+but it must still include raw outlier diffs for small handwritten change
+clusters.
 
 #### `git-agent commit-msg --amend`
 
@@ -618,7 +621,10 @@ Behavior:
 - treat staged paths as authoritative scope
 - precompute staged context before generation, with changed paths, status,
   stats, recent style commits, previous HEAD paths/stats/diff for contrast,
-  and full bounded staged diff
+  and a bounded staged diff
+- compact generated-heavy staged changes with a context pack only when raw
+  outlier diffs for small handwritten change clusters remain visible in the
+  initial request
 - use recent commit history as style reference only
 - use previous HEAD paths/stats/diff only as contrast to understand what was
   already done, not as current staged scope; for large previous diffs, paths
