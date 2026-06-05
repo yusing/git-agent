@@ -1,12 +1,15 @@
 # git-agent
 
-`git-agent` is an OpenAI-compatible, read-only tool-calling agent harness for
-Git-related operations.
+`git-agent` is an OpenAI-compatible tool-calling agent harness for Git-related
+operations. Model tools are read-only; the explicit `commit` command can run the
+final Git commit after message generation.
 
 ## Commands
 
 - `git-agent commit-msg`
 - `git-agent commit-msg --amend`
+- `git-agent commit`
+- `git-agent commit --amend`
 - `git-agent pr-message`
 - `git-agent release-note <base> <release>`
 
@@ -85,7 +88,7 @@ If `$(FISH_CONFIG_DIR)` exists, `make install` also installs fish completions to
 
 ## Debug sessions
 
-Every command stores a JSON trace under:
+Message-generation commands store a JSON trace under:
 
 ```text
 .git-agent/sessions/<timestamp>-<command>/
@@ -95,3 +98,18 @@ Trace files include session metadata, every Responses request sent to the
 provider, every response received, each tool call, and the tool output returned
 to the model. API keys are redacted from request traces. `--debug` prints the
 trace directory to stderr.
+
+`git-agent commit` and `git-agent commit --amend` generate the same message as
+`commit-msg`. Stdout streams a human console trace while the message
+is generated, then prints Git's raw commit summary after `git commit` succeeds.
+Trace lines use short local times like `15:04:05 INF final`, color field keys
+when stdout is a terminal, and render long or multiline values as indented
+preview blocks so raw patches do not flood the console. No on-disk trace session
+is written. Commit creation is delegated to
+`git commit --file -` (or
+`git commit --amend --file -`), so normal Git config, hooks, `commit.gpgSign`,
+system `gpg`, and `gpg-agent` behavior apply. If commit creation fails after
+message generation, including because signing fails or a key is locked, the
+command exits nonzero and stdout still contains the streamed trace lines,
+including the final event for the generated message. The final error includes
+the generated message and Git error so the user can commit manually.

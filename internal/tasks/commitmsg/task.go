@@ -49,11 +49,11 @@ type PreparedCommitContext struct {
 	StagedStatus              []gitctx.PathChange     `json:"staged_status"`
 	StagedStats               []gitctx.FileStat       `json:"staged_stats"`
 	StagedSubmodules          []PreparedSubmodule     `json:"staged_submodules,omitempty"`
-	ContextPack               contextpack.ContextPack `json:"context_pack,omitempty"`
+	ContextPack               contextpack.ContextPack `json:"context_pack"`
 	RecentCommits             []gitctx.CommitInfo     `json:"recent_commits"`
 	PreviousHeadPaths         []string                `json:"previous_head_paths,omitempty"`
 	PreviousHeadStats         []gitctx.FileStat       `json:"previous_head_stats,omitempty"`
-	PreviousHeadContextPack   contextpack.ContextPack `json:"previous_head_context_pack,omitempty"`
+	PreviousHeadContextPack   contextpack.ContextPack `json:"previous_head_context_pack"`
 	PreviousHeadDiff          string                  `json:"previous_head_diff,omitempty"`
 	PreviousHeadDiffTruncated bool                    `json:"previous_head_diff_truncated,omitempty"`
 	OutlierDiff               string                  `json:"outlier_diff,omitempty"`

@@ -11,13 +11,17 @@ binary that:
 - uses the official OpenAI Go SDK against an OpenAI-compatible Responses API
   endpoint
 - runs a bounded, read-only, tool-calling agent loop
-- emits only the final commit message or release note on stdout
+- emits only the final commit message or release note on stdout for
+  message-generation commands
+- can optionally create the Git commit after generating a message
 - preserves project guidance behavior close to Codex for AGENTS-family files
 
 Primary initial workflows:
 
 - `git-agent commit-msg`
 - `git-agent commit-msg --amend`
+- `git-agent commit`
+- `git-agent commit --amend`
 - `git-agent pr-message`
 - `git-agent release-note <base> <release>`
 
@@ -51,6 +55,34 @@ clusters.
 
 Generate a commit message for the final post-amend commit result, not a delta
 note about the newly staged changes.
+
+#### `git-agent commit`
+
+Generate a commit message from staged changes using the same prompt,
+validation, shaping, guidance, and read-only model tools as `commit-msg`, then
+create the commit by running `git commit --file -` in the
+repository root. This mode writes no `.git-agent/sessions/*/events.ndjson`
+trace. On success, stdout streams a human console trace while
+generating the message, then prints Git's raw commit summary after `git commit`
+succeeds. Trace lines use short local times such as `15:04:05 INF final`, color
+field keys when stdout is a terminal, and render long or multiline values as
+indented preview blocks. Because commit creation is delegated to Git, normal Git
+config,
+hooks, `commit.gpgSign`, system `gpg`, and `gpg-agent` behavior apply. If commit
+creation fails after message generation, including because signing fails or a key
+is locked, the command returns nonzero, keeps the streamed trace events on
+stdout, and reports both the generated message and the Git error so the user can
+commit manually.
+
+#### `git-agent commit --amend`
+
+Generate the final amended commit message using the same semantics as
+`commit-msg --amend`, then amend the commit by running
+`git commit --amend --file -` in the repository root. The
+success stdout contract matches `git-agent commit`: human console trace lines
+followed by Git's raw commit summary.
+Amend mode preserves the original HEAD author and uses the current configured
+committer.
 
 #### `git-agent pr-message`
 
@@ -91,7 +123,7 @@ Flag behavior:
 - `--xhigh`: send `reasoning.effort=xhigh`
 - default: omit both `service_tier` and `reasoning`
 
-`commit-msg` additionally supports:
+`commit-msg` and `commit` additionally support:
 
 - `--amend`
 
@@ -124,11 +156,23 @@ Resolution order:
 
 ### stdout / stderr contract
 
-- stdout: final generated artifact only
+- stdout for generation-only commands: final generated artifact only
+- stdout for `commit` / `commit --amend`: streaming human console trace lines
+  while generating the message, followed by Git's raw commit summary after
+  success
 - stderr: diagnostics, debug output, validation failures, provider/tool loop
-  summaries when `--debug` is enabled
-- every command writes a JSON trace session under `.git-agent/sessions/`
+  summaries when `--debug` is enabled, and stderr emitted by a successful
+  delegated `git commit`
+- generation-only commands write a JSON trace session under `.git-agent/sessions/`
   regardless of `--debug`; `--debug` prints the session directory on stderr
+- `commit` / `commit --amend` do not write an on-disk NDJSON trace session;
+  their human console trace lines are streamed to stdout
+- `commit` / `commit --amend` delegate commit creation to `git commit`, so Git
+  config, hooks, `commit.gpgSign`, system `gpg`, and `gpg-agent` behavior apply
+- if commit creation fails after message generation, the command returns nonzero
+  after streaming trace events to stdout; the final error includes the
+  generated commit message plus the commit failure so the user can commit
+  manually
 
 ### Exit behavior
 
@@ -219,22 +263,26 @@ including:
 ### Agent loop lifecycle
 
 1. resolve config and repo context
-2. create a JSON trace session
-3. resolve project guidance for the task target path or staged paths
-4. build task-specific instructions, developer context, and initial user prompt
-5. for `release-note`, precompute the requested range context in Go before the
+2. for `commit` / `commit --amend`, collect staged paths
+3. create a JSON trace session, or a stdout-streaming human console trace for
+   `commit` / `commit --amend`
+4. resolve project guidance for the task target path or staged paths
+5. build task-specific instructions, developer context, and initial user prompt
+6. for `release-note`, precompute the requested range context in Go before the
    first provider call, including resolved refs, parent commits, submodule
    gitlink changes, submodule history when locally available, and repository
    ownership/link hints
-6. send request to the Responses API through the official OpenAI Go SDK
-7. record each request and response as JSON trace files
-8. if the model requests tools, execute only registered read-only tools
-9. record each tool call and tool output as JSON trace files
-10. append function-call and function-call-output items and continue until final
+7. send request to the Responses API through the official OpenAI Go SDK
+8. record each request and response in the active trace
+9. if the model requests tools, execute only registered read-only tools
+10. record each tool call and tool output in the active trace
+11. append function-call and function-call-output items and continue until final
     text is returned
-11. validate output against task rules
-12. if invalid and repair budget remains, run exactly one repair pass
-13. print final text to stdout
+12. validate output against task rules
+13. if invalid and repair budget remains, run exactly one repair pass
+14. print final text to stdout for generation-only commands, or stream human
+    console trace lines while generating the message and then print Git's raw
+    commit summary after creating or amending through `git commit`
 
 ### Subcommand execution flow graphs
 
@@ -308,6 +356,42 @@ flowchart TD
     Preserve --> FinalValidate[Reject delta or process phrasing]
     FinalValidate --> FinalTrace[Trace final artifact]
     FinalTrace --> Stdout([Print artifact only to stdout])
+```
+
+#### `git-agent commit` / `git-agent commit --amend`
+
+```mermaid
+flowchart TD
+    Start([git-agent commit --optional-amend]) --> Parse[Parse --amend and shared flags]
+    Parse --> Resolve[Resolve config from flags, env, defaults]
+    Resolve --> Timeout[Create task timeout context]
+    Timeout --> OpenRepo[Open repository]
+    OpenRepo --> StagedPaths[Collect staged paths]
+    StagedPaths --> Mode{Amend?}
+    Mode -- no --> Prepare[Precompute staged commit context]
+    Mode -- yes --> Guidance[Resolve project guidance for staged paths]
+    Prepare --> Guidance
+    Guidance --> Trace[Create stdout-streaming console trace]
+    Trace --> Registry[Register read-only commit-message tools]
+    Registry --> Runner[Build OpenAI runner with validator and tool specs]
+    Runner --> Request[Assemble request layers]
+    Request --> Model[Call Responses API]
+    Model --> ToolDecision{Tool calls?}
+    ToolDecision -- yes --> ExecuteTools[Execute allowed read-only tools]
+    ExecuteTools --> RecordTools[Stream trace event and update in-memory snapshot]
+    RecordTools --> Continue[Append function call and output items]
+    Continue --> Model
+    ToolDecision -- no --> Validate[Validate and shape commit message]
+    Validate --> FinalTrace[Record final artifact]
+    FinalTrace --> Commit{Amend?}
+    Commit -- no --> GitCommit[Run git commit --file]
+    Commit -- yes --> GitAmend[Run git commit --amend --file]
+    GitCommit --> Summary[Print raw Git commit summary]
+    GitAmend --> Summary
+    Summary --> Done([commit complete])
+    GitCommit -- failure --> ErrorTrace[Trace commit error event]
+    GitAmend -- failure --> ErrorTrace
+    ErrorTrace --> Manual([Return error with generated message])
 ```
 
 #### `git-agent pr-message`
@@ -390,24 +474,39 @@ The runtime must enforce:
 
 ### Session trace format
 
-Each command stores a trace under:
+Generation-only commands store persistent traces under:
 
 ```text
 .git-agent/sessions/<timestamp>-<command>/
 ```
 
-Trace files are monotonically numbered:
+Persistent trace directories contain:
 
 ```text
-001-session.json
-002-request.json
-003-response.json
-004-tool-call.json
-005-tool-output.json
-...
+events.ndjson
+session.json
+artifacts/<sha256>.txt
 ```
 
-Trace contents include:
+`events.ndjson` is an append-only NDJSON event stream. `session.json` is a
+compacted snapshot for humans and test diagnostics. Large string values are
+stored under `artifacts/` and replaced by artifact metadata in both files.
+
+`git-agent commit` and `git-agent commit --amend` do not create an on-disk trace
+session. They stream readable console trace lines to stdout. Console trace lines
+are summarized, so they keep the event type and useful counters without dumping
+raw request/response JSON or full diffs. Large or multiline string values in
+stdout stream traces are rendered as indented preview blocks with truncation
+metadata because there is no artifact directory and raw multiline patches are
+not console-friendly.
+
+Each stdout trace line has this shape:
+
+```text
+15:04:05 INF session.started command=commit
+```
+
+On-disk trace contents include:
 
 - session metadata: command, mode/range, repository summary, staged paths when
   relevant
@@ -416,9 +515,9 @@ Trace contents include:
   SDK
 - every model-requested tool call
 - every tool output returned to the model
+- final generated artifacts and commit errors when relevant
 
-Trace files are written with `json.Encoder` and indentation. They are
-diagnostic artifacts and are ignored by Git via `/.git-agent/`.
+Trace files are diagnostic artifacts and are ignored by Git via `/.git-agent/`.
 
 ## 4. Guidance resolution
 
@@ -863,8 +962,10 @@ Use temporary repositories to test:
 
 ### go-git fidelity risk
 
-Index and diff fidelity may not perfectly mirror `git` CLI behavior. This is
-most likely to affect amend and submodule-heavy scenarios.
+Index and diff fidelity in the read-only context helpers may not perfectly
+mirror `git` CLI behavior. Commit creation itself is delegated to `git commit`,
+so this risk is limited to generated context for amend and submodule-heavy
+scenarios.
 
 Mitigation:
 
@@ -906,14 +1007,18 @@ Mitigation:
 
 Session traces intentionally store prompts, provider responses, tool arguments,
 and tool outputs. They are useful for debugging but may include repository
-content.
+content. For `git-agent commit` and `git-agent commit --amend`, the same trace
+data is streamed to stdout instead of being written under `.git-agent/sessions/`;
+large string values are compacted inline with preview metadata.
 
 Mitigation:
 
 - redact API keys from request traces
-- store traces under `.git-agent/`
+- store generation-only traces under `.git-agent/`
 - ignore `.git-agent/` in Git
 - print trace directory only when `--debug` is enabled
+- document that commit-command stdout may contain repository context and should
+  be handled like trace data
 
 ## 10. Immediate acceptance criteria for the skeleton
 
@@ -936,6 +1041,10 @@ complete when:
 - `make install DESTDIR=<tmp> PREFIX=/usr/local` installs an executable binary
 - `git-agent commit-msg` and `git-agent commit-msg --amend` route through the
   bounded SDK-backed agent loop
+- `git-agent commit` and `git-agent commit --amend` route through the same
+  bounded SDK-backed commit-message loop, stream human console trace lines to
+  stdout, write no on-disk NDJSON session trace, create or amend the commit
+  through `git commit`, and print Git's raw commit summary after success
 - `git-agent pr-message` routes through the bounded SDK-backed agent loop,
   targets `origin/HEAD..HEAD`, and sends prepared branch context without
   exposing model tools
@@ -944,8 +1053,9 @@ complete when:
 - commit-message guidance resolves against staged paths
 - tools are read-only and exposed as strict function tools
 - tool outputs use the stable JSON envelope
-- every command writes a `.git-agent/sessions/<timestamp>-<command>/` trace
-- stdout contains only the final generated artifact
+- generation-only commands write a `.git-agent/sessions/<timestamp>-<command>/`
+  trace
+- generation-only stdout contains only the final generated artifact
 
 The full end-to-end migration goal is complete only after Phase 9 is performed
 outside this repository and verified against the Fish wrapper environment.

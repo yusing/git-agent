@@ -2,6 +2,7 @@ package releasenote
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -301,11 +302,7 @@ func schemaTypeIncludes(value any, want string) bool {
 	case string:
 		return v == want
 	case []string:
-		for _, typ := range v {
-			if typ == want {
-				return true
-			}
-		}
+		return slices.Contains(v, want)
 	case []any:
 		for _, typ := range v {
 			if typ == want {

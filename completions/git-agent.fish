@@ -7,7 +7,7 @@ end
 
 function __git_agent_has_subcommand
     set -l words (commandline -opc)
-    test (count $words) -gt 1; and contains -- $words[2] commit-msg pr-message release-note
+    test (count $words) -gt 1; and contains -- $words[2] commit commit-msg pr-message release-note
 end
 
 function __git_agent_using_command
@@ -22,11 +22,13 @@ end
 
 complete -c git-agent -f
 
+complete -c git-agent -n '__git_agent_no_subcommand' -a commit -d 'Generate a message and commit staged changes'
 complete -c git-agent -n '__git_agent_no_subcommand' -a commit-msg -d 'Generate a commit message from staged changes'
 complete -c git-agent -n '__git_agent_no_subcommand' -a pr-message -d 'Generate a pull request message from branch changes'
 complete -c git-agent -n '__git_agent_no_subcommand' -a release-note -d 'Generate a release note for a ref range'
 complete -c git-agent -n '__git_agent_no_subcommand' -a help -d 'Show usage'
 
+complete -c git-agent -n '__git_agent_using_command commit' -l amend -d 'Generate an amended commit message and amend HEAD'
 complete -c git-agent -n '__git_agent_using_command commit-msg' -l amend -d 'Generate an amended commit message'
 
 complete -c git-agent -n '__git_agent_has_subcommand' -l model -r -d 'Override OPENAI_MODEL'

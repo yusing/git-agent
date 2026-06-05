@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -18,7 +18,7 @@ import (
 )
 
 func TestRunWithoutArgsReturnsUsage(t *testing.T) {
-	err := New().Run(context.Background(), nil)
+	err := New().Run(t.Context(), nil)
 	if err == nil {
 		t.Fatal("expected usage error")
 	}
@@ -31,14 +31,14 @@ func TestRunCommitMsgRequiresAPIKey(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	app := &App{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
-	err := app.Run(context.Background(), []string{"commit-msg"})
+	err := app.Run(t.Context(), []string{"commit-msg"})
 	if err == nil || !strings.Contains(err.Error(), "missing ~/.codex/auth.json and OPENAI_API_KEY") {
 		t.Fatalf("expected missing auth error, got %v", err)
 	}
 }
 
 func TestRunReleaseNoteRequiresRange(t *testing.T) {
-	err := New().Run(context.Background(), []string{"release-note"})
+	err := New().Run(t.Context(), []string{"release-note"})
 	if err == nil {
 		t.Fatal("expected argument error")
 	}
@@ -66,7 +66,7 @@ func TestCommitMsgPrintsOnlyProviderArtifact(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	app := &App{stdout: &stdout, stderr: &stderr}
-	if err := app.Run(context.Background(), []string{"commit-msg"}); err != nil {
+	if err := app.Run(t.Context(), []string{"commit-msg"}); err != nil {
 		t.Fatal(err)
 	}
 	if stdout.String() != "Add parser\n" {
@@ -85,6 +85,177 @@ func TestCommitMsgPrintsOnlyProviderArtifact(t *testing.T) {
 	for _, name := range []string{"events.ndjson", "session.json"} {
 		if _, err := os.Stat(filepath.Join(sessions[0], name)); err != nil {
 			t.Fatalf("missing trace file %s: %v", name, err)
+		}
+	}
+}
+
+func TestCommitStreamsTraceThenPrintsGitSummary(t *testing.T) {
+	repoDir := initRepo(t)
+	if err := os.WriteFile(filepath.Join(repoDir, ".git", "hooks", "post-commit"), []byte("#!/bin/sh\necho hook stderr >&2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repoDir)
+	server := commitMessageServer(t, "feat: add app")
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "test-model")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"commit"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(stderr.String()); got != "hook stderr" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+
+	events, rawOutput := decodeCommitOutput(t, stdout.Bytes())
+	if !strings.Contains(rawOutput, "(root-commit)") || !strings.Contains(rawOutput, "feat: add app") {
+		t.Fatalf("raw git output = %q", rawOutput)
+	}
+	session := eventValue(t, events, "session")
+	if got := session["command"]; got != "commit" {
+		t.Fatalf("trace command = %#v", got)
+	}
+	final := eventValue(t, events, "final")
+	if got := final["text"]; got != "feat: add app" {
+		t.Fatalf("trace final text = %#v", got)
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, ".git-agent")); !os.IsNotExist(err) {
+		t.Fatalf(".git-agent stat err = %v, want not exist", err)
+	}
+	if got := gitOutputString(t, repoDir, "log", "-1", "--pretty=%s"); strings.TrimSpace(got) != "feat: add app" {
+		t.Fatalf("commit subject = %q", got)
+	}
+}
+
+func TestCommitAmendAmendsHead(t *testing.T) {
+	repoDir := initRepo(t)
+	runGit(t, repoDir, "commit", "-m", "base")
+	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("amended\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "add", "app.txt")
+	t.Chdir(repoDir)
+	server := commitMessageServer(t, "feat: amend app")
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "test-model")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"commit", "--amend"}); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	events, rawOutput := decodeCommitOutput(t, stdout.Bytes())
+	if !strings.Contains(rawOutput, "feat: amend app") {
+		t.Fatalf("raw git output = %q", rawOutput)
+	}
+	session := eventValue(t, events, "session")
+	if got := session["mode"]; got != "amend" {
+		t.Fatalf("trace mode = %#v", got)
+	}
+	if got := strings.TrimSpace(gitOutputString(t, repoDir, "rev-list", "--count", "HEAD")); got != "1" {
+		t.Fatalf("commit count = %q", got)
+	}
+	if got := strings.TrimSpace(gitOutputString(t, repoDir, "log", "-1", "--pretty=%s")); got != "feat: amend app" {
+		t.Fatalf("commit subject = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, ".git-agent")); !os.IsNotExist(err) {
+		t.Fatalf(".git-agent stat err = %v, want not exist", err)
+	}
+}
+
+func TestCommitAmendPreservesOriginalAuthor(t *testing.T) {
+	repoDir := initRepo(t)
+	runGit(t, repoDir, "config", "user.name", "Original Author")
+	runGit(t, repoDir, "config", "user.email", "original@example.com")
+	runGit(t, repoDir, "commit", "-m", "base")
+	runGit(t, repoDir, "config", "user.name", "Current Committer")
+	runGit(t, repoDir, "config", "user.email", "current@example.com")
+	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("amended\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "add", "app.txt")
+	t.Chdir(repoDir)
+	server := commitMessageServer(t, "feat: amend app")
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "test-model")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"commit", "--amend"}); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	got := strings.TrimSpace(gitOutputString(t, repoDir, "log", "-1", "--format=%an <%ae>|%cn <%ce>"))
+	want := "Original Author <original@example.com>|Current Committer <current@example.com>"
+	if got != want {
+		t.Fatalf("author/committer = %q, want %q", got, want)
+	}
+}
+
+func TestCommitFailureReturnsGeneratedMessage(t *testing.T) {
+	repoDir := initRepo(t)
+	runGit(t, repoDir, "config", "commit.gpgSign", "true")
+	fakeGPG := filepath.Join(t.TempDir(), "fake-gpg")
+	if err := os.WriteFile(fakeGPG, []byte("#!/bin/sh\necho fake gpg locked >&2\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "config", "gpg.program", fakeGPG)
+	t.Chdir(repoDir)
+	server := commitMessageServer(t, "feat: signed commit")
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "test-model")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	err := app.Run(t.Context(), []string{"commit"})
+	if err == nil {
+		t.Fatal("expected commit failure")
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	events, gitOutput := decodeCommitOutput(t, stdout.Bytes())
+	if strings.TrimSpace(gitOutput) != "" {
+		t.Fatalf("git output = %q", gitOutput)
+	}
+	final := eventValue(t, events, "final")
+	if got := final["text"]; got != "feat: signed commit" {
+		t.Fatalf("trace final text = %#v", got)
+	}
+	traceError := eventValue(t, events, "error")
+	if traceError["generated_commit_message"] != "feat: signed commit" || !strings.Contains(stdout.String(), "fake gpg locked") {
+		t.Fatalf("trace error = %#v", traceError)
+	}
+	for _, want := range []string{
+		"commit failed after message generation",
+		"git commit failed",
+		"fake gpg locked",
+		"Generated commit message:\nfeat: signed commit",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error missing %q:\n%s", want, err)
 		}
 	}
 }
@@ -124,7 +295,7 @@ func TestCommitMsgUsesChatGPTAuthFileByDefault(t *testing.T) {
 
 	var stdout bytes.Buffer
 	app := &App{stdout: &stdout, stderr: &bytes.Buffer{}}
-	if err := app.Run(context.Background(), []string{"commit-msg", "--base-url", server.URL}); err != nil {
+	if err := app.Run(t.Context(), []string{"commit-msg", "--base-url", server.URL}); err != nil {
 		t.Fatal(err)
 	}
 	if stdout.String() != "Add parser\n" {
@@ -152,7 +323,7 @@ func TestCommitMsgRequiresStagedChanges(t *testing.T) {
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
 			app := &App{stdout: &stdout, stderr: &stderr}
-			err := app.Run(context.Background(), tc.args)
+			err := app.Run(t.Context(), tc.args)
 			if err == nil || !strings.Contains(err.Error(), "commit-msg requires staged changes") {
 				t.Fatalf("expected staged changes error, got %v", err)
 			}
@@ -163,6 +334,30 @@ func TestCommitMsgRequiresStagedChanges(t *testing.T) {
 				t.Fatalf("stderr = %q", stderr.String())
 			}
 		})
+	}
+}
+
+func TestCommitRequiresStagedChanges(t *testing.T) {
+	repoDir := initRepo(t)
+	runGit(t, repoDir, "commit", "-m", "base")
+	t.Chdir(repoDir)
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", "")
+	t.Setenv("OPENAI_MODEL", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	err := app.Run(t.Context(), []string{"commit"})
+	if err == nil || !strings.Contains(err.Error(), "commit requires staged changes") {
+		t.Fatalf("expected staged changes error, got %v", err)
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
 
@@ -193,7 +388,7 @@ func TestCommitMsgRestoresMatchingRecentTaskIDSuffix(t *testing.T) {
 
 	var stdout bytes.Buffer
 	app := &App{stdout: &stdout, stderr: &bytes.Buffer{}}
-	if err := app.Run(context.Background(), []string{"commit-msg"}); err != nil {
+	if err := app.Run(t.Context(), []string{"commit-msg"}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(stdout.String(), "fix(schedtask): log skipped duplicate task creation (T46571)\n\n") {
@@ -237,7 +432,7 @@ func TestPRMessageUsesPreparedOriginHeadContextAndPrintsArtifact(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	app := &App{stdout: &stdout, stderr: &stderr}
-	if err := app.Run(context.Background(), []string{"pr-message"}); err != nil {
+	if err := app.Run(t.Context(), []string{"pr-message"}); err != nil {
 		t.Fatal(err)
 	}
 	if stdout.String() != "feat: update app from branch\n" {
@@ -298,7 +493,7 @@ func TestReleaseNoteRaisesStepAndTimeoutFloor(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	app := &App{stdout: &stdout, stderr: &stderr}
-	if err := app.Run(context.Background(), []string{"release-note", "--timeout", "30s", "--max-steps", "3", "v1.0.0", "HEAD"}); err != nil {
+	if err := app.Run(t.Context(), []string{"release-note", "--timeout", "30s", "--max-steps", "3", "v1.0.0", "HEAD"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(requests) == 0 {
@@ -349,7 +544,7 @@ func TestCommitMsgForwardsFastAndThinkingFlags(t *testing.T) {
 	t.Setenv("OPENAI_MODEL", "test-model")
 
 	app := &App{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
-	if err := app.Run(context.Background(), []string{"commit-msg", "--fast", "--medium"}); err != nil {
+	if err := app.Run(t.Context(), []string{"commit-msg", "--fast", "--medium"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(requests) != 1 {
@@ -369,7 +564,7 @@ func TestCommitMsgForwardsFastAndThinkingFlags(t *testing.T) {
 
 func TestRunRejectsConflictingThinkingFlags(t *testing.T) {
 	app := &App{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
-	err := app.Run(context.Background(), []string{"commit-msg", "--high", "--xhigh"})
+	err := app.Run(t.Context(), []string{"commit-msg", "--high", "--xhigh"})
 	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Fatalf("expected mutually exclusive error, got %v", err)
 	}
@@ -397,6 +592,201 @@ func runGit(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %v failed: %v\n%s", args, err, out)
 	}
+}
+
+func gitOutputString(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+	return string(out)
+}
+
+func commitMessageServer(t *testing.T, message string) *httptest.Server {
+	t.Helper()
+	escaped, err := json.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: ")
+		fmt.Fprintf(w, `{"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"test-model","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":%s,"annotations":[]}]}]}}`, escaped)
+		fmt.Fprint(w, "\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+}
+
+func decodeCommitOutput(t *testing.T, data []byte) ([]map[string]any, string) {
+	t.Helper()
+	var events []map[string]any
+	var rest bytes.Buffer
+	inRest := false
+	lines := bytes.Split(data, []byte("\n"))
+	for idx, line := range lines {
+		if len(line) == 0 {
+			if inRest && idx < len(lines)-1 {
+				rest.WriteByte('\n')
+			}
+			continue
+		}
+		text := string(line)
+		if !inRest {
+			if event, ok := parseTextTraceEvent(t, text); ok {
+				events = append(events, event)
+				continue
+			}
+			if len(events) > 0 && strings.HasPrefix(text, "  ") && !strings.HasPrefix(text, "    ") {
+				parseContinuationFields(events[len(events)-1], strings.TrimSpace(text))
+				continue
+			}
+			if strings.HasPrefix(text, "    ") {
+				continue
+			}
+		}
+		inRest = true
+		rest.Write(line)
+		if idx < len(lines)-1 {
+			rest.WriteByte('\n')
+		}
+	}
+	if len(events) == 0 {
+		t.Fatalf("no trace events in output:\n%s", data)
+	}
+	return events, rest.String()
+}
+
+func parseTextTraceEvent(t *testing.T, line string) (map[string]any, bool) {
+	t.Helper()
+	fields := splitTextFields(line)
+	if len(fields) < 3 || !consoleTimeField(fields[0]) || !consoleLevelField(fields[1]) {
+		return nil, false
+	}
+	event := map[string]any{
+		"time":  fields[0],
+		"level": fields[1],
+		"msg":   fields[2],
+	}
+	parseFields(event, fields[3:])
+	return event, true
+}
+
+func parseContinuationFields(event map[string]any, line string) {
+	if strings.HasSuffix(line, ":") {
+		return
+	}
+	parseFields(event, splitTextFields(line))
+}
+
+func parseFields(event map[string]any, fields []string) {
+	for _, field := range fields {
+		key, value, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		if unquoted, err := strconv.Unquote(value); err == nil {
+			value = unquoted
+		}
+		if strings.Contains(key, ".") {
+			setNested(event, key, value)
+			continue
+		}
+		event[key] = value
+	}
+}
+
+func consoleTimeField(value string) bool {
+	parts := strings.Split(value, ":")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if len(part) != 2 {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func consoleLevelField(value string) bool {
+	switch value {
+	case "DBG", "INF", "WRN", "ERR":
+		return true
+	default:
+		return false
+	}
+}
+
+func splitTextFields(line string) []string {
+	var fields []string
+	start := -1
+	inQuote := false
+	escaped := false
+	for idx, r := range line {
+		if start < 0 {
+			if r == ' ' {
+				continue
+			}
+			start = idx
+		}
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch r {
+		case '\\':
+			if inQuote {
+				escaped = true
+			}
+		case '"':
+			inQuote = !inQuote
+		case ' ':
+			if !inQuote {
+				fields = append(fields, line[start:idx])
+				start = -1
+			}
+		}
+	}
+	if start >= 0 {
+		fields = append(fields, line[start:])
+	}
+	return fields
+}
+
+func setNested(root map[string]any, dotted string, value string) {
+	parts := strings.Split(dotted, ".")
+	for _, part := range parts[:len(parts)-1] {
+		next, ok := root[part].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			root[part] = next
+		}
+		root = next
+	}
+	root[parts[len(parts)-1]] = value
+}
+
+func eventValue(t *testing.T, events []map[string]any, kind string) map[string]any {
+	t.Helper()
+	for _, event := range events {
+		if event["msg"] != kind {
+			continue
+		}
+		return event
+	}
+	t.Fatalf("missing trace event %q in %#v", kind, events)
+	return nil
 }
 
 func writeCodexAuth(t *testing.T, content string) {

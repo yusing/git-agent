@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -45,6 +47,8 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	}
 
 	switch args[0] {
+	case "commit":
+		return a.runCommit(ctx, args[1:])
 	case "commit-msg":
 		return a.runCommitMsg(ctx, args[1:])
 	case "pr-message":
@@ -59,26 +63,10 @@ func (a *App) Run(ctx context.Context, args []string) error {
 }
 
 func (a *App) runCommitMsg(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("commit-msg", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-
-	var amend bool
-	var opts config.Options
-	fs.BoolVar(&amend, "amend", false, "generate an amended commit message")
-	registerSharedFlags(fs, &opts)
-
-	if err := fs.Parse(args); err != nil {
+	mode, opts, err := parseCommitFlags("commit-msg", args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() != 0 {
-		return errors.New("commit-msg does not accept positional arguments")
-	}
-
-	mode := commitmsg.ModeNormal
-	if amend {
-		mode = commitmsg.ModeAmend
-	}
-
 	cfg, err := config.Resolve(opts)
 	if err != nil {
 		return err
@@ -97,20 +85,6 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 	if len(stagedPaths) == 0 {
 		return errors.New("commit-msg requires staged changes")
 	}
-	userPrompt := commitmsg.UserPrompt(mode, cfg.MaxSteps, cfg.MaxToolCalls)
-	var preparedCommit *commitmsg.PreparedCommitContext
-	if mode == commitmsg.ModeNormal {
-		prepared, err := commitmsg.PrepareCommitContext(repo)
-		if err != nil {
-			return err
-		}
-		preparedCommit = &prepared
-		userPrompt = commitmsg.UserPromptWithPreparedCommitContext(prepared, cfg.MaxSteps, cfg.MaxToolCalls)
-	}
-	renderedGuidance, err := resolveGuidanceForPaths(repo, cfg.GuidanceFamily, stagedPaths)
-	if err != nil {
-		return err
-	}
 	recorder, err := trace.New(repo.RootPath, "commit-msg")
 	if err != nil {
 		return err
@@ -118,8 +92,107 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 	if cfg.Debug {
 		fmt.Fprintf(a.stderr, "trace_dir=%s\n", recorder.Dir())
 	}
+	result, err := a.generateCommitMessage(taskCtx, cfg, repo, stagedPaths, mode, "commit-msg", recorder)
+	if err != nil {
+		return err
+	}
+	return a.writeResult(cfg, result)
+}
+
+func (a *App) runCommit(ctx context.Context, args []string) error {
+	mode, opts, err := parseCommitFlags("commit", args)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Resolve(opts)
+	if err != nil {
+		return err
+	}
+	taskCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+
+	repo, err := gitctx.Open(".")
+	if err != nil {
+		return err
+	}
+	stagedPaths, err := repo.StagedPaths()
+	if err != nil {
+		return err
+	}
+	if len(stagedPaths) == 0 {
+		return errors.New("commit requires staged changes")
+	}
+	recorder, err := trace.NewStream("commit", a.stdout)
+	if err != nil {
+		return err
+	}
+	result, err := a.generateCommitMessage(taskCtx, cfg, repo, stagedPaths, mode, "commit", recorder)
+	if err != nil {
+		return err
+	}
+	if cfg.Debug {
+		fmt.Fprintf(a.stderr, "tool_calls=%d repair_calls=%d\n", result.ToolCalls, result.RepairCalls)
+	}
+
+	commitOutput, err := gitCommit(taskCtx, repo, result.Text, mode == commitmsg.ModeAmend)
+	if err != nil {
+		if writeErr := recorder.Write("error", map[string]any{
+			"message":                  err.Error(),
+			"generated_commit_message": result.Text,
+		}); writeErr != nil {
+			return errors.Join(commitFailureError(result.Text, err), writeErr)
+		}
+		return commitFailureError(result.Text, err)
+	}
+	if commitOutput.stderr != "" {
+		if _, err := fmt.Fprint(a.stderr, commitOutput.stderr); err != nil {
+			return err
+		}
+	}
+	_, err = fmt.Fprint(a.stdout, commitOutput.stdout)
+	return err
+}
+
+func parseCommitFlags(command string, args []string) (commitmsg.Mode, config.Options, error) {
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	var amend bool
+	var opts config.Options
+	fs.BoolVar(&amend, "amend", false, "generate an amended commit message")
+	registerSharedFlags(fs, &opts)
+
+	if err := fs.Parse(args); err != nil {
+		return "", config.Options{}, err
+	}
+	if fs.NArg() != 0 {
+		return "", config.Options{}, fmt.Errorf("%s does not accept positional arguments", command)
+	}
+
+	mode := commitmsg.ModeNormal
+	if amend {
+		mode = commitmsg.ModeAmend
+	}
+	return mode, opts, nil
+}
+
+func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo *gitctx.Repository, stagedPaths []string, mode commitmsg.Mode, command string, recorder *trace.Recorder) (agent.Result, error) {
+	userPrompt := commitmsg.UserPrompt(mode, cfg.MaxSteps, cfg.MaxToolCalls)
+	var preparedCommit *commitmsg.PreparedCommitContext
+	if mode == commitmsg.ModeNormal {
+		prepared, err := commitmsg.PrepareCommitContext(repo)
+		if err != nil {
+			return agent.Result{}, err
+		}
+		preparedCommit = &prepared
+		userPrompt = commitmsg.UserPromptWithPreparedCommitContext(prepared, cfg.MaxSteps, cfg.MaxToolCalls)
+	}
+	renderedGuidance, err := resolveGuidanceForPaths(repo, cfg.GuidanceFamily, stagedPaths)
+	if err != nil {
+		return agent.Result{}, err
+	}
 	session := map[string]any{
-		"command":      "commit-msg",
+		"command":      command,
 		"mode":         mode,
 		"repo":         repo.Summary(),
 		"staged_paths": stagedPaths,
@@ -128,7 +201,7 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 		session["prepared_commit_context"] = preparedCommit.TraceValue()
 	}
 	if err := recorder.Write("session", session); err != nil {
-		return err
+		return agent.Result{}, err
 	}
 	registry := tools.NewRegistry(repo)
 	runner := agent.OpenAIRunner{
@@ -140,8 +213,8 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 		Trace:     recorder,
 		Budget:    a.budgetHandler(),
 	}
-	environment := environmentContext(repo, "commit-msg", string(mode), cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
-	result, err := runner.Run(taskCtx, agent.Request{
+	environment := environmentContext(repo, command, string(mode), cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
+	result, err := runner.Run(ctx, agent.Request{
 		SystemPrompt:      commitmsg.SystemPrompt(mode),
 		ToolPolicy:        toolPolicy(),
 		Environment:       environment,
@@ -152,23 +225,76 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 		RepairOnValidator: true,
 	})
 	if err != nil {
-		return err
+		return agent.Result{}, err
 	}
 	result.Text = commitmsg.Shape(result.Text)
 	if recent, err := repo.RecentCommits(10); err == nil {
 		result.Text = commitmsg.PreserveTaskIDSuffix(result.Text, recent)
 	}
 	if errs := commitmsg.Validate(mode, result.Text); len(errs) > 0 {
-		return fmt.Errorf("validation failed after shaping: %v", errs)
+		return agent.Result{}, fmt.Errorf("validation failed after shaping: %v", errs)
 	}
 	if err := recorder.Write("final", map[string]any{
 		"text":         result.Text,
 		"tool_calls":   result.ToolCalls,
 		"repair_calls": result.RepairCalls,
 	}); err != nil {
-		return err
+		return agent.Result{}, err
 	}
-	return a.writeResult(cfg, result)
+	return result, nil
+}
+
+type gitCommitOutput struct {
+	stdout string
+	stderr string
+}
+
+func gitCommit(ctx context.Context, repo *gitctx.Repository, message string, amend bool) (gitCommitOutput, error) {
+	args := []string{"commit", "--file", "-"}
+	if amend {
+		args = []string{"commit", "--amend", "--file", "-"}
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = repo.RootPath
+	cmd.Stdin = strings.NewReader(strings.TrimSpace(message) + "\n")
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		output := gitCommitOutput{stdout: stdout.String(), stderr: stderr.String()}
+		return output, gitCommitError(amend, output, err)
+	}
+	return gitCommitOutput{stdout: stdout.String(), stderr: stderr.String()}, nil
+}
+
+func gitCommitError(amend bool, output gitCommitOutput, err error) error {
+	command := "git commit"
+	if amend {
+		command = "git commit --amend"
+	}
+	details := output.ErrorDetails()
+	if details == "" {
+		return fmt.Errorf("%s failed: %w", command, err)
+	}
+	return fmt.Errorf("%s failed: %w\n%s", command, err, details)
+}
+
+func (o gitCommitOutput) ErrorDetails() string {
+	var parts []string
+	if text := strings.TrimSpace(o.stdout); text != "" {
+		parts = append(parts, "stdout:\n"+text)
+	}
+	if text := strings.TrimSpace(o.stderr); text != "" {
+		parts = append(parts, "stderr:\n"+text)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func commitFailureError(message string, err error) error {
+	return fmt.Errorf("commit failed after message generation: %w\n\nGenerated commit message:\n%s", err, strings.TrimSpace(message))
 }
 
 func (a *App) runPRMessage(ctx context.Context, args []string) error {
@@ -407,7 +533,7 @@ func environmentContext(repo *gitctx.Repository, command, mode, guidanceFamily s
 <guidance_family>%s</guidance_family>
 <max_model_steps>%d</max_model_steps>
 <max_tool_calls>%d</max_tool_calls>
-<stdout_contract>final artifact only</stdout_contract>
+<model_output_contract>final artifact only</model_output_contract>
 </environment_context>`, repo.WorkPath, repo.RootPath, command, mode, guidanceFamily, maxSteps, maxToolCalls)
 }
 
@@ -480,6 +606,7 @@ func usageError(prefix string) error {
 		b.WriteString("\n\n")
 	}
 	b.WriteString("usage:\n")
+	b.WriteString("  git-agent commit [--amend] [flags]\n")
 	b.WriteString("  git-agent commit-msg [--amend] [flags]\n")
 	b.WriteString("  git-agent pr-message [flags]\n")
 	b.WriteString("  git-agent release-note <base> <release> [flags]\n")
