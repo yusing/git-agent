@@ -6,7 +6,7 @@ toolchain go1.26.3
 
 require (
 	github.com/go-git/go-git/v6 v6.0.0-alpha.4
-	github.com/openai/openai-go/v3 v3.37.0
+	github.com/openai/openai-go/v3 v3.39.0
 )
 
 require (
