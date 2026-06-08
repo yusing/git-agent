@@ -43,6 +43,34 @@ func TestValidateAmendAgainstOriginalPreservesHeadSubject(t *testing.T) {
 	}
 }
 
+func TestValidateWithPreparedCommitContextRequiresSubmoduleSummaries(t *testing.T) {
+	t.Parallel()
+
+	prepared := PreparedCommitContext{
+		Mode: ModeNormal,
+		StagedSubmodules: []PreparedSubmodule{{
+			Path: "wiki",
+			Commits: []gitctx.CommitInfo{
+				{Summary: "docs(godoxy): document Docker label shortcuts"},
+				{Summary: "docs(godoxy): document wildcard route aliases"},
+			},
+		}},
+	}
+
+	errs := ValidateWithPreparedCommitContext(prepared, "chore: update wiki")
+	if len(errs) == 0 || !strings.Contains(strings.Join(errs, "\n"), "docs(godoxy): document Docker label shortcuts") {
+		t.Fatalf("expected missing submodule summary error, got %v", errs)
+	}
+
+	valid := `chore: update wiki
+
+- docs(godoxy): document Docker label shortcuts
+- docs(godoxy): document wildcard route aliases`
+	if errs := ValidateWithPreparedCommitContext(prepared, valid); len(errs) != 0 {
+		t.Fatalf("expected submodule summaries to pass, got %v", errs)
+	}
+}
+
 func TestPromptsNameRequiredScope(t *testing.T) {
 	t.Parallel()
 

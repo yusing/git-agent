@@ -89,6 +89,70 @@ func TestCommitMsgPrintsOnlyProviderArtifact(t *testing.T) {
 	}
 }
 
+func TestCommitMsgRepairsSubmoduleUpdateThatDropsCommitSummary(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	root := t.TempDir()
+	wikiDir := filepath.Join(root, "wiki-src")
+	if err := os.MkdirAll(wikiDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, wikiDir, "init")
+	runGit(t, wikiDir, "config", "user.name", "Test User")
+	runGit(t, wikiDir, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(wikiDir, "docs.md"), []byte("wildcards\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, wikiDir, "add", "docs.md")
+	runGit(t, wikiDir, "commit", "-m", "docs(godoxy): document wildcard route aliases")
+	baseSHA := strings.TrimSpace(gitOutputString(t, wikiDir, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(wikiDir, "docs.md"), []byte("wildcards\nlabels\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, wikiDir, "add", "docs.md")
+	runGit(t, wikiDir, "commit", "-m", "docs(godoxy): document Docker label shortcuts")
+	releaseSHA := strings.TrimSpace(gitOutputString(t, wikiDir, "rev-parse", "HEAD"))
+
+	repoDir := filepath.Join(root, "webui")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "config", "user.name", "Test User")
+	runGit(t, repoDir, "config", "user.email", "test@example.com")
+	runGit(t, repoDir, "-c", "protocol.file.allow=always", "submodule", "add", wikiDir, "wiki")
+	runGit(t, filepath.Join(repoDir, "wiki"), "checkout", baseSHA)
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-m", "feat: add wiki submodule")
+
+	runGit(t, filepath.Join(repoDir, "wiki"), "checkout", releaseSHA)
+	runGit(t, repoDir, "add", "wiki")
+	t.Chdir(repoDir)
+
+	server := commitMessageSequenceServer(t,
+		"chore: update wiki",
+		"chore: update wiki\n\n- docs(godoxy): document Docker label shortcuts",
+	)
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "test-model")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"commit-msg"}); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "chore: update wiki\n\n- docs(godoxy): document Docker label shortcuts" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
 func TestCommitStreamsTraceThenPrintsGitSummary(t *testing.T) {
 	repoDir := initRepo(t)
 	if err := os.WriteFile(filepath.Join(repoDir, ".git", "hooks", "post-commit"), []byte("#!/bin/sh\necho hook stderr >&2\n"), 0o755); err != nil {

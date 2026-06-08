@@ -761,6 +761,9 @@ Behavior:
   helper files or tests are added
 - use `feat` only when the staged diff introduces a genuinely new user-visible
   capability, API, command, config option, or behavior
+- when staged submodule commit summaries are available, include those summaries
+  in the generated message rather than emitting only a generic submodule-ref
+  update subject
 
 Output rules:
 
@@ -861,6 +864,8 @@ Commit message validator checks at minimum:
 - no stray commentary
 - amend mode does not use process/delta phrasing
 - amend mode preserves the original HEAD subject
+- normal mode includes staged submodule commit summaries when prepared context
+  exposes them
 - body lines stay within the target width after output shaping (target width: 72
   characters after shaping, except for long unbreakable tokens such as URLs)
 

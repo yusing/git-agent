@@ -613,7 +613,7 @@ Rules:
 - if focus_diff is present, use it together with diff and context_pack; focus_diff_paths explains which omitted or cut-off paths it covers
 - choose refactor when staged evidence shows extraction, relocation, deduplication, or internal reorganization of existing behavior; choose feat only for genuinely new user-visible capability/API/command/config behavior
 - do not default to "add" phrasing because files are new; for extraction-heavy changes prefer "extract", "move", "centralize", "consolidate", or "reuse"
-- if staged_submodules contains commits, use those submodule commit summaries as staged evidence; do not collapse them to a generic "newer submodule refs" message
+- if staged_submodules contains commits, include each submodule commit summary in the commit message and use those summaries as staged evidence; do not collapse them to a generic "newer submodule refs" message
 - do not copy phrasing from recent commits or previous_head_diff as if it were current staged work
 - if diff_truncated is true, stay conservative and describe only visible evidence
 - if outlier_diff_truncated is true, stay conservative for outlier details beyond visible hunks
@@ -915,6 +915,47 @@ func ValidateAmendAgainstOriginal(originalMessage, output string) []string {
 		errs = append(errs, fmt.Sprintf("amend output must preserve original HEAD subject %q, got %q", originalSubject, subject))
 	}
 	return errs
+}
+
+func ValidateWithPreparedCommitContext(prepared PreparedCommitContext, output string) []string {
+	errs := Validate(ModeNormal, output)
+	return append(errs, validateStagedSubmoduleSummaries(prepared.StagedSubmodules, output)...)
+}
+
+func validateStagedSubmoduleSummaries(submodules []PreparedSubmodule, output string) []string {
+	expected := stagedSubmoduleCommitSummaries(submodules)
+	if len(expected) == 0 {
+		return nil
+	}
+
+	normalizedOutput := normalizeSummaryText(output)
+	var missing []string
+	for _, summary := range expected {
+		if !strings.Contains(normalizedOutput, normalizeSummaryText(summary)) {
+			missing = append(missing, summary)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("commit message must include staged submodule commit summaries: %s", strings.Join(missing, "; "))}
+}
+
+func stagedSubmoduleCommitSummaries(submodules []PreparedSubmodule) []string {
+	var summaries []string
+	for _, submodule := range submodules {
+		for _, commit := range submodule.Commits {
+			summary := strings.TrimSpace(commit.Summary)
+			if summary != "" {
+				summaries = append(summaries, summary)
+			}
+		}
+	}
+	return summaries
+}
+
+func normalizeSummaryText(text string) string {
+	return strings.Join(strings.Fields(strings.ToLower(text)), " ")
 }
 
 func firstSubjectLine(message string) string {

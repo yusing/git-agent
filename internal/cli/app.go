@@ -224,6 +224,11 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 		return agent.Result{}, err
 	}
 	validator := func(text string) []string { return commitmsg.Validate(mode, text) }
+	if preparedCommit != nil {
+		validator = func(text string) []string {
+			return commitmsg.ValidateWithPreparedCommitContext(*preparedCommit, text)
+		}
+	}
 	if mode == commitmsg.ModeAmend {
 		validator = func(text string) []string {
 			return commitmsg.ValidateAmendAgainstOriginal(originalAmendMessage, text)
