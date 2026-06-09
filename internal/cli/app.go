@@ -416,13 +416,24 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 	fs.SetOutput(io.Discard)
 
 	var opts config.Options
+	var outputPath string
 	registerSharedFlags(fs, &opts)
+	fs.StringVar(&outputPath, "out", "", "write release note markdown to file and stream trace to stdout")
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 2 {
 		return errors.New("release-note requires <base> <release>")
+	}
+	outSet := false
+	fs.Visit(func(f *flag.Flag) {
+		outSet = outSet || f.Name == "out"
+	})
+	if outSet {
+		if err := preflightWritableOutput(outputPath); err != nil {
+			return err
+		}
 	}
 
 	cfg, err := config.Resolve(opts)
@@ -446,18 +457,27 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	recorder, err := trace.New(repo.RootPath, "release-note")
+	var recorder *trace.Recorder
+	if outSet {
+		recorder, err = trace.NewStream("release-note", a.stdout)
+	} else {
+		recorder, err = trace.New(repo.RootPath, "release-note")
+	}
 	if err != nil {
 		return err
 	}
-	if cfg.Debug {
+	if cfg.Debug && !outSet {
 		fmt.Fprintf(a.stderr, "trace_dir=%s\n", recorder.Dir())
 	}
-	if err := recorder.Write("session", map[string]any{
+	session := map[string]any{
 		"command": "release-note",
 		"range":   fs.Arg(0) + ".." + fs.Arg(1),
 		"repo":    repo.Summary(),
-	}); err != nil {
+	}
+	if outSet {
+		session["out"] = outputPath
+	}
+	if err := recorder.Write("session", session); err != nil {
 		return err
 	}
 	registry := tools.NewRegistry(repo)
@@ -509,7 +529,63 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 	}); err != nil {
 		return err
 	}
+	if outSet {
+		if cfg.Debug {
+			fmt.Fprintf(a.stderr, "tool_calls=%d repair_calls=%d\n", result.ToolCalls, result.RepairCalls)
+		}
+		return writeOutputFile(outputPath, result.Text)
+	}
 	return a.writeResult(cfg, result)
+}
+
+func preflightWritableOutput(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("--out requires a file path")
+	}
+
+	info, err := os.Stat(path)
+	if err == nil {
+		if info.IsDir() {
+			return fmt.Errorf("--out %q is a directory", path)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("--out %q is not a regular file", path)
+		}
+		file, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err != nil {
+			return fmt.Errorf("--out %q is not writable: %w", path, err)
+		}
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("--out %q writable check failed: %w", path, err)
+		}
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("check --out %q: %w", path, err)
+	}
+
+	dir := filepath.Dir(path)
+	file, err := os.CreateTemp(dir, ".git-agent-out-*")
+	if err != nil {
+		return fmt.Errorf("--out directory %q is not writable: %w", dir, err)
+	}
+	tempName := file.Name()
+	closeErr := file.Close()
+	removeErr := os.Remove(tempName)
+	if closeErr != nil {
+		return fmt.Errorf("--out directory %q writable check failed: %w", dir, closeErr)
+	}
+	if removeErr != nil {
+		return fmt.Errorf("--out directory %q cleanup failed: %w", dir, removeErr)
+	}
+	return nil
+}
+
+func writeOutputFile(path string, text string) error {
+	if err := os.WriteFile(path, []byte(strings.TrimSpace(text)+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write --out %q: %w", path, err)
+	}
+	return nil
 }
 
 func registerSharedFlags(fs *flag.FlagSet, opts *config.Options) {
@@ -640,6 +716,6 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent commit [--amend] [flags]\n")
 	b.WriteString("  git-agent commit-msg [--amend] [flags]\n")
 	b.WriteString("  git-agent pr-message [flags]\n")
-	b.WriteString("  git-agent release-note <base> <release> [flags]\n")
+	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")
 	return errors.New(b.String())
 }

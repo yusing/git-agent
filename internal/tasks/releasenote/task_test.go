@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/yusing/git-agent/internal/gitctx"
 )
 
 func TestValidateRejectsNonJSON(t *testing.T) {
@@ -180,6 +182,66 @@ func TestOutputSchemaDoesNotRequestChildBullets(t *testing.T) {
 
 	if schemaHasProperty(OutputSchema(), "children") {
 		t.Fatal("schema should not expose children; release notes should stay flat")
+	}
+}
+
+func TestPreparedCommitsIncludeLineClampedFullMessages(t *testing.T) {
+	t.Parallel()
+
+	message := strings.Join([]string{
+		"feat(webui): add command option highlighting",
+		"",
+		"Adds completion support for RuleDo option blocks.",
+		"Highlights pass and bypass variants.",
+		"Keeps invalid option blocks visually distinct.",
+		"Line 6",
+		"Line 7",
+		"Line 8",
+		"Line 9",
+		"Line 10",
+		"Line 11",
+	}, "\n")
+
+	prepared := preparedCommits([]gitctx.CommitMessageInfo{{
+		SHA:     "deadbeef",
+		Summary: "feat(webui): add command option highlighting",
+		Message: message,
+	}}, "https://github.com/example/webui")
+
+	if len(prepared) != 1 {
+		t.Fatalf("prepared commits = %d", len(prepared))
+	}
+	if got := strings.Count(prepared[0].Message, "\n") + 1; got != preparedCommitMessageMaxLines {
+		t.Fatalf("message lines = %d, want %d:\n%s", got, preparedCommitMessageMaxLines, prepared[0].Message)
+	}
+	if strings.Contains(prepared[0].Message, "Line 11") {
+		t.Fatalf("message was not line-clamped:\n%s", prepared[0].Message)
+	}
+	if !strings.Contains(prepared[0].Message, "Adds completion support") {
+		t.Fatalf("message missing body content:\n%s", prepared[0].Message)
+	}
+}
+
+func TestPreparedCommitsIncludeWordClampedFullMessages(t *testing.T) {
+	t.Parallel()
+
+	words := make([]string, preparedCommitMessageMaxWords+3)
+	for i := range words {
+		words[i] = fmt.Sprintf("word%d", i)
+	}
+
+	prepared := preparedCommits([]gitctx.CommitMessageInfo{{
+		SHA:     "deadbeef",
+		Summary: "feat(core): add route support",
+		Message: strings.Join(words, " "),
+	}}, "")
+
+	gotWords := strings.Fields(prepared[0].Message)
+	if len(gotWords) != preparedCommitMessageMaxWords {
+		t.Fatalf("message words = %d, want %d", len(gotWords), preparedCommitMessageMaxWords)
+	}
+	if strings.Contains(prepared[0].Message, "word1000") {
+		t.Fatalf("message was not word-clamped")
 	}
 }
 
@@ -563,6 +625,7 @@ func TestUserPromptContainsSchemaInstructionsAndPreparedContext(t *testing.T) {
 		ParentCommits: []PreparedCommit{{
 			SHA:     "deadbeef",
 			Summary: "refactor(route): remove path_patterns",
+			Message: "refactor(route): remove path_patterns\n\nRoute config now uses path_rules.",
 			URL:     "https://github.com/example/godoxy/commit/deadbeef",
 		}},
 		RequiredSubmoduleGroups: []string{"webui"},
@@ -576,6 +639,7 @@ func TestUserPromptContainsSchemaInstructionsAndPreparedContext(t *testing.T) {
 			Commits: []PreparedCommit{{
 				SHA:     "cafebabe",
 				Summary: "docs: refresh routing reference",
+				Message: "docs: refresh routing reference\n\nUpdates operator examples.",
 				URL:     "https://github.com/example/webui/commit/cafebabe",
 			}},
 		}},
@@ -587,11 +651,13 @@ func TestUserPromptContainsSchemaInstructionsAndPreparedContext(t *testing.T) {
 		`"recommended_sections": [`,
 		`"required_submodule_groups": [`,
 		`"path": "webui"`,
+		`"message": "refactor(route): remove path_patterns\n\nRoute config now uses path_rules."`,
 		`"label"`,
 		`"refs"`,
 		`ref type must be one of: "commit", "pr", "issue"`,
 		`avoid low-signal benefit clauses`,
 		`add a second clause only when it adds non-obvious operator impact`,
+		`use each commit's clamped "message" content, not just "summary"`,
 		"only use fallback tools if the prepared context is missing information you need",
 	} {
 		if !strings.Contains(got, want) {

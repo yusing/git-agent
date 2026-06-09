@@ -42,6 +42,14 @@ type CommitInfo struct {
 	Date    string `json:"date,omitempty"`
 }
 
+type CommitMessageInfo struct {
+	SHA     string `json:"sha"`
+	Summary string `json:"summary"`
+	Message string `json:"message,omitempty"`
+	Author  string `json:"author,omitempty"`
+	Date    string `json:"date,omitempty"`
+}
+
 type PathChange struct {
 	Path     string `json:"path"`
 	Staging  string `json:"staging"`
@@ -449,6 +457,34 @@ func (r *Repository) LogFrom(base, release string, limit int) ([]CommitInfo, err
 	var commits []CommitInfo
 	err = iter.ForEach(func(commit *object.Commit) error {
 		commits = append(commits, commitInfo(commit))
+		if limit > 0 && len(commits) >= limit {
+			return stopeach{}
+		}
+		return nil
+	})
+	if errors.As(err, new(stopeach)) {
+		return commits, nil
+	}
+	return commits, err
+}
+
+func (r *Repository) LogMessagesFrom(base, release string, limit int) ([]CommitMessageInfo, error) {
+	from, err := r.resolveLogStart(release)
+	if err != nil {
+		return nil, err
+	}
+
+	excluded, err := r.reachableCommitSet(base)
+	if err != nil {
+		return nil, err
+	}
+
+	iter := object.NewCommitPreorderIter(from, excluded, nil)
+	defer iter.Close()
+
+	var commits []CommitMessageInfo
+	err = iter.ForEach(func(commit *object.Commit) error {
+		commits = append(commits, commitMessageInfo(commit))
 		if limit > 0 && len(commits) >= limit {
 			return stopeach{}
 		}
@@ -1069,11 +1105,23 @@ func filePathsFromPatch(patch *object.Patch) []string {
 }
 
 func commitInfo(commit *object.Commit) CommitInfo {
+	message := strings.TrimSpace(commit.Message)
 	return CommitInfo{
 		SHA:     commit.Hash.String(),
-		Summary: strings.Split(strings.TrimSpace(commit.Message), "\n")[0],
+		Summary: strings.Split(message, "\n")[0],
 		Author:  commit.Author.Name,
 		Date:    commit.Author.When.Format(time.RFC3339),
+	}
+}
+
+func commitMessageInfo(commit *object.Commit) CommitMessageInfo {
+	info := commitInfo(commit)
+	return CommitMessageInfo{
+		SHA:     info.SHA,
+		Summary: info.Summary,
+		Message: strings.TrimSpace(commit.Message),
+		Author:  info.Author,
+		Date:    info.Date,
 	}
 }
 

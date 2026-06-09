@@ -600,6 +600,78 @@ func TestReleaseNoteRaisesStepAndTimeoutFloor(t *testing.T) {
 	}
 }
 
+func TestReleaseNoteOutWritesFileAndStreamsTrace(t *testing.T) {
+	repoDir := initRepo(t)
+	t.Chdir(repoDir)
+	runGit(t, repoDir, "commit", "--allow-empty", "-m", "base")
+	runGit(t, repoDir, "tag", "-m", "v1.0.0", "v1.0.0")
+	runGit(t, repoDir, "commit", "--allow-empty", "-m", "feat: release app")
+
+	server := commitMessageSequenceServer(t, `{"sections":[]}`)
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "test-model")
+
+	outPath := filepath.Join(t.TempDir(), "release.md")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"release-note", "--out", outPath, "v1.0.0", "HEAD"}); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	written, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(written); !strings.Contains(got, "### Full Changelog") || !strings.HasSuffix(got, "\n") {
+		t.Fatalf("release note file = %q", got)
+	}
+
+	events, rest := decodeCommitOutput(t, stdout.Bytes())
+	if strings.TrimSpace(rest) != "" {
+		t.Fatalf("unexpected non-trace stdout = %q", rest)
+	}
+	session := eventValue(t, events, "session")
+	if got := session["command"]; got != "release-note" {
+		t.Fatalf("trace command = %#v", got)
+	}
+	if got := eventValue(t, events, "final")["tool_calls"]; got != "0" {
+		t.Fatalf("final tool_calls = %#v", got)
+	}
+	sessions, err := filepath.Glob(filepath.Join(repoDir, ".git-agent", "sessions", "*-release-note"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("release-note --out wrote json sessions: %#v", sessions)
+	}
+}
+
+func TestReleaseNoteOutPreflightsWritableFile(t *testing.T) {
+	err := New().Run(t.Context(), []string{"release-note", "--out", t.TempDir(), "v1.0.0", "HEAD"})
+	if err == nil {
+		t.Fatal("expected --out preflight error")
+	}
+	if !strings.Contains(err.Error(), "--out") || !strings.Contains(err.Error(), "is a directory") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestReleaseNoteOutRejectsExplicitEmptyFile(t *testing.T) {
+	err := New().Run(t.Context(), []string{"release-note", "--out=", "v1.0.0", "HEAD"})
+	if err == nil {
+		t.Fatal("expected --out empty path error")
+	}
+	if !strings.Contains(err.Error(), "--out requires a file path") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestEnvironmentContextIncludesCurrentStepLimit(t *testing.T) {
 	repoDir := initRepo(t)
 	repo, err := gitctx.Open(repoDir)

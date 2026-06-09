@@ -102,6 +102,7 @@ Rules:
 - preserve parent/submodule ownership of references
 - downplay internal sync, generated docs, and schema churn unless deployers must act on them
 - use the prepared release-note context below as primary evidence
+- use each commit's clamped "message" content, not just "summary", before inferring operator impact
 - only use fallback tools if the prepared context is missing information you need
 
 Prepared release-note context:

@@ -11,7 +11,7 @@ final Git commit after message generation.
 - `git-agent commit`
 - `git-agent commit --amend`
 - `git-agent pr-message`
-- `git-agent release-note <base> <release>`
+- `git-agent release-note [--out <file>] <base> <release>`
 
 Mermaid execution-flow graphs for each subcommand are documented in
 [`docs/spec.md`](docs/spec.md#subcommand-execution-flow-graphs).
@@ -98,6 +98,11 @@ Trace files include session metadata, every Responses request sent to the
 provider, every response received, each tool call, and the tool output returned
 to the model. API keys are redacted from request traces. `--debug` prints the
 trace directory to stderr.
+
+`git-agent release-note --out <file> <base> <release>` checks the output target
+is writable before generation, streams the human console trace to stdout, writes
+the rendered Markdown to the requested file, and does not create an on-disk JSON
+trace session.
 
 `git-agent commit` and `git-agent commit --amend` generate the same message as
 `commit-msg`. Stdout streams a human console trace while the message

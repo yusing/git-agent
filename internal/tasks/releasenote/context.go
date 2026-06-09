@@ -12,7 +12,11 @@ import (
 	"github.com/yusing/git-agent/internal/gitctx"
 )
 
-const preparedCommitLimit = 200
+const (
+	preparedCommitLimit           = 200
+	preparedCommitMessageMaxLines = 10
+	preparedCommitMessageMaxWords = 1000
+)
 
 type PreparedContext struct {
 	Range                   string              `json:"range"`
@@ -32,6 +36,7 @@ type PreparedContext struct {
 type PreparedCommit struct {
 	SHA     string `json:"sha"`
 	Summary string `json:"summary"`
+	Message string `json:"message,omitempty"`
 	URL     string `json:"url,omitempty"`
 }
 
@@ -56,7 +61,7 @@ func PrepareContext(repo *gitctx.Repository, baseRef, releaseRef string) (Prepar
 		return PreparedContext{}, err
 	}
 
-	parentCommits, err := repo.LogFrom(baseRef, releaseRef, preparedCommitLimit)
+	parentCommits, err := repo.LogMessagesFrom(baseRef, releaseRef, preparedCommitLimit)
 	if err != nil {
 		return PreparedContext{}, err
 	}
@@ -110,19 +115,20 @@ func (c PreparedContext) RenderForPrompt() string {
 	return c.Render()
 }
 
-func preparedCommits(commits []gitctx.CommitInfo, repoURL string) []PreparedCommit {
+func preparedCommits(commits []gitctx.CommitMessageInfo, repoURL string) []PreparedCommit {
 	prepared := make([]PreparedCommit, 0, len(commits))
 	for _, commit := range commits {
 		prepared = append(prepared, PreparedCommit{
 			SHA:     commit.SHA,
 			Summary: commit.Summary,
+			Message: clampCommitMessage(commit.Message),
 			URL:     commitURL(repoURL, commit.SHA),
 		})
 	}
 	return prepared
 }
 
-func recommendedSections(commits []gitctx.CommitInfo) []string {
+func recommendedSections(commits []gitctx.CommitMessageInfo) []string {
 	hasBreaking := false
 	hasBugFixes := false
 	hasFeatures := false
@@ -189,13 +195,63 @@ func prepareSubmodule(root string, change gitctx.SubmoduleChange, gitmodulesURL 
 	}
 	submodule.GroupHeading = submoduleHeading(change.Path, submodule.RepositoryURL)
 
-	commits, err := repo.LogFrom(change.Old, change.New, preparedCommitLimit)
+	commits, err := repo.LogMessagesFrom(change.Old, change.New, preparedCommitLimit)
 	if err != nil {
 		return PreparedSubmodule{}, err
 	}
 	submodule.LocalHistoryAvailable = true
 	submodule.Commits = preparedCommits(commits, submodule.RepositoryURL)
 	return submodule, nil
+}
+
+func clampCommitMessage(message string) string {
+	message = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(message, "\r\n", "\n"), "\r", "\n"))
+	if message == "" {
+		return ""
+	}
+	return clampCommitMessageWords(clampCommitMessageLines(message, preparedCommitMessageMaxLines), preparedCommitMessageMaxWords)
+}
+
+func clampCommitMessageLines(message string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	lines := strings.Split(message, "\n")
+	if len(lines) <= limit {
+		return message
+	}
+	return strings.Join(lines[:limit], "\n")
+}
+
+func clampCommitMessageWords(message string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	wordsUsed := 0
+	for i, line := range strings.Split(message, "\n") {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		words := strings.Fields(line)
+		if len(words) == 0 {
+			continue
+		}
+		remaining := limit - wordsUsed
+		if remaining <= 0 {
+			break
+		}
+		if len(words) > remaining {
+			words = words[:remaining]
+		}
+		b.WriteString(strings.Join(words, " "))
+		wordsUsed += len(words)
+		if wordsUsed >= limit {
+			break
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func ExpectedSubmoduleHeadings(prepared PreparedContext) map[string]string {

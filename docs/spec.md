@@ -23,7 +23,7 @@ Supported workflows:
 - `git-agent commit`
 - `git-agent commit --amend`
 - `git-agent pr-message`
-- `git-agent release-note <base> <release>`
+- `git-agent release-note [--out <file>] <base> <release>`
 
 ### Non-goals
 
@@ -103,12 +103,17 @@ Generate a squash merge commit message for the current branch versus
 authoritative scope, precomputes branch evidence before generation, and uses
 branch commits as supporting evidence.
 
-#### `git-agent release-note <base> <release>`
+#### `git-agent release-note [--out <file>] <base> <release>`
 
 Generate a GitHub release body for the range from `<base>` to `<release>`.
 The command precomputes release-note evidence in Go before generation and then
 asks the model to write from that prepared context, with only minimal read-only
 fallback tools available for rare gaps.
+By default the rendered Markdown is printed to stdout and a JSON trace is
+written under `.git-agent/sessions/`. With `--out <file>`, the command checks
+the target is writable before generation, streams the human console trace to
+stdout, writes the rendered Markdown to the file, and does not write a JSON
+trace session.
 
 ### Flags
 
@@ -125,6 +130,11 @@ All subcommands reserve this shared flag surface:
 - `--max-steps`
 - `--guidance-family`
 - `--debug`
+
+`release-note` additionally supports:
+
+- `--out <file>`: write rendered Markdown to file and stream human console trace
+  to stdout instead of writing an on-disk JSON trace session
 
 Flag behavior:
 
@@ -169,6 +179,9 @@ Resolution order:
 ### stdout / stderr contract
 
 - stdout for generation-only commands: final generated artifact only
+- stdout for `release-note --out <file>`: streaming human console trace lines
+  while generating the release note; the rendered Markdown is written to the
+  requested file after a preflight writable check
 - stdout for `commit` / `commit --amend`: streaming human console trace lines
   while generating the message, followed by Git's raw commit summary after
   success
@@ -176,7 +189,10 @@ Resolution order:
   summaries when `--debug` is enabled, and stderr emitted by a successful
   delegated `git commit`
 - generation-only commands write a JSON trace session under `.git-agent/sessions/`
-  regardless of `--debug`; `--debug` prints the session directory on stderr
+  regardless of `--debug`, except `release-note --out <file>`; `--debug`
+  prints the session directory on stderr when a JSON trace session is used
+- `release-note --out <file>` does not write an on-disk NDJSON trace session;
+  its human console trace lines are streamed to stdout
 - `commit` / `commit --amend` do not write an on-disk NDJSON trace session;
   their human console trace lines are streamed to stdout
 - `commit` / `commit --amend` delegate commit creation to `git commit`, so Git
@@ -294,9 +310,10 @@ including:
     text is returned
 12. validate output against task rules
 13. if invalid and repair budget remains, run exactly one repair pass
-14. print final text to stdout for generation-only commands, or stream human
-    console trace lines while generating the message and then print Git's raw
-    commit summary after creating or amending through `git commit`
+14. print final text to stdout for generation-only commands, write it to
+    `--out` for `release-note --out <file>`, or stream human console trace
+    lines while generating the message and then print Git's raw commit summary
+    after creating or amending through `git commit`
 
 ### Subcommand execution flow graphs
 
@@ -443,14 +460,20 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Start([git-agent release-note base release]) --> Parse[Parse shared flags and two refs]
-    Parse --> Resolve[Resolve config from flags, env, defaults]
+    Start([git-agent release-note base release]) --> Parse[Parse shared flags, optional --out, and two refs]
+    Parse --> OutCheck{--out set?}
+    OutCheck -- yes --> Preflight[Preflight output file writable]
+    OutCheck -- no --> Resolve
+    Preflight --> Resolve
     Resolve --> Floors[Raise max steps and timeout to release-note minimums]
     Floors --> Timeout[Create task timeout context]
     Timeout --> OpenRepo[Open repository]
     OpenRepo --> Guidance[Resolve project guidance for repository root]
-    Guidance --> Trace[Create .git-agent session trace]
-    Trace --> Registry[Register repo_summary fallback tool]
+    Guidance --> Trace{--out set?}
+    Trace -- no --> JSONTrace[Create .git-agent session trace]
+    Trace -- yes --> StreamTrace[Create stdout-streaming console trace]
+    JSONTrace --> Registry[Register repo_summary fallback tool]
+    StreamTrace --> Registry
     Registry --> Prepare[Precompute release-note context]
     Prepare --> Refs[Resolve base and release refs]
     Refs --> ParentLog[Collect parent repository commits]
@@ -476,7 +499,9 @@ flowchart TD
     BuildDoc --> ValidateDoc[Validate rendered document requirements]
     ValidateDoc --> Render[Render final Markdown]
     Render --> FinalTrace[Trace final artifact]
-    FinalTrace --> Stdout([Print artifact only to stdout])
+    FinalTrace --> Output{--out set?}
+    Output -- no --> Stdout([Print artifact only to stdout])
+    Output -- yes --> File([Write artifact to --out file])
 ```
 
 ### Bounded execution
@@ -837,9 +862,12 @@ Behavior:
 
 - peel and validate both refs
 - generate a parent-repository commit log for the selected range
+- include each release-note commit's full message content in prepared context,
+  clamped independently to 10 lines and 1000 words
 - inspect submodule gitlink changes
 - include submodule commit groups only when the gitlink moved and local commit
-  history is available
+  history is available; submodule commit messages follow the same 10-line and
+  1000-word independent clamps
 - optimize prose for deployers/operators rather than developers
 - keep narrative bullets concise: state the change first, avoid generic benefit
   clauses when they restate the capability, and add second-clause detail only for
@@ -1017,12 +1045,15 @@ The in-repository implementation is complete when:
 - `git-agent pr-message` routes through the bounded SDK-backed agent loop,
   targets `origin/HEAD..HEAD`, and sends prepared branch context without
   exposing model tools
-- `git-agent release-note <base> <release>` resolves refs before generation
+- `git-agent release-note [--out <file>] <base> <release>` resolves refs before
+  generation
 - guidance rendering uses repository-relative `<PROJECT_DOC path="...">` tags
 - normal commit-message guidance resolves against staged paths, while amend
   guidance resolves against the final amended paths
 - tools are read-only and exposed as strict function tools
 - tool outputs use the stable JSON envelope
 - generation-only commands write a `.git-agent/sessions/<timestamp>-<command>/`
-  trace
-- generation-only stdout contains only the final generated artifact
+  trace, except `release-note --out <file>`
+- generation-only stdout contains only the final generated artifact, except
+  `release-note --out <file>` streams human console trace lines and writes the
+  artifact to the requested file

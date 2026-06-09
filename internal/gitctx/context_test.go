@@ -44,6 +44,48 @@ func TestOpenAndInspectStagedChanges(t *testing.T) {
 	}
 }
 
+func TestLogMessagesFromIncludesFullCommitMessage(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "app.txt"), "base\n")
+	runGit(t, repoDir, "add", "app.txt")
+	runGit(t, repoDir, "commit", "-m", "base")
+	baseSHA := gitHead(t, repoDir)
+
+	writeFile(t, filepath.Join(repoDir, "app.txt"), "release\n")
+	runGit(t, repoDir, "add", "app.txt")
+	runGit(t, repoDir, "commit",
+		"-m", "feat(webui): add command option highlighting",
+		"-m", "Adds completion support for RuleDo option blocks.",
+		"-m", "Highlights pass and bypass variants.",
+	)
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commits, err := repo.LogMessagesFrom(baseSHA, "HEAD", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commits) != 1 {
+		t.Fatalf("commits = %d", len(commits))
+	}
+	if commits[0].Summary != "feat(webui): add command option highlighting" {
+		t.Fatalf("summary = %q", commits[0].Summary)
+	}
+	for _, want := range []string{
+		"feat(webui): add command option highlighting",
+		"Adds completion support for RuleDo option blocks.",
+		"Highlights pass and bypass variants.",
+	} {
+		if !strings.Contains(commits[0].Message, want) {
+			t.Fatalf("message missing %q:\n%s", want, commits[0].Message)
+		}
+	}
+}
+
 func TestStagedStatusExcludesUnstagedOnlyChanges(t *testing.T) {
 	t.Parallel()
 

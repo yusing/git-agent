@@ -43,4 +43,5 @@ complete -c git-agent -n '__git_agent_has_subcommand' -l max-steps -r -d 'Overri
 complete -c git-agent -n '__git_agent_has_subcommand' -l guidance-family -r -a 'auto agents claude codex none' -d 'Force guidance family'
 complete -c git-agent -n '__git_agent_has_subcommand' -l debug -d 'Enable debug output on stderr'
 
+complete -c git-agent -n '__git_agent_using_command release-note' -l out -r -d 'Write release note markdown to file'
 complete -c git-agent -n '__git_agent_using_command release-note' -a '(__git_agent_git_refs)' -d 'Git ref'
