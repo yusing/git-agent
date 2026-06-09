@@ -79,6 +79,63 @@ func TestValidateRejectsChildBullets(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsLowSignalReleaseNoteContinuations(t *testing.T) {
+	t.Parallel()
+
+	errs := Validate(`{
+  "sections": [
+    {
+      "heading":"New Features",
+      "bullets":[
+        {
+          "label":"WebUI/Rules Editor",
+          "summary":"Improves the rules editor with completion and highlighting for command option blocks, reducing editing errors when operators build or adjust routing rules in the UI",
+          "refs":[{"type":"commit","value":"deadbeef"}]
+        },
+        {
+          "label":"TLS/Autocert",
+          "summary":"Adds deSEC autocert provider support in the UI and exposed types, enabling operators to configure that DNS provider for certificate automation",
+          "refs":[{"type":"commit","value":"cafebabe"}]
+        }
+      ]
+    }
+  ]
+}`)
+	if len(errs) == 0 {
+		t.Fatal("expected low-signal continuation errors")
+	}
+	if got := strings.Join(errs, "\n"); !strings.Contains(got, "low-signal continuation") {
+		t.Fatalf("expected low-signal continuation error, got:\n%s", got)
+	}
+}
+
+func TestValidateAllowsMeaningfulReleaseNoteContinuations(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+  "sections": [
+    {
+      "heading":"Improvements",
+      "bullets":[
+        {
+          "label":"Core/Proxy",
+          "summary":"Routes now close idle upstream connections when canceled, preventing stale upstream sockets after route shutdown",
+          "refs":[{"type":"commit","value":"deadbeef"}]
+        },
+        {
+          "label":"Config/Migration",
+          "summary":"Renames path_patterns to path_rules, requiring config updates before rollout",
+          "refs":[{"type":"commit","value":"cafebabe"}]
+        }
+      ]
+    }
+  ]
+}`
+	if errs := Validate(raw); len(errs) > 0 {
+		t.Fatalf("Validate() errors = %v", errs)
+	}
+}
+
 func TestValidateAcceptsNullablePracticalOptionalBulletFields(t *testing.T) {
 	t.Parallel()
 
@@ -533,6 +590,8 @@ func TestUserPromptContainsSchemaInstructionsAndPreparedContext(t *testing.T) {
 		`"label"`,
 		`"refs"`,
 		`ref type must be one of: "commit", "pr", "issue"`,
+		`avoid low-signal benefit clauses`,
+		`add a second clause only when it adds non-obvious operator impact`,
 		"only use fallback tools if the prepared context is missing information you need",
 	} {
 		if !strings.Contains(got, want) {

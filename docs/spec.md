@@ -841,6 +841,10 @@ Behavior:
 - include submodule commit groups only when the gitlink moved and local commit
   history is available
 - optimize prose for deployers/operators rather than developers
+- keep narrative bullets concise: state the change first, avoid generic benefit
+  clauses when they restate the capability, and add second-clause detail only for
+  non-obvious impact, required action, compatibility/risk, rollout scope, or
+  behavior changes
 
 Output rules:
 
@@ -874,6 +878,8 @@ Release note validator checks at minimum:
 - first printable line starts with `### `
 - no forbidden preamble
 - heading/content structure valid
+- no low-signal release-note continuations such as generic "enabling operators"
+  or "reducing editing errors" clauses
 - `### Full Changelog` included when required
 
 ### Repair strategy

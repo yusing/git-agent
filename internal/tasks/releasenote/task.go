@@ -91,6 +91,9 @@ Rules:
 - omit empty sections
 - set "label" to a concise stable area such as "Core/Middleware" or "WebUI/Dashboard" when natural; otherwise use null
 - every bullet must use a concise operator-facing summary in "summary"
+- write the summary as the change itself first; keep one sentence when it is complete
+- avoid low-signal benefit clauses such as "enabling operators to...", "reducing editing errors...", "making it easier...", or "improving usability" when the change already states the capability
+- add a second clause only when it adds non-obvious operator impact, required action, compatibility/risk, rollout scope, or behavior change
 - put references only in "refs"; do not embed commit SHAs, PR numbers, or issue numbers into "summary"
 - each bullet must include at least one ref
 - do not emit sub-bullets; keep each release-note item as one complete top-level bullet
@@ -472,6 +475,9 @@ func validateBullets(sections []Section) []string {
 			if strings.Contains(bullet.Summary, "```") {
 				errs = append(errs, fmt.Sprintf("section %q bullet summary contains code fence", sec.Heading))
 			}
+			if hasLowSignalContinuation(bullet.Summary) {
+				errs = append(errs, fmt.Sprintf("section %q bullet %q has low-signal continuation; keep summaries concise and add a second clause only for non-obvious operator impact, required action, compatibility/risk, rollout scope, or behavior change", sec.Heading, bullet.Summary))
+			}
 			if len(bullet.Refs) == 0 {
 				errs = append(errs, fmt.Sprintf("section %q bullet %q has no refs", sec.Heading, bullet.Summary))
 			}
@@ -480,6 +486,79 @@ func validateBullets(sections []Section) []string {
 		}
 	}
 	return errs
+}
+
+func hasLowSignalContinuation(summary string) bool {
+	for _, clause := range strings.Split(summary, ",") {
+		if isLowSignalContinuation(clause) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLowSignalContinuation(clause string) bool {
+	clause = strings.ToLower(strings.TrimSpace(clause))
+	if clause == "" {
+		return false
+	}
+	for {
+		trimmed := strings.TrimPrefix(strings.TrimPrefix(clause, "and "), "while ")
+		if trimmed == clause {
+			break
+		}
+		clause = trimmed
+	}
+
+	for _, prefix := range []string{
+		"enabling operators to ",
+		"enabling users to ",
+		"enabling admins to ",
+		"enabling teams to ",
+		"which enables operators to ",
+		"which enables users to ",
+		"which enables admins to ",
+		"which enables teams to ",
+		"that enables operators to ",
+		"that enables users to ",
+		"that enables admins to ",
+		"that enables teams to ",
+		"allowing operators to ",
+		"allowing users to ",
+		"allowing admins to ",
+		"allowing teams to ",
+		"helping operators ",
+		"helping users ",
+		"helping admins ",
+		"helping teams ",
+		"making it easier for operators ",
+		"making it easier for users ",
+		"making it easier for admins ",
+		"making it easier for teams ",
+	} {
+		if strings.HasPrefix(clause, prefix) {
+			return true
+		}
+	}
+
+	for _, fragment := range []string{
+		"reducing editing errors",
+		"reducing configuration errors",
+		"reducing operator errors",
+		"reducing user errors",
+		"reducing mistakes",
+		"reducing confusion",
+		"reducing friction",
+		"improving usability",
+		"improving operator confidence",
+		"improving user confidence",
+	} {
+		if strings.Contains(clause, fragment) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func validateChildBullets(heading string, bullet Bullet) []string {
