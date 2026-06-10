@@ -129,6 +129,10 @@ func PRMessageToolNames() []string {
 	}
 }
 
+// ReleaseNoteToolNames returns the legacy release-note tool set.
+//
+// Deprecated: release-note generation now precomputes release evidence in Go
+// and exposes only repo_summary as a fallback tool.
 func ReleaseNoteToolNames() []string {
 	return []string{
 		"repo_summary",
@@ -147,6 +151,8 @@ func ReleaseNoteToolNames() []string {
 const (
 	defaultMaxBytes = 32 * 1024
 	defaultMaxLines = 800
+
+	deprecatedReleaseNoteToolPrefix = "Deprecated: release-note generation now precomputes this evidence in Go and no longer exposes this tool to the model. "
 )
 
 var skippedDirs = map[string]bool{
@@ -719,7 +725,7 @@ func (t gitPRCommitsTool) Execute(_ context.Context, invocation Invocation) (Res
 type resolveRefTool repoTool
 
 func (t resolveRefTool) Definition() Definition {
-	return Definition{Name: "resolve_ref", Description: "Resolve a ref to a commit hash.", Schema: schema(map[string]any{
+	return Definition{Name: "resolve_ref", Description: deprecatedReleaseNoteToolPrefix + "Resolve a ref to a commit hash.", Schema: schema(map[string]any{
 		"ref": stringProp("Git revision/ref/tag name."),
 	}, "ref"), Strict: true}
 }
@@ -741,7 +747,7 @@ func (t resolveRefTool) Execute(_ context.Context, invocation Invocation) (Resul
 type gitLogRangeTool repoTool
 
 func (t gitLogRangeTool) Definition() Definition {
-	return Definition{Name: "git_log_range", Description: "Return commits reachable from release and stopping before base.", Schema: schema(map[string]any{
+	return Definition{Name: "git_log_range", Description: deprecatedReleaseNoteToolPrefix + "Return commits reachable from release and stopping before base.", Schema: schema(map[string]any{
 		"base":    stringProp("Base ref excluded from the range."),
 		"release": stringProp("Release ref included as range tip."),
 		"limit":   intProp("Maximum commits to return.", 1, 500),
@@ -770,7 +776,7 @@ func (t gitLogRangeTool) Execute(_ context.Context, invocation Invocation) (Resu
 type gitmodulesTableTool repoTool
 
 func (t gitmodulesTableTool) Definition() Definition {
-	return Definition{Name: "gitmodules_table", Description: "Read .gitmodules if present.", Schema: emptySchema(), Strict: true}
+	return Definition{Name: "gitmodules_table", Description: deprecatedReleaseNoteToolPrefix + "Read .gitmodules if present.", Schema: emptySchema(), Strict: true}
 }
 
 func (t gitmodulesTableTool) Execute(context.Context, Invocation) (Result, error) {
@@ -788,7 +794,7 @@ func (t gitmodulesTableTool) Execute(context.Context, Invocation) (Result, error
 type submoduleGitlinkRangeTool repoTool
 
 func (t submoduleGitlinkRangeTool) Definition() Definition {
-	return Definition{Name: "submodule_gitlink_range", Description: "Return changed submodule gitlinks between two refs.", Schema: schema(map[string]any{
+	return Definition{Name: "submodule_gitlink_range", Description: deprecatedReleaseNoteToolPrefix + "Return changed submodule gitlinks between two refs.", Schema: schema(map[string]any{
 		"base":    stringProp("Base ref excluded from the range."),
 		"release": stringProp("Release ref included as range tip."),
 	}, "base", "release"), Strict: true}
@@ -812,7 +818,7 @@ func (t submoduleGitlinkRangeTool) Execute(_ context.Context, invocation Invocat
 type submoduleLogRangeTool repoTool
 
 func (t submoduleLogRangeTool) Definition() Definition {
-	return Definition{Name: "submodule_log_range", Description: "Return submodule commits when local checkout is available.", Schema: schema(map[string]any{
+	return Definition{Name: "submodule_log_range", Description: deprecatedReleaseNoteToolPrefix + "Return submodule commits when local checkout is available.", Schema: schema(map[string]any{
 		"path":    stringProp("Repository-relative submodule path."),
 		"base":    stringProp("Base submodule commit/ref excluded from range."),
 		"release": stringProp("Release submodule commit/ref included as range tip."),
@@ -851,7 +857,7 @@ func (t submoduleLogRangeTool) Execute(_ context.Context, invocation Invocation)
 type repoKindTool repoTool
 
 func (t repoKindTool) Definition() Definition {
-	return Definition{Name: "repo_kind", Description: "Return coarse repository kind.", Schema: emptySchema(), Strict: true}
+	return Definition{Name: "repo_kind", Description: deprecatedReleaseNoteToolPrefix + "Return coarse repository kind.", Schema: emptySchema(), Strict: true}
 }
 
 func (t repoKindTool) Execute(context.Context, Invocation) (Result, error) {

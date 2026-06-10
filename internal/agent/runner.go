@@ -181,7 +181,7 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 		}
 		for _, call := range response.ToolCalls {
 			if maxToolCalls > 0 && result.ToolCalls >= maxToolCalls {
-				recovered, updatedSteps, updatedTools, err := r.resolveBudgetExhaustion(ctx, instructions, messages, result, BudgetStatus{
+				recovered, updatedSteps, updatedTools, err := r.resolveBudgetExhaustion(ctx, instructions, messages, result, textFormat, BudgetStatus{
 					Kind:          BudgetKindToolCalls,
 					Limit:         maxToolCalls,
 					Used:          result.ToolCalls,
@@ -227,7 +227,7 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 			messages = append(messages, openai.NewFunctionCallOutput(callID, toolResult.Content))
 		}
 		if step == maxSteps-1 {
-			recovered, updatedSteps, updatedTools, err := r.resolveBudgetExhaustion(ctx, instructions, messages, result, BudgetStatus{
+			recovered, updatedSteps, updatedTools, err := r.resolveBudgetExhaustion(ctx, instructions, messages, result, textFormat, BudgetStatus{
 				Kind:         BudgetKindModelSteps,
 				Limit:        maxSteps,
 				Used:         step + 1,
@@ -248,7 +248,7 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 	return Result{}, fmt.Errorf("agent exceeded maximum model steps (%d)", maxSteps)
 }
 
-func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions string, messages []openai.Item, current Result, status BudgetStatus) (Result, int, int, error) {
+func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions string, messages []openai.Item, current Result, textFormat *openai.TextFormat, status BudgetStatus) (Result, int, int, error) {
 	if r.Budget != nil {
 		decision, err := r.Budget(ctx, status)
 		if err != nil {
@@ -274,7 +274,7 @@ func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions
 		}
 	}
 
-	finalized, err := r.finalizeWithoutTools(ctx, instructions, messages, status)
+	finalized, err := r.finalizeWithoutTools(ctx, instructions, messages, textFormat, status)
 	if err != nil {
 		return Result{}, 0, 0, err
 	}
@@ -292,7 +292,7 @@ func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions
 	return finalized, status.MaxSteps, status.MaxToolCalls, nil
 }
 
-func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions string, messages []openai.Item, status BudgetStatus) (Result, error) {
+func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions string, messages []openai.Item, textFormat *openai.TextFormat, status BudgetStatus) (Result, error) {
 	finalMessages := append(slices.Clone(messages), openai.NewMessage("developer", finalizationNotice(status)))
 	req := openai.Request{
 		Model:         r.Config.Model,
@@ -303,6 +303,7 @@ func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions st
 		AuthAccountID: r.Config.AuthAccountID,
 		Instructions:  finalArtifactInstructions(instructions),
 		Input:         finalMessages,
+		TextFormat:    textFormat,
 	}
 	if err := writeTraceRequest(r.Trace, req); err != nil {
 		return Result{}, err
@@ -372,9 +373,15 @@ func requestInstructions(taskInstructions string, toolSpecs []openai.ToolSpec) s
 		prefix += "\n\n"
 	}
 	if len(toolSpecs) == 0 {
-		return prefix + "Return only the final artifact. Do not call tools."
+		return prefix + "No tools are available. Return only the final artifact."
 	}
-	return prefix + "Use only listed read-only tools. Return only the final artifact when enough evidence has been gathered."
+	return prefix + `# Agent loop
+You are in a bounded agent loop.
+Use only listed read-only tools.
+Call tools only when they reduce material uncertainty; do not call tools just to repeat provided context.
+Prefer narrow tool calls that target the missing evidence.
+Do not ask the user for more evidence.
+Return only the final artifact when enough evidence has been gathered.`
 }
 
 func finalArtifactInstructions(taskInstructions string) string {
@@ -382,5 +389,9 @@ func finalArtifactInstructions(taskInstructions string) string {
 	if prefix != "" {
 		prefix += "\n\n"
 	}
-	return prefix + "Do not call tools. Return only the best final artifact possible from the evidence already gathered."
+	return prefix + `# Forced finalization
+Do not call tools.
+Use only evidence already gathered in the conversation.
+If evidence is partial, stay conservative and avoid unsupported claims.
+Return only the best final artifact possible.`
 }

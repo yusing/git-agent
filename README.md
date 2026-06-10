@@ -69,6 +69,9 @@ Behavior defaults:
 
 - omit `service_tier` unless `--fast` is set
 - omit reasoning mode unless one of `--low`, `--medium`, `--high`, or `--xhigh` is set
+- `--append-prompt` adds a bounded operator hint to the task prompt; it can
+  steer style or emphasis only when consistent with the task contract and
+  repository evidence
 
 ## Build and install
 

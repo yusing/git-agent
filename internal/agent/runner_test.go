@@ -160,6 +160,9 @@ func TestRunnerExecutesToolCallRoundTrip(t *testing.T) {
 	if got := client.requests[1].Input[len(client.requests[1].Input)-1]; got.Type != "function_call_output" || got.CallID != "call_1" {
 		t.Fatalf("missing tool output input: %#v", got)
 	}
+	if instructions := client.requests[0].Instructions; !containsAll(instructions, "bounded agent loop", "reduce material uncertainty", "do not call tools just to repeat provided context", "Do not ask the user for more evidence") {
+		t.Fatalf("request instructions missing tool economy guidance: %s", instructions)
+	}
 }
 
 func TestRunnerRejectsToolCallsOutsideAllowedSet(t *testing.T) {
@@ -215,7 +218,17 @@ func TestRunnerFinalizesWhenStepBudgetRunsOut(t *testing.T) {
 	result, err := runner.Run(context.Background(), Request{
 		SystemPrompt: "system",
 		UserPrompt:   "user",
-		MaxSteps:     1,
+		TextFormat: &openai.TextFormat{
+			Name: "artifact",
+			Schema: map[string]any{
+				"type":                 "object",
+				"properties":           map[string]any{"summary": map[string]any{"type": "string"}},
+				"required":             []string{"summary"},
+				"additionalProperties": false,
+			},
+			Strict: true,
+		},
+		MaxSteps: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -228,6 +241,9 @@ func TestRunnerFinalizesWhenStepBudgetRunsOut(t *testing.T) {
 	}
 	if len(client.requests[1].Tools) != 0 {
 		t.Fatalf("expected forced finalization without tools, got %#v", client.requests[1].Tools)
+	}
+	if client.requests[1].TextFormat == nil || client.requests[1].TextFormat.Name != "artifact" {
+		t.Fatalf("forced finalization dropped text format: %#v", client.requests[1].TextFormat)
 	}
 }
 
@@ -282,4 +298,13 @@ func runGit(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %v failed: %v\n%s", args, err, out)
 	}
+}
+
+func containsAll(text string, needles ...string) bool {
+	for _, needle := range needles {
+		if !strings.Contains(text, needle) {
+			return false
+		}
+	}
+	return true
 }

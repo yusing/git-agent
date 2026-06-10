@@ -122,6 +122,31 @@ func TestParseArgsAllowsBOMAndOuterWhitespace(t *testing.T) {
 	}
 }
 
+func TestLegacyReleaseNoteToolsAreMarkedDeprecated(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	repo, err := gitctx.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	registry := NewRegistry(repo)
+	for _, def := range registry.Definitions([]string{
+		"resolve_ref",
+		"git_log_range",
+		"gitmodules_table",
+		"submodule_gitlink_range",
+		"submodule_log_range",
+		"repo_kind",
+	}) {
+		if !strings.HasPrefix(def.Description, "Deprecated:") {
+			t.Fatalf("%s description is not marked deprecated: %q", def.Name, def.Description)
+		}
+	}
+}
+
 func TestPRMessageToolsExposeOriginHeadComparison(t *testing.T) {
 	t.Parallel()
 
