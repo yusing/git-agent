@@ -83,6 +83,11 @@ func TestPromptsNameRequiredScope(t *testing.T) {
 	if got := SystemPrompt(ModeNormal); !containsAll(got, "previous HEAD diff", "contrast", "avoid restating previous work") {
 		t.Fatalf("normal system prompt missing previous-diff contrast guard: %s", got)
 	}
+	if got := SystemPrompt(ModeNormal); !containsAll(got, "Do not insert manual line breaks", "output shaping wraps the final message") {
+		t.Fatalf("normal system prompt missing formatter-owned wrapping guidance: %s", got)
+	} else if strings.Contains(got, "Wrap body lines") {
+		t.Fatalf("normal system prompt still asks model to wrap body lines: %s", got)
+	}
 	if got := SystemPrompt(ModeAmend); !containsAll(got, "final amended commit", "versus its parent", "one commit", "Do not narrate a delta or process") {
 		t.Fatalf("amend prompt missing final commit scope: %s", got)
 	}
@@ -483,6 +488,53 @@ func TestShapeWrapsBodyAndKeepsSubject(t *testing.T) {
 	}
 }
 
+func TestShapeReflowsSoftWrappedBodyParagraphs(t *testing.T) {
+	t.Parallel()
+
+	output := `refactor(ui): extract OVH autocert editor and tidy form layout
+
+Move the OVH auth method editor out of DnsProviderOptionsEditor while
+preserving its application-key/OAuth2 switching behavior.
+
+Normalize form spacing and Tailwind utilities across autocert, generic
+form fields, and the playground quick reference, including smaller
+inline
+add buttons and the extra certificates description.`
+
+	got := Shape(output)
+	want := `refactor(ui): extract OVH autocert editor and tidy form layout
+
+Move the OVH auth method editor out of DnsProviderOptionsEditor while
+preserving its application-key/OAuth2 switching behavior.
+
+Normalize form spacing and Tailwind utilities across autocert, generic
+form fields, and the playground quick reference, including smaller
+inline add buttons and the extra certificates description.`
+	if got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestShapePreservesBodyLists(t *testing.T) {
+	t.Parallel()
+
+	output := `feat(agent): update provider verification
+
+Verify configured providers before persisting the response.
+- keep successful providers in config
+- report failed providers separately`
+
+	got := Shape(output)
+	want := `feat(agent): update provider verification
+
+Verify configured providers before persisting the response.
+- keep successful providers in config
+- report failed providers separately`
+	if got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
 func TestShapeRepairsWrappedSubjectContinuation(t *testing.T) {
 	t.Parallel()
 
@@ -495,8 +547,8 @@ query helpers and generated accessors.`
 	got := Shape(output)
 	want := `refactor(uc): adopt typed query helpers across asterisk, IM and phoneconfig (T46750)
 
-Switch staged UC packages from model-based query building to typed
-query helpers and generated accessors.`
+Switch staged UC packages from model-based query building to typed query
+helpers and generated accessors.`
 	if got != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
@@ -517,8 +569,8 @@ query helpers and generated accessors.`
 	})
 	want := `refactor(uc): adopt typed query helpers across asterisk, IM and phoneconfig (T46750)
 
-Switch staged UC packages from model-based query building to typed
-query helpers and generated accessors.`
+Switch staged UC packages from model-based query building to typed query
+helpers and generated accessors.`
 	if got != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}

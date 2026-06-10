@@ -52,21 +52,83 @@ func WrapBody(text string, width int) string {
 	}
 
 	var out []string
+	var paragraph []string
+	flush := func() {
+		if len(paragraph) == 0 {
+			return
+		}
+		out = append(out, wrapLine(strings.Join(paragraph, " "), width)...)
+		paragraph = nil
+	}
 	for line := range strings.SplitSeq(strings.TrimSpace(text), "\n") {
+		trimmedRight := strings.TrimRight(line, " \t")
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
+			flush()
 			out = append(out, "")
 			continue
 		}
-		for len(trimmed) > width {
-			cut := strings.LastIndex(trimmed[:width+1], " ")
-			if cut <= 0 {
-				cut = width
-			}
-			out = append(out, strings.TrimSpace(trimmed[:cut]))
-			trimmed = strings.TrimSpace(trimmed[cut:])
+		if isStructuralBodyLine(line, trimmed) {
+			flush()
+			out = append(out, trimmedRight)
+			continue
 		}
-		out = append(out, trimmed)
+		paragraph = append(paragraph, trimmed)
 	}
+	flush()
 	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func isStructuralBodyLine(line, trimmed string) bool {
+	if line != strings.TrimLeft(line, " \t") ||
+		strings.HasPrefix(trimmed, "- ") ||
+		strings.HasPrefix(trimmed, "* ") ||
+		strings.HasPrefix(trimmed, "+ ") ||
+		strings.HasPrefix(trimmed, "> ") ||
+		isOrderedListLine(trimmed) {
+		return true
+	}
+	prefix, _, ok := strings.Cut(trimmed, ": ")
+	return ok && isTrailerToken(prefix)
+}
+
+func isOrderedListLine(line string) bool {
+	for i, r := range line {
+		if r < '0' || r > '9' {
+			return i > 0 && r == '.' && len(line) > i+1 && line[i+1] == ' '
+		}
+	}
+	return false
+}
+
+func isTrailerToken(text string) bool {
+	if text == "" {
+		return false
+	}
+	for _, r := range text {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func wrapLine(text string, width int) []string {
+	var out []string
+	for len(text) > width {
+		cut := strings.LastIndex(text[:width+1], " ")
+		if cut <= 0 {
+			nextSpace := strings.Index(text, " ")
+			if nextSpace < 0 {
+				return append(out, text)
+			}
+			out = append(out, strings.TrimSpace(text[:nextSpace]))
+			text = strings.TrimSpace(text[nextSpace:])
+			continue
+		}
+		out = append(out, strings.TrimSpace(text[:cut]))
+		text = strings.TrimSpace(text[cut:])
+	}
+	return append(out, text)
 }

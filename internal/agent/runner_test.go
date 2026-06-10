@@ -58,6 +58,42 @@ func TestRunnerRepairsInvalidOutputOnce(t *testing.T) {
 	}
 }
 
+func TestRunnerNormalizesBeforeValidationAndReturn(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeClient{responses: []openai.Response{
+		{Text: "Add parser\n\nbody line"},
+	}}
+	runner := OpenAIRunner{
+		Config: config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1},
+		Client: client,
+		Normalize: func(text string) string {
+			return strings.ReplaceAll(text, "\n", " ")
+		},
+		Validator: func(text string) []string {
+			if strings.Contains(text, "\n") {
+				return []string{"not normalized"}
+			}
+			return nil
+		},
+	}
+
+	result, err := runner.Run(context.Background(), Request{
+		SystemPrompt:      "system",
+		UserPrompt:        "user",
+		RepairOnValidator: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "Add parser  body line" {
+		t.Fatalf("result text = %q", result.Text)
+	}
+	if result.RepairCalls != 0 {
+		t.Fatalf("repair calls = %d, want 0", result.RepairCalls)
+	}
+}
+
 func TestRunnerForwardsTextFormat(t *testing.T) {
 	t.Parallel()
 

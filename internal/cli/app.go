@@ -241,6 +241,7 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 		Tools:     registry,
 		ToolSpecs: registry.Definitions(tools.CommitMessageToolNames()),
 		Validator: validator,
+		Normalize: commitmsg.Shape,
 		Trace:     recorder,
 		Budget:    a.budgetHandler(),
 	}
@@ -258,7 +259,6 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 	if err != nil {
 		return agent.Result{}, err
 	}
-	result.Text = commitmsg.Shape(result.Text)
 	if recent, err := repo.RecentCommits(10); err == nil {
 		result.Text = commitmsg.PreserveTaskIDSuffix(result.Text, recent)
 	}
@@ -382,6 +382,7 @@ func (a *App) runPRMessage(ctx context.Context, args []string) error {
 		Config:    cfg,
 		Client:    openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
 		Validator: func(text string) []string { return commitmsg.Validate(commitmsg.ModePR, text) },
+		Normalize: commitmsg.Shape,
 		Trace:     recorder,
 		Budget:    a.budgetHandler(),
 	}
@@ -397,7 +398,6 @@ func (a *App) runPRMessage(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	result.Text = commitmsg.Shape(result.Text)
 	if errs := commitmsg.Validate(commitmsg.ModePR, result.Text); len(errs) > 0 {
 		return fmt.Errorf("validation failed after shaping: %v", errs)
 	}

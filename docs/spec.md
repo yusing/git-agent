@@ -341,13 +341,14 @@ flowchart TD
     Continue --> Model
     ToolBudget -- no --> Budget[Extend interactively or force final artifact]
     Budget --> Model
-    ToolDecision -- no --> Validate[Validate commit message]
+    ToolDecision -- no --> Shape[Shape body wrapping]
+    Shape --> Validate[Validate shaped commit message]
     Validate --> Valid{Valid?}
     Valid -- no --> Repair[Run one repair pass]
-    Repair --> Revalidate[Revalidate repaired output]
-    Revalidate --> Shape[Shape body wrapping]
-    Valid -- yes --> Shape
-    Shape --> Preserve[Preserve supported task ID suffix]
+    Repair --> Reshape[Shape repaired output]
+    Reshape --> Revalidate[Revalidate shaped repaired output]
+    Revalidate --> Preserve
+    Valid -- yes --> Preserve[Preserve supported task ID suffix]
     Preserve --> FinalValidate[Validate shaped output]
     FinalValidate --> FinalTrace[Trace final artifact]
     FinalTrace --> Stdout([Print artifact only to stdout])
@@ -379,13 +380,14 @@ flowchart TD
     Continue --> Model
     ToolBudget -- no --> Budget[Extend interactively or force final artifact]
     Budget --> Model
-    ToolDecision -- no --> Validate[Validate amended commit message]
+    ToolDecision -- no --> Shape[Shape body wrapping]
+    Shape --> Validate[Validate shaped amended commit message]
     Validate --> Valid{Valid?}
     Valid -- no --> Repair[Run one repair pass]
-    Repair --> Revalidate[Revalidate repaired output]
-    Revalidate --> Shape[Shape body wrapping]
-    Valid -- yes --> Shape
-    Shape --> Preserve[Preserve supported task ID suffix]
+    Repair --> Reshape[Shape repaired output]
+    Reshape --> Revalidate[Revalidate shaped repaired output]
+    Revalidate --> Preserve
+    Valid -- yes --> Preserve[Preserve supported task ID suffix]
     Preserve --> FinalValidate[Reject delta or process phrasing]
     FinalValidate --> FinalTrace[Trace final artifact]
     FinalTrace --> Stdout([Print artifact only to stdout])
@@ -445,13 +447,14 @@ flowchart TD
     Request --> Model[Call Responses API]
     Model --> ToolGuard{Tool calls returned?}
     ToolGuard -- yes --> Error[Fail: no tool registry configured for pr-message]
-    ToolGuard -- no --> Validate[Validate squash commit message]
+    ToolGuard -- no --> Shape[Shape body wrapping]
+    Shape --> Validate[Validate shaped squash commit message]
     Validate --> Valid{Valid?}
     Valid -- no --> Repair[Run one repair pass without tools]
-    Repair --> Revalidate[Revalidate repaired output]
-    Revalidate --> Shape[Shape body wrapping]
-    Valid -- yes --> Shape
-    Shape --> FinalValidate[Validate shaped output]
+    Repair --> Reshape[Shape repaired output]
+    Reshape --> Revalidate[Revalidate shaped repaired output]
+    Revalidate --> FinalValidate
+    Valid -- yes --> FinalValidate[Validate shaped output]
     FinalValidate --> FinalTrace[Trace final artifact]
     FinalTrace --> Stdout([Print artifact only to stdout])
 ```
@@ -796,9 +799,11 @@ Output rules:
 - blank line before body only when body exists
 - no fences
 - no explanations
-- body lines wrapped to target width (target width: 72 characters after output
-  shaping; long unbreakable tokens such as URLs may exceed the limit only when
-  they cannot be wrapped safely)
+- the model is not asked to hard-wrap body paragraphs; output shaping treats
+  nonblank body lines inside the same paragraph as soft wraps, reflows them to
+  the target width (72 characters), and preserves blank lines between paragraphs
+- long unbreakable tokens such as URLs may exceed the limit only when they
+  cannot be wrapped safely
 
 ### Commit message: amend mode
 
@@ -853,8 +858,8 @@ Output rules:
 - no fences
 - no explanations
 - no commit-by-commit changelog
-- body lines wrapped to target width using the same commit-message shaping
-  rules
+- the model is not asked to hard-wrap body paragraphs; output shaping applies
+  the same commit-message paragraph reflow and target-width rules
 
 ### Release note generation
 
@@ -900,6 +905,8 @@ Commit message validator checks at minimum:
   exposes them
 - body lines stay within the target width after output shaping (target width: 72
   characters after shaping, except for long unbreakable tokens such as URLs)
+- output shaping reflows soft line breaks inside body paragraphs so generated
+  messages do not keep isolated word shards from model line wrapping
 
 Release note validator checks at minimum:
 

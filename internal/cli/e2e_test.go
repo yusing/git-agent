@@ -70,10 +70,7 @@ func TestCommitMsgEndToEndWithRealisticFixture(t *testing.T) {
 			}
 			return responseWithText("resp_commit_2", `feat(route): add named do option blocks
 
-Accept braced do-option maps while preserving positional help order and
-validation.
-
-Update parser coverage, README examples, and routing docs.`)
+Accept braced do-option maps while preserving positional help order and validation, then update parser coverage, README examples, and routing docs so generated messages can rely on formatter-owned wrapping.`)
 		},
 	}))
 	defer cleanup()
@@ -94,6 +91,11 @@ Update parser coverage, README examples, and routing docs.`)
 	}
 	if mode == providerModeFake && !strings.Contains(output, "feat(route): add named do option blocks") {
 		t.Fatalf("unexpected fake-provider commit message:\n%s", output)
+	}
+	for _, line := range strings.Split(output, "\n")[2:] {
+		if len(line) > 72 {
+			t.Fatalf("body line too long after shaping: %d %q\n%s", len(line), line, output)
+		}
 	}
 	assertTraceArtifacts(t, fixture.repoDir, "*-commit-msg", 1)
 }

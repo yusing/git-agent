@@ -106,14 +106,14 @@ Use provided context and, when tools are available, tools to inspect repository 
 Return only the final commit message.
 No Markdown fences. No explanations.
 Subject line first. Blank line before body only when body exists.
-Wrap body lines around 72 columns.
+Do not insert manual line breaks inside body paragraphs for width; output shaping wraps the final message.
 Recent commits are style reference only.
 Describe only supported changes. Do not invent motivations unsupported by the diff.
 Infer accurate type, scope, and impact from the evidence.
 Choose 'refactor' when the staged diff mainly moves, extracts, centralizes, or reorganizes existing behavior, even if helper packages/files/tests are added.
 Choose 'feat' only when the staged diff introduces a user-visible capability, API, command, config option, or behavior that did not exist before.
 For extraction-heavy changes, prefer verbs such as "extract", "move", "centralize", "consolidate", or "reuse" over defaulting to "add" because files are new.
-Body optional. When present, keep it concise, naturally wrapped, and within three short paragraphs.
+Body optional. When present, keep it concise and within three short paragraphs.
 When useful, the body may include compact nested detail blocks for submodule updates or grouped follow-up facts, but only when the diff clearly supports them.
 When submodule commit summaries are provided, describe their actual changes instead of only saying the submodule ref moved.
 `

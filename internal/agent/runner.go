@@ -37,6 +37,8 @@ type Result struct {
 
 type Validator func(string) []string
 
+type TextNormalizer func(string) string
+
 type BudgetKind string
 
 const (
@@ -67,6 +69,7 @@ type OpenAIRunner struct {
 	Tools     *tools.Registry
 	ToolSpecs []tools.Definition
 	Validator Validator
+	Normalize TextNormalizer
 	Trace     *trace.Recorder
 	Budget    BudgetHandler
 }
@@ -103,6 +106,7 @@ func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error)
 	if err != nil {
 		return Result{}, err
 	}
+	r.normalizeResult(&result)
 
 	if r.Validator != nil {
 		if errs := r.Validator(result.Text); len(errs) > 0 {
@@ -120,12 +124,19 @@ func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error)
 			}
 			result.RepairCalls++
 			result.Text = repaired.Text
+			r.normalizeResult(&result)
 			if errs := r.Validator(result.Text); len(errs) > 0 {
 				return Result{}, fmt.Errorf("validation failed after repair: %v", errs)
 			}
 		}
 	}
 	return result, nil
+}
+
+func (r *OpenAIRunner) normalizeResult(result *Result) {
+	if r.Normalize != nil {
+		result.Text = r.Normalize(result.Text)
+	}
 }
 
 func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, messages []openai.Item, toolSpecs []openai.ToolSpec, allowedToolNames []string, textFormat *openai.TextFormat, maxSteps int) (Result, error) {
