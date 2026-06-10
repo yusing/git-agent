@@ -182,14 +182,15 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 	var preparedAmend *commitmsg.PreparedAmendContext
 	var originalAmendMessage string
 	guidancePaths := stagedPaths
-	if mode == commitmsg.ModeNormal {
+	switch mode {
+	case commitmsg.ModeNormal:
 		prepared, err := commitmsg.PrepareCommitContext(repo)
 		if err != nil {
 			return agent.Result{}, err
 		}
 		preparedCommit = &prepared
 		userPrompt = commitmsg.UserPromptWithPreparedCommitContext(prepared, cfg.MaxSteps, cfg.MaxToolCalls)
-	} else if mode == commitmsg.ModeAmend {
+	case commitmsg.ModeAmend:
 		prepared, err := commitmsg.PrepareAmendContext(repo)
 		if err != nil {
 			return agent.Result{}, err
