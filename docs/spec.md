@@ -129,6 +129,7 @@ All subcommands reserve this shared flag surface:
 - `--timeout`
 - `--max-steps`
 - `--guidance-family`
+- `--append-prompt <text>`
 - `--debug`
 
 `release-note` additionally supports:
@@ -143,6 +144,8 @@ Flag behavior:
 - `--medium`: send `reasoning.effort=medium`
 - `--high`: send `reasoning.effort=high`
 - `--xhigh`: send `reasoning.effort=xhigh`
+- `--append-prompt <text>`: append `## User prompt` plus the supplied text to
+  the task user prompt as an operator hint
 - default: omit both `service_tier` and `reasoning`
 
 `commit-msg` and `commit` additionally support:
@@ -301,7 +304,8 @@ including:
    locally available, and repository ownership/link hints
 5. resolve project guidance for the task target paths, after context prep when
    prepared paths define the target scope
-6. build task-specific instructions, developer context, and initial user prompt
+6. build task-specific instructions, developer context, and initial user prompt,
+   appending any `--append-prompt` hint to the user prompt
 7. send request to the Responses API through the official OpenAI Go SDK
 8. record each request and response in the active trace
 9. if the model requests tools, execute only registered read-only tools

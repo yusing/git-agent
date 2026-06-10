@@ -62,6 +62,7 @@ Common flags:
 - `--timeout`
 - `--max-steps`
 - `--guidance-family`
+- `--append-prompt`
 - `--debug`
 
 Behavior defaults:

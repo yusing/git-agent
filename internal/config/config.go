@@ -33,6 +33,7 @@ type Config struct {
 	MaxSteps       int
 	MaxToolCalls   int
 	GuidanceFamily string
+	AppendPrompt   string
 	Debug          bool
 }
 
@@ -48,6 +49,7 @@ type Options struct {
 	Timeout        string
 	MaxSteps       int
 	GuidanceFamily string
+	AppendPrompt   string
 	Debug          bool
 }
 
@@ -123,6 +125,7 @@ func Resolve(opts Options) (Config, error) {
 		MaxSteps:       maxSteps,
 		MaxToolCalls:   DefaultMaxTools,
 		GuidanceFamily: firstNonEmpty(opts.GuidanceFamily, stringDefaultGuidanceFamily()),
+		AppendPrompt:   opts.AppendPrompt,
 		Debug:          opts.Debug,
 	}, nil
 }

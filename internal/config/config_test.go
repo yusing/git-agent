@@ -15,12 +15,13 @@ func TestResolveFlagEnvDefaultOrder(t *testing.T) {
 	t.Setenv("OPENAI_MODEL", "env-model")
 
 	cfg, err := Resolve(Options{
-		BaseURL:  "https://flag.example/v1",
-		Model:    "flag-model",
-		Fast:     true,
-		Medium:   true,
-		Timeout:  "3s",
-		MaxSteps: 2,
+		BaseURL:      "https://flag.example/v1",
+		Model:        "flag-model",
+		Fast:         true,
+		Medium:       true,
+		Timeout:      "3s",
+		MaxSteps:     2,
+		AppendPrompt: "prefer parser scope",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -51,6 +52,9 @@ func TestResolveFlagEnvDefaultOrder(t *testing.T) {
 	}
 	if cfg.MaxSteps != 2 {
 		t.Fatalf("MaxSteps = %d", cfg.MaxSteps)
+	}
+	if cfg.AppendPrompt != "prefer parser scope" {
+		t.Fatalf("AppendPrompt = %q", cfg.AppendPrompt)
 	}
 }
 

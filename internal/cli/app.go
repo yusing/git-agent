@@ -251,7 +251,7 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 		ToolPolicy:        toolPolicy(),
 		Environment:       environment,
 		ProjectGuidance:   renderedGuidance,
-		UserPrompt:        userPrompt,
+		UserPrompt:        appendUserPrompt(userPrompt, cfg.AppendPrompt),
 		AllowedToolNames:  tools.CommitMessageToolNames(),
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
@@ -391,7 +391,7 @@ func (a *App) runPRMessage(ctx context.Context, args []string) error {
 		SystemPrompt:      commitmsg.SystemPrompt(commitmsg.ModePR),
 		Environment:       environment,
 		ProjectGuidance:   renderedGuidance,
-		UserPrompt:        commitmsg.UserPromptWithPreparedPRContext(prepared, cfg.MaxSteps, cfg.MaxToolCalls),
+		UserPrompt:        appendUserPrompt(commitmsg.UserPromptWithPreparedPRContext(prepared, cfg.MaxSteps, cfg.MaxToolCalls), cfg.AppendPrompt),
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
 	})
@@ -501,7 +501,7 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 		ToolPolicy:        toolPolicy(),
 		Environment:       environment,
 		ProjectGuidance:   renderedGuidance,
-		UserPrompt:        releasenote.UserPrompt(prepared, cfg.MaxSteps, cfg.MaxToolCalls),
+		UserPrompt:        appendUserPrompt(releasenote.UserPrompt(prepared, cfg.MaxSteps, cfg.MaxToolCalls), cfg.AppendPrompt),
 		TextFormat:        releasenote.TextFormat(),
 		AllowedToolNames:  []string{releaseNoteFallbackTools},
 		MaxSteps:          cfg.MaxSteps,
@@ -599,7 +599,16 @@ func registerSharedFlags(fs *flag.FlagSet, opts *config.Options) {
 	fs.StringVar(&opts.Timeout, "timeout", "", "override default request timeout")
 	fs.IntVar(&opts.MaxSteps, "max-steps", 0, "override maximum agent steps")
 	fs.StringVar(&opts.GuidanceFamily, "guidance-family", "", "force guidance family")
+	fs.StringVar(&opts.AppendPrompt, "append-prompt", "", "append a user prompt hint to the model request")
 	fs.BoolVar(&opts.Debug, "debug", false, "enable debug output on stderr")
+}
+
+func appendUserPrompt(prompt, userInput string) string {
+	userInput = strings.TrimSpace(userInput)
+	if userInput == "" {
+		return prompt
+	}
+	return strings.TrimSpace(prompt) + "\n## User prompt\n" + userInput
 }
 
 func resolveGuidanceForPaths(repo *gitctx.Repository, requestedFamily string, paths []string) (string, error) {

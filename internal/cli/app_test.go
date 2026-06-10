@@ -89,6 +89,46 @@ func TestCommitMsgPrintsOnlyProviderArtifact(t *testing.T) {
 	}
 }
 
+func TestCommitMsgAppendPromptAddsUserHint(t *testing.T) {
+	repoDir := initRepo(t)
+	t.Chdir(repoDir)
+
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, string(body))
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: ")
+		fmt.Fprint(w, `{"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"test-model","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Add parser","annotations":[]}]}]}}`)
+		fmt.Fprint(w, "\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "test-model")
+
+	app := &App{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
+	if err := app.Run(t.Context(), []string{"commit-msg", "--append-prompt", "Prefer parser scope."}); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	for _, want := range []string{"## User prompt", "Prefer parser scope."} {
+		if !strings.Contains(requests[0], want) {
+			t.Fatalf("request missing appended prompt %q:\n%s", want, requests[0])
+		}
+	}
+}
+
 func TestCommitMsgRepairsSubmoduleUpdateThatDropsCommitSummary(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
