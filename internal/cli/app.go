@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -424,8 +425,11 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 2 {
-		return errors.New("release-note requires <base> <release>")
+	if fs.NArg() != 1 && fs.NArg() != 2 {
+		return errors.New("release-note requires either <base> <release> or patch|minor|major")
+	}
+	if fs.NArg() == 1 && !isReleaseVersionBump(fs.Arg(0)) {
+		return errors.New("release-note single argument must be patch, minor, or major")
 	}
 	outSet := false
 	fs.Visit(func(f *flag.Flag) {
@@ -454,6 +458,10 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	rangeArgs, err := releaseNoteRangeForArgs(repo, fs.Args())
+	if err != nil {
+		return err
+	}
 	renderedGuidance, err := resolveGuidanceForPaths(repo, cfg.GuidanceFamily, nil)
 	if err != nil {
 		return err
@@ -472,8 +480,12 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 	}
 	session := map[string]any{
 		"command": "release-note",
-		"range":   fs.Arg(0) + ".." + fs.Arg(1),
+		"range":   rangeArgs.BaseRef + ".." + rangeArgs.ReleaseRef,
 		"repo":    repo.Summary(),
+	}
+	if rangeArgs.Inferred {
+		session["inferred_from"] = rangeArgs.Bump
+		session["release_revision"] = rangeArgs.ReleaseRevision
 	}
 	if outSet {
 		session["out"] = outputPath
@@ -482,7 +494,7 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 		return err
 	}
 	registry := tools.NewRegistry(repo)
-	prepared, err := releasenote.PrepareContext(repo, fs.Arg(0), fs.Arg(1))
+	prepared, err := releasenote.PrepareContextFromRevision(repo, rangeArgs.BaseRef, rangeArgs.ReleaseRef, rangeArgs.ReleaseRevision)
 	if err != nil {
 		return err
 	}
@@ -496,7 +508,7 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 		Trace:     recorder,
 		Budget:    a.budgetHandler(),
 	}
-	environment := environmentContext(repo, "release-note", fs.Arg(0)+".."+fs.Arg(1), cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
+	environment := environmentContext(repo, "release-note", rangeArgs.BaseRef+".."+rangeArgs.ReleaseRef, cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
 	result, err := runner.Run(taskCtx, agent.Request{
 		SystemPrompt:      releasenote.SystemPrompt(),
 		ToolPolicy:        toolPolicy(),
@@ -537,6 +549,110 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 		return writeOutputFile(outputPath, result.Text)
 	}
 	return a.writeResult(cfg, result)
+}
+
+type releaseNoteRange struct {
+	BaseRef         string
+	ReleaseRef      string
+	ReleaseRevision string
+	Bump            string
+	Inferred        bool
+}
+
+func releaseNoteRangeForArgs(repo *gitctx.Repository, args []string) (releaseNoteRange, error) {
+	if len(args) == 2 {
+		return releaseNoteRange{BaseRef: args[0], ReleaseRef: args[1], ReleaseRevision: args[1]}, nil
+	}
+	if len(args) != 1 || !isReleaseVersionBump(args[0]) {
+		return releaseNoteRange{}, errors.New("release-note requires either <base> <release> or patch|minor|major")
+	}
+
+	baseRef, err := repo.LastVersionTag()
+	if err != nil {
+		return releaseNoteRange{}, err
+	}
+	releaseRef, err := bumpReleaseVersion(baseRef, args[0])
+	if err != nil {
+		return releaseNoteRange{}, err
+	}
+	return releaseNoteRange{
+		BaseRef:         baseRef,
+		ReleaseRef:      releaseRef,
+		ReleaseRevision: "HEAD",
+		Bump:            args[0],
+		Inferred:        true,
+	}, nil
+}
+
+func isReleaseVersionBump(value string) bool {
+	switch value {
+	case "patch", "minor", "major":
+		return true
+	default:
+		return false
+	}
+}
+
+type releaseVersion struct {
+	Major int
+	Minor int
+	Patch int
+}
+
+func bumpReleaseVersion(tag, bump string) (string, error) {
+	version, ok := parseReleaseVersion(tag)
+	if !ok {
+		return "", fmt.Errorf("last tag %q is not a semantic version", tag)
+	}
+	switch bump {
+	case "patch":
+		version.Patch++
+	case "minor":
+		version.Minor++
+		version.Patch = 0
+	case "major":
+		version.Major++
+		version.Minor = 0
+		version.Patch = 0
+	default:
+		return "", fmt.Errorf("unsupported release version bump %q", bump)
+	}
+	return fmt.Sprintf("%d.%d.%d", version.Major, version.Minor, version.Patch), nil
+}
+
+func parseReleaseVersion(tag string) (releaseVersion, bool) {
+	trimmed := strings.TrimPrefix(tag, "v")
+	parts := strings.Split(trimmed, ".")
+	if len(parts) != 3 {
+		return releaseVersion{}, false
+	}
+	major, ok := parseReleaseVersionPart(parts[0])
+	if !ok {
+		return releaseVersion{}, false
+	}
+	minor, ok := parseReleaseVersionPart(parts[1])
+	if !ok {
+		return releaseVersion{}, false
+	}
+	patch, ok := parseReleaseVersionPart(parts[2])
+	if !ok {
+		return releaseVersion{}, false
+	}
+	return releaseVersion{Major: major, Minor: minor, Patch: patch}, true
+}
+
+func parseReleaseVersionPart(value string) (int, bool) {
+	if value == "" {
+		return 0, false
+	}
+	if len(value) > 1 && value[0] == '0' {
+		return 0, false
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, false
+	}
+	return parsed, true
 }
 
 func preflightWritableOutput(path string) error {
@@ -746,5 +862,6 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent commit-msg [--amend] [flags]\n")
 	b.WriteString("  git-agent pr-message [flags]\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")
+	b.WriteString("  git-agent release-note [--out <file>] [flags] patch|minor|major\n")
 	return errors.New(b.String())
 }

@@ -52,20 +52,24 @@ type PreparedSubmodule struct {
 }
 
 func PrepareContext(repo *gitctx.Repository, baseRef, releaseRef string) (PreparedContext, error) {
+	return PrepareContextFromRevision(repo, baseRef, releaseRef, releaseRef)
+}
+
+func PrepareContextFromRevision(repo *gitctx.Repository, baseRef, releaseRef, releaseRevision string) (PreparedContext, error) {
 	baseSHA, err := repo.ResolveRef(baseRef)
 	if err != nil {
 		return PreparedContext{}, err
 	}
-	releaseSHA, err := repo.ResolveRef(releaseRef)
+	releaseSHA, err := repo.ResolveRef(releaseRevision)
 	if err != nil {
 		return PreparedContext{}, err
 	}
 
-	parentCommits, err := repo.LogMessagesFrom(baseRef, releaseRef, preparedCommitLimit)
+	parentCommits, err := repo.LogMessagesFrom(baseRef, releaseRevision, preparedCommitLimit)
 	if err != nil {
 		return PreparedContext{}, err
 	}
-	submoduleChanges, err := repo.SubmoduleGitlinkRange(baseRef, releaseRef)
+	submoduleChanges, err := repo.SubmoduleGitlinkRange(baseRef, releaseRevision)
 	if err != nil {
 		return PreparedContext{}, err
 	}

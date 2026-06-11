@@ -12,6 +12,7 @@ final Git commit after message generation.
 - `git-agent commit --amend`
 - `git-agent pr-message`
 - `git-agent release-note [--out <file>] <base> <release>`
+- `git-agent release-note [--out <file>] patch|minor|major`
 
 Mermaid execution-flow graphs for each subcommand are documented in
 [`docs/spec.md`](docs/spec.md#subcommand-execution-flow-graphs).
@@ -106,7 +107,11 @@ trace directory to stderr.
 `git-agent release-note --out <file> <base> <release>` checks the output target
 is writable before generation, streams the human console trace to stdout, writes
 the rendered Markdown to the requested file, and does not create an on-disk JSON
-trace session.
+trace session. The command also accepts a single `patch`, `minor`, or `major`
+argument: it finds the latest reachable semantic version tag (`vX.Y.Z` or
+`X.Y.Z`), strips any `v` prefix, bumps the requested component, and uses `HEAD`
+as the release revision for evidence. For example, both `v1.0.0` + `patch` and
+`1.0.0` + `patch` infer release version `1.0.1`.
 
 `git-agent commit` and `git-agent commit --amend` generate the same message as
 `commit-msg`. Stdout streams a human console trace while the message

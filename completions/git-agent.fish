@@ -25,7 +25,7 @@ complete -c git-agent -f
 complete -c git-agent -n '__git_agent_no_subcommand' -a commit -d 'Generate a message and commit staged changes'
 complete -c git-agent -n '__git_agent_no_subcommand' -a commit-msg -d 'Generate a commit message from staged changes'
 complete -c git-agent -n '__git_agent_no_subcommand' -a pr-message -d 'Generate a pull request message from branch changes'
-complete -c git-agent -n '__git_agent_no_subcommand' -a release-note -d 'Generate a release note for a ref range'
+complete -c git-agent -n '__git_agent_no_subcommand' -a release-note -d 'Generate a release note for a range or version bump'
 complete -c git-agent -n '__git_agent_no_subcommand' -a help -d 'Show usage'
 
 complete -c git-agent -n '__git_agent_using_command commit' -l amend -d 'Generate an amended commit message and amend HEAD'
@@ -45,4 +45,5 @@ complete -c git-agent -n '__git_agent_has_subcommand' -l append-prompt -r -d 'Ap
 complete -c git-agent -n '__git_agent_has_subcommand' -l debug -d 'Enable debug output on stderr'
 
 complete -c git-agent -n '__git_agent_using_command release-note' -l out -r -d 'Write release note markdown to file'
+complete -c git-agent -n '__git_agent_using_command release-note' -a 'patch minor major' -d 'Infer release version from latest semver tag'
 complete -c git-agent -n '__git_agent_using_command release-note' -a '(__git_agent_git_refs)' -d 'Git ref'

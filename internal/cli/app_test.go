@@ -661,6 +661,89 @@ func TestReleaseNoteRaisesStepAndTimeoutFloor(t *testing.T) {
 	}
 }
 
+func TestReleaseNoteVersionBumpShortcutInfersRange(t *testing.T) {
+	repoDir := initRepo(t)
+	t.Chdir(repoDir)
+	runGit(t, repoDir, "commit", "-m", "feat: base app")
+	runGit(t, repoDir, "tag", "-m", "v1.0.0", "v1.0.0")
+	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("release\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "add", "app.txt")
+	runGit(t, repoDir, "commit", "-m", "feat: release app")
+
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, string(body))
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: ")
+		fmt.Fprint(w, `{"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"test-model","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"{\"sections\":[]}","annotations":[]}]}]}}`)
+		fmt.Fprint(w, "\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "test-model")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"release-note", "patch"}); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if len(requests) != 1 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	for _, want := range []string{"v1.0.0..1.0.1", "release_ref", "1.0.1", "feat: release app"} {
+		if !strings.Contains(requests[0], want) {
+			t.Fatalf("request missing %q:\n%s", want, requests[0])
+		}
+	}
+	if !strings.Contains(stdout.String(), "### Full Changelog") || !strings.Contains(stdout.String(), "feat: release app") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestBumpReleaseVersionStripsVPrefix(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		tag  string
+		bump string
+		want string
+	}{
+		{name: "v patch", tag: "v1.0.0", bump: "patch", want: "1.0.1"},
+		{name: "plain patch", tag: "1.0.0", bump: "patch", want: "1.0.1"},
+		{name: "minor", tag: "v1.2.3", bump: "minor", want: "1.3.0"},
+		{name: "major", tag: "v1.2.3", bump: "major", want: "2.0.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := bumpReleaseVersion(tc.tag, tc.bump)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("bumpReleaseVersion(%q, %q) = %q, want %q", tc.tag, tc.bump, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestReleaseNoteOutWritesFileAndStreamsTrace(t *testing.T) {
 	repoDir := initRepo(t)
 	t.Chdir(repoDir)

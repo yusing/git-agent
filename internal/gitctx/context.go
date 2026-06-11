@@ -2,6 +2,7 @@ package gitctx
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -233,6 +235,125 @@ func filePatchMatchesAnyPath(patch fdiff.FilePatch, paths map[string]bool) bool 
 		}
 	}
 	return false
+}
+
+func (r *Repository) LastVersionTag() (string, error) {
+	tagsByCommit, err := r.versionTagsByCommit()
+	if err != nil {
+		return "", err
+	}
+	if len(tagsByCommit) == 0 {
+		return "", errors.New("no semantic version tags found")
+	}
+
+	from, err := r.resolveLogStart("HEAD")
+	if err != nil {
+		return "", err
+	}
+	iter := object.NewCommitPreorderIter(from, nil, nil)
+	defer iter.Close()
+
+	var tag string
+	err = iter.ForEach(func(commit *object.Commit) error {
+		tags := tagsByCommit[commit.Hash]
+		if len(tags) == 0 {
+			return nil
+		}
+		slices.SortFunc(tags, compareVersionTags)
+		tag = tags[0].Name
+		return stopeach{}
+	})
+	if errors.As(err, new(stopeach)) {
+		return tag, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return "", errors.New("no semantic version tags reachable from HEAD")
+}
+
+type versionTag struct {
+	Name  string
+	Major int
+	Minor int
+	Patch int
+}
+
+func (r *Repository) versionTagsByCommit() (map[plumbing.Hash][]versionTag, error) {
+	iter, err := r.Repo.Tags()
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	tags := map[plumbing.Hash][]versionTag{}
+	for {
+		ref, err := iter.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		tag, ok := parseVersionTag(ref.Name().Short())
+		if !ok {
+			continue
+		}
+		commit, err := r.ResolveCommit(tag.Name)
+		if err != nil {
+			continue
+		}
+		tags[commit.Hash] = append(tags[commit.Hash], tag)
+	}
+	return tags, nil
+}
+
+func parseVersionTag(name string) (versionTag, bool) {
+	trimmed := strings.TrimPrefix(name, "v")
+	parts := strings.Split(trimmed, ".")
+	if len(parts) != 3 {
+		return versionTag{}, false
+	}
+	major, ok := parseVersionPart(parts[0])
+	if !ok {
+		return versionTag{}, false
+	}
+	minor, ok := parseVersionPart(parts[1])
+	if !ok {
+		return versionTag{}, false
+	}
+	patch, ok := parseVersionPart(parts[2])
+	if !ok {
+		return versionTag{}, false
+	}
+	return versionTag{Name: name, Major: major, Minor: minor, Patch: patch}, true
+}
+
+func parseVersionPart(value string) (int, bool) {
+	if value == "" {
+		return 0, false
+	}
+	if len(value) > 1 && value[0] == '0' {
+		return 0, false
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, false
+	}
+	return parsed, true
+}
+
+func compareVersionTags(a, b versionTag) int {
+	if diff := cmp.Compare(b.Major, a.Major); diff != 0 {
+		return diff
+	}
+	if diff := cmp.Compare(b.Minor, a.Minor); diff != 0 {
+		return diff
+	}
+	if diff := cmp.Compare(b.Patch, a.Patch); diff != 0 {
+		return diff
+	}
+	return strings.Compare(a.Name, b.Name)
 }
 
 func (r *Repository) RecentCommits(limit int) ([]CommitInfo, error) {

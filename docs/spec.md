@@ -24,6 +24,7 @@ Supported workflows:
 - `git-agent commit --amend`
 - `git-agent pr-message`
 - `git-agent release-note [--out <file>] <base> <release>`
+- `git-agent release-note [--out <file>] patch|minor|major`
 
 ### Non-goals
 
@@ -103,9 +104,14 @@ Generate a squash merge commit message for the current branch versus
 authoritative scope, precomputes branch evidence before generation, and uses
 branch commits as supporting evidence.
 
-#### `git-agent release-note [--out <file>] <base> <release>`
+#### `git-agent release-note [--out <file>] <base> <release>` or `git-agent release-note [--out <file>] patch|minor|major`
 
 Generate a GitHub release body for the range from `<base>` to `<release>`.
+As a shortcut, `patch`, `minor`, or `major` finds the latest reachable semantic
+version tag, accepts either `vX.Y.Z` or `X.Y.Z`, strips any `v` prefix, bumps the
+requested component, and uses `HEAD` as the release revision for evidence. For
+example, `v1.0.0` plus `patch` and `1.0.0` plus `patch` both infer release
+version `1.0.1`.
 The command precomputes release-note evidence in Go before generation and then
 asks the model to write from that prepared context, with only a minimal
 read-only fallback tool available for rare gaps.
@@ -473,11 +479,11 @@ flowchart TD
     FinalTrace --> Stdout([Print artifact only to stdout])
 ```
 
-#### `git-agent release-note <base> <release>`
+#### `git-agent release-note <base> <release>` or `git-agent release-note patch|minor|major`
 
 ```mermaid
 flowchart TD
-    Start([git-agent release-note base release]) --> Parse[Parse shared flags, optional --out, and two refs]
+    Start([git-agent release-note args]) --> Parse[Parse shared flags, optional --out, and release range or version bump]
     Parse --> OutCheck{--out set?}
     OutCheck -- yes --> Preflight[Preflight output file writable]
     OutCheck -- no --> Resolve
@@ -491,8 +497,11 @@ flowchart TD
     Trace -- yes --> StreamTrace[Create stdout-streaming console trace]
     JSONTrace --> Registry[Register repo_summary fallback tool]
     StreamTrace --> Registry
-    Registry --> Prepare[Precompute release-note context]
-    Prepare --> Refs[Resolve base and release refs]
+    Registry --> Infer{Version bump shortcut?}
+    Infer -- yes --> Bump[Find latest reachable semver tag and bump patch/minor/major; use HEAD for evidence]
+    Infer -- no --> Prepare
+    Bump --> Prepare[Precompute release-note context]
+    Prepare --> Refs[Resolve base and release revision]
     Refs --> ParentLog[Collect parent repository commits]
     ParentLog --> Submodules[Inspect submodule gitlink changes]
     Submodules --> SubHistory[Collect local submodule history when available]
@@ -992,7 +1001,7 @@ Use temporary repositories to test:
 - staged-path guidance scoping
 - detached HEAD
 - root commit handling
-- release-note tag/range handling
+- release-note tag/range handling, including patch/minor/major shortcut inference
 - submodule gitlink movement and missing checkout cases
 
 ## 8. Risks and open constraints
@@ -1073,8 +1082,10 @@ The in-repository implementation is complete when:
 - `git-agent pr-message` routes through the bounded SDK-backed agent loop,
   targets `origin/HEAD..HEAD`, and sends prepared branch context without
   exposing model tools
-- `git-agent release-note [--out <file>] <base> <release>` resolves refs before
-  generation
+- `git-agent release-note [--out <file>] <base> <release>` resolves explicit refs
+  before generation; `git-agent release-note [--out <file>] patch|minor|major`
+  resolves the latest reachable semantic version tag and uses `HEAD` as the
+  release revision
 - guidance rendering uses repository-relative `<PROJECT_DOC path="...">` tags
 - normal commit-message guidance resolves against staged paths, while amend
   guidance resolves against the final amended paths
