@@ -111,7 +111,9 @@ Rules:
 - use "commit" refs for commit SHAs and "pr"/"issue" refs for numeric identifiers without the leading #
 - preserve parent/submodule ownership of references
 - downplay internal sync, generated docs, and schema churn unless deployers must act on them
-- use the prepared release-note context below as primary evidence
+- use candidate_items as the primary narrative plan when present; include only candidates with include=true
+- use each candidate's evidence plus its referenced commit's changed paths, diffstat, operator_signals, and patch_excerpt to verify wording before writing a bullet
+- do not invent behavior beyond draft_fact and evidence; narrow or omit low-confidence candidates instead
 - use each commit's clamped "message" content, not just "summary", before inferring operator impact
 - only use fallback tools if the prepared context is missing information you need
 

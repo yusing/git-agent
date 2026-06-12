@@ -84,6 +84,15 @@ func TestLogMessagesFromIncludesFullCommitMessage(t *testing.T) {
 			t.Fatalf("message missing %q:\n%s", want, commits[0].Message)
 		}
 	}
+	if commits[0].Diffstat.FilesChanged != 1 || commits[0].Diffstat.Additions == 0 {
+		t.Fatalf("diffstat = %#v", commits[0].Diffstat)
+	}
+	if len(commits[0].Files) != 1 || commits[0].Files[0].Path != "app.txt" || commits[0].Files[0].Status != "modified" {
+		t.Fatalf("files = %#v", commits[0].Files)
+	}
+	if !strings.Contains(commits[0].PatchExcerpt, "--- app.txt") || !strings.Contains(commits[0].PatchExcerpt, "+ release") {
+		t.Fatalf("patch excerpt missing expected change:\n%s", commits[0].PatchExcerpt)
+	}
 }
 
 func TestStagedStatusExcludesUnstagedOnlyChanges(t *testing.T) {

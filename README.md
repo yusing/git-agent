@@ -107,11 +107,15 @@ trace directory to stderr.
 `git-agent release-note --out <file> <base> <release>` checks the output target
 is writable before generation, streams the human console trace to stdout, writes
 the rendered Markdown to the requested file, and does not create an on-disk JSON
-trace session. The command also accepts a single `patch`, `minor`, or `major`
-argument: it finds the latest reachable semantic version tag (`vX.Y.Z` or
-`X.Y.Z`), strips any `v` prefix, bumps the requested component, and uses `HEAD`
-as the release revision for evidence. For example, both `v1.0.0` + `patch` and
-`1.0.0` + `patch` infer release version `1.0.1`.
+trace session. Release-note context is precomputed before the model runs and
+includes commit messages, changed paths, diffstat, bounded patch excerpts,
+operator-facing change signals, omit/include policy hints, and candidate release
+note items so the model can ground bullets in concrete commit evidence. The
+command also accepts a single `patch`, `minor`, or `major` argument: it finds the
+latest reachable semantic version tag (`vX.Y.Z` or `X.Y.Z`), strips any `v`
+prefix, bumps the requested component, and uses `HEAD` as the release revision
+for evidence. For example, both `v1.0.0` + `patch` and `1.0.0` + `patch` infer
+release version `1.0.1`.
 
 `git-agent commit` and `git-agent commit --amend` generate the same message as
 `commit-msg`. Stdout streams a human console trace while the message

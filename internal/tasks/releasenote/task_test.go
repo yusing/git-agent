@@ -245,6 +245,116 @@ func TestPreparedCommitsIncludeWordClampedFullMessages(t *testing.T) {
 	}
 }
 
+func TestPreparedCommitsIncludeEvidenceAndCandidateItems(t *testing.T) {
+	t.Parallel()
+
+	prepared := preparedCommits([]gitctx.CommitMessageInfo{
+		{
+			SHA:          "abc1234",
+			Summary:      "feat(config): expose TLS key defaults",
+			Message:      "feat(config): expose TLS key defaults\n\nExpose default TLS key metadata in generated schemas.",
+			PatchExcerpt: "--- internal/config/tls.go\n+ DefaultKeyType = EC256",
+			Files: []gitctx.CommitFileChange{
+				{Path: "internal/config/tls.go", Status: "modified", Additions: 2, Deletions: 1},
+				{Path: "webui/src/types/godoxy/schema.json", Status: "modified", Additions: 5},
+			},
+			Diffstat: gitctx.CommitDiffstat{FilesChanged: 2, Additions: 7, Deletions: 1},
+		},
+	}, "https://github.com/example/godoxy")
+
+	if len(prepared) != 1 {
+		t.Fatalf("prepared commits = %d", len(prepared))
+	}
+	commit := prepared[0]
+	if len(commit.Files) != 2 || commit.Files[1].Generated != true {
+		t.Fatalf("files = %#v", commit.Files)
+	}
+	if commit.Diffstat == nil || commit.Diffstat.FilesChanged != 2 || commit.Diffstat.GeneratedFilesChanged != 1 {
+		t.Fatalf("diffstat = %#v", commit.Diffstat)
+	}
+	if commit.OperatorSignals == nil || !commit.OperatorSignals.ConfigSchemaChanged || !commit.OperatorSignals.RuntimeChanged {
+		t.Fatalf("operator signals = %#v", commit.OperatorSignals)
+	}
+	if commit.Policy == nil || !commit.Policy.IncludeNarrative {
+		t.Fatalf("policy = %#v", commit.Policy)
+	}
+	candidates := candidateItems(prepared, nil)
+	if len(candidates) != 1 {
+		t.Fatalf("candidates = %#v", candidates)
+	}
+	candidate := candidates[0]
+	if candidate.RecommendedSection != "New Features" || candidate.Label != "Config" || candidate.Confidence != "high" {
+		t.Fatalf("candidate = %#v", candidate)
+	}
+	if !strings.Contains(candidate.DraftFact, "Expose default TLS key metadata") {
+		t.Fatalf("draft fact = %q", candidate.DraftFact)
+	}
+}
+
+func TestGeneratedSchemaChangesRemainNarrativeCandidates(t *testing.T) {
+	t.Parallel()
+
+	prepared := preparedCommits([]gitctx.CommitMessageInfo{
+		{
+			SHA:     "def5678",
+			Summary: "fix(types): expose autocert certificate key type default",
+			Message: "fix(types): expose autocert certificate key type default\n\nReplace the inline certificate_key_type note with an @default EC256 annotation.",
+			Files: []gitctx.CommitFileChange{
+				{Path: "src/types/godoxy/schema.json", Status: "modified", Additions: 3, Deletions: 1},
+			},
+			Diffstat: gitctx.CommitDiffstat{FilesChanged: 1, Additions: 3, Deletions: 1},
+		},
+	}, "")
+
+	commit := prepared[0]
+	if commit.Policy == nil || !commit.Policy.IncludeNarrative {
+		t.Fatalf("generated schema policy = %#v", commit.Policy)
+	}
+	if commit.OperatorSignals == nil || !commit.OperatorSignals.ConfigSchemaChanged || !commit.OperatorSignals.GeneratedOnly {
+		t.Fatalf("operator signals = %#v", commit.OperatorSignals)
+	}
+}
+
+func TestCandidateItemsSkipSubmodulePointerCommits(t *testing.T) {
+	t.Parallel()
+
+	parent := []PreparedCommit{
+		{
+			SHA:     "parent123",
+			Summary: "chore(webui): update webui submodule",
+			Files: []PreparedChangedFile{
+				{Path: "webui", Status: "modified", Submodule: true},
+			},
+			OperatorSignals: &OperatorSignals{SubmoduleOnly: true},
+			Policy:          &ReleaseNotePolicy{IncludeNarrative: false, Reason: "submodule pointer update; use submodule commits as narrative evidence"},
+		},
+	}
+	submodules := []PreparedSubmodule{
+		{
+			Path:                  "webui",
+			LocalHistoryAvailable: true,
+			Commits: []PreparedCommit{
+				{
+					SHA:             "child123",
+					Summary:         "fix(types): expose certificate key default",
+					Message:         "fix(types): expose certificate key default\n\nReplace inline note with @default metadata.",
+					Files:           []PreparedChangedFile{{Path: "src/types/godoxy/schema.json", Status: "modified", Generated: true}},
+					OperatorSignals: &OperatorSignals{ConfigSchemaChanged: true},
+					Policy:          &ReleaseNotePolicy{IncludeNarrative: true},
+				},
+			},
+		},
+	}
+
+	candidates := candidateItems(parent, submodules)
+	if len(candidates) != 1 {
+		t.Fatalf("candidates = %#v", candidates)
+	}
+	if candidates[0].ID != "webui-child123" || candidates[0].Label != "WebUI/Types" || candidates[0].RecommendedSection != "Bug Fixes" {
+		t.Fatalf("candidate = %#v", candidates[0])
+	}
+}
+
 func TestBuildDocumentSortsSectionsAndAttachesChangelog(t *testing.T) {
 	t.Parallel()
 
@@ -658,6 +768,8 @@ func TestUserPromptContainsSchemaInstructionsAndPreparedContext(t *testing.T) {
 		`ref type must be one of: "commit", "pr", "issue"`,
 		`avoid low-signal benefit clauses`,
 		`add a second clause only when it adds non-obvious operator impact`,
+		`use candidate_items as the primary narrative plan`,
+		`referenced commit's changed paths, diffstat, operator_signals, and patch_excerpt`,
 		`use each commit's clamped "message" content, not just "summary"`,
 		"only use fallback tools if the prepared context is missing information you need",
 		`<prepared_release_note_context format="json">`,

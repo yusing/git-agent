@@ -45,11 +45,31 @@ type CommitInfo struct {
 }
 
 type CommitMessageInfo struct {
-	SHA     string `json:"sha"`
-	Summary string `json:"summary"`
-	Message string `json:"message,omitempty"`
-	Author  string `json:"author,omitempty"`
-	Date    string `json:"date,omitempty"`
+	SHA           string             `json:"sha"`
+	Summary       string             `json:"summary"`
+	Message       string             `json:"message,omitempty"`
+	Author        string             `json:"author,omitempty"`
+	Date          string             `json:"date,omitempty"`
+	Files         []CommitFileChange `json:"files,omitempty"`
+	Diffstat      CommitDiffstat     `json:"diffstat,omitzero"`
+	PatchExcerpt  string             `json:"patch_excerpt,omitempty"`
+	EvidenceError string             `json:"evidence_error,omitempty"`
+}
+
+type CommitFileChange struct {
+	Path      string `json:"path"`
+	OldPath   string `json:"old_path,omitempty"`
+	Status    string `json:"status"`
+	Additions int    `json:"additions,omitempty"`
+	Deletions int    `json:"deletions,omitempty"`
+	Binary    bool   `json:"binary,omitempty"`
+	Submodule bool   `json:"submodule,omitempty"`
+}
+
+type CommitDiffstat struct {
+	FilesChanged int `json:"files_changed,omitempty"`
+	Additions    int `json:"additions,omitempty"`
+	Deletions    int `json:"deletions,omitempty"`
 }
 
 type PathChange struct {
@@ -842,18 +862,7 @@ func (r *Repository) patchHeadAgainstParent() (*object.Patch, error) {
 	if err != nil {
 		return nil, err
 	}
-	if head.NumParents() == 0 {
-		tree, err := head.Tree()
-		if err != nil {
-			return nil, err
-		}
-		return (&object.Tree{}).Patch(tree)
-	}
-	parent, err := head.Parent(0)
-	if err != nil {
-		return nil, err
-	}
-	return parent.Patch(head)
+	return patchCommitAgainstFirstParent(head)
 }
 
 func (r *Repository) patchFinalAmended() (*object.Patch, error) {
@@ -1237,13 +1246,170 @@ func commitInfo(commit *object.Commit) CommitInfo {
 
 func commitMessageInfo(commit *object.Commit) CommitMessageInfo {
 	info := commitInfo(commit)
-	return CommitMessageInfo{
+	message := CommitMessageInfo{
 		SHA:     info.SHA,
 		Summary: info.Summary,
 		Message: strings.TrimSpace(commit.Message),
 		Author:  info.Author,
 		Date:    info.Date,
 	}
+	patch, err := patchCommitAgainstFirstParent(commit)
+	if err != nil {
+		message.EvidenceError = err.Error()
+		return message
+	}
+	message.Files = commitFileChangesFromPatch(patch)
+	message.Diffstat = commitDiffstat(message.Files)
+	message.PatchExcerpt = commitPatchExcerpt(patch, 12*1024, 80)
+	return message
+}
+
+func patchCommitAgainstFirstParent(commit *object.Commit) (*object.Patch, error) {
+	if commit.NumParents() == 0 {
+		tree, err := commit.Tree()
+		if err != nil {
+			return nil, err
+		}
+		return (&object.Tree{}).Patch(tree)
+	}
+	parent, err := commit.Parent(0)
+	if err != nil {
+		return nil, err
+	}
+	return parent.Patch(commit)
+}
+
+func commitFileChangesFromPatch(patch *object.Patch) []CommitFileChange {
+	if patch == nil {
+		return nil
+	}
+	statsByPath := map[string]FileStat{}
+	for _, stat := range fileStatsFromPatch(patch) {
+		statsByPath[stat.Path] = stat
+	}
+	changes := make([]CommitFileChange, 0, len(patch.FilePatches()))
+	for _, filePatch := range patch.FilePatches() {
+		from, to := filePatch.Files()
+		path, oldPath := patchPath(from, to)
+		change := CommitFileChange{
+			Path:      path,
+			OldPath:   oldPath,
+			Status:    patchStatus(from, to),
+			Binary:    filePatch.IsBinary(),
+			Submodule: patchHasSubmoduleMode(from, to),
+		}
+		if stat, ok := statsByPath[path]; ok {
+			change.Additions = stat.Adds
+			change.Deletions = stat.Deletes
+		} else if oldPath != "" {
+			if stat, ok := statsByPath[oldPath]; ok {
+				change.Additions = stat.Adds
+				change.Deletions = stat.Deletes
+			}
+		}
+		changes = append(changes, change)
+	}
+	slices.SortFunc(changes, func(a, b CommitFileChange) int {
+		return cmp.Compare(a.Path, b.Path)
+	})
+	return changes
+}
+
+func patchPath(from, to fdiff.File) (string, string) {
+	if to == nil {
+		if from == nil {
+			return "", ""
+		}
+		return from.Path(), ""
+	}
+	if from != nil && from.Path() != to.Path() {
+		return to.Path(), from.Path()
+	}
+	return to.Path(), ""
+}
+
+func patchStatus(from, to fdiff.File) string {
+	switch {
+	case from == nil && to != nil:
+		return "added"
+	case from != nil && to == nil:
+		return "deleted"
+	case from != nil && to != nil && from.Path() != to.Path():
+		return "renamed"
+	default:
+		return "modified"
+	}
+}
+
+func patchHasSubmoduleMode(from, to fdiff.File) bool {
+	return from != nil && from.Mode() == filemode.Submodule || to != nil && to.Mode() == filemode.Submodule
+}
+
+func commitDiffstat(files []CommitFileChange) CommitDiffstat {
+	var stat CommitDiffstat
+	stat.FilesChanged = len(files)
+	for _, file := range files {
+		stat.Additions += file.Additions
+		stat.Deletions += file.Deletions
+	}
+	return stat
+}
+
+func commitPatchExcerpt(patch *object.Patch, maxBytes, maxLines int) string {
+	if patch == nil {
+		return ""
+	}
+	var b strings.Builder
+	files := 0
+	lines := 0
+	for _, filePatch := range patch.FilePatches() {
+		if filePatch.IsBinary() {
+			continue
+		}
+		from, to := filePatch.Files()
+		path, oldPath := patchPath(from, to)
+		if path == "" {
+			continue
+		}
+		if files >= 5 || lines >= maxLines {
+			break
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		if oldPath != "" {
+			fmt.Fprintf(&b, "--- %s => %s\n", oldPath, path)
+		} else {
+			fmt.Fprintf(&b, "--- %s\n", path)
+		}
+		files++
+		for _, chunk := range filePatch.Chunks() {
+			if chunk.Type() == fdiff.Equal {
+				continue
+			}
+			prefix := "+"
+			if chunk.Type() == fdiff.Delete {
+				prefix = "-"
+			}
+			for line := range strings.SplitSeq(chunk.Content(), "\n") {
+				if line == "" || lines >= maxLines {
+					continue
+				}
+				trimmed := strings.TrimSpace(line)
+				if trimmed == "" {
+					continue
+				}
+				fmt.Fprintf(&b, "%s %s\n", prefix, trimmed)
+				lines++
+				if b.Len() >= maxBytes {
+					limited, _ := textutil.Limit(b.String(), maxBytes, maxLines)
+					return strings.TrimSpace(limited)
+				}
+			}
+		}
+	}
+	limited, _ := textutil.Limit(b.String(), maxBytes, maxLines)
+	return strings.TrimSpace(limited)
 }
 
 func formatCommit(commit *object.Commit) string {
