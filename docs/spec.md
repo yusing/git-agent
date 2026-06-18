@@ -171,7 +171,8 @@ directory as it is skipped by git-agent's own safety rules, including dot paths,
 symlinks, oversized files, binary files, non-text MIME types, unreadable paths,
 and non-regular files. Paths skipped only by `.gitignore` or `.gitagentignore`
 patterns are not reported. While embedding missing index chunks, `--debug`
-writes live `search_embed_plan` and `search_embed_progress` stderr lines.
+writes live `search_timing`, `search_embed_plan`, and `search_embed_progress`
+stderr lines.
 
 ### Flags
 

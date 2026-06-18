@@ -168,9 +168,6 @@ func (a *App) writeSearchDebug(output searchtask.Output) {
 		diag.IndexDir,
 		diag.Total.Round(time.Millisecond),
 	)
-	for _, timing := range diag.Timings {
-		fmt.Fprintf(a.stderr, "search_timing step=%s duration=%s\n", timing.Step, timing.Duration.Round(time.Millisecond))
-	}
 }
 
 func (a *App) runCommitMsg(ctx context.Context, args []string) error {

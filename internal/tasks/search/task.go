@@ -234,10 +234,17 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	started := time.Now()
 	phaseStarted := started
 	var diag Diagnostics
+	debugf := func(format string, args ...any) {
+		if opts.DebugLog != nil {
+			opts.DebugLog(fmt.Sprintf(format, args...))
+		}
+	}
 	mark := func(step string) {
 		now := time.Now()
-		diag.Timings = append(diag.Timings, Timing{Step: step, Duration: now.Sub(phaseStarted)})
+		duration := now.Sub(phaseStarted)
+		diag.Timings = append(diag.Timings, Timing{Step: step, Duration: duration})
 		phaseStarted = now
+		debugf("search_timing step=%s duration=%s", step, duration.Round(time.Millisecond))
 	}
 	resultWithDiagnostics := func(output Output) Output {
 		diag.Total = time.Since(started)
@@ -246,11 +253,6 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 	fail := func(err error) (Output, error) {
 		return resultWithDiagnostics(Output{}), err
-	}
-	debugf := func(format string, args ...any) {
-		if opts.DebugLog != nil {
-			opts.DebugLog(fmt.Sprintf(format, args...))
-		}
 	}
 
 	query = strings.TrimSpace(query)
