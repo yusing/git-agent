@@ -15,9 +15,6 @@ final Git commit after message generation.
 - `git-agent release-note [--out <file>] patch|minor|major`
 - `git-agent search [--rev <rev>] [--min-relatedness <score>] [--limit <n>] <query...>`
 
-Mermaid execution-flow graphs for each subcommand are documented in
-[`docs/spec.md`](docs/spec.md#subcommand-execution-flow-graphs).
-
 ## Configuration
 
 By default, `git-agent` uses ChatGPT/Codex auth from:
@@ -71,47 +68,16 @@ Common flags:
 - `--append-prompt`
 - `--debug`
 
-`search` is embeddings-only semantic retrieval for agents. It does not run the
-Responses API, does not call tools, does not generate text, and has no lexical
-fallback or keyword boost. By default it searches current files under the
-current working directory exactly as they exist on disk, including staged,
-unstaged, and untracked files. Filesystem mode skips dot files/directories,
-honors `.gitignore` patterns, and skips binary files, oversized files, and
-symlinks. It does not require a Git repository.
+`search` is embeddings-only semantic retrieval for agents. It searches the
+current filesystem by default, or a committed tree with `--rev <rev>`, and
+writes JSON results to stdout. Use `--code` to limit candidates to source-code
+files.
 
-Go files with a pre-package heading comment containing `DO NOT EDIT` are indexed
-as path-only chunks. Their filename can match semantically, but generated source
-content is not embedded.
-
-`git-agent search --rev <rev> <query...>` switches to a committed Git tree. In
-that mode the command must run inside a Git repository, resolves `<rev>` to a
-commit, searches that commit tree only, and ignores current filesystem
-contents.
-
-Use `git-agent search --code <query...>` for implementation searches. It keeps
-the CLI simple by only filtering candidates to source-code files before
-embedding/ranking; it does not add lexical matching or score boosts. Default
-search still includes docs and code.
-
-Search requires an embeddings API key. Set `OPENAI_EMBEDDING_API_KEY` to keep
-embeddings credentials separate from normal message-generation auth; if it is
-unset, search falls back to `OPENAI_API_KEY`. Codex/ChatGPT auth is not used for
-embeddings. Use `OPENAI_EMBEDDING_BASE_URL` for an embeddings-only provider base
-URL; otherwise search falls back to `OPENAI_BASE_URL` and then
-`https://api.openai.com/v1`. The selected account/backend must have embeddings
-access and quota; otherwise search fails clearly instead of falling back to
-lexical retrieval. `--base-url`, `--timeout`, and `--debug` are supported.
-The default embedding model is `text-embedding-3-small` with `1024` dimensions;
-pass `--embedding-model text-embedding-3-large` when recall quality is worth the
-extra cost, storage, and latency. `--embedding-dimensions <n>` or
-`OPENAI_EMBEDDING_DIMENSIONS` changes the search embedding dimensions only,
-without affecting non-search model usage. Lower dimensions reduce index size
-and latency; higher dimensions can improve recall. `OPENAI_EMBEDDING_MODEL`
-changes the search default without affecting `OPENAI_MODEL`. Results are
-written as JSON only on stdout.
-`relatedness` is always in `(0, 1]`, and results below
-`--min-relatedness` are omitted. Defaults are `--min-relatedness 0.70`,
-`--limit 20`, and maximum `--limit 100`.
+Search uses `OPENAI_EMBEDDING_API_KEY` when set, then falls back to
+`OPENAI_API_KEY`; Codex/ChatGPT auth is not used for embeddings. The default
+embedding model is `text-embedding-3-small` with `1024` dimensions. Results
+below `--min-relatedness` are omitted. Defaults are
+`--min-relatedness 0.70`, `--limit 20`, and maximum `--limit 100`.
 
 Behavior defaults:
 
@@ -146,42 +112,19 @@ Message-generation commands store a JSON trace under:
 .git-agent/sessions/<timestamp>-<command>/
 ```
 
-Trace files include session metadata, every Responses request sent to the
-provider, every response received, each tool call, and the tool output returned
-to the model. API keys are redacted from request traces. `--debug` prints the
-trace directory to stderr.
+Trace files include session metadata, provider requests/responses, tool calls,
+and returned tool output. API keys are redacted. `--debug` prints the trace
+directory to stderr.
 
-`git-agent release-note --out <file> <base> <release>` checks the output target
-is writable before generation, streams the human console trace to stdout, writes
-the rendered Markdown to the requested file, and does not create an on-disk JSON
-trace session. Release-note context is precomputed before the model runs and
-includes commit messages, changed paths, diffstat, bounded patch excerpts,
-operator-facing change signals, omit/include policy hints, and candidate release
-note items so the model can ground bullets in concrete commit evidence. The
-command also accepts a single `patch`, `minor`, or `major` argument: it finds the
-latest reachable semantic version tag (`vX.Y.Z` or `X.Y.Z`), strips any `v`
-prefix, bumps the requested component, and uses `HEAD` as the release revision
-for evidence. For example, both `v1.0.0` + `patch` and `1.0.0` + `patch` infer
-release version `1.0.1`.
+`release-note --out <file>` writes the rendered Markdown to the requested file
+and skips the on-disk JSON trace session. `release-note patch|minor|major` finds
+the latest reachable semantic version tag, bumps the requested component, and
+uses `HEAD` as the release revision.
 
-`git-agent commit` and `git-agent commit --amend` generate the same message as
-`commit-msg`. Stdout streams a human console trace while the message
-is generated, then prints Git's raw commit summary after `git commit` succeeds.
-Trace lines use short local times like `15:04:05 INF final`, color field keys
-when stdout is a terminal, and render long or multiline values as indented
-preview blocks so raw patches do not flood the console. No on-disk trace session
-is written. Commit creation is delegated to
-`git commit --file -` (or
-`git commit --amend --file -`), so normal Git config, hooks, `commit.gpgSign`,
-system `gpg`, and `gpg-agent` behavior apply. If commit creation fails after
-message generation, including because signing fails or a key is locked, the
-command exits nonzero and stdout still contains the streamed trace lines,
-including the final event for the generated message. The final error includes
-the generated message and Git error so the user can commit manually.
-In amend mode, the current HEAD commit message is treated as the message anchor:
-small staged cleanups or refinements must preserve the original subject instead
-of replacing the commit with a narrow delta description. The amend request is
-seeded with prepared context for the latest commit being amended, including its
-HEAD-vs-parent diff, the final amended diff versus the parent, staged
-diagnostics, and recent style commits before the model can ask for narrower
-read-only follow-up tools.
+`commit` and `commit --amend` generate the same message as `commit-msg`, stream
+the human console trace to stdout, then run `git commit --file -` or
+`git commit --amend --file -`. Normal Git config, hooks, signing, and
+`gpg-agent` behavior apply. If commit creation fails after message generation,
+the command exits nonzero and includes both the generated message and Git error.
+In amend mode, the current HEAD message is treated as the message anchor so
+small staged refinements preserve the original subject.
