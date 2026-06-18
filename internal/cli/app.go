@@ -87,6 +87,18 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	embeddingBatchInputs, err := config.ResolveEmbeddingBatchInputs(searchtask.DefaultEmbeddingBatchInputs)
+	if err != nil {
+		return err
+	}
+	embeddingBatchMaxChars, err := config.ResolveEmbeddingBatchMaxChars(searchtask.DefaultEmbeddingBatchMaxChars)
+	if err != nil {
+		return err
+	}
+	embeddingConcurrency, err := config.ResolveEmbeddingConcurrency(0)
+	if err != nil {
+		return err
+	}
 	fs.StringVar(&opts.BaseURL, "base-url", "", "override provider base URL")
 	fs.StringVar(&opts.Timeout, "timeout", "", "override default request timeout")
 	fs.BoolVar(&opts.Debug, "debug", false, "enable debug output on stderr")
@@ -126,20 +138,23 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 		return err
 	}
 	output, err := searchtask.Run(ctx, openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}), searchtask.Options{
-		Root:                root,
-		Rev:                 rev,
-		MinRelatedness:      minRelatedness,
-		Limit:               limit,
-		IndexOnly:           indexOnly,
-		Reindex:             reindex,
-		CodeOnly:            codeOnly,
-		EmbeddingModel:      embeddingModel,
-		EmbeddingDimensions: embeddingDimensions,
-		EmbeddingMaxInput:   embeddingMaxInput,
-		APIKey:              cfg.APIKey,
-		BaseURL:             cfg.BaseURL,
-		Debug:               cfg.Debug,
-		DebugLog:            debugLog,
+		Root:                   root,
+		Rev:                    rev,
+		MinRelatedness:         minRelatedness,
+		Limit:                  limit,
+		IndexOnly:              indexOnly,
+		Reindex:                reindex,
+		CodeOnly:               codeOnly,
+		EmbeddingModel:         embeddingModel,
+		EmbeddingDimensions:    embeddingDimensions,
+		EmbeddingMaxInput:      embeddingMaxInput,
+		EmbeddingBatchInputs:   embeddingBatchInputs,
+		EmbeddingBatchMaxChars: embeddingBatchMaxChars,
+		EmbeddingConcurrency:   embeddingConcurrency,
+		APIKey:                 cfg.APIKey,
+		BaseURL:                cfg.BaseURL,
+		Debug:                  cfg.Debug,
+		DebugLog:               debugLog,
 	}, query)
 	if err != nil {
 		if cfg.Debug {

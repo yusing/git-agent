@@ -166,12 +166,44 @@ func TestResolveEmbeddingMaxInputUsesEnv(t *testing.T) {
 	}
 }
 
+func TestResolveEmbeddingTuningUsesEnv(t *testing.T) {
+	tests := []struct {
+		name    string
+		envName string
+		value   string
+		resolve func(int) (int, error)
+		want    int
+	}{
+		{"batch inputs", EnvEmbeddingBatchInputs, "16", ResolveEmbeddingBatchInputs, 16},
+		{"batch max chars", EnvEmbeddingBatchMaxChars, "900000", ResolveEmbeddingBatchMaxChars, 900000},
+		{"concurrency", EnvEmbeddingConcurrency, "6", ResolveEmbeddingConcurrency, 6},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(tt.envName, tt.value)
+			got, err := tt.resolve(1)
+			if err != nil || got != tt.want {
+				t.Fatalf("resolved %s = %d, %v", tt.envName, got, err)
+			}
+		})
+	}
+}
+
 func TestResolveEmbeddingMaxInputRejectsInvalidEnv(t *testing.T) {
 	t.Setenv(EnvEmbeddingMaxInput, "nope")
 
 	_, err := ResolveEmbeddingMaxInput(100)
 	if err == nil || !strings.Contains(err.Error(), "invalid OPENAI_EMBEDDING_MAX_INPUT_CHARS") {
 		t.Fatalf("expected invalid max input error, got %v", err)
+	}
+}
+
+func TestResolveEmbeddingTuningRejectsInvalidEnv(t *testing.T) {
+	t.Setenv(EnvEmbeddingBatchInputs, "0")
+
+	_, err := ResolveEmbeddingBatchInputs(10)
+	if err == nil || !strings.Contains(err.Error(), "OPENAI_EMBEDDING_BATCH_INPUTS must be positive") {
+		t.Fatalf("expected invalid batch inputs error, got %v", err)
 	}
 }
 

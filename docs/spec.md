@@ -172,7 +172,8 @@ symlinks, oversized files, binary files, non-text MIME types, unreadable paths,
 and non-regular files. Paths skipped only by `.gitignore` or `.gitagentignore`
 patterns are not reported. While embedding missing index chunks, `--debug`
 writes live `search_timing`, `search_embed_plan`, and `search_embed_progress`
-stderr lines.
+stderr lines. `search_embed_plan` includes the number of embedding batches and
+the concurrent request limit chosen for the run.
 
 ### Flags
 
@@ -249,7 +250,12 @@ the same isolation. `OPENAI_EMBEDDING_MODEL` changes the default search
 embedding model without changing `OPENAI_MODEL`; `OPENAI_EMBEDDING_DIMENSIONS`
 changes search embedding dimensions without changing non-search model usage.
 `OPENAI_EMBEDDING_MAX_INPUT_CHARS` changes the per-input embedding cap from the
-default `32000` characters.
+default `32000` characters. `OPENAI_EMBEDDING_BATCH_INPUTS` changes the maximum
+inputs per embedding request from the default `10`;
+`OPENAI_EMBEDDING_BATCH_MAX_CHARS` changes the maximum total characters per
+embedding request from the default `700000`; `OPENAI_EMBEDDING_CONCURRENCY`
+changes the concurrent embedding request limit from the default
+`min(GOMAXPROCS, 8)`.
 The selected account/backend must have embeddings access and quota; otherwise
 search fails clearly and does not fall back to lexical retrieval.
 Supported environment variables:
@@ -262,6 +268,9 @@ Supported environment variables:
 - `OPENAI_EMBEDDING_MODEL`
 - `OPENAI_EMBEDDING_DIMENSIONS`
 - `OPENAI_EMBEDDING_MAX_INPUT_CHARS`
+- `OPENAI_EMBEDDING_BATCH_INPUTS`
+- `OPENAI_EMBEDDING_BATCH_MAX_CHARS`
+- `OPENAI_EMBEDDING_CONCURRENCY`
 
 Resolution order:
 

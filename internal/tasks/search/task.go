@@ -42,8 +42,8 @@ const (
 	maxExcerptLines               = 40
 	maxExcerptBytes               = 12 << 10
 	indexVersion                  = 2
-	batchMaxInputs                = 10
-	batchMaxChars                 = 700_000
+	DefaultEmbeddingBatchInputs   = 10
+	DefaultEmbeddingBatchMaxChars = 700_000
 	DefaultEmbeddingMaxInputChars = 32_000
 	maxEmbeddingLineChars         = 4_000
 )
@@ -56,20 +56,23 @@ var searchIgnoreFileNames = map[string]bool{
 var searchIgnoreFileOrder = []string{".gitignore", ".gitagentignore"}
 
 type Options struct {
-	Root                string
-	Rev                 string
-	MinRelatedness      float64
-	Limit               int
-	IndexOnly           bool
-	Reindex             bool
-	CodeOnly            bool
-	EmbeddingModel      string
-	EmbeddingDimensions int
-	EmbeddingMaxInput   int
-	APIKey              string
-	BaseURL             string
-	Debug               bool
-	DebugLog            func(string)
+	Root                   string
+	Rev                    string
+	MinRelatedness         float64
+	Limit                  int
+	IndexOnly              bool
+	Reindex                bool
+	CodeOnly               bool
+	EmbeddingModel         string
+	EmbeddingDimensions    int
+	EmbeddingMaxInput      int
+	EmbeddingBatchInputs   int
+	EmbeddingBatchMaxChars int
+	EmbeddingConcurrency   int
+	APIKey                 string
+	BaseURL                string
+	Debug                  bool
+	DebugLog               func(string)
 }
 
 type Output struct {
@@ -274,6 +277,15 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	if opts.EmbeddingMaxInput < 0 {
 		return fail(errors.New("embedding max input chars must be positive"))
 	}
+	if opts.EmbeddingBatchInputs < 0 {
+		return fail(errors.New("embedding batch inputs must be positive"))
+	}
+	if opts.EmbeddingBatchMaxChars < 0 {
+		return fail(errors.New("embedding batch max chars must be positive"))
+	}
+	if opts.EmbeddingConcurrency < 0 {
+		return fail(errors.New("embedding concurrency must be positive"))
+	}
 	root, err := filepath.Abs(cmp.Or(opts.Root, "."))
 	if err != nil {
 		return fail(err)
@@ -338,7 +350,9 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	diag.EmbeddedChunks = len(missing)
 	savedDuringEmbedding := false
 	if len(missing) > 0 {
-		debugf("search_embed_plan missing_chunks=%d reused_chunks=%d index_dir=%q", len(missing), reused, indexDir)
+		batchInputs := embeddingBatchInputs(opts)
+		batchMaxChars := embeddingBatchMaxChars(opts)
+		concurrency := embeddingConcurrency(opts)
 		texts := cappedEmbeddingInputs(missingEmbeddingTexts(missing), opts.EmbeddingMaxInput)
 		type embeddingBatch struct {
 			start int
@@ -351,14 +365,15 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		}
 		var batches []embeddingBatch
 		for start := 0; start < len(missing); {
-			end := embeddingBatchEnd(texts, start)
+			end := embeddingBatchEnd(texts, start, batchInputs, batchMaxChars)
 			batches = append(batches, embeddingBatch{start: start, end: end})
 			start = end
 		}
+		debugf("search_embed_plan missing_chunks=%d reused_chunks=%d batches=%d batch_inputs=%d batch_max_chars=%d concurrency=%d index_dir=%q", len(missing), reused, len(batches), batchInputs, batchMaxChars, concurrency, indexDir)
 
 		embedCtx, cancelEmbeddings := context.WithCancel(ctx)
 		group, groupCtx := errgroup.WithContext(embedCtx)
-		group.SetLimit(embeddingConcurrency())
+		group.SetLimit(concurrency)
 		results := make(chan embeddingBatchResult, len(batches))
 		waitErr := make(chan error, 1)
 		go func() {
@@ -1033,8 +1048,10 @@ func embedTexts(ctx context.Context, client openai.EmbeddingClient, opts Options
 		end   int
 	}
 	var batches []batch
+	batchInputs := embeddingBatchInputs(opts)
+	batchMaxChars := embeddingBatchMaxChars(opts)
 	for start := 0; start < len(texts); {
-		end := embeddingBatchEnd(texts, start)
+		end := embeddingBatchEnd(texts, start, batchInputs, batchMaxChars)
 		batches = append(batches, batch{start: start, end: end})
 		start = end
 	}
@@ -1045,7 +1062,7 @@ func embedTexts(ctx context.Context, client openai.EmbeddingClient, opts Options
 	batchVectors := make([][][]float64, len(batches))
 	batchDimensions := make([]int, len(batches))
 	group, ctx := errgroup.WithContext(ctx)
-	group.SetLimit(embeddingConcurrency())
+	group.SetLimit(embeddingConcurrency(opts))
 	for idx, batch := range batches {
 		group.Go(func() error {
 			response, err := embedBatch(ctx, client, opts, texts[batch.start:batch.end])
@@ -1124,16 +1141,39 @@ func embedBatch(ctx context.Context, client openai.EmbeddingClient, opts Options
 	}, nil
 }
 
-func embeddingConcurrency() int {
-	return min(max(runtime.GOMAXPROCS(0)/2, 1), 8)
+func embeddingBatchInputs(opts Options) int {
+	if opts.EmbeddingBatchInputs > 0 {
+		return opts.EmbeddingBatchInputs
+	}
+	return DefaultEmbeddingBatchInputs
 }
 
-func embeddingBatchEnd(texts []string, start int) int {
+func embeddingBatchMaxChars(opts Options) int {
+	if opts.EmbeddingBatchMaxChars > 0 {
+		return opts.EmbeddingBatchMaxChars
+	}
+	return DefaultEmbeddingBatchMaxChars
+}
+
+func embeddingConcurrency(opts Options) int {
+	if opts.EmbeddingConcurrency > 0 {
+		return opts.EmbeddingConcurrency
+	}
+	return min(max(runtime.GOMAXPROCS(0), 1), 8)
+}
+
+func embeddingBatchEnd(texts []string, start, maxInputs, maxChars int) int {
+	if maxInputs < 1 {
+		maxInputs = DefaultEmbeddingBatchInputs
+	}
+	if maxChars < 1 {
+		maxChars = DefaultEmbeddingBatchMaxChars
+	}
 	end := start
 	chars := 0
-	for end < len(texts) && end-start < batchMaxInputs {
+	for end < len(texts) && end-start < maxInputs {
 		nextChars := len(texts[end])
-		if end > start && chars+nextChars > batchMaxChars {
+		if end > start && chars+nextChars > maxChars {
 			break
 		}
 		chars += nextChars

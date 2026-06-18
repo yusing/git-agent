@@ -29,11 +29,14 @@ const (
 )
 
 const (
-	EnvEmbeddingAPIKey     = "OPENAI_EMBEDDING_API_KEY"
-	EnvEmbeddingBaseURL    = "OPENAI_EMBEDDING_BASE_URL"
-	EnvEmbeddingModel      = "OPENAI_EMBEDDING_MODEL"
-	EnvEmbeddingDimensions = "OPENAI_EMBEDDING_DIMENSIONS"
-	EnvEmbeddingMaxInput   = "OPENAI_EMBEDDING_MAX_INPUT_CHARS"
+	EnvEmbeddingAPIKey        = "OPENAI_EMBEDDING_API_KEY"
+	EnvEmbeddingBaseURL       = "OPENAI_EMBEDDING_BASE_URL"
+	EnvEmbeddingModel         = "OPENAI_EMBEDDING_MODEL"
+	EnvEmbeddingDimensions    = "OPENAI_EMBEDDING_DIMENSIONS"
+	EnvEmbeddingMaxInput      = "OPENAI_EMBEDDING_MAX_INPUT_CHARS"
+	EnvEmbeddingBatchInputs   = "OPENAI_EMBEDDING_BATCH_INPUTS"
+	EnvEmbeddingBatchMaxChars = "OPENAI_EMBEDDING_BATCH_MAX_CHARS"
+	EnvEmbeddingConcurrency   = "OPENAI_EMBEDDING_CONCURRENCY"
 )
 
 type Config struct {
@@ -202,13 +205,29 @@ func ResolveEmbeddingDimensions(flagValue int) (int, error) {
 }
 
 func ResolveEmbeddingMaxInput(defaultValue int) (int, error) {
-	if value := os.Getenv(EnvEmbeddingMaxInput); value != "" {
+	return resolvePositiveEnvInt(EnvEmbeddingMaxInput, defaultValue)
+}
+
+func ResolveEmbeddingBatchInputs(defaultValue int) (int, error) {
+	return resolvePositiveEnvInt(EnvEmbeddingBatchInputs, defaultValue)
+}
+
+func ResolveEmbeddingBatchMaxChars(defaultValue int) (int, error) {
+	return resolvePositiveEnvInt(EnvEmbeddingBatchMaxChars, defaultValue)
+}
+
+func ResolveEmbeddingConcurrency(defaultValue int) (int, error) {
+	return resolvePositiveEnvInt(EnvEmbeddingConcurrency, defaultValue)
+}
+
+func resolvePositiveEnvInt(name string, defaultValue int) (int, error) {
+	if value := os.Getenv(name); value != "" {
 		parsed, err := strconv.Atoi(value)
 		if err != nil {
-			return 0, fmt.Errorf("invalid %s: %w", EnvEmbeddingMaxInput, err)
+			return 0, fmt.Errorf("invalid %s: %w", name, err)
 		}
 		if parsed < 1 {
-			return 0, fmt.Errorf("%s must be positive", EnvEmbeddingMaxInput)
+			return 0, fmt.Errorf("%s must be positive", name)
 		}
 		return parsed, nil
 	}

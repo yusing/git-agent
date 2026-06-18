@@ -582,7 +582,7 @@ func TestSearchIgnoresStaleIndexVersion(t *testing.T) {
 
 func TestSearchCheckpointsIndexEmbeddingsByBatch(t *testing.T) {
 	root := t.TempDir()
-	for i := range batchMaxInputs + 1 {
+	for i := range DefaultEmbeddingBatchInputs + 1 {
 		writeFile(t, root, filepath.Join("pkg", fmt.Sprintf("file_%03d.txt", i)), "alpha\n")
 	}
 
@@ -606,8 +606,8 @@ func TestSearchCheckpointsIndexEmbeddingsByBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Diagnostics.ReusedChunks != batchMaxInputs {
-		t.Fatalf("reused chunks = %d, want %d", second.Diagnostics.ReusedChunks, batchMaxInputs)
+	if second.Diagnostics.ReusedChunks != DefaultEmbeddingBatchInputs {
+		t.Fatalf("reused chunks = %d, want %d", second.Diagnostics.ReusedChunks, DefaultEmbeddingBatchInputs)
 	}
 	if second.Diagnostics.EmbeddedChunks != 1 || second.Diagnostics.EmbeddedDone != 1 {
 		t.Fatalf("embedding diagnostics = %#v", second.Diagnostics)
@@ -649,8 +649,8 @@ func TestSearchBatchesIndexEmbeddingsAndCachesExactQueryEmbedding(t *testing.T) 
 	if firstCalls <= 2 {
 		t.Fatalf("embedding calls after first run = %d, want multiple bounded batches + query", firstCalls)
 	}
-	if embedder.maxBatchSize() > batchMaxInputs {
-		t.Fatalf("max embedding batch = %d, want <= %d", embedder.maxBatchSize(), batchMaxInputs)
+	if embedder.maxBatchSize() > DefaultEmbeddingBatchInputs {
+		t.Fatalf("max embedding batch = %d, want <= %d", embedder.maxBatchSize(), DefaultEmbeddingBatchInputs)
 	}
 
 	second, err := Run(t.Context(), embedder, opts, "alpha")
@@ -714,17 +714,44 @@ func TestSearchTruncatesEmbeddingInputs(t *testing.T) {
 	}
 }
 
-func TestEmbeddingConcurrencyUsesHalfGOMAXPROCSCappedAtEight(t *testing.T) {
+func TestEmbeddingConcurrencyUsesGOMAXPROCSCappedAtEight(t *testing.T) {
 	old := runtime.GOMAXPROCS(20)
 	defer runtime.GOMAXPROCS(old)
 
-	if got := embeddingConcurrency(); got != 8 {
+	if got := embeddingConcurrency(Options{}); got != 8 {
 		t.Fatalf("embedding concurrency = %d, want cap 8", got)
 	}
 
-	runtime.GOMAXPROCS(2)
-	if got := embeddingConcurrency(); got != 1 {
-		t.Fatalf("embedding concurrency = %d, want half GOMAXPROCS floor 1", got)
+	runtime.GOMAXPROCS(6)
+	if got := embeddingConcurrency(Options{}); got != 6 {
+		t.Fatalf("embedding concurrency = %d, want GOMAXPROCS", got)
+	}
+
+	if got := embeddingConcurrency(Options{EmbeddingConcurrency: 12}); got != 12 {
+		t.Fatalf("embedding concurrency override = %d, want 12", got)
+	}
+}
+
+func TestEmbeddingBatchTuning(t *testing.T) {
+	embedder := &countingEmbedder{}
+	texts := []string{"aaaa", "bbbb", "cccc", "dddd", "eeee", "fffff", "ggggg"}
+
+	_, _, err := embedTexts(t.Context(), embedder, Options{
+		EmbeddingModel:         "text-embedding-3-small",
+		EmbeddingDimensions:    3,
+		EmbeddingBatchInputs:   3,
+		EmbeddingBatchMaxChars: 10,
+		APIKey:                 "test-key",
+		BaseURL:                "http://example.test",
+	}, texts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if embedder.callCount() != 4 {
+		t.Fatalf("embedding calls = %d, want 4", embedder.callCount())
+	}
+	if embedder.maxBatchSize() > 3 {
+		t.Fatalf("max embedding batch = %d, want <= 3", embedder.maxBatchSize())
 	}
 }
 
