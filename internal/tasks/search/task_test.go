@@ -372,6 +372,28 @@ func TestSearchSplitsRejectedEmbeddingBatches(t *testing.T) {
 	}
 }
 
+func TestSearchTruncatesEmbeddingInputs(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "alpha.txt", strings.Repeat("alpha ", 100))
+
+	out, err := Run(t.Context(), lengthLimitEmbedder{max: 32}, Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		EmbeddingMaxInput:   32,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}, strings.Repeat("alpha ", 100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Results) == 0 {
+		t.Fatalf("results = %#v", out.Results)
+	}
+}
+
 func TestEmbeddingConcurrencyUsesHalfGOMAXPROCSCappedAtEight(t *testing.T) {
 	old := runtime.GOMAXPROCS(20)
 	defer runtime.GOMAXPROCS(old)
@@ -409,4 +431,17 @@ func vectorFor(input string) []float64 {
 	default:
 		return []float64{0, 0, 1}
 	}
+}
+
+type lengthLimitEmbedder struct {
+	max int
+}
+
+func (e lengthLimitEmbedder) CreateEmbeddings(_ context.Context, request openai.EmbeddingRequest) (openai.EmbeddingResponse, error) {
+	for _, input := range request.Inputs {
+		if len([]rune(input)) > e.max {
+			return openai.EmbeddingResponse{}, fmt.Errorf("input length = %d, want <= %d", len([]rune(input)), e.max)
+		}
+	}
+	return fakeEmbedder{}.CreateEmbeddings(context.Background(), request)
 }

@@ -455,6 +455,7 @@ func useGeneralEmbeddingProvider(t *testing.T) {
 	t.Setenv(config.EnvEmbeddingBaseURL, "")
 	t.Setenv(config.EnvEmbeddingModel, "")
 	t.Setenv(config.EnvEmbeddingDimensions, "")
+	t.Setenv(config.EnvEmbeddingMaxInput, "")
 }
 
 func TestCommitMsgPrintsOnlyProviderArtifact(t *testing.T) {

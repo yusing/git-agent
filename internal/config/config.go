@@ -32,6 +32,7 @@ const (
 	EnvEmbeddingBaseURL    = "OPENAI_EMBEDDING_BASE_URL"
 	EnvEmbeddingModel      = "OPENAI_EMBEDDING_MODEL"
 	EnvEmbeddingDimensions = "OPENAI_EMBEDDING_DIMENSIONS"
+	EnvEmbeddingMaxInput   = "OPENAI_EMBEDDING_MAX_INPUT_CHARS"
 )
 
 type Config struct {
@@ -197,6 +198,20 @@ func ResolveEmbeddingDimensions(flagValue int) (int, error) {
 		return parsed, nil
 	}
 	return DefaultEmbeddingDimensions, nil
+}
+
+func ResolveEmbeddingMaxInput(defaultValue int) (int, error) {
+	if value := os.Getenv(EnvEmbeddingMaxInput); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return 0, fmt.Errorf("invalid %s: %w", EnvEmbeddingMaxInput, err)
+		}
+		if parsed < 1 {
+			return 0, fmt.Errorf("%s must be positive", EnvEmbeddingMaxInput)
+		}
+		return parsed, nil
+	}
+	return defaultValue, nil
 }
 
 func resolveBaseURL(flagValue string, auth resolvedAuth) string {

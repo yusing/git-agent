@@ -30,17 +30,18 @@ import (
 )
 
 const (
-	DefaultMinRelatedness = 0.70
-	DefaultLimit          = 20
-	MaxLimit              = 100
-	MaxFileBytes          = 1 << 20
-	chunkLines            = 80
-	chunkOverlap          = 20
-	maxExcerptLines       = 40
-	maxExcerptBytes       = 12 << 10
-	indexVersion          = 1
-	batchMaxInputs        = 10
-	batchMaxChars         = 700_000
+	DefaultMinRelatedness         = 0.70
+	DefaultLimit                  = 20
+	MaxLimit                      = 100
+	MaxFileBytes                  = 1 << 20
+	chunkLines                    = 80
+	chunkOverlap                  = 20
+	maxExcerptLines               = 40
+	maxExcerptBytes               = 12 << 10
+	indexVersion                  = 1
+	batchMaxInputs                = 10
+	batchMaxChars                 = 700_000
+	DefaultEmbeddingMaxInputChars = 32_000
 )
 
 type Options struct {
@@ -53,6 +54,7 @@ type Options struct {
 	CodeOnly            bool
 	EmbeddingModel      string
 	EmbeddingDimensions int
+	EmbeddingMaxInput   int
 	APIKey              string
 	BaseURL             string
 	Debug               bool
@@ -241,6 +243,9 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 	if opts.EmbeddingDimensions < 1 {
 		return fail(errors.New("--embedding-dimensions must be positive"))
+	}
+	if opts.EmbeddingMaxInput < 0 {
+		return fail(errors.New("embedding max input chars must be positive"))
 	}
 
 	root, err := filepath.Abs(cmp.Or(opts.Root, "."))
@@ -813,6 +818,7 @@ func missingEmbeddingTexts(chunks []Chunk) []string {
 }
 
 func embedTexts(ctx context.Context, client openai.EmbeddingClient, opts Options, texts []string) ([][]float64, int, error) {
+	texts = cappedEmbeddingInputs(texts, opts.EmbeddingMaxInput)
 	type batch struct {
 		start int
 		end   int
@@ -858,6 +864,25 @@ func embedTexts(ctx context.Context, client openai.EmbeddingClient, opts Options
 		vectors = append(vectors, vectorsForBatch...)
 	}
 	return vectors, dimensions, nil
+}
+
+func cappedEmbeddingInputs(texts []string, maxChars int) []string {
+	if maxChars == 0 {
+		maxChars = DefaultEmbeddingMaxInputChars
+	}
+	inputs := make([]string, len(texts))
+	for i, text := range texts {
+		chars := 0
+		for j := range text {
+			if chars == maxChars {
+				text = text[:j]
+				break
+			}
+			chars++
+		}
+		inputs[i] = text
+	}
+	return inputs
 }
 
 func embedBatch(ctx context.Context, client openai.EmbeddingClient, opts Options, texts []string) (openai.EmbeddingResponse, error) {

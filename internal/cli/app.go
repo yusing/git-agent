@@ -83,6 +83,10 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	embeddingMaxInput, err := config.ResolveEmbeddingMaxInput(searchtask.DefaultEmbeddingMaxInputChars)
+	if err != nil {
+		return err
+	}
 	fs.StringVar(&opts.BaseURL, "base-url", "", "override provider base URL")
 	fs.StringVar(&opts.Timeout, "timeout", "", "override default request timeout")
 	fs.BoolVar(&opts.Debug, "debug", false, "enable debug output on stderr")
@@ -127,6 +131,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 		CodeOnly:            codeOnly,
 		EmbeddingModel:      embeddingModel,
 		EmbeddingDimensions: embeddingDimensions,
+		EmbeddingMaxInput:   embeddingMaxInput,
 		APIKey:              cfg.APIKey,
 		BaseURL:             cfg.BaseURL,
 		Debug:               cfg.Debug,

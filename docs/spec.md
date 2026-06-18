@@ -229,6 +229,8 @@ embeddings. It reads `OPENAI_EMBEDDING_BASE_URL` before `OPENAI_BASE_URL` for
 the same isolation. `OPENAI_EMBEDDING_MODEL` changes the default search
 embedding model without changing `OPENAI_MODEL`; `OPENAI_EMBEDDING_DIMENSIONS`
 changes search embedding dimensions without changing non-search model usage.
+`OPENAI_EMBEDDING_MAX_INPUT_CHARS` changes the per-input embedding cap from the
+default `32000` characters.
 The selected account/backend must have embeddings access and quota; otherwise
 search fails clearly and does not fall back to lexical retrieval.
 Supported environment variables:
@@ -240,6 +242,7 @@ Supported environment variables:
 - `OPENAI_EMBEDDING_BASE_URL`
 - `OPENAI_EMBEDDING_MODEL`
 - `OPENAI_EMBEDDING_DIMENSIONS`
+- `OPENAI_EMBEDDING_MAX_INPUT_CHARS`
 
 Resolution order:
 

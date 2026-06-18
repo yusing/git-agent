@@ -157,6 +157,24 @@ func TestResolveEmbeddingDimensionsRejectsInvalidEnv(t *testing.T) {
 	}
 }
 
+func TestResolveEmbeddingMaxInputUsesEnv(t *testing.T) {
+	t.Setenv(EnvEmbeddingMaxInput, "32000")
+
+	got, err := ResolveEmbeddingMaxInput(100)
+	if err != nil || got != 32000 {
+		t.Fatalf("embedding max input = %d, %v", got, err)
+	}
+}
+
+func TestResolveEmbeddingMaxInputRejectsInvalidEnv(t *testing.T) {
+	t.Setenv(EnvEmbeddingMaxInput, "nope")
+
+	_, err := ResolveEmbeddingMaxInput(100)
+	if err == nil || !strings.Contains(err.Error(), "invalid OPENAI_EMBEDDING_MAX_INPUT_CHARS") {
+		t.Fatalf("expected invalid max input error, got %v", err)
+	}
+}
+
 func TestResolveIgnoresEmbeddingOnlyEnv(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("OPENAI_API_KEY", "general-key")
