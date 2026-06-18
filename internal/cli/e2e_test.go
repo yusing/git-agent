@@ -18,6 +18,143 @@ import (
 	"github.com/yusing/git-agent/internal/tasks/commitmsg"
 )
 
+func TestSearchEndToEndIndexesRanksAndReplays(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	runGit(t, root, "init")
+	if err := os.MkdirAll(filepath.Join(root, "internal", "cli"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "internal", "agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFixtureFile(t, filepath.Join(root, "internal", "cli", "app.go"), `package cli
+
+func runSearch() {
+	// semantic search flags are parsed here
+	_ = "search parser target"
+}
+`)
+	writeFixtureFile(t, filepath.Join(root, "internal", "agent", "runner.go"), `package agent
+
+func enforceBudget() {
+	_ = "tool call budget enforcement"
+}
+`)
+	writeFixtureFile(t, filepath.Join(root, "README.md"), "release note docs\n")
+	t.Chdir(root)
+
+	server, stats := newSearchEmbeddingsServer(t)
+	defer server.Close()
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	first := runSearchE2E(t, []string{"search", "--min-relatedness", "0.70", "where are search flags parsed"})
+	if first.Source.Root != root {
+		t.Fatalf("search root = %q, want %q", first.Source.Root, root)
+	}
+	assertSearchResult(t, first, "internal/cli/app.go:", "search parser target")
+	if first.Retrieval.Index != "miss" || first.Replay.Mode != "none" {
+		t.Fatalf("first retrieval/replay = %#v %#v", first.Retrieval, first.Replay)
+	}
+	if first.Retrieval.Dimensions != 1024 {
+		t.Fatalf("first dimensions = %d", first.Retrieval.Dimensions)
+	}
+	if got := stats.calls(); got != 2 {
+		t.Fatalf("first run embedding calls = %d, want chunks batch + query", got)
+	}
+
+	second := runSearchE2E(t, []string{"search", "--min-relatedness", "0.70", "where are search flags parsed"})
+	assertSearchResult(t, second, "internal/cli/app.go:", "search parser target")
+	if second.Retrieval.Index != "hit" || second.Replay.Mode != "hit" {
+		t.Fatalf("second retrieval/replay = %#v %#v", second.Retrieval, second.Replay)
+	}
+	if got := stats.calls(); got != 2 {
+		t.Fatalf("second exact query should reuse chunks and cached query embedding; calls = %d", got)
+	}
+
+	similar := runSearchE2E(t, []string{"search", "--min-relatedness", "0.70", "find the search flag parser"})
+	assertSearchResult(t, similar, "internal/cli/app.go:", "search parser target")
+	if similar.Replay.Mode != "similar" || similar.Replay.From == nil || *similar.Replay.From != "where are search flags parsed" {
+		t.Fatalf("similar replay = %#v", similar.Replay)
+	}
+
+	writeFixtureFile(t, filepath.Join(root, "internal", "cli", "app.go"), `package cli
+
+func runSearch() {
+	// semantic search flags are parsed here
+	_ = "fresh indexed marker"
+}
+`)
+	changed := runSearchE2E(t, []string{"search", "--min-relatedness", "0.70", "where are search flags parsed"})
+	assertSearchResult(t, changed, "internal/cli/app.go:", "fresh indexed marker")
+	if changed.Replay.Mode != "hit" {
+		t.Fatalf("changed replay = %#v", changed.Replay)
+	}
+	if got := stats.calls(); got != 4 {
+		t.Fatalf("changed run should re-embed changed chunks and reuse cached query embedding; calls = %d", got)
+	}
+
+	manifests, err := filepath.Glob(filepath.Join(root, ".git-agent", "search", "fs", "*", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifests) == 0 {
+		t.Fatal("search index manifest was not written")
+	}
+	vectorFiles, err := filepath.Glob(filepath.Join(root, ".git-agent", "search", "fs", "*", "vectors.f32"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vectorFiles) == 0 {
+		t.Fatal("search binary vector cache was not written")
+	}
+	if _, err := os.Stat(filepath.Join(root, ".git-agent", "sessions")); !os.IsNotExist(err) {
+		t.Fatalf("search should not create model sessions, stat err = %v", err)
+	}
+}
+
+func TestSearchRealProviderEndToEndOnThisRepo(t *testing.T) {
+	if strings.ToLower(strings.TrimSpace(os.Getenv("GIT_AGENT_SEARCH_E2E_PROVIDER"))) != "real" {
+		t.Skip("set GIT_AGENT_SEARCH_E2E_PROVIDER=real to run real embeddings e2e")
+	}
+	if os.Getenv("OPENAI_EMBEDDING_API_KEY") == "" && os.Getenv("OPENAI_API_KEY") == "" {
+		t.Skip("skipping real search e2e: neither OPENAI_EMBEDDING_API_KEY nor OPENAI_API_KEY is set")
+	}
+
+	sourceRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	runGit(t, root, "init")
+	for _, path := range []string{
+		"internal/tasks/search/task.go",
+		"internal/cli/app.go",
+		"README.md",
+	} {
+		data, err := os.ReadFile(filepath.Join(sourceRoot, filepath.FromSlash(path)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFixtureFile(t, filepath.Join(root, filepath.FromSlash(path)), string(data))
+	}
+	t.Chdir(root)
+
+	query := "where is semantic search replay history vector cache and chunk ranking implemented"
+	first := runSearchE2E(t, []string{"search", "--reindex", "--min-relatedness", "0.55", "--limit", "5", query})
+	assertSearchHasRange(t, first, "internal/tasks/search/task.go:")
+	if first.Retrieval.Index != "miss" || first.Replay.Mode != "none" {
+		t.Fatalf("first retrieval/replay = %#v %#v", first.Retrieval, first.Replay)
+	}
+
+	second := runSearchE2E(t, []string{"search", "--min-relatedness", "0.55", "--limit", "5", query})
+	assertSearchHasRange(t, second, "internal/tasks/search/task.go:")
+	if second.Retrieval.Index != "hit" || second.Replay.Mode != "hit" {
+		t.Fatalf("second retrieval/replay = %#v %#v", second.Retrieval, second.Replay)
+	}
+}
+
 func TestCommitMsgEndToEndWithRealisticFixture(t *testing.T) {
 	fixture := buildCommitMsgFixture(t)
 	t.Chdir(fixture.repoDir)
@@ -401,6 +538,184 @@ const (
 	providerModeFake providerMode = "fake"
 	providerModeReal providerMode = "real"
 )
+
+type searchE2EOutput struct {
+	Source struct {
+		Mode string `json:"mode"`
+		Root string `json:"root"`
+	} `json:"source"`
+	Retrieval struct {
+		Index      string `json:"index"`
+		Dimensions int    `json:"dimensions"`
+	} `json:"retrieval"`
+	Results []struct {
+		Relatedness float64 `json:"relatedness"`
+		Range       string  `json:"range"`
+		Excerpt     string  `json:"excerpt"`
+	} `json:"results"`
+	Replay struct {
+		Mode string  `json:"mode"`
+		From *string `json:"from"`
+	} `json:"replay"`
+}
+
+type searchEmbeddingStats struct {
+	mu    sync.Mutex
+	count int
+}
+
+func (s *searchEmbeddingStats) calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.count
+}
+
+func (s *searchEmbeddingStats) addCall() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.count++
+}
+
+func runSearchE2E(t *testing.T, args []string) searchE2EOutput {
+	t.Helper()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), args); err != nil {
+		t.Fatalf("search failed: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	var out searchE2EOutput
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("stdout is not search JSON: %q: %v", stdout.String(), err)
+	}
+	return out
+}
+
+func assertSearchResult(t *testing.T, out searchE2EOutput, rangePrefix, excerpt string) {
+	t.Helper()
+
+	if out.Source.Mode != "filesystem" {
+		t.Fatalf("source = %#v", out.Source)
+	}
+	if len(out.Results) == 0 {
+		t.Fatalf("no search results: %#v", out)
+	}
+	top := out.Results[0]
+	if !strings.HasPrefix(top.Range, rangePrefix) {
+		t.Fatalf("top range = %q, want prefix %q", top.Range, rangePrefix)
+	}
+	if !strings.Contains(top.Excerpt, excerpt) {
+		t.Fatalf("top excerpt missing %q:\n%s", excerpt, top.Excerpt)
+	}
+	if top.Relatedness <= 0 || top.Relatedness > 1 {
+		t.Fatalf("relatedness = %v", top.Relatedness)
+	}
+}
+
+func assertSearchHasRange(t *testing.T, out searchE2EOutput, rangePrefix string) {
+	t.Helper()
+
+	if len(out.Results) == 0 {
+		t.Fatalf("no search results: %#v", out)
+	}
+	for _, result := range out.Results {
+		if strings.HasPrefix(result.Range, rangePrefix) {
+			if result.Relatedness <= 0 || result.Relatedness > 1 {
+				t.Fatalf("relatedness = %v", result.Relatedness)
+			}
+			return
+		}
+	}
+	t.Fatalf("results do not include range prefix %q: %#v", rangePrefix, out.Results)
+}
+
+func newSearchEmbeddingsServer(t *testing.T) (*httptest.Server, *searchEmbeddingStats) {
+	t.Helper()
+
+	stats := &searchEmbeddingStats{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stats.addCall()
+		if r.URL.Path != "/embeddings" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		var payload struct {
+			Input      any    `json:"input"`
+			Model      string `json:"model"`
+			Dimensions int    `json:"dimensions"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Dimensions != 1024 {
+			t.Fatalf("dimensions = %d", payload.Dimensions)
+		}
+		inputs := embeddingInputs(t, payload.Input)
+		data := make([]map[string]any, len(inputs))
+		for i, input := range inputs {
+			data[i] = map[string]any{
+				"object":    "embedding",
+				"index":     i,
+				"embedding": searchE2EVector(input, payload.Dimensions),
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"model":  payload.Model,
+			"data":   data,
+			"usage":  map[string]any{"prompt_tokens": 1, "total_tokens": 1},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	return server, stats
+}
+
+func embeddingInputs(t *testing.T, input any) []string {
+	t.Helper()
+
+	switch value := input.(type) {
+	case string:
+		return []string{value}
+	case []any:
+		inputs := make([]string, 0, len(value))
+		for _, item := range value {
+			text, ok := item.(string)
+			if !ok {
+				t.Fatalf("embedding input item = %T, want string", item)
+			}
+			inputs = append(inputs, text)
+		}
+		return inputs
+	default:
+		t.Fatalf("embedding input = %T, want string or []string", input)
+		return nil
+	}
+}
+
+func searchE2EVector(input string, dimensions int) []float64 {
+	vector := make([]float64, dimensions)
+	input = strings.ToLower(input)
+	switch {
+	case strings.Contains(input, "search") || strings.Contains(input, "parser") || strings.Contains(input, "flag"):
+		vector[0] = 1
+	case strings.Contains(input, "budget"):
+		if dimensions > 1 {
+			vector[1] = 1
+		}
+	case strings.Contains(input, "release"):
+		if dimensions > 2 {
+			vector[2] = 1
+		}
+	default:
+		vector[0] = -1
+	}
+	return vector
+}
 
 func configureE2EProvider(t *testing.T, fakeServer *httptest.Server) (providerMode, func()) {
 	t.Helper()

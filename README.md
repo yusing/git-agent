@@ -13,6 +13,7 @@ final Git commit after message generation.
 - `git-agent pr-message`
 - `git-agent release-note [--out <file>] <base> <release>`
 - `git-agent release-note [--out <file>] patch|minor|major`
+- `git-agent search [--rev <rev>] [--min-relatedness <score>] [--limit <n>] <query...>`
 
 Mermaid execution-flow graphs for each subcommand are documented in
 [`docs/spec.md`](docs/spec.md#subcommand-execution-flow-graphs).
@@ -48,6 +49,10 @@ Supported environment variables:
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
+- `OPENAI_EMBEDDING_API_KEY`
+- `OPENAI_EMBEDDING_BASE_URL`
+- `OPENAI_EMBEDDING_MODEL`
+- `OPENAI_EMBEDDING_DIMENSIONS`
 
 CLI flags override environment values.
 
@@ -65,6 +70,48 @@ Common flags:
 - `--guidance-family`
 - `--append-prompt`
 - `--debug`
+
+`search` is embeddings-only semantic retrieval for agents. It does not run the
+Responses API, does not call tools, does not generate text, and has no lexical
+fallback or keyword boost. By default it searches current files under the
+current working directory exactly as they exist on disk, including staged,
+unstaged, and untracked files. Filesystem mode skips dot files/directories,
+honors `.gitignore` patterns, and skips binary files, oversized files, and
+symlinks. It does not require a Git repository.
+
+Go files with a pre-package heading comment containing `DO NOT EDIT` are indexed
+as path-only chunks. Their filename can match semantically, but generated source
+content is not embedded.
+
+`git-agent search --rev <rev> <query...>` switches to a committed Git tree. In
+that mode the command must run inside a Git repository, resolves `<rev>` to a
+commit, searches that commit tree only, and ignores current filesystem
+contents.
+
+Use `git-agent search --code <query...>` for implementation searches. It keeps
+the CLI simple by only filtering candidates to source-code files before
+embedding/ranking; it does not add lexical matching or score boosts. Default
+search still includes docs and code.
+
+Search requires an embeddings API key. Set `OPENAI_EMBEDDING_API_KEY` to keep
+embeddings credentials separate from normal message-generation auth; if it is
+unset, search falls back to `OPENAI_API_KEY`. Codex/ChatGPT auth is not used for
+embeddings. Use `OPENAI_EMBEDDING_BASE_URL` for an embeddings-only provider base
+URL; otherwise search falls back to `OPENAI_BASE_URL` and then
+`https://api.openai.com/v1`. The selected account/backend must have embeddings
+access and quota; otherwise search fails clearly instead of falling back to
+lexical retrieval. `--base-url`, `--timeout`, and `--debug` are supported.
+The default embedding model is `text-embedding-3-small` with `1024` dimensions;
+pass `--embedding-model text-embedding-3-large` when recall quality is worth the
+extra cost, storage, and latency. `--embedding-dimensions <n>` or
+`OPENAI_EMBEDDING_DIMENSIONS` changes the search embedding dimensions only,
+without affecting non-search model usage. Lower dimensions reduce index size
+and latency; higher dimensions can improve recall. `OPENAI_EMBEDDING_MODEL`
+changes the search default without affecting `OPENAI_MODEL`. Results are
+written as JSON only on stdout.
+`relatedness` is always in `(0, 1]`, and results below
+`--min-relatedness` are omitted. Defaults are `--min-relatedness 0.70`,
+`--limit 20`, and maximum `--limit 100`.
 
 Behavior defaults:
 

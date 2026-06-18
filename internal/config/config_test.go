@@ -97,6 +97,90 @@ func TestResolveUsesChatGPTAuthFileByDefault(t *testing.T) {
 	}
 }
 
+func TestResolveEmbeddingsRequiresAPIKeyEvenWithChatGPTAuthFile(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_BASE_URL", "http://legacy.example/v1")
+	t.Setenv(EnvEmbeddingAPIKey, "")
+	writeCodexAuth(t, `{
+		"auth_mode": "chatgpt",
+		"tokens": {
+			"access_token": "access-token",
+			"account_id": "workspace-123"
+		}
+	}`)
+
+	_, err := ResolveEmbeddings(Options{})
+	if err == nil || !strings.Contains(err.Error(), "search requires OPENAI_EMBEDDING_API_KEY or OPENAI_API_KEY") {
+		t.Fatalf("expected API key error, got %v", err)
+	}
+}
+
+func TestResolveEmbeddingsUsesEmbeddingOnlyEnv(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "general-key")
+	t.Setenv("OPENAI_BASE_URL", "http://general.example/v1")
+	t.Setenv(EnvEmbeddingAPIKey, "embedding-key")
+	t.Setenv(EnvEmbeddingBaseURL, "http://embedding.example/v1")
+	t.Setenv(EnvEmbeddingModel, "text-embedding-3-large")
+	t.Setenv(EnvEmbeddingDimensions, "512")
+
+	cfg, err := ResolveEmbeddings(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.APIKey != "embedding-key" {
+		t.Fatalf("APIKey = %q", cfg.APIKey)
+	}
+	if cfg.BaseURL != "http://embedding.example/v1" {
+		t.Fatalf("BaseURL = %q", cfg.BaseURL)
+	}
+	if got := ResolveEmbeddingModel(""); got != "text-embedding-3-large" {
+		t.Fatalf("embedding model = %q", got)
+	}
+	if got := ResolveEmbeddingModel("flag-model"); got != "flag-model" {
+		t.Fatalf("flag embedding model = %q", got)
+	}
+	if got, err := ResolveEmbeddingDimensions(0); err != nil || got != 512 {
+		t.Fatalf("embedding dimensions = %d, %v", got, err)
+	}
+	if got, err := ResolveEmbeddingDimensions(1024); err != nil || got != 1024 {
+		t.Fatalf("flag embedding dimensions = %d, %v", got, err)
+	}
+}
+
+func TestResolveEmbeddingDimensionsRejectsInvalidEnv(t *testing.T) {
+	t.Setenv(EnvEmbeddingDimensions, "nope")
+
+	_, err := ResolveEmbeddingDimensions(0)
+	if err == nil || !strings.Contains(err.Error(), "invalid OPENAI_EMBEDDING_DIMENSIONS") {
+		t.Fatalf("expected invalid dimensions error, got %v", err)
+	}
+}
+
+func TestResolveIgnoresEmbeddingOnlyEnv(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "general-key")
+	t.Setenv("OPENAI_BASE_URL", "http://general.example/v1")
+	t.Setenv("OPENAI_MODEL", "general-model")
+	t.Setenv(EnvEmbeddingAPIKey, "embedding-key")
+	t.Setenv(EnvEmbeddingBaseURL, "http://embedding.example/v1")
+	t.Setenv(EnvEmbeddingModel, "text-embedding-3-large")
+
+	cfg, err := Resolve(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.APIKey != "general-key" {
+		t.Fatalf("APIKey = %q", cfg.APIKey)
+	}
+	if cfg.BaseURL != "http://general.example/v1" {
+		t.Fatalf("BaseURL = %q", cfg.BaseURL)
+	}
+	if cfg.Model != "general-model" {
+		t.Fatalf("Model = %q", cfg.Model)
+	}
+}
+
 func TestResolveAllowsBaseURLFlagToOverrideChatGPTDefault(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("OPENAI_BASE_URL", "http://legacy.example/v1")

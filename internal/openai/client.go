@@ -23,6 +23,10 @@ type Client interface {
 	CreateResponse(context.Context, Request) (Response, error)
 }
 
+type EmbeddingClient interface {
+	CreateEmbeddings(context.Context, EmbeddingRequest) (EmbeddingResponse, error)
+}
+
 type Request struct {
 	Model         string      `json:"model"`
 	ServiceTier   string      `json:"service_tier,omitempty"`
@@ -34,6 +38,20 @@ type Request struct {
 	Input         []Item      `json:"input"`
 	Tools         []ToolSpec  `json:"tools,omitempty"`
 	TextFormat    *TextFormat `json:"text_format,omitempty"`
+}
+
+type EmbeddingRequest struct {
+	Model      string
+	Dimensions int
+	BaseURL    string
+	APIKey     string
+	Inputs     []string
+}
+
+type EmbeddingResponse struct {
+	Model      string
+	Vectors    [][]float64
+	Dimensions int
 }
 
 type TextFormat struct {
@@ -143,6 +161,69 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 		result.ToolCalls = mergeToolCalls(result.ToolCalls, accum.toolCalls())
 	}
 	return result, nil
+}
+
+func (c *SDKClient) CreateEmbeddings(ctx context.Context, request EmbeddingRequest) (EmbeddingResponse, error) {
+	if len(request.Inputs) == 0 {
+		return EmbeddingResponse{}, errors.New("embedding request requires input")
+	}
+	opts := []option.RequestOption{
+		option.WithAPIKey(request.APIKey),
+		option.WithBaseURL(request.BaseURL),
+	}
+	if c.HTTPClient != nil {
+		opts = append(opts, option.WithHTTPClient(c.HTTPClient))
+	} else {
+		opts = append(opts, option.WithHTTPClient(http.DefaultClient))
+	}
+	client := openaisdk.NewClient(opts...)
+
+	params := openaisdk.EmbeddingNewParams{
+		Model: openaisdk.EmbeddingModel(request.Model),
+		Input: openaisdk.EmbeddingNewParamsInputUnion{
+			OfArrayOfStrings: request.Inputs,
+		},
+		EncodingFormat: openaisdk.EmbeddingNewParamsEncodingFormatFloat,
+	}
+	if request.Dimensions > 0 {
+		params.Dimensions = openaisdk.Int(int64(request.Dimensions))
+	}
+	response, err := client.Embeddings.New(ctx, params)
+	if err != nil {
+		return EmbeddingResponse{}, upstreamError(err)
+	}
+	if len(response.Data) != len(request.Inputs) {
+		return EmbeddingResponse{}, fmt.Errorf("embedding response count = %d, want %d", len(response.Data), len(request.Inputs))
+	}
+
+	vectors := make([][]float64, len(response.Data))
+	dimensions := 0
+	for _, item := range response.Data {
+		if item.Index < 0 || int(item.Index) >= len(vectors) {
+			return EmbeddingResponse{}, fmt.Errorf("embedding response index %d out of range", item.Index)
+		}
+		vector := item.Embedding
+		if len(vector) == 0 {
+			return EmbeddingResponse{}, fmt.Errorf("embedding response index %d is empty", item.Index)
+		}
+		if dimensions == 0 {
+			dimensions = len(vector)
+		}
+		if len(vector) != dimensions {
+			return EmbeddingResponse{}, fmt.Errorf("embedding dimensions mismatch: %d and %d", dimensions, len(vector))
+		}
+		vectors[item.Index] = vector
+	}
+	for i, vector := range vectors {
+		if vector == nil {
+			return EmbeddingResponse{}, fmt.Errorf("embedding response missing index %d", i)
+		}
+	}
+	return EmbeddingResponse{
+		Model:      response.Model,
+		Vectors:    vectors,
+		Dimensions: dimensions,
+	}, nil
 }
 
 func withDefaultDialTimeout(client *http.Client) *http.Client {

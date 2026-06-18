@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"github.com/yusing/git-agent/internal/openai"
 	"github.com/yusing/git-agent/internal/tasks/commitmsg"
 	"github.com/yusing/git-agent/internal/tasks/releasenote"
+	searchtask "github.com/yusing/git-agent/internal/tasks/search"
 	"github.com/yusing/git-agent/internal/tools"
 	"github.com/yusing/git-agent/internal/trace"
 )
@@ -56,10 +58,104 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return a.runPRMessage(ctx, args[1:])
 	case "release-note":
 		return a.runReleaseNote(ctx, args[1:])
+	case "search":
+		return a.runSearch(ctx, args[1:])
 	case "-h", "--help", "help":
 		return usageError("")
 	default:
 		return usageError(fmt.Sprintf("unknown command %q", args[0]))
+	}
+}
+
+func (a *App) runSearch(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("search", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	var opts config.Options
+	var rev string
+	var minRelatedness float64
+	var limit int
+	var reindex bool
+	var codeOnly bool
+	var embeddingModel string
+	embeddingDimensions, err := config.ResolveEmbeddingDimensions(0)
+	if err != nil {
+		return err
+	}
+	fs.StringVar(&opts.BaseURL, "base-url", "", "override provider base URL")
+	fs.StringVar(&opts.Timeout, "timeout", "", "override default request timeout")
+	fs.BoolVar(&opts.Debug, "debug", false, "enable debug output on stderr")
+	fs.StringVar(&rev, "rev", "", "search a committed Git tree")
+	fs.Float64Var(&minRelatedness, "min-relatedness", searchtask.DefaultMinRelatedness, "minimum semantic relatedness")
+	fs.IntVar(&limit, "limit", searchtask.DefaultLimit, "maximum results")
+	fs.BoolVar(&reindex, "reindex", false, "rebuild embeddings for the selected source")
+	fs.BoolVar(&codeOnly, "code", false, "search code files only")
+	fs.StringVar(&embeddingModel, "embedding-model", config.ResolveEmbeddingModel(""), "embedding model")
+	fs.IntVar(&embeddingDimensions, "embedding-dimensions", embeddingDimensions, "embedding dimensions")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	embeddingDimensions, err = config.ResolveEmbeddingDimensions(embeddingDimensions)
+	if err != nil {
+		return err
+	}
+	query := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	if query == "" {
+		return errors.New("search requires a query")
+	}
+	cfg, err := config.ResolveEmbeddings(opts)
+	if err != nil {
+		return err
+	}
+	taskCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+
+	root, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	output, err := searchtask.Run(taskCtx, openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}), searchtask.Options{
+		Root:                root,
+		Rev:                 rev,
+		MinRelatedness:      minRelatedness,
+		Limit:               limit,
+		Reindex:             reindex,
+		CodeOnly:            codeOnly,
+		EmbeddingModel:      embeddingModel,
+		EmbeddingDimensions: embeddingDimensions,
+		APIKey:              cfg.APIKey,
+		BaseURL:             cfg.BaseURL,
+		Debug:               cfg.Debug,
+	}, query)
+	if err != nil {
+		if cfg.Debug {
+			a.writeSearchDebug(output)
+		}
+		return err
+	}
+	if cfg.Debug {
+		a.writeSearchDebug(output)
+	}
+	encoder := json.NewEncoder(a.stdout)
+	encoder.SetEscapeHTML(false)
+	return encoder.Encode(output)
+}
+
+func (a *App) writeSearchDebug(output searchtask.Output) {
+	diag := output.Diagnostics
+	fmt.Fprintf(a.stderr, "search_index=%s results=%d files=%d chunks=%d reused_chunks=%d embedded_chunks=%d index_dir=%s total=%s\n",
+		output.Retrieval.Index,
+		len(output.Results),
+		diag.Files,
+		diag.Chunks,
+		diag.ReusedChunks,
+		diag.EmbeddedChunks,
+		diag.IndexDir,
+		diag.Total.Round(time.Millisecond),
+	)
+	for _, timing := range diag.Timings {
+		fmt.Fprintf(a.stderr, "search_timing step=%s duration=%s\n", timing.Step, timing.Duration.Round(time.Millisecond))
 	}
 }
 
@@ -863,5 +959,6 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent pr-message [flags]\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] patch|minor|major\n")
+	b.WriteString("  git-agent search [--rev <rev>] [flags] <query...>\n")
 	return errors.New(b.String())
 }

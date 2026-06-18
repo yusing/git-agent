@@ -85,6 +85,13 @@ type FileStat struct {
 	IsBinary bool   `json:"is_binary,omitempty"`
 }
 
+type CommitFile struct {
+	Path string
+	Blob string
+	Text string
+	Size int64
+}
+
 type SubmoduleChange struct {
 	Path string `json:"path"`
 	Old  string `json:"old,omitempty"`
@@ -542,6 +549,37 @@ func (r *Repository) ResolveCommit(ref string) (*object.Commit, error) {
 		return nil, err
 	}
 	return r.Repo.CommitObject(*hash)
+}
+
+func (r *Repository) WalkCommitTextFiles(ref string, maxBytes int64, visit func(CommitFile) error) error {
+	commit, err := r.ResolveCommit(ref)
+	if err != nil {
+		return err
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return err
+	}
+	iter := tree.Files()
+	defer iter.Close()
+	return iter.ForEach(func(file *object.File) error {
+		if maxBytes > 0 && file.Size > maxBytes {
+			return nil
+		}
+		if binary, err := file.IsBinary(); err != nil || binary {
+			return err
+		}
+		text, err := file.Contents()
+		if err != nil {
+			return err
+		}
+		return visit(CommitFile{
+			Path: filepath.ToSlash(file.Name),
+			Blob: file.Hash.String(),
+			Text: text,
+			Size: file.Size,
+		})
+	})
 }
 
 func (r *Repository) PullRequestBase() (CommitInfo, error) {

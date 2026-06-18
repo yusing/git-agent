@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -19,6 +20,18 @@ const (
 	DefaultMaxSteps       = 30
 	DefaultMaxTools       = 24
 	defaultCodexAuthPath  = ".codex/auth.json"
+)
+
+const (
+	DefaultEmbeddingModel      = "text-embedding-3-small"
+	DefaultEmbeddingDimensions = 1024
+)
+
+const (
+	EnvEmbeddingAPIKey     = "OPENAI_EMBEDDING_API_KEY"
+	EnvEmbeddingBaseURL    = "OPENAI_EMBEDDING_BASE_URL"
+	EnvEmbeddingModel      = "OPENAI_EMBEDDING_MODEL"
+	EnvEmbeddingDimensions = "OPENAI_EMBEDDING_DIMENSIONS"
 )
 
 type Config struct {
@@ -35,6 +48,13 @@ type Config struct {
 	GuidanceFamily string
 	AppendPrompt   string
 	Debug          bool
+}
+
+type EmbeddingsConfig struct {
+	APIKey  string
+	BaseURL string
+	Timeout time.Duration
+	Debug   bool
 }
 
 type Options struct {
@@ -128,6 +148,55 @@ func Resolve(opts Options) (Config, error) {
 		AppendPrompt:   opts.AppendPrompt,
 		Debug:          opts.Debug,
 	}, nil
+}
+
+func ResolveEmbeddings(opts Options) (EmbeddingsConfig, error) {
+	timeout := DefaultTimeout
+	if opts.Timeout != "" {
+		parsed, err := time.ParseDuration(opts.Timeout)
+		if err != nil {
+			return EmbeddingsConfig{}, fmt.Errorf("invalid --timeout: %w", err)
+		}
+		if parsed <= 0 {
+			return EmbeddingsConfig{}, errors.New("--timeout must be positive")
+		}
+		timeout = parsed
+	}
+
+	apiKey := firstNonEmpty(opts.APIKey, os.Getenv(EnvEmbeddingAPIKey), os.Getenv("OPENAI_API_KEY"))
+	if apiKey == "" {
+		return EmbeddingsConfig{}, errors.New("search requires OPENAI_EMBEDDING_API_KEY or OPENAI_API_KEY; Codex auth does not support embeddings")
+	}
+	return EmbeddingsConfig{
+		APIKey:  apiKey,
+		BaseURL: firstNonEmpty(opts.BaseURL, os.Getenv(EnvEmbeddingBaseURL), os.Getenv("OPENAI_BASE_URL"), DefaultBaseURL),
+		Timeout: timeout,
+		Debug:   opts.Debug,
+	}, nil
+}
+
+func ResolveEmbeddingModel(flagValue string) string {
+	return firstNonEmpty(flagValue, os.Getenv(EnvEmbeddingModel), DefaultEmbeddingModel)
+}
+
+func ResolveEmbeddingDimensions(flagValue int) (int, error) {
+	if flagValue != 0 {
+		if flagValue < 1 {
+			return 0, errors.New("--embedding-dimensions must be positive")
+		}
+		return flagValue, nil
+	}
+	if value := os.Getenv(EnvEmbeddingDimensions); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return 0, fmt.Errorf("invalid %s: %w", EnvEmbeddingDimensions, err)
+		}
+		if parsed < 1 {
+			return 0, fmt.Errorf("%s must be positive", EnvEmbeddingDimensions)
+		}
+		return parsed, nil
+	}
+	return DefaultEmbeddingDimensions, nil
 }
 
 func resolveBaseURL(flagValue string, auth resolvedAuth) string {

@@ -26,6 +26,7 @@ complete -c git-agent -n '__git_agent_no_subcommand' -a commit -d 'Generate a me
 complete -c git-agent -n '__git_agent_no_subcommand' -a commit-msg -d 'Generate a commit message from staged changes'
 complete -c git-agent -n '__git_agent_no_subcommand' -a pr-message -d 'Generate a pull request message from branch changes'
 complete -c git-agent -n '__git_agent_no_subcommand' -a release-note -d 'Generate a release note for a range or version bump'
+complete -c git-agent -n '__git_agent_no_subcommand' -a search -d 'Search repository context with embeddings'
 complete -c git-agent -n '__git_agent_no_subcommand' -a help -d 'Show usage'
 
 complete -c git-agent -n '__git_agent_using_command commit' -l amend -d 'Generate an amended commit message and amend HEAD'
@@ -47,3 +48,14 @@ complete -c git-agent -n '__git_agent_has_subcommand' -l debug -d 'Enable debug 
 complete -c git-agent -n '__git_agent_using_command release-note' -l out -r -d 'Write release note markdown to file'
 complete -c git-agent -n '__git_agent_using_command release-note' -a 'patch minor major' -d 'Infer release version from latest semver tag'
 complete -c git-agent -n '__git_agent_using_command release-note' -a '(__git_agent_git_refs)' -d 'Git ref'
+
+complete -c git-agent -n '__git_agent_using_command search' -l rev -r -a '(__git_agent_git_refs)' -d 'Search a committed Git tree'
+complete -c git-agent -n '__git_agent_using_command search' -l min-relatedness -r -d 'Minimum semantic relatedness'
+complete -c git-agent -n '__git_agent_using_command search' -l limit -r -d 'Maximum results'
+complete -c git-agent -n '__git_agent_using_command search' -l reindex -d 'Rebuild embeddings for the selected source'
+complete -c git-agent -n '__git_agent_using_command search' -l code -d 'Search code files only'
+complete -c git-agent -n '__git_agent_using_command search' -l embedding-model -r -a 'text-embedding-3-small text-embedding-3-large' -d 'Embedding model'
+complete -c git-agent -n '__git_agent_using_command search' -l embedding-dimensions -r -a '512 768 1024 1536 3072' -d 'Embedding dimensions'
+complete -c git-agent -n '__git_agent_using_command search' -l base-url -r -d 'Override provider base URL'
+complete -c git-agent -n '__git_agent_using_command search' -l timeout -r -d 'Override default request timeout'
+complete -c git-agent -n '__git_agent_using_command search' -l debug -d 'Enable debug output on stderr'

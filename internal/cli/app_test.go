@@ -44,6 +44,272 @@ func TestRunReleaseNoteRequiresRange(t *testing.T) {
 	}
 }
 
+func TestSearchPrintsJSONAndUsesEmbeddingsOnly(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("HOME", t.TempDir())
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("release notes live here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path != "/embeddings" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload struct {
+			Input      any    `json:"input"`
+			Model      string `json:"model"`
+			Dimensions int    `json:"dimensions"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Model != "text-embedding-3-small" {
+			t.Fatalf("model = %q", payload.Model)
+		}
+		if payload.Dimensions != 1024 {
+			t.Fatalf("dimensions = %d", payload.Dimensions)
+		}
+		inputs, ok := payload.Input.([]any)
+		count := 1
+		if ok {
+			count = len(inputs)
+		}
+		data := make([]map[string]any, count)
+		for i := range count {
+			data[i] = map[string]any{"object": "embedding", "index": i, "embedding": embeddingTestVector(payload.Dimensions, 1)}
+		}
+		response := map[string]any{
+			"object": "list",
+			"model":  payload.Model,
+			"data":   data,
+			"usage":  map[string]any{"prompt_tokens": 1, "total_tokens": 1},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"search", "release", "notes"}); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	var out struct {
+		Source struct {
+			Mode string `json:"mode"`
+			Root string `json:"root"`
+		} `json:"source"`
+		Results []struct {
+			Range string `json:"range"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("stdout is not JSON: %q: %v", stdout.String(), err)
+	}
+	if out.Source.Mode != "filesystem" || out.Source.Root != root {
+		t.Fatalf("source = %#v", out.Source)
+	}
+	if len(out.Results) != 1 || out.Results[0].Range != "notes.txt:1-1" {
+		t.Fatalf("results = %#v", out.Results)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".git-agent", "sessions")); !os.IsNotExist(err) {
+		t.Fatalf("sessions stat err = %v, want not exist", err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("expected embeddings request")
+	}
+}
+
+func TestSearchRequiresAPIKeyEvenWithCodexAuth(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("release notes live here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeCodexAuth(t, `{
+		"auth_mode": "chatgpt",
+		"tokens": {
+			"access_token": "access-token",
+			"account_id": "workspace-123"
+		}
+	}`)
+
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_EMBEDDING_API_KEY", "")
+	t.Setenv("OPENAI_BASE_URL", "http://legacy.example/v1")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	err := app.Run(t.Context(), []string{"search", "release", "notes"})
+	if err == nil || !strings.Contains(err.Error(), "search requires OPENAI_EMBEDDING_API_KEY or OPENAI_API_KEY") {
+		t.Fatalf("expected API key error, got %v", err)
+	}
+}
+
+func TestSearchUsesEmbeddingOnlyEnv(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("HOME", t.TempDir())
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("release notes live here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer embedding-key" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		var payload struct {
+			Input      any    `json:"input"`
+			Model      string `json:"model"`
+			Dimensions int    `json:"dimensions"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Model != "text-embedding-3-large" {
+			t.Fatalf("model = %q", payload.Model)
+		}
+		if payload.Dimensions != 512 {
+			t.Fatalf("dimensions = %d", payload.Dimensions)
+		}
+		inputs, _ := payload.Input.([]any)
+		count := max(1, len(inputs))
+		data := make([]map[string]any, count)
+		for i := range count {
+			data[i] = map[string]any{"object": "embedding", "index": i, "embedding": embeddingTestVector(payload.Dimensions, 1)}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"model":  payload.Model,
+			"data":   data,
+			"usage":  map[string]any{"prompt_tokens": 1, "total_tokens": 1},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_BASE_URL", "http://general.example/v1")
+	t.Setenv("OPENAI_EMBEDDING_API_KEY", "embedding-key")
+	t.Setenv("OPENAI_EMBEDDING_BASE_URL", server.URL)
+	t.Setenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large")
+	t.Setenv("OPENAI_EMBEDDING_DIMENSIONS", "512")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"search", "release", "notes"}); err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(stdout.Bytes()) {
+		t.Fatalf("stdout is not JSON: %q", stdout.String())
+	}
+}
+
+func TestSearchRevIgnoresCurrentFilesystem(t *testing.T) {
+	repoDir := initRepo(t)
+	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("committed content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "add", "app.txt")
+	runGit(t, repoDir, "commit", "-m", "initial")
+	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("working content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repoDir)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/embeddings" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		var payload struct {
+			Input any    `json:"input"`
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		var inputs []string
+		switch input := payload.Input.(type) {
+		case string:
+			inputs = []string{input}
+		case []any:
+			for _, value := range input {
+				text, _ := value.(string)
+				inputs = append(inputs, text)
+			}
+		}
+		data := make([]map[string]any, len(inputs))
+		for i, input := range inputs {
+			vector := []float64{-1, 0, 0}
+			if strings.Contains(strings.ToLower(input), "committed") {
+				vector = []float64{1, 0, 0}
+			}
+			data[i] = map[string]any{"object": "embedding", "index": i, "embedding": vector}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"model":  payload.Model,
+			"data":   data,
+			"usage":  map[string]any{"prompt_tokens": 1, "total_tokens": 1},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"search", "--rev", "HEAD", "--min-relatedness", "0.9", "committed"}); err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Source struct {
+			Mode        string `json:"mode"`
+			ResolvedRev string `json:"resolved_rev"`
+		} `json:"source"`
+		Results []struct {
+			Excerpt string `json:"excerpt"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("stdout is not JSON: %q: %v", stdout.String(), err)
+	}
+	if out.Source.Mode != "revision" || out.Source.ResolvedRev == "" {
+		t.Fatalf("source = %#v", out.Source)
+	}
+	if len(out.Results) != 1 {
+		t.Fatalf("results = %#v", out.Results)
+	}
+	if !strings.Contains(out.Results[0].Excerpt, "committed content") || strings.Contains(out.Results[0].Excerpt, "working content") {
+		t.Fatalf("excerpt = %q", out.Results[0].Excerpt)
+	}
+}
+
 func TestCommitMsgPrintsOnlyProviderArtifact(t *testing.T) {
 	repoDir := initRepo(t)
 	t.Chdir(repoDir)
@@ -1117,6 +1383,14 @@ func eventValue(t *testing.T, events []map[string]any, kind string) map[string]a
 	}
 	t.Fatalf("missing trace event %q in %#v", kind, events)
 	return nil
+}
+
+func embeddingTestVector(dimensions int, first float64) []float64 {
+	vector := make([]float64, dimensions)
+	if dimensions > 0 {
+		vector[0] = first
+	}
+	return vector
 }
 
 func writeCodexAuth(t *testing.T, content string) {
