@@ -254,7 +254,7 @@ embedding model without changing `OPENAI_MODEL`; `OPENAI_EMBEDDING_DIMENSIONS`
 changes search embedding dimensions without changing non-search model usage.
 `OPENAI_EMBEDDING_MAX_INPUT_CHARS` changes the per-input embedding cap from the
 default `32000` characters. `OPENAI_EMBEDDING_BATCH_INPUTS` changes the maximum
-inputs per embedding request from the default `10`;
+inputs per embedding request from the default `32`;
 `OPENAI_EMBEDDING_BATCH_MAX_CHARS` changes the maximum total characters per
 embedding request from the default `700000`; `OPENAI_EMBEDDING_CONCURRENCY`
 changes the concurrent embedding request limit from the default

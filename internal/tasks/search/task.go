@@ -42,7 +42,7 @@ const (
 	maxExcerptLines               = 40
 	maxExcerptBytes               = 12 << 10
 	indexVersion                  = 2
-	DefaultEmbeddingBatchInputs   = 10
+	DefaultEmbeddingBatchInputs   = 32
 	DefaultEmbeddingBatchMaxChars = 700_000
 	DefaultEmbeddingMaxInputChars = 32_000
 	maxEmbeddingLineChars         = 4_000

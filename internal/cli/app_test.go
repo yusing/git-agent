@@ -462,6 +462,7 @@ func TestSearchTimeoutIsPerEmbeddingRequest(t *testing.T) {
 
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv(config.EnvEmbeddingBatchInputs, "10")
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
