@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bytedance/sonic"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/textutil"
 )
@@ -195,7 +195,7 @@ func jsonResult(tool string, value any, truncated bool) (Result, error) {
 		"data":      value,
 		"truncated": truncated,
 	}
-	data, err := json.MarshalIndent(envelope, "", "  ")
+	data, err := sonic.MarshalIndent(envelope, "", "  ")
 	if err != nil {
 		return Result{}, err
 	}
@@ -210,7 +210,7 @@ func parseArgs[T any](raw string) (T, error) {
 	if raw == "" {
 		return value, nil
 	}
-	err := json.Unmarshal([]byte(raw), &value)
+	err := sonic.UnmarshalString(raw, &value)
 	if err != nil {
 		return value, fmt.Errorf("invalid tool arguments %q: %w", raw, err)
 	}

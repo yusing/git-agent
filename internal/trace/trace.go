@@ -5,7 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	stdjson "encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +20,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/bytedance/sonic"
 )
 
 type Recorder struct {
@@ -80,6 +82,8 @@ const (
 	consoleInlineFields          = 6
 	consoleInlineWidth           = 140
 )
+
+var sonicUseNumber = sonic.Config{UseNumber: true}.Froze()
 
 func New(root, command string) (*Recorder, error) {
 	now := time.Now().UTC()
@@ -194,14 +198,12 @@ func (r *Recorder) writeMapLocked(kind string, value map[string]any) error {
 }
 
 func Normalize(value any) any {
-	data, err := json.Marshal(value)
+	data, err := sonic.Marshal(value)
 	if err != nil {
 		return value
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
 	var normalized any
-	if err := decoder.Decode(&normalized); err != nil {
+	if err := sonicUseNumber.Unmarshal(data, &normalized); err != nil {
 		return value
 	}
 	return expandJSONStrings(normalized)
@@ -235,20 +237,15 @@ func expandJSONStrings(value any) any {
 }
 
 func expandJSONString(value string) any {
-	trimmed := bytes.TrimSpace([]byte(value))
+	trimmed := strings.TrimSpace(value)
 	if len(trimmed) == 0 {
 		return value
 	}
 	if trimmed[0] != '{' && trimmed[0] != '[' {
 		return value
 	}
-	decoder := json.NewDecoder(bytes.NewReader(trimmed))
-	decoder.UseNumber()
 	var expanded any
-	if err := decoder.Decode(&expanded); err != nil {
-		return value
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+	if err := sonicUseNumber.UnmarshalFromString(trimmed, &expanded); err != nil {
 		return value
 	}
 	return expandJSONStrings(expanded)
@@ -698,7 +695,7 @@ func consoleScalarSlice(value []any) bool {
 
 func consoleScalar(value any) bool {
 	switch value := value.(type) {
-	case nil, bool, json.Number, int, int64, float64:
+	case nil, bool, stdjson.Number, int, int64, float64:
 		return true
 	case string:
 		return len(value) <= consoleStringPreviewBytes && !strings.Contains(value, "\n")
@@ -930,7 +927,7 @@ func (r *Recorder) writeSnapshotLocked() error {
 	}
 
 	var buf bytes.Buffer
-	encoder := json.NewEncoder(&buf)
+	encoder := sonic.ConfigDefault.NewEncoder(&buf)
 	encoder.SetEscapeHTML(false)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(snapshotValue); err != nil {
@@ -961,14 +958,12 @@ func (r *Recorder) compactedMapValueLocked(value map[string]any) (map[string]any
 }
 
 func (r *Recorder) compactedValueLocked(value any) (any, error) {
-	data, err := json.Marshal(value)
+	data, err := sonic.Marshal(value)
 	if err != nil {
 		return nil, err
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
 	var normalized any
-	if err := decoder.Decode(&normalized); err != nil {
+	if err := sonicUseNumber.Unmarshal(data, &normalized); err != nil {
 		return nil, err
 	}
 	return r.compactLargeStringsLocked(normalized)
@@ -1073,9 +1068,9 @@ func stringField(value map[string]any, key string) string {
 }
 
 func mustJSON(value any) string {
-	data, err := json.Marshal(value)
+	data, err := sonic.MarshalString(value)
 	if err != nil {
 		return fmt.Sprintf("%#v", value)
 	}
-	return string(data)
+	return data
 }

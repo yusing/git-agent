@@ -1,13 +1,13 @@
 package commitmsg
 
 import (
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 
+	"github.com/bytedance/sonic"
 	"github.com/yusing/git-agent/internal/contextpack"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/textutil"
@@ -492,7 +492,7 @@ func diffMentionsPath(diff, path string) bool {
 }
 
 func (c PreparedCommitContext) Render() string {
-	data, err := json.MarshalIndent(c, "", "  ")
+	data, err := sonic.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return fmt.Sprintf(`{"mode":%q}`, c.Mode)
 	}
@@ -500,7 +500,7 @@ func (c PreparedCommitContext) Render() string {
 }
 
 func (c PreparedAmendContext) Render() string {
-	data, err := json.MarshalIndent(c, "", "  ")
+	data, err := sonic.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return fmt.Sprintf(`{"mode":%q}`, c.Mode)
 	}
@@ -551,7 +551,7 @@ func (c PreparedCommitContext) RenderForPrompt() string {
 		view["previous_head_diff"] = c.PreviousHeadDiff
 		view["previous_head_diff_truncated"] = c.PreviousHeadDiffTruncated
 	}
-	data, err := json.MarshalIndent(view, "", "  ")
+	data, err := sonic.MarshalIndent(view, "", "  ")
 	if err != nil {
 		return fmt.Sprintf(`{"mode":%q}`, c.Mode)
 	}
@@ -855,7 +855,7 @@ func PreparePRContext(repo *gitctx.Repository) (PreparedPRContext, error) {
 }
 
 func (c PreparedPRContext) Render() string {
-	data, err := json.MarshalIndent(c, "", "  ")
+	data, err := sonic.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return fmt.Sprintf(`{"range":%q}`, c.Range)
 	}

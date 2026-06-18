@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bytedance/sonic"
 	"github.com/yusing/git-agent/internal/agent"
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/gitctx"
@@ -145,7 +145,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	if cfg.Debug {
 		a.writeSearchDebug(output)
 	}
-	encoder := json.NewEncoder(a.stdout)
+	encoder := sonic.ConfigDefault.NewEncoder(a.stdout)
 	encoder.SetEscapeHTML(false)
 	return encoder.Encode(output)
 }

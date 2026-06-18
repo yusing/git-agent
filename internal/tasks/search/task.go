@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -23,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bytedance/sonic"
 	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/openai"
@@ -720,7 +720,7 @@ func loadBinaryVectors(dir string) ([]vectorRecord, error) {
 		return nil, err
 	}
 	var index []vectorIndexRecord
-	if err := json.Unmarshal(indexData, &index); err != nil {
+	if err := sonic.Unmarshal(indexData, &index); err != nil {
 		return nil, err
 	}
 	vectorData, err := os.ReadFile(filepath.Join(dir, "vectors.f32"))
@@ -766,7 +766,7 @@ func loadLegacyVectors(dir string) ([]vectorRecord, error) {
 		return nil, err
 	}
 	var records []vectorRecord
-	if err := json.Unmarshal(data, &records); err != nil {
+	if err := sonic.Unmarshal(data, &records); err != nil {
 		return nil, err
 	}
 	return records, nil
@@ -991,7 +991,7 @@ func writeBinaryVectors(dir string, records []vectorRecord) error {
 }
 
 func writeJSON(path string, value any) error {
-	data, err := json.MarshalIndent(value, "", "  ")
+	data, err := sonic.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -1118,7 +1118,7 @@ func loadHistory(dir string) ([]historyEntry, error) {
 		return nil, err
 	}
 	var entries []historyEntry
-	return entries, json.Unmarshal(data, &entries)
+	return entries, sonic.Unmarshal(data, &entries)
 }
 
 func appendHistory(dir string, entry historyEntry) error {

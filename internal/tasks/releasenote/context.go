@@ -1,7 +1,6 @@
 package releasenote
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -9,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bytedance/sonic"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/textutil"
 )
@@ -186,7 +186,7 @@ func PrepareContextFromRevision(repo *gitctx.Repository, baseRef, releaseRef, re
 }
 
 func (c PreparedContext) Render() string {
-	data, err := json.MarshalIndent(c, "", "  ")
+	data, err := sonic.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return fmt.Sprintf(`{"range":%q}`, c.Range)
 	}

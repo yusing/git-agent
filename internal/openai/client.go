@@ -3,7 +3,6 @@ package openai
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bytedance/sonic"
 	openaisdk "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
@@ -647,7 +647,7 @@ func (r Request) MarshalTraceJSON() ([]byte, error) {
 		return nil, err
 	}
 	var buf bytes.Buffer
-	encoder := json.NewEncoder(&buf)
+	encoder := sonic.ConfigDefault.NewEncoder(&buf)
 	encoder.SetEscapeHTML(false)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(traceValue); err != nil {
