@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/gitctx"
 )
 
@@ -48,6 +49,7 @@ func TestSearchPrintsJSONAndUsesEmbeddingsOnly(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
 	t.Setenv("HOME", t.TempDir())
+	useGeneralEmbeddingProvider(t)
 	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("release notes live here\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -227,6 +229,7 @@ func TestSearchUsesEmbeddingOnlyEnv(t *testing.T) {
 
 func TestSearchRevIgnoresCurrentFilesystem(t *testing.T) {
 	repoDir := initRepo(t)
+	useGeneralEmbeddingProvider(t)
 	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("committed content\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -308,6 +311,15 @@ func TestSearchRevIgnoresCurrentFilesystem(t *testing.T) {
 	if !strings.Contains(out.Results[0].Excerpt, "committed content") || strings.Contains(out.Results[0].Excerpt, "working content") {
 		t.Fatalf("excerpt = %q", out.Results[0].Excerpt)
 	}
+}
+
+func useGeneralEmbeddingProvider(t *testing.T) {
+	t.Helper()
+
+	t.Setenv(config.EnvEmbeddingAPIKey, "")
+	t.Setenv(config.EnvEmbeddingBaseURL, "")
+	t.Setenv(config.EnvEmbeddingModel, "")
+	t.Setenv(config.EnvEmbeddingDimensions, "")
 }
 
 func TestCommitMsgPrintsOnlyProviderArtifact(t *testing.T) {

@@ -21,6 +21,7 @@ import (
 func TestSearchEndToEndIndexesRanksAndReplays(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
+	useGeneralEmbeddingProvider(t)
 	runGit(t, root, "init")
 	if err := os.MkdirAll(filepath.Join(root, "internal", "cli"), 0o755); err != nil {
 		t.Fatal(err)
