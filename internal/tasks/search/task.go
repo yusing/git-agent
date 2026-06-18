@@ -45,6 +45,11 @@ const (
 	maxEmbeddingLineChars         = 4_000
 )
 
+var searchIgnoreFileNames = map[string]bool{
+	".gitignore":      true,
+	".gitagentignore": true,
+}
+
 type Options struct {
 	Root                string
 	Rev                 string
@@ -1262,7 +1267,7 @@ func filesystemIgnoreMatcher(root string) gitignore.Matcher {
 			}
 			return nil
 		}
-		if entry.Name() != ".gitignore" {
+		if !searchIgnoreFileNames[entry.Name()] {
 			return nil
 		}
 		relDir := ""

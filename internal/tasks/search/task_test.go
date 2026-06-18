@@ -67,7 +67,9 @@ func (e *countingEmbedder) maxBatchSize() int64 {
 func TestFilesystemSearchDoesNotRequireGitAndIndexesCurrentFiles(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, ".gitignore", "node_modules/\n")
+	writeFile(t, root, ".gitagentignore", "search-only.txt\n")
 	writeFile(t, root, "notes.txt", "release notes live here\n")
+	writeFile(t, root, "search-only.txt", "release notes live here\n")
 	writeFile(t, root, "node_modules/ignored.txt", "release notes live here\n")
 	writeFile(t, root, ".omx/ignored.txt", "release notes live here\n")
 
@@ -94,6 +96,9 @@ func TestFilesystemSearchDoesNotRequireGitAndIndexesCurrentFiles(t *testing.T) {
 	}
 	if strings.Contains(out.Results[0].Excerpt, "ignored") {
 		t.Fatalf("excerpt includes skipped dependency dir: %s", out.Results[0].Excerpt)
+	}
+	if strings.Contains(out.Results[0].Range, "search-only.txt") {
+		t.Fatalf("range includes .gitagentignore file: %s", out.Results[0].Range)
 	}
 }
 

@@ -128,8 +128,10 @@ Run embeddings-only semantic context search and print machine-readable JSON.
 Filesystem mode is the default: it searches current files under the current
 working directory exactly as they exist on disk and does not require a Git
 repository. Staged, unstaged, and untracked files are included when physically
-under the search root unless skipped by dot-path rules, `.gitignore`, or binary,
-oversized-file, and symlink safety checks.
+under the search root unless skipped by dot-path rules, `.gitignore`,
+`.gitagentignore`, or binary, oversized-file, and symlink safety checks.
+`.gitagentignore` uses the same pattern syntax and per-directory base behavior
+as `.gitignore`, but only affects `git-agent search` filesystem discovery.
 
 Go files with a pre-package heading comment containing `DO NOT EDIT` are indexed
 as path-only chunks. Search embeds the filename/language metadata for those

@@ -74,6 +74,9 @@ current filesystem by default, or a committed tree with `--rev <rev>`, and
 writes JSON results to stdout. Use `--code` to limit candidates to source-code
 files. Use `--index` without a query to build or refresh missing embeddings
 without searching; add `--reindex` to rebuild existing embeddings too.
+Filesystem search reads `.gitignore` and `.gitagentignore`; use
+`.gitagentignore` for search-only exclusions such as generated or minified
+artifacts that should remain tracked.
 
 Search uses `OPENAI_EMBEDDING_API_KEY` when set, then falls back to
 `OPENAI_API_KEY`; Codex/ChatGPT auth is not used for embeddings. The default
