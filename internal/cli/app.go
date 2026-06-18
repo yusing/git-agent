@@ -108,14 +108,11 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	taskCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
-	defer cancel()
-
 	root, err := os.Getwd()
 	if err != nil {
 		return err
 	}
-	output, err := searchtask.Run(taskCtx, openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}), searchtask.Options{
+	output, err := searchtask.Run(ctx, openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}), searchtask.Options{
 		Root:                root,
 		Rev:                 rev,
 		MinRelatedness:      minRelatedness,

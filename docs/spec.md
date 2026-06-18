@@ -600,7 +600,7 @@ The runtime must enforce:
 - maximum tool calls
 - maximum bytes/lines per tool result
 - per-request timeout
-- overall task timeout
+- overall task timeout for message-generation commands
 
 ### Session trace format
 

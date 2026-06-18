@@ -10,9 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/gitctx"
@@ -222,6 +225,69 @@ func TestSearchUsesEmbeddingOnlyEnv(t *testing.T) {
 	app := &App{stdout: &stdout, stderr: &stderr}
 	if err := app.Run(t.Context(), []string{"search", "release", "notes"}); err != nil {
 		t.Fatal(err)
+	}
+	if !json.Valid(stdout.Bytes()) {
+		t.Fatalf("stdout is not JSON: %q", stdout.String())
+	}
+}
+
+func TestSearchTimeoutIsPerEmbeddingRequest(t *testing.T) {
+	oldProcs := runtime.GOMAXPROCS(2)
+	defer runtime.GOMAXPROCS(oldProcs)
+
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("HOME", t.TempDir())
+	useGeneralEmbeddingProvider(t)
+	for i := range 11 {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("file%d.go", i)), []byte("package main\n\nfunc target() {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		time.Sleep(25 * time.Millisecond)
+		var payload struct {
+			Input      any    `json:"input"`
+			Model      string `json:"model"`
+			Dimensions int    `json:"dimensions"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		inputs := []any{payload.Input}
+		if values, ok := payload.Input.([]any); ok {
+			inputs = values
+		}
+		data := make([]map[string]any, len(inputs))
+		for i := range inputs {
+			data[i] = map[string]any{"object": "embedding", "index": i, "embedding": embeddingTestVector(payload.Dimensions, 1)}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"model":  payload.Model,
+			"data":   data,
+			"usage":  map[string]any{"prompt_tokens": 1, "total_tokens": 1},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"search", "--timeout", "50ms", "--code", "target"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() < 3 {
+		t.Fatalf("embedding calls = %d, want index batches plus query", calls.Load())
 	}
 	if !json.Valid(stdout.Bytes()) {
 		t.Fatalf("stdout is not JSON: %q", stdout.String())
