@@ -141,6 +141,74 @@ func TestSearchPrintsJSONAndUsesEmbeddingsOnly(t *testing.T) {
 	}
 }
 
+func TestSearchIndexPrintsJSONWithoutQueryEmbedding(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("HOME", t.TempDir())
+	useGeneralEmbeddingProvider(t)
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("release notes live here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		var payload struct {
+			Input      any    `json:"input"`
+			Model      string `json:"model"`
+			Dimensions int    `json:"dimensions"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		inputs, ok := payload.Input.([]any)
+		count := 1
+		if ok {
+			count = len(inputs)
+		}
+		data := make([]map[string]any, count)
+		for i := range count {
+			data[i] = map[string]any{"object": "embedding", "index": i, "embedding": embeddingTestVector(payload.Dimensions, 1)}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"model":  payload.Model,
+			"data":   data,
+			"usage":  map[string]any{"prompt_tokens": 1, "total_tokens": 1},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"search", "--index"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("embedding calls = %d, want index only", calls.Load())
+	}
+	var out struct {
+		Query   string `json:"query"`
+		Results []any  `json:"results"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("stdout is not JSON: %q: %v", stdout.String(), err)
+	}
+	if out.Query != "" || len(out.Results) != 0 {
+		t.Fatalf("output = %#v", out)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestSearchRequiresAPIKeyEvenWithCodexAuth(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)

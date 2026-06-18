@@ -75,6 +75,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	var rev string
 	var minRelatedness float64
 	var limit int
+	var indexOnly bool
 	var reindex bool
 	var codeOnly bool
 	var embeddingModel string
@@ -88,6 +89,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	fs.StringVar(&rev, "rev", "", "search a committed Git tree")
 	fs.Float64Var(&minRelatedness, "min-relatedness", searchtask.DefaultMinRelatedness, "minimum semantic relatedness")
 	fs.IntVar(&limit, "limit", searchtask.DefaultLimit, "maximum results")
+	fs.BoolVar(&indexOnly, "index", false, "build embeddings for the selected source without searching")
 	fs.BoolVar(&reindex, "reindex", false, "rebuild embeddings for the selected source")
 	fs.BoolVar(&codeOnly, "code", false, "search code files only")
 	fs.StringVar(&embeddingModel, "embedding-model", config.ResolveEmbeddingModel(""), "embedding model")
@@ -101,7 +103,10 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 		return err
 	}
 	query := strings.TrimSpace(strings.Join(fs.Args(), " "))
-	if query == "" {
+	if indexOnly && query != "" {
+		return errors.New("search --index does not accept a query")
+	}
+	if query == "" && !indexOnly {
 		return errors.New("search requires a query")
 	}
 	cfg, err := config.ResolveEmbeddings(opts)
@@ -117,6 +122,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 		Rev:                 rev,
 		MinRelatedness:      minRelatedness,
 		Limit:               limit,
+		IndexOnly:           indexOnly,
 		Reindex:             reindex,
 		CodeOnly:            codeOnly,
 		EmbeddingModel:      embeddingModel,
@@ -956,6 +962,6 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent pr-message [flags]\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] patch|minor|major\n")
-	b.WriteString("  git-agent search [--rev <rev>] [flags] <query...>\n")
+	b.WriteString("  git-agent search [--index] [--rev <rev>] [flags] <query...>\n")
 	return errors.New(b.String())
 }

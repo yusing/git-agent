@@ -48,6 +48,7 @@ type Options struct {
 	Rev                 string
 	MinRelatedness      float64
 	Limit               int
+	IndexOnly           bool
 	Reindex             bool
 	CodeOnly            bool
 	EmbeddingModel      string
@@ -226,7 +227,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 
 	query = strings.TrimSpace(query)
-	if query == "" {
+	if query == "" && !opts.IndexOnly {
 		return fail(errors.New("search query is empty"))
 	}
 	if opts.MinRelatedness <= 0 || opts.MinRelatedness > 1 {
@@ -338,6 +339,27 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 	mark("persist")
 
+	indexStatus := "miss"
+	if reused > 0 {
+		indexStatus = "hit"
+	}
+	if opts.IndexOnly {
+		return resultWithDiagnostics(Output{
+			Query:          query,
+			Source:         source,
+			MinRelatedness: opts.MinRelatedness,
+			Retrieval: Retrieval{
+				Mode:           "embeddings",
+				EmbeddingModel: opts.EmbeddingModel,
+				Index:          indexStatus,
+				Dimensions:     dimensions,
+				Filters:        Filters{Code: opts.CodeOnly},
+				Skipped:        skipped,
+			},
+			Results: []Result{},
+		}), nil
+	}
+
 	normalizedQuery := normalizeQuery(query)
 	queryVector, queryDimensions, cachedQuery := cachedQueryEmbedding(indexDir, normalizedQuery, opts.EmbeddingModel, opts.EmbeddingDimensions, source, root, resolvedRev)
 	if !cachedQuery {
@@ -377,10 +399,6 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	})
 	mark("replay")
 
-	indexStatus := "miss"
-	if reused > 0 {
-		indexStatus = "hit"
-	}
 	return resultWithDiagnostics(Output{
 		Query:          query,
 		Source:         source,

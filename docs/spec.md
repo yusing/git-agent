@@ -25,7 +25,7 @@ Supported workflows:
 - `git-agent pr-message`
 - `git-agent release-note [--out <file>] <base> <release>`
 - `git-agent release-note [--out <file>] patch|minor|major`
-- `git-agent search [--rev <rev>] [--min-relatedness <score>] [--limit <n>] <query...>`
+- `git-agent search [--index] [--rev <rev>] [--min-relatedness <score>] [--limit <n>] <query...>`
 
 ### Non-goals
 
@@ -122,7 +122,7 @@ the target is writable before generation, streams the human console trace to
 stdout, writes the rendered Markdown to the file, and does not write a JSON
 trace session.
 
-#### `git-agent search [--rev <rev>] <query...>`
+#### `git-agent search [--index] [--rev <rev>] <query...>`
 
 Run embeddings-only semantic context search and print machine-readable JSON.
 Filesystem mode is the default: it searches current files under the current
@@ -149,6 +149,11 @@ the local binary vector cache.
 embedding. It is intended for implementation-location searches where docs would
 otherwise rank above code. It does not change scoring and does not introduce a
 lexical fallback.
+
+`--index` builds missing embeddings for the selected filesystem or revision
+source, writes the same JSON envelope with an empty result list, and skips query
+embedding, scoring, replay history, and semantic search. `--index --reindex`
+rebuilds embeddings even when cache entries already exist.
 
 ### Flags
 
@@ -181,6 +186,7 @@ Message-generation subcommands reserve this shared flag surface:
 - `--rev <rev>`: search a committed Git tree instead of current filesystem files
 - `--min-relatedness <score>`: default `0.70`, valid `0 < score <= 1`
 - `--limit <n>`: default `20`, valid `1..100`
+- `--index`: build embeddings for the selected source without searching
 - `--reindex`: rebuild embeddings for the selected source
 - `--embedding-model <model>`: default `text-embedding-3-small`
 - `--embedding-dimensions <n>`: default `1024`, valid positive integer
