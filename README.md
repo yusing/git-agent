@@ -78,6 +78,7 @@ without searching; add `--reindex` to rebuild existing embeddings too.
 Search uses `OPENAI_EMBEDDING_API_KEY` when set, then falls back to
 `OPENAI_API_KEY`; Codex/ChatGPT auth is not used for embeddings. The default
 embedding model is `text-embedding-3-small` with `1024` dimensions. Each
+embedding chunk clamps physical lines to `4000` characters before each
 embedding input is capped at `32000` characters unless
 `OPENAI_EMBEDDING_MAX_INPUT_CHARS` is set. Results below `--min-relatedness`
 are omitted. Defaults are `--min-relatedness 0.70`, `--limit 20`, and maximum

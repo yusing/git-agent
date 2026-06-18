@@ -243,6 +243,29 @@ func TestGeneratedGoFilesUsePathOnlyChunks(t *testing.T) {
 	}
 }
 
+func TestEmbeddingTextClampsLongLines(t *testing.T) {
+	longLine := strings.Repeat("x", maxEmbeddingLineChars+100)
+	chunks := chunksForFile(fileContent{
+		path:   "bundle.js",
+		source: "filesystem",
+		text:   longLine,
+		size:   int64(len(longLine)),
+	})
+	if len(chunks) != 1 {
+		t.Fatalf("chunks = %d, want one chunk", len(chunks))
+	}
+	if got := chunks[0].text; got != longLine {
+		t.Fatal("chunk text was clamped")
+	}
+	_, body, ok := strings.Cut(chunks[0].EmbeddingText, "\n\n")
+	if !ok {
+		t.Fatalf("embedding text missing metadata separator: %q", chunks[0].EmbeddingText)
+	}
+	if got := len([]rune(body)); got != maxEmbeddingLineChars {
+		t.Fatalf("embedding body chars = %d, want %d", got, maxEmbeddingLineChars)
+	}
+}
+
 func TestDoNotEditAfterPackageDoesNotMarkGenerated(t *testing.T) {
 	chunks := chunksForFile(fileContent{
 		path:   "handwritten.go",
@@ -294,6 +317,48 @@ func TestReindexIgnoresExistingVectors(t *testing.T) {
 	}
 	if third.Retrieval.Index != "miss" {
 		t.Fatalf("reindex index = %q", third.Retrieval.Index)
+	}
+}
+
+func TestSearchIgnoresStaleIndexVersion(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.txt", "alpha\n")
+
+	embedder := &countingEmbedder{}
+	opts := Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}
+	first, err := Run(t.Context(), embedder, opts, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCalls := embedder.callCount()
+
+	manifestPath := filepath.Join(first.Diagnostics.IndexDir, "manifest.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = []byte(strings.Replace(string(data), fmt.Sprintf(`"version": %d`, indexVersion), fmt.Sprintf(`"version": %d`, indexVersion-1), 1))
+	if err := os.WriteFile(manifestPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := Run(t.Context(), embedder, opts, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Retrieval.Index != "miss" {
+		t.Fatalf("second index = %q, want miss", second.Retrieval.Index)
+	}
+	if embedder.callCount() <= firstCalls {
+		t.Fatalf("embedding calls after stale manifest = %d, want > %d", embedder.callCount(), firstCalls)
 	}
 }
 

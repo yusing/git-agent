@@ -145,6 +145,11 @@ not use lexical fallback, lexical ranking, token overlap, or path/name boosts.
 It embeds the query and local chunks, then performs an exact cosine scan over
 the local binary vector cache.
 
+Chunk embedding text clamps each physical source line to `4000` characters
+before applying the per-input embedding character cap. This bounds minified or
+single-line generated files without changing file discovery, chunk ranges, or
+result excerpts.
+
 `--code` narrows the candidate set to source-code files before chunking and
 embedding. It is intended for implementation-location searches where docs would
 otherwise rank above code. It does not change scoring and does not introduce a

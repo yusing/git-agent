@@ -38,10 +38,11 @@ const (
 	chunkOverlap                  = 20
 	maxExcerptLines               = 40
 	maxExcerptBytes               = 12 << 10
-	indexVersion                  = 1
+	indexVersion                  = 2
 	batchMaxInputs                = 10
 	batchMaxChars                 = 700_000
 	DefaultEmbeddingMaxInputChars = 32_000
+	maxEmbeddingLineChars         = 4_000
 )
 
 type Options struct {
@@ -703,11 +704,47 @@ func embeddingText(chunk Chunk, text string) string {
 		fmt.Fprintf(&b, "language: %s\n", lang)
 	}
 	b.WriteString("\n")
-	b.WriteString(text)
+	b.WriteString(clampEmbeddingLines(text))
 	return b.String()
 }
 
+func clampEmbeddingLines(text string) string {
+	if text == "" {
+		return ""
+	}
+	var b strings.Builder
+	for i, line := range splitLines(text) {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(clampEmbeddingLine(line))
+	}
+	return b.String()
+}
+
+func clampEmbeddingLine(line string) string {
+	chars := 0
+	for end := range line {
+		if chars == maxEmbeddingLineChars {
+			return line[:end]
+		}
+		chars++
+	}
+	return line
+}
+
 func loadVectors(dir string) ([]vectorRecord, error) {
+	var found manifest
+	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		return nil, err
+	}
+	if err := sonic.Unmarshal(data, &found); err != nil {
+		return nil, err
+	}
+	if found.Version != indexVersion {
+		return nil, fmt.Errorf("index version = %d, want %d", found.Version, indexVersion)
+	}
 	if records, err := loadBinaryVectors(dir); err == nil {
 		return records, nil
 	}
