@@ -219,6 +219,9 @@ func TestSearchDebugPrintsNonIgnoreSkippedFiles(t *testing.T) {
 			t.Fatalf("debug includes ignored/control file %q:\n%s", unwanted, debug)
 		}
 	}
+	if strings.Index(debug, "search_skip ") > strings.Index(debug, "search_index=") {
+		t.Fatalf("search_skip was not streamed before summary:\n%s", debug)
+	}
 }
 
 func TestSearchIndexPrintsJSONWithoutQueryEmbedding(t *testing.T) {

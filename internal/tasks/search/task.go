@@ -294,7 +294,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		}
 		indexRoot = repo.RootPath
 		source = Source{Mode: "revision", Rev: opts.Rev, ResolvedRev: resolvedRev}
-		files, skipped, skippedFiles, err = discoverRevisionFiles(repo, resolvedRev)
+		files, skipped, skippedFiles, err = discoverRevisionFiles(repo, resolvedRev, debugf)
 		if err != nil {
 			return fail(err)
 		}
@@ -302,7 +302,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		if repo, err := gitctx.Open(root); err == nil {
 			indexRoot = repo.RootPath
 		}
-		files, skipped, skippedFiles, err = discoverFilesystemFiles(root)
+		files, skipped, skippedFiles, err = discoverFilesystemFiles(root, debugf)
 		if err != nil {
 			return fail(err)
 		}
@@ -531,15 +531,19 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}), nil
 }
 
-func discoverFilesystemFiles(root string) ([]fileContent, SkippedCounts, []SkippedFile, error) {
+func discoverFilesystemFiles(root string, debugf func(string, ...any)) ([]fileContent, SkippedCounts, []SkippedFile, error) {
 	var files []fileContent
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
+	skip := func(path, reason string) {
+		skippedFiles = append(skippedFiles, SkippedFile{Path: path, Reason: reason})
+		debugf("search_skip path=%q reason=%s", path, reason)
+	}
 	ignoreMatcher := filesystemIgnoreMatcher(root)
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			skipped.Unreadable++
-			skippedFiles = append(skippedFiles, SkippedFile{Path: filepath.ToSlash(path), Reason: "unreadable"})
+			skip(filepath.ToSlash(path), "unreadable")
 			return nil
 		}
 		name := entry.Name()
@@ -551,7 +555,7 @@ func discoverFilesystemFiles(root string) ([]fileContent, SkippedCounts, []Skipp
 		if entry.IsDir() {
 			if path != root && shouldSkipDir(name) {
 				skipped.Dirs++
-				skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "dot_dir"})
+				skip(rel, "dot_dir")
 				return filepath.SkipDir
 			}
 			if path != root && ignoreMatcher.Match(pathParts(rel), true) {
@@ -564,7 +568,7 @@ func discoverFilesystemFiles(root string) ([]fileContent, SkippedCounts, []Skipp
 			if searchIgnoreFileNames[name] {
 				return nil
 			}
-			skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "dot_file"})
+			skip(rel, "dot_file")
 			return nil
 		}
 		if ignoreMatcher.Match(pathParts(rel), false) {
@@ -573,37 +577,37 @@ func discoverFilesystemFiles(root string) ([]fileContent, SkippedCounts, []Skipp
 		info, err := entry.Info()
 		if err != nil {
 			skipped.Unreadable++
-			skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "unreadable"})
+			skip(rel, "unreadable")
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			skipped.Symlink++
-			skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "symlink"})
+			skip(rel, "symlink")
 			return nil
 		}
 		if !info.Mode().IsRegular() {
-			skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "non_regular"})
+			skip(rel, "non_regular")
 			return nil
 		}
 		if info.Size() > MaxFileBytes {
 			skipped.Oversized++
-			skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "oversized"})
+			skip(rel, "oversized")
 			return nil
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			skipped.Unreadable++
-			skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "unreadable"})
+			skip(rel, "unreadable")
 			return nil
 		}
 		if isBinary(data) {
 			skipped.Binary++
-			skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "binary"})
+			skip(rel, "binary")
 			return nil
 		}
 		if !isIndexableText(rel, data) {
 			skipped.NonText++
-			skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "non_text"})
+			skip(rel, "non_text")
 			return nil
 		}
 		files = append(files, fileContent{
@@ -619,10 +623,14 @@ func discoverFilesystemFiles(root string) ([]fileContent, SkippedCounts, []Skipp
 	return files, skipped, skippedFiles, err
 }
 
-func discoverRevisionFiles(repo *gitctx.Repository, rev string) ([]fileContent, SkippedCounts, []SkippedFile, error) {
+func discoverRevisionFiles(repo *gitctx.Repository, rev string, debugf func(string, ...any)) ([]fileContent, SkippedCounts, []SkippedFile, error) {
 	var files []fileContent
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
+	skip := func(path, reason string) {
+		skippedFiles = append(skippedFiles, SkippedFile{Path: path, Reason: reason})
+		debugf("search_skip path=%q reason=%s", path, reason)
+	}
 	ignoreMatcher, err := revisionIgnoreMatcher(repo, rev)
 	if err != nil {
 		return nil, skipped, nil, err
@@ -630,7 +638,7 @@ func discoverRevisionFiles(repo *gitctx.Repository, rev string) ([]fileContent, 
 	err = repo.WalkCommitTextFiles(rev, MaxFileBytes, func(file gitctx.CommitFile) error {
 		if shouldSkipPath(file.Path) {
 			skipped.Dirs++
-			skippedFiles = append(skippedFiles, SkippedFile{Path: filepath.ToSlash(file.Path), Reason: "dot_path"})
+			skip(filepath.ToSlash(file.Path), "dot_path")
 			return nil
 		}
 		if revisionPathIgnored(ignoreMatcher, file.Path) {
@@ -638,7 +646,7 @@ func discoverRevisionFiles(repo *gitctx.Repository, rev string) ([]fileContent, 
 		}
 		if !isIndexableText(file.Path, []byte(file.Text)) {
 			skipped.NonText++
-			skippedFiles = append(skippedFiles, SkippedFile{Path: filepath.ToSlash(file.Path), Reason: "non_text"})
+			skip(filepath.ToSlash(file.Path), "non_text")
 			return nil
 		}
 		files = append(files, fileContent{
@@ -652,7 +660,7 @@ func discoverRevisionFiles(repo *gitctx.Repository, rev string) ([]fileContent, 
 	}, func(file gitctx.CommitFileSkip) error {
 		if shouldSkipPath(file.Path) {
 			skipped.Dirs++
-			skippedFiles = append(skippedFiles, SkippedFile{Path: filepath.ToSlash(file.Path), Reason: "dot_path"})
+			skip(filepath.ToSlash(file.Path), "dot_path")
 			return nil
 		}
 		if revisionPathIgnored(ignoreMatcher, file.Path) {
@@ -661,10 +669,10 @@ func discoverRevisionFiles(repo *gitctx.Repository, rev string) ([]fileContent, 
 		switch file.Reason {
 		case "oversized":
 			skipped.Oversized++
-			skippedFiles = append(skippedFiles, SkippedFile{Path: filepath.ToSlash(file.Path), Reason: "oversized"})
+			skip(filepath.ToSlash(file.Path), "oversized")
 		case "binary":
 			skipped.Binary++
-			skippedFiles = append(skippedFiles, SkippedFile{Path: filepath.ToSlash(file.Path), Reason: "binary"})
+			skip(filepath.ToSlash(file.Path), "binary")
 		}
 		return nil
 	})

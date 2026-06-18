@@ -342,7 +342,7 @@ func TestDiscoverFilesystemFilesClassifiesSkipReasons(t *testing.T) {
 	writeFile(t, root, "manual.pdf", "%PDF-1.7\nrelease notes\n")
 	writeFile(t, root, "binary.dat", "release\x00notes\n")
 
-	files, skipped, skippedFiles, err := discoverFilesystemFiles(root)
+	files, skipped, skippedFiles, err := discoverFilesystemFiles(root, func(string, ...any) {})
 	if err != nil {
 		t.Fatal(err)
 	}

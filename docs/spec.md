@@ -166,8 +166,8 @@ rebuilds embeddings even when cache entries already exist. Index embedding
 progress is checkpointed after every successful embedding batch so interrupted
 or failed runs can reuse already-paid embeddings on the next run.
 
-With `--debug`, search writes one `search_skip` stderr line per file or
-directory skipped by git-agent's own safety rules, including dot paths,
+With `--debug`, search writes one live `search_skip` stderr line per file or
+directory as it is skipped by git-agent's own safety rules, including dot paths,
 symlinks, oversized files, binary files, non-text MIME types, unreadable paths,
 and non-regular files. Paths skipped only by `.gitignore` or `.gitagentignore`
 patterns are not reported. While embedding missing index chunks, `--debug`
