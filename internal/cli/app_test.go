@@ -141,6 +141,7 @@ func TestSearchPrintsJSONAndUsesEmbeddingsOnly(t *testing.T) {
 func TestSearchRequiresAPIKeyEvenWithCodexAuth(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
+	useGeneralEmbeddingProvider(t)
 	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("release notes live here\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
