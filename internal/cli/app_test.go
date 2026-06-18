@@ -231,11 +231,21 @@ func TestSearchDebugPrintsNonIgnoreSkippedFiles(t *testing.T) {
 	}
 	debug := stderr.String()
 	for _, want := range []string{
-		`search_timing step=discover`,
-		`search_embed_plan missing_chunks=1 reused_chunks=0`,
-		`search_embed_progress embedded_done=1 missing_chunks=1`,
-		`search_skip path="binary.dat" reason=binary`,
-		`search_skip path="icon.svg" reason=non_text`,
+		`INF search_timing`,
+		`step=discover`,
+		`INF search_embed_plan`,
+		`missing_chunks=1`,
+		`reused_chunks=0`,
+		`INF search_embed_progress`,
+		`progress="1/1 (100.0%)"`,
+		`elapsed=`,
+		`item_elapsed=`,
+		`client_elapsed=`,
+		`INF search_skip`,
+		`path=binary.dat`,
+		`reason=binary`,
+		`path=icon.svg`,
+		`reason=non_text`,
 	} {
 		if !strings.Contains(debug, want) {
 			t.Fatalf("debug missing %q:\n%s", want, debug)
@@ -246,10 +256,10 @@ func TestSearchDebugPrintsNonIgnoreSkippedFiles(t *testing.T) {
 			t.Fatalf("debug includes ignored/control file %q:\n%s", unwanted, debug)
 		}
 	}
-	if strings.Index(debug, "search_skip ") > strings.Index(debug, "search_index=") {
+	if strings.Index(debug, "INF search_skip") > strings.Index(debug, "INF search_index") {
 		t.Fatalf("search_skip was not streamed before summary:\n%s", debug)
 	}
-	if strings.Index(debug, "search_timing step=discover") > strings.Index(debug, "search_index=") {
+	if strings.Index(debug, "INF search_timing") > strings.Index(debug, "INF search_index") {
 		t.Fatalf("search_timing was not streamed before summary:\n%s", debug)
 	}
 }

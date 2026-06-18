@@ -13,6 +13,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"log/slog"
 	"math"
 	"mime"
 	"net/http"
@@ -72,7 +73,7 @@ type Options struct {
 	APIKey                 string
 	BaseURL                string
 	Debug                  bool
-	DebugLog               func(string)
+	DebugLog               func(string, ...slog.Attr)
 }
 
 type Output struct {
@@ -237,9 +238,9 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	started := time.Now()
 	phaseStarted := started
 	var diag Diagnostics
-	debugf := func(format string, args ...any) {
+	debugLog := func(kind string, attrs ...slog.Attr) {
 		if opts.DebugLog != nil {
-			opts.DebugLog(fmt.Sprintf(format, args...))
+			opts.DebugLog(kind, attrs...)
 		}
 	}
 	mark := func(step string) {
@@ -247,7 +248,10 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		duration := now.Sub(phaseStarted)
 		diag.Timings = append(diag.Timings, Timing{Step: step, Duration: duration})
 		phaseStarted = now
-		debugf("search_timing step=%s duration=%s", step, duration.Round(time.Millisecond))
+		debugLog("search_timing",
+			slog.String("step", step),
+			slog.Duration("duration", duration.Round(time.Millisecond)),
+		)
 	}
 	resultWithDiagnostics := func(output Output) Output {
 		diag.Total = time.Since(started)
@@ -308,7 +312,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		}
 		indexRoot = repo.RootPath
 		source = Source{Mode: "revision", Rev: opts.Rev, ResolvedRev: resolvedRev}
-		files, skipped, skippedFiles, err = discoverRevisionFiles(repo, resolvedRev, debugf)
+		files, skipped, skippedFiles, err = discoverRevisionFiles(repo, resolvedRev, debugLog)
 		if err != nil {
 			return fail(err)
 		}
@@ -316,7 +320,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		if repo, err := gitctx.Open(root); err == nil {
 			indexRoot = repo.RootPath
 		}
-		files, skipped, skippedFiles, err = discoverFilesystemFiles(root, debugf)
+		files, skipped, skippedFiles, err = discoverFilesystemFiles(root, debugLog)
 		if err != nil {
 			return fail(err)
 		}
@@ -359,8 +363,9 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		}
 		type embeddingBatchResult struct {
 			embeddingBatch
-			response openai.EmbeddingResponse
-			err      error
+			response      openai.EmbeddingResponse
+			clientElapsed time.Duration
+			err           error
 		}
 		var batches []embeddingBatch
 		for start := 0; start < len(missing); {
@@ -368,8 +373,17 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 			batches = append(batches, embeddingBatch{start: start, end: end})
 			start = end
 		}
-		debugf("search_embed_plan missing_chunks=%d reused_chunks=%d batches=%d batch_inputs=%d batch_max_chars=%d concurrency=%d index_dir=%q", len(missing), reused, len(batches), batchInputs, batchMaxChars, concurrency, indexDir)
+		debugLog("search_embed_plan",
+			slog.Int("missing_chunks", len(missing)),
+			slog.Int("reused_chunks", reused),
+			slog.Int("batches", len(batches)),
+			slog.Int("batch_inputs", batchInputs),
+			slog.Int("batch_max_chars", batchMaxChars),
+			slog.Int("concurrency", concurrency),
+			slog.String("index_dir", indexDir),
+		)
 
+		embedStarted := time.Now()
 		embedCtx, cancelEmbeddings := context.WithCancel(ctx)
 		group, groupCtx := errgroup.WithContext(embedCtx)
 		group.SetLimit(concurrency)
@@ -381,11 +395,13 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 					break
 				}
 				group.Go(func() error {
+					clientStarted := time.Now()
 					response, err := embedBatch(groupCtx, client, opts, texts[batch.start:batch.end])
+					clientElapsed := time.Since(clientStarted)
 					if err != nil {
 						err = fmt.Errorf("embedding request failed: %w", err)
 					}
-					results <- embeddingBatchResult{embeddingBatch: batch, response: response, err: err}
+					results <- embeddingBatchResult{embeddingBatch: batch, response: response, clientElapsed: clientElapsed, err: err}
 					return err
 				})
 			}
@@ -440,7 +456,16 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 				})
 				diag.EmbeddedDone++
 			}
-			debugf("search_embed_progress embedded_done=%d missing_chunks=%d", diag.EmbeddedDone, len(missing))
+			elapsedRaw := time.Since(embedStarted)
+			elapsed := elapsedRaw.Round(time.Millisecond)
+			itemElapsed := (elapsedRaw / time.Duration(diag.EmbeddedDone)).Round(time.Millisecond)
+			progress := float64(diag.EmbeddedDone) / float64(len(missing)) * 100
+			debugLog("search_embed_progress",
+				slog.String("progress", fmt.Sprintf("%d/%d (%.1f%%)", diag.EmbeddedDone, len(missing), progress)),
+				slog.Duration("elapsed", elapsed),
+				slog.Duration("item_elapsed", itemElapsed),
+				slog.Duration("client_elapsed", result.clientElapsed.Round(time.Millisecond)),
+			)
 		}
 		cancelEmbeddings()
 		if err := <-waitErr; embedErr == nil {
@@ -538,13 +563,16 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}), nil
 }
 
-func discoverFilesystemFiles(root string, debugf func(string, ...any)) ([]fileContent, SkippedCounts, []SkippedFile, error) {
+func discoverFilesystemFiles(root string, debugLog func(string, ...slog.Attr)) ([]fileContent, SkippedCounts, []SkippedFile, error) {
 	var files []fileContent
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
 	skip := func(path, reason string) {
 		skippedFiles = append(skippedFiles, SkippedFile{Path: path, Reason: reason})
-		debugf("search_skip path=%q reason=%s", path, reason)
+		debugLog("search_skip",
+			slog.String("path", path),
+			slog.String("reason", reason),
+		)
 	}
 	ignoreMatcher := filesystemIgnoreMatcher(root)
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
@@ -630,13 +658,16 @@ func discoverFilesystemFiles(root string, debugf func(string, ...any)) ([]fileCo
 	return files, skipped, skippedFiles, err
 }
 
-func discoverRevisionFiles(repo *gitctx.Repository, rev string, debugf func(string, ...any)) ([]fileContent, SkippedCounts, []SkippedFile, error) {
+func discoverRevisionFiles(repo *gitctx.Repository, rev string, debugLog func(string, ...slog.Attr)) ([]fileContent, SkippedCounts, []SkippedFile, error) {
 	var files []fileContent
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
 	skip := func(path, reason string) {
 		skippedFiles = append(skippedFiles, SkippedFile{Path: path, Reason: reason})
-		debugf("search_skip path=%q reason=%s", path, reason)
+		debugLog("search_skip",
+			slog.String("path", path),
+			slog.String("reason", reason),
+		)
 	}
 	ignoreMatcher, err := revisionIgnoreMatcher(repo, rev)
 	if err != nil {

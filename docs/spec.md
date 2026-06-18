@@ -165,14 +165,18 @@ embedding, scoring, replay history, and semantic search. `--index --reindex`
 rebuilds embeddings even when cache entries already exist. Successful indexing
 writes the local cache after all missing embeddings complete.
 
-With `--debug`, search writes one live `search_skip` stderr line per file or
-directory as it is skipped by git-agent's own safety rules, including dot paths,
+With `--debug`, search writes live human console diagnostic events to stderr
+using the same renderer as streamed traces. It writes one `search_skip` event per
+file or directory skipped by git-agent's own safety rules, including dot paths,
 symlinks, oversized files, binary files, non-text MIME types, unreadable paths,
 and non-regular files. Paths skipped only by `.gitignore` or `.gitagentignore`
 patterns are not reported. While embedding missing index chunks, `--debug`
 writes live `search_timing`, `search_embed_plan`, and `search_embed_progress`
-stderr lines. `search_embed_plan` includes the number of embedding batches and
-the concurrent request limit chosen for the run.
+events. `search_embed_plan` includes the number of embedding batches and the
+concurrent request limit chosen for the run. `search_embed_progress` includes
+compact completed/total percent progress, elapsed embedding time, average
+elapsed time per embedded chunk, and client-side embedding call duration for
+that batch.
 
 ### Flags
 
@@ -292,9 +296,9 @@ Resolution order:
 - stdout for `commit` / `commit --amend`: streaming human console trace lines
   while generating the message, followed by Git's raw commit summary after
   success
-- stderr: diagnostics, debug output, validation failures, provider/tool loop
-  summaries when `--debug` is enabled, and stderr emitted by a successful
-  delegated `git commit`
+- stderr: diagnostics, console-formatted debug output, validation failures,
+  provider/tool loop summaries when `--debug` is enabled, and stderr emitted by
+  a successful delegated `git commit`
 - `search` writes errors and optional `--debug` diagnostics to stderr only and
   never writes a model trace session
 - generation-only commands write a JSON trace session under `.git-agent/sessions/`

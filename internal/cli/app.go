@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -133,9 +134,9 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	if err := a.maybeStartPprof(ctx, opts); err != nil {
 		return err
 	}
-	var debugLog func(string)
+	var debugLog func(string, ...slog.Attr)
 	if cfg.Debug {
-		debugLog = func(line string) { fmt.Fprintln(a.stderr, line) }
+		debugLog = a.writeDebugEvent
 	}
 	root, err := os.Getwd()
 	if err != nil {
@@ -176,17 +177,21 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 
 func (a *App) writeSearchDebug(output searchtask.Output) {
 	diag := output.Diagnostics
-	fmt.Fprintf(a.stderr, "search_index=%s results=%d files=%d chunks=%d reused_chunks=%d embedded_chunks=%d embedded_done=%d index_dir=%s total=%s\n",
-		output.Retrieval.Index,
-		len(output.Results),
-		diag.Files,
-		diag.Chunks,
-		diag.ReusedChunks,
-		diag.EmbeddedChunks,
-		diag.EmbeddedDone,
-		diag.IndexDir,
-		diag.Total.Round(time.Millisecond),
+	a.writeDebugEvent("search_index",
+		slog.String("index", output.Retrieval.Index),
+		slog.Int("results", len(output.Results)),
+		slog.Int("files", diag.Files),
+		slog.Int("chunks", diag.Chunks),
+		slog.Int("reused_chunks", diag.ReusedChunks),
+		slog.Int("embedded_chunks", diag.EmbeddedChunks),
+		slog.Int("embedded_done", diag.EmbeddedDone),
+		slog.String("index_dir", diag.IndexDir),
+		slog.Duration("total", diag.Total.Round(time.Millisecond)),
 	)
+}
+
+func (a *App) writeDebugEvent(kind string, attrs ...slog.Attr) {
+	_ = trace.WriteConsoleDiagnostic(a.stderr, kind, attrs...)
 }
 
 func (a *App) runCommitMsg(ctx context.Context, args []string) error {
@@ -220,7 +225,7 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 		return err
 	}
 	if cfg.Debug {
-		fmt.Fprintf(a.stderr, "trace_dir=%s\n", recorder.Dir())
+		a.writeDebugEvent("trace", slog.String("trace_dir", recorder.Dir()))
 	}
 	result, err := a.generateCommitMessage(taskCtx, cfg, repo, stagedPaths, mode, "commit-msg", recorder)
 	if err != nil {
@@ -264,7 +269,7 @@ func (a *App) runCommit(ctx context.Context, args []string) error {
 		return err
 	}
 	if cfg.Debug {
-		fmt.Fprintf(a.stderr, "tool_calls=%d repair_calls=%d\n", result.ToolCalls, result.RepairCalls)
+		a.writeDebugEvent("agent_summary", slog.Int("tool_calls", result.ToolCalls), slog.Int("repair_calls", result.RepairCalls))
 	}
 
 	commitOutput, err := gitCommit(taskCtx, repo, result.Text, mode == commitmsg.ModeAmend)
@@ -502,7 +507,7 @@ func (a *App) runPRMessage(ctx context.Context, args []string) error {
 		return err
 	}
 	if cfg.Debug {
-		fmt.Fprintf(a.stderr, "trace_dir=%s\n", recorder.Dir())
+		a.writeDebugEvent("trace", slog.String("trace_dir", recorder.Dir()))
 	}
 	if err := recorder.Write("session", map[string]any{
 		"command":       "pr-message",
@@ -613,7 +618,7 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 		return err
 	}
 	if cfg.Debug && !outSet {
-		fmt.Fprintf(a.stderr, "trace_dir=%s\n", recorder.Dir())
+		a.writeDebugEvent("trace", slog.String("trace_dir", recorder.Dir()))
 	}
 	session := map[string]any{
 		"command": "release-note",
@@ -681,7 +686,7 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 	}
 	if outSet {
 		if cfg.Debug {
-			fmt.Fprintf(a.stderr, "tool_calls=%d repair_calls=%d\n", result.ToolCalls, result.RepairCalls)
+			a.writeDebugEvent("agent_summary", slog.Int("tool_calls", result.ToolCalls), slog.Int("repair_calls", result.RepairCalls))
 		}
 		return writeOutputFile(outputPath, result.Text)
 	}
@@ -983,7 +988,7 @@ func interactiveReader(reader io.Reader) bool {
 
 func (a *App) writeResult(cfg config.Config, result agent.Result) error {
 	if cfg.Debug {
-		fmt.Fprintf(a.stderr, "tool_calls=%d repair_calls=%d\n", result.ToolCalls, result.RepairCalls)
+		a.writeDebugEvent("agent_summary", slog.Int("tool_calls", result.ToolCalls), slog.Int("repair_calls", result.RepairCalls))
 	}
 	_, err := fmt.Fprintln(a.stdout, strings.TrimSpace(result.Text))
 	return err

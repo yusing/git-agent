@@ -293,6 +293,12 @@ func writeConsoleTraceEvent(writer io.Writer, at time.Time, kind string, value m
 	return writeConsoleEvent(writer, at, kind, consoleEventValue(kind, value), consoleColorEnabled(writer))
 }
 
+// WriteConsoleDiagnostic writes a human console diagnostic event with the same
+// renderer used by streaming traces.
+func WriteConsoleDiagnostic(writer io.Writer, kind string, attrs ...slog.Attr) error {
+	return writeConsoleAttrEvent(writer, time.Now().UTC(), kind, attrs, consoleColorEnabled(writer))
+}
+
 type consoleInlineField struct {
 	key   string
 	value string
@@ -306,6 +312,15 @@ type consoleBlockField struct {
 
 func writeConsoleEvent(writer io.Writer, at time.Time, message string, fields map[string]any, color bool) error {
 	inline, blocks := consoleFields(fields)
+	return writeConsoleFieldsEvent(writer, at, message, inline, blocks, color)
+}
+
+func writeConsoleAttrEvent(writer io.Writer, at time.Time, message string, attrs []slog.Attr, color bool) error {
+	inline, blocks := consoleAttrFields(attrs)
+	return writeConsoleFieldsEvent(writer, at, message, inline, blocks, color)
+}
+
+func writeConsoleFieldsEvent(writer io.Writer, at time.Time, message string, inline []consoleInlineField, blocks []consoleBlockField, color bool) error {
 	var out strings.Builder
 	writeConsoleHeader(&out, at, message, color)
 	if len(blocks) == 0 && len(inline) <= consoleInlineFields && inlineWidth(inline) <= consoleInlineWidth {
@@ -397,6 +412,55 @@ func consoleFields(fields map[string]any) ([]consoleInlineField, []consoleBlockF
 	var blocks []consoleBlockField
 	collectConsoleFields("", fields, &inline, &blocks)
 	return inline, blocks
+}
+
+func consoleAttrFields(attrs []slog.Attr) ([]consoleInlineField, []consoleBlockField) {
+	var inline []consoleInlineField
+	var blocks []consoleBlockField
+	for _, attr := range attrs {
+		collectConsoleAttr("", attr, &inline, &blocks)
+	}
+	return inline, blocks
+}
+
+func collectConsoleAttr(prefix string, attr slog.Attr, inline *[]consoleInlineField, blocks *[]consoleBlockField) {
+	if attr.Equal(slog.Attr{}) {
+		return
+	}
+	value := attr.Value.Resolve()
+	key := joinConsoleKey(prefix, attr.Key)
+	if value.Kind() == slog.KindGroup {
+		for _, child := range value.Group() {
+			collectConsoleAttr(key, child, inline, blocks)
+		}
+		return
+	}
+	collectConsoleSlogValue(key, value, inline, blocks)
+}
+
+func collectConsoleSlogValue(prefix string, value slog.Value, inline *[]consoleInlineField, blocks *[]consoleBlockField) {
+	switch value.Kind() {
+	case slog.KindAny:
+		collectConsoleFields(prefix, value.Any(), inline, blocks)
+	case slog.KindString:
+		text := value.String()
+		if strings.Contains(text, "\n") || len(text) > consoleStringPreviewBytes {
+			preview, truncated := multilinePreview(text, consoleStringPreviewBytes, consoleStringPreviewLines)
+			*blocks = append(*blocks, consoleBlockField{
+				key:  prefix,
+				text: preview,
+				meta: consolePreviewMeta(map[string]any{
+					"bytes":     len(text),
+					"lines":     lineCount(text),
+					"truncated": truncated,
+				}),
+			})
+			return
+		}
+		*inline = append(*inline, consoleInlineField{key: prefix, value: formatConsoleScalar(text)})
+	default:
+		*inline = append(*inline, consoleInlineField{key: prefix, value: value.String()})
+	}
 }
 
 func collectConsoleFields(prefix string, value any, inline *[]consoleInlineField, blocks *[]consoleBlockField) {
