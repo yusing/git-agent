@@ -102,6 +102,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	fs.StringVar(&opts.BaseURL, "base-url", "", "override provider base URL")
 	fs.StringVar(&opts.Timeout, "timeout", "", "override default request timeout")
 	fs.BoolVar(&opts.Debug, "debug", false, "enable debug output on stderr")
+	fs.StringVar(&opts.Pprof, "pprof", "", "serve pprof on address")
 	fs.StringVar(&rev, "rev", "", "search a committed Git tree")
 	fs.Float64Var(&minRelatedness, "min-relatedness", searchtask.DefaultMinRelatedness, "minimum semantic relatedness")
 	fs.IntVar(&limit, "limit", searchtask.DefaultLimit, "maximum results")
@@ -127,6 +128,9 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	}
 	cfg, err := config.ResolveEmbeddings(opts)
 	if err != nil {
+		return err
+	}
+	if err := a.maybeStartPprof(ctx, opts); err != nil {
 		return err
 	}
 	var debugLog func(string)
@@ -194,6 +198,9 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := a.maybeStartPprof(ctx, opts); err != nil {
+		return err
+	}
 	taskCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
 
@@ -229,6 +236,9 @@ func (a *App) runCommit(ctx context.Context, args []string) error {
 	}
 	cfg, err := config.Resolve(opts)
 	if err != nil {
+		return err
+	}
+	if err := a.maybeStartPprof(ctx, opts); err != nil {
 		return err
 	}
 	taskCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
@@ -465,9 +475,11 @@ func (a *App) runPRMessage(ctx context.Context, args []string) error {
 	if fs.NArg() != 0 {
 		return errors.New("pr-message does not accept positional arguments")
 	}
-
 	cfg, err := config.Resolve(opts)
 	if err != nil {
+		return err
+	}
+	if err := a.maybeStartPprof(ctx, opts); err != nil {
 		return err
 	}
 	taskCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
@@ -572,6 +584,9 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 	}
 	if cfg.Timeout < releaseNoteMinTimeout {
 		cfg.Timeout = releaseNoteMinTimeout
+	}
+	if err := a.maybeStartPprof(ctx, opts); err != nil {
+		return err
 	}
 	taskCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
@@ -840,6 +855,7 @@ func registerSharedFlags(fs *flag.FlagSet, opts *config.Options) {
 	fs.StringVar(&opts.GuidanceFamily, "guidance-family", "", "force guidance family")
 	fs.StringVar(&opts.AppendPrompt, "append-prompt", "", "append a user prompt hint to the model request")
 	fs.BoolVar(&opts.Debug, "debug", false, "enable debug output on stderr")
+	fs.StringVar(&opts.Pprof, "pprof", "", "serve pprof on address")
 }
 
 func appendUserPrompt(prompt, userInput string) string {

@@ -563,7 +563,7 @@ func TestSearchIgnoresStaleIndexVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data = []byte(strings.Replace(string(data), fmt.Sprintf(`"version": %d`, indexVersion), fmt.Sprintf(`"version": %d`, indexVersion-1), 1))
+	data = []byte(strings.Replace(string(data), fmt.Sprintf(`"version":%d`, indexVersion), fmt.Sprintf(`"version":%d`, indexVersion-1), 1))
 	if err := os.WriteFile(manifestPath, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -580,7 +580,7 @@ func TestSearchIgnoresStaleIndexVersion(t *testing.T) {
 	}
 }
 
-func TestSearchCheckpointsIndexEmbeddingsByBatch(t *testing.T) {
+func TestSearchPersistsIndexAfterAllEmbeddingsSucceed(t *testing.T) {
 	root := t.TempDir()
 	for i := range DefaultEmbeddingBatchInputs + 1 {
 		writeFile(t, root, filepath.Join("pkg", fmt.Sprintf("file_%03d.txt", i)), "alpha\n")
@@ -606,14 +606,14 @@ func TestSearchCheckpointsIndexEmbeddingsByBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Diagnostics.ReusedChunks != DefaultEmbeddingBatchInputs {
-		t.Fatalf("reused chunks = %d, want %d", second.Diagnostics.ReusedChunks, DefaultEmbeddingBatchInputs)
+	if second.Diagnostics.ReusedChunks != 0 {
+		t.Fatalf("reused chunks = %d, want 0", second.Diagnostics.ReusedChunks)
 	}
-	if second.Diagnostics.EmbeddedChunks != 1 || second.Diagnostics.EmbeddedDone != 1 {
+	if second.Diagnostics.EmbeddedChunks != DefaultEmbeddingBatchInputs+1 || second.Diagnostics.EmbeddedDone != DefaultEmbeddingBatchInputs+1 {
 		t.Fatalf("embedding diagnostics = %#v", second.Diagnostics)
 	}
-	if secondEmbedder.callCount() != 1 {
-		t.Fatalf("embedding calls = %d, want 1", secondEmbedder.callCount())
+	if secondEmbedder.callCount() != 2 {
+		t.Fatalf("embedding calls = %d, want 2", secondEmbedder.callCount())
 	}
 }
 

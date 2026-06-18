@@ -44,6 +44,7 @@ complete -c git-agent -n '__git_agent_has_subcommand' -l max-steps -r -d 'Overri
 complete -c git-agent -n '__git_agent_has_subcommand' -l guidance-family -r -a 'auto agents claude codex none' -d 'Force guidance family'
 complete -c git-agent -n '__git_agent_has_subcommand' -l append-prompt -r -d 'Append a user prompt hint to the model request'
 complete -c git-agent -n '__git_agent_has_subcommand' -l debug -d 'Enable debug output on stderr'
+complete -c git-agent -n '__git_agent_has_subcommand' -l pprof -r -d 'Serve pprof on address'
 
 complete -c git-agent -n '__git_agent_using_command release-note' -l out -r -d 'Write release note markdown to file'
 complete -c git-agent -n '__git_agent_using_command release-note' -a 'patch minor major' -d 'Infer release version from latest semver tag'
@@ -60,3 +61,4 @@ complete -c git-agent -n '__git_agent_using_command search' -l embedding-dimensi
 complete -c git-agent -n '__git_agent_using_command search' -l base-url -r -d 'Override provider base URL'
 complete -c git-agent -n '__git_agent_using_command search' -l timeout -r -d 'Override default request timeout'
 complete -c git-agent -n '__git_agent_using_command search' -l debug -d 'Enable debug output on stderr'
+complete -c git-agent -n '__git_agent_using_command search' -l pprof -r -d 'Serve pprof on address'

@@ -76,6 +76,7 @@ type Options struct {
 	GuidanceFamily string
 	AppendPrompt   string
 	Debug          bool
+	Pprof          string
 }
 
 type codexAuthFile struct {

@@ -48,6 +48,32 @@ func TestRunReleaseNoteRequiresRange(t *testing.T) {
 	}
 }
 
+func TestPprofMuxDoesNotRegisterDefaultMux(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil)
+	if _, pattern := http.DefaultServeMux.Handler(request); pattern != "" {
+		t.Fatalf("default mux registered pprof pattern %q", pattern)
+	}
+
+	recorder := httptest.NewRecorder()
+	newPprofMux().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "goroutine") {
+		t.Fatalf("index missing goroutine profile: %q", recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/debug/pprof/goroutine?debug=1", nil)
+	newPprofMux().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "goroutine profile") {
+		t.Fatalf("goroutine profile missing: %q", recorder.Body.String())
+	}
+}
+
 func TestSearchPrintsJSONAndUsesEmbeddingsOnly(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)

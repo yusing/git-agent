@@ -1,7 +1,7 @@
 package search
 
 import (
-	"bytes"
+	"bufio"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -348,7 +348,6 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 	missing := missingChunks(chunks, vectors)
 	diag.EmbeddedChunks = len(missing)
-	savedDuringEmbedding := false
 	if len(missing) > 0 {
 		batchInputs := embeddingBatchInputs(opts)
 		batchMaxChars := embeddingBatchMaxChars(opts)
@@ -441,15 +440,6 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 				})
 				diag.EmbeddedDone++
 			}
-			if err := saveIndex(indexDir, source, root, resolvedRev, opts.EmbeddingModel, dimensions, chunks, records); err != nil {
-				cancelEmbeddings()
-				for range results {
-				}
-				<-waitErr
-				mark("persist")
-				return fail(err)
-			}
-			savedDuringEmbedding = true
 			debugf("search_embed_progress embedded_done=%d missing_chunks=%d", diag.EmbeddedDone, len(missing))
 		}
 		cancelEmbeddings()
@@ -463,7 +453,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 	mark("embed_index")
 
-	if len(chunks) > 0 && (len(missing) > 0 || opts.Reindex) && !savedDuringEmbedding {
+	if len(chunks) > 0 && (len(missing) > 0 || opts.Reindex) {
 		if err := saveIndex(indexDir, source, root, resolvedRev, opts.EmbeddingModel, dimensions, chunks, records); err != nil {
 			mark("persist")
 			return fail(err)
@@ -1208,9 +1198,16 @@ func saveIndex(dir string, source Source, root, resolvedRev, model string, dimen
 
 func writeBinaryVectors(dir string, records []vectorRecord) error {
 	index := make([]vectorIndexRecord, len(records))
-	var data bytes.Buffer
+	vectorPath := filepath.Join(dir, "vectors.f32")
+	file, err := os.OpenFile(vectorPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	writer := bufio.NewWriterSize(file, 1<<20)
+	var offset int64
 	for i, record := range records {
 		if record.Dimensions < 1 || len(record.Vector) != record.Dimensions {
+			file.Close()
 			return fmt.Errorf("vector record %s dimensions mismatch", record.ChunkID)
 		}
 		index[i] = vectorIndexRecord{
@@ -1225,22 +1222,30 @@ func writeBinaryVectors(dir string, records []vectorRecord) error {
 			Dimensions:     record.Dimensions,
 			Size:           record.Size,
 			MTimeUnixNano:  record.MTimeUnixNano,
-			Offset:         int64(data.Len()),
+			Offset:         offset,
 		}
 		var buf [4]byte
 		for _, value := range record.Vector {
 			binary.LittleEndian.PutUint32(buf[:], math.Float32bits(float32(value)))
-			data.Write(buf[:])
+			if _, err := writer.Write(buf[:]); err != nil {
+				file.Close()
+				return err
+			}
 		}
+		offset += int64(record.Dimensions * 4)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "vectors.f32"), data.Bytes(), 0o644); err != nil {
+	if err := writer.Flush(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
 		return err
 	}
 	return writeJSON(filepath.Join(dir, "vectors.index.json"), index)
 }
 
 func writeJSON(path string, value any) error {
-	data, err := sonic.MarshalIndent(value, "", "  ")
+	data, err := sonic.Marshal(value)
 	if err != nil {
 		return err
 	}

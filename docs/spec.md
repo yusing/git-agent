@@ -162,9 +162,8 @@ lexical fallback.
 `--index` builds missing embeddings for the selected filesystem or revision
 source, writes the same JSON envelope with an empty result list, and skips query
 embedding, scoring, replay history, and semantic search. `--index --reindex`
-rebuilds embeddings even when cache entries already exist. Index embedding
-progress is checkpointed after every successful embedding batch so interrupted
-or failed runs can reuse already-paid embeddings on the next run.
+rebuilds embeddings even when cache entries already exist. Successful indexing
+writes the local cache after all missing embeddings complete.
 
 With `--debug`, search writes one live `search_skip` stderr line per file or
 directory as it is skipped by git-agent's own safety rules, including dot paths,
@@ -191,6 +190,7 @@ Message-generation subcommands reserve this shared flag surface:
 - `--guidance-family`
 - `--append-prompt <text>`
 - `--debug`
+- `--pprof <addr>`
 
 `release-note` additionally supports:
 
@@ -202,6 +202,7 @@ Message-generation subcommands reserve this shared flag surface:
 - `--base-url`: override provider base URL
 - `--timeout`: override default request timeout
 - `--debug`: enable diagnostics on stderr
+- `--pprof <addr>`: serve Go pprof endpoints on the requested address
 - `--code`: search source-code files only
 - `--rev <rev>`: search a committed Git tree instead of current filesystem files
 - `--min-relatedness <score>`: default `0.70`, valid `0 < score <= 1`
@@ -222,6 +223,8 @@ Flag behavior:
   task user prompt. The hint is escaped inside `<operator_hint>` tags and is
   explicitly lower priority than task instructions, tool policy, project
   guidance, and authoritative repository evidence.
+- `--pprof <addr>`: bind the requested address and serve `/debug/pprof/`
+  endpoints until the command exits
 - default: omit both `service_tier` and `reasoning`
 
 `commit-msg` and `commit` additionally support:
