@@ -61,6 +61,17 @@ func (e *countingEmbedder) CreateEmbeddings(_ context.Context, request openai.Em
 	return openai.EmbeddingResponse{Model: request.Model, Vectors: vectors, Dimensions: 3}, nil
 }
 
+type failOnPathEmbedder string
+
+func (e failOnPathEmbedder) CreateEmbeddings(ctx context.Context, request openai.EmbeddingRequest) (openai.EmbeddingResponse, error) {
+	for _, input := range request.Inputs {
+		if strings.Contains(input, string(e)) {
+			return openai.EmbeddingResponse{}, errors.New("boom")
+		}
+	}
+	return fakeEmbedder{}.CreateEmbeddings(ctx, request)
+}
+
 func (e *countingEmbedder) callCount() int64 {
 	return e.calls.Load()
 }
@@ -566,6 +577,43 @@ func TestSearchIgnoresStaleIndexVersion(t *testing.T) {
 	}
 	if embedder.callCount() <= firstCalls {
 		t.Fatalf("embedding calls after stale manifest = %d, want > %d", embedder.callCount(), firstCalls)
+	}
+}
+
+func TestSearchCheckpointsIndexEmbeddingsByBatch(t *testing.T) {
+	root := t.TempDir()
+	for i := range batchMaxInputs + 1 {
+		writeFile(t, root, filepath.Join("pkg", fmt.Sprintf("file_%03d.txt", i)), "alpha\n")
+	}
+
+	opts := Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		IndexOnly:           true,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}
+	firstEmbedder := failOnPathEmbedder("file_010.txt")
+	if _, err := Run(t.Context(), firstEmbedder, opts, ""); err == nil {
+		t.Fatal("expected embedding failure")
+	}
+
+	secondEmbedder := &countingEmbedder{}
+	second, err := Run(t.Context(), secondEmbedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Diagnostics.ReusedChunks != batchMaxInputs {
+		t.Fatalf("reused chunks = %d, want %d", second.Diagnostics.ReusedChunks, batchMaxInputs)
+	}
+	if second.Diagnostics.EmbeddedChunks != 1 || second.Diagnostics.EmbeddedDone != 1 {
+		t.Fatalf("embedding diagnostics = %#v", second.Diagnostics)
+	}
+	if secondEmbedder.callCount() != 1 {
+		t.Fatalf("embedding calls = %d, want 1", secondEmbedder.callCount())
 	}
 }
 

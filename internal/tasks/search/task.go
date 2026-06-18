@@ -69,6 +69,7 @@ type Options struct {
 	APIKey              string
 	BaseURL             string
 	Debug               bool
+	DebugLog            func(string)
 }
 
 type Output struct {
@@ -87,6 +88,7 @@ type Diagnostics struct {
 	Chunks         int
 	ReusedChunks   int
 	EmbeddedChunks int
+	EmbeddedDone   int
 	SkippedFiles   []SkippedFile
 	Timings        []Timing
 	Total          time.Duration
@@ -245,6 +247,11 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	fail := func(err error) (Output, error) {
 		return resultWithDiagnostics(Output{}), err
 	}
+	debugf := func(format string, args ...any) {
+		if opts.DebugLog != nil {
+			opts.DebugLog(fmt.Sprintf(format, args...))
+		}
+	}
 
 	query = strings.TrimSpace(query)
 	if query == "" && !opts.IndexOnly {
@@ -265,7 +272,6 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	if opts.EmbeddingMaxInput < 0 {
 		return fail(errors.New("embedding max input chars must be positive"))
 	}
-
 	root, err := filepath.Abs(cmp.Or(opts.Root, "."))
 	if err != nil {
 		return fail(err)
@@ -328,35 +334,119 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 	missing := missingChunks(chunks, vectors)
 	diag.EmbeddedChunks = len(missing)
+	savedDuringEmbedding := false
 	if len(missing) > 0 {
-		embedded, dim, err := embedTexts(ctx, client, opts, missingEmbeddingTexts(missing))
-		if err != nil {
-			mark("embed_index")
-			return fail(err)
+		debugf("search_embed_plan missing_chunks=%d reused_chunks=%d index_dir=%q", len(missing), reused, indexDir)
+		texts := cappedEmbeddingInputs(missingEmbeddingTexts(missing), opts.EmbeddingMaxInput)
+		type embeddingBatch struct {
+			start int
+			end   int
 		}
-		dimensions = dim
-		for i, chunk := range missing {
-			vector := embedded[i]
-			vectors[chunk.ID] = vector
-			records = append(records, vectorRecord{
-				ChunkID:        chunk.ID,
-				Path:           chunk.Path,
-				Source:         chunk.Source,
-				Blob:           chunk.Blob,
-				StartLine:      chunk.StartLine,
-				EndLine:        chunk.EndLine,
-				ContentHash:    chunk.ContentHash,
-				EmbeddingModel: opts.EmbeddingModel,
-				Dimensions:     len(vector),
-				Size:           chunk.Size,
-				MTimeUnixNano:  chunk.MTimeUnixNano,
-				Vector:         vector,
-			})
+		type embeddingBatchResult struct {
+			embeddingBatch
+			response openai.EmbeddingResponse
+			err      error
+		}
+		var batches []embeddingBatch
+		for start := 0; start < len(missing); {
+			end := embeddingBatchEnd(texts, start)
+			batches = append(batches, embeddingBatch{start: start, end: end})
+			start = end
+		}
+
+		embedCtx, cancelEmbeddings := context.WithCancel(ctx)
+		group, groupCtx := errgroup.WithContext(embedCtx)
+		group.SetLimit(embeddingConcurrency())
+		results := make(chan embeddingBatchResult, len(batches))
+		waitErr := make(chan error, 1)
+		go func() {
+			for _, batch := range batches {
+				if groupCtx.Err() != nil {
+					break
+				}
+				group.Go(func() error {
+					response, err := embedBatch(groupCtx, client, opts, texts[batch.start:batch.end])
+					if err != nil {
+						err = fmt.Errorf("embedding request failed: %w", err)
+					}
+					results <- embeddingBatchResult{embeddingBatch: batch, response: response, err: err}
+					return err
+				})
+			}
+			waitErr <- group.Wait()
+			close(results)
+		}()
+
+		var embedErr error
+		for result := range results {
+			if result.err != nil {
+				if embedErr == nil {
+					embedErr = result.err
+				}
+				cancelEmbeddings()
+				continue
+			}
+			response := result.response
+			start, end := result.start, result.end
+			if len(response.Vectors) != end-start {
+				if embedErr == nil {
+					embedErr = fmt.Errorf("embedding response vectors = %d, want %d", len(response.Vectors), end-start)
+				}
+				cancelEmbeddings()
+				continue
+			}
+			if dimensions == 0 {
+				dimensions = response.Dimensions
+			}
+			if response.Dimensions != dimensions {
+				if embedErr == nil {
+					embedErr = fmt.Errorf("embedding dimensions mismatch: %d and %d", dimensions, response.Dimensions)
+				}
+				cancelEmbeddings()
+				continue
+			}
+			for i, chunk := range missing[start:end] {
+				vector := response.Vectors[i]
+				vectors[chunk.ID] = vector
+				records = append(records, vectorRecord{
+					ChunkID:        chunk.ID,
+					Path:           chunk.Path,
+					Source:         chunk.Source,
+					Blob:           chunk.Blob,
+					StartLine:      chunk.StartLine,
+					EndLine:        chunk.EndLine,
+					ContentHash:    chunk.ContentHash,
+					EmbeddingModel: opts.EmbeddingModel,
+					Dimensions:     len(vector),
+					Size:           chunk.Size,
+					MTimeUnixNano:  chunk.MTimeUnixNano,
+					Vector:         vector,
+				})
+				diag.EmbeddedDone++
+			}
+			if err := saveIndex(indexDir, source, root, resolvedRev, opts.EmbeddingModel, dimensions, chunks, records); err != nil {
+				cancelEmbeddings()
+				for range results {
+				}
+				<-waitErr
+				mark("persist")
+				return fail(err)
+			}
+			savedDuringEmbedding = true
+			debugf("search_embed_progress embedded_done=%d missing_chunks=%d", diag.EmbeddedDone, len(missing))
+		}
+		cancelEmbeddings()
+		if err := <-waitErr; embedErr == nil {
+			embedErr = err
+		}
+		if embedErr != nil {
+			mark("embed_index")
+			return fail(embedErr)
 		}
 	}
 	mark("embed_index")
 
-	if len(chunks) > 0 && (len(missing) > 0 || opts.Reindex) {
+	if len(chunks) > 0 && (len(missing) > 0 || opts.Reindex) && !savedDuringEmbedding {
 		if err := saveIndex(indexDir, source, root, resolvedRev, opts.EmbeddingModel, dimensions, chunks, records); err != nil {
 			mark("persist")
 			return fail(err)

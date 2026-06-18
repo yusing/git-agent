@@ -162,13 +162,16 @@ lexical fallback.
 `--index` builds missing embeddings for the selected filesystem or revision
 source, writes the same JSON envelope with an empty result list, and skips query
 embedding, scoring, replay history, and semantic search. `--index --reindex`
-rebuilds embeddings even when cache entries already exist.
+rebuilds embeddings even when cache entries already exist. Index embedding
+progress is checkpointed after every successful embedding batch so interrupted
+or failed runs can reuse already-paid embeddings on the next run.
 
 With `--debug`, search writes one `search_skip` stderr line per file or
 directory skipped by git-agent's own safety rules, including dot paths,
 symlinks, oversized files, binary files, non-text MIME types, unreadable paths,
 and non-regular files. Paths skipped only by `.gitignore` or `.gitagentignore`
-patterns are not reported.
+patterns are not reported. While embedding missing index chunks, `--debug`
+writes live `search_embed_plan` and `search_embed_progress` stderr lines.
 
 ### Flags
 

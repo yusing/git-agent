@@ -205,6 +205,8 @@ func TestSearchDebugPrintsNonIgnoreSkippedFiles(t *testing.T) {
 	}
 	debug := stderr.String()
 	for _, want := range []string{
+		`search_embed_plan missing_chunks=1 reused_chunks=0`,
+		`search_embed_progress embedded_done=1 missing_chunks=1`,
 		`search_skip path="binary.dat" reason=binary`,
 		`search_skip path="icon.svg" reason=non_text`,
 	} {
@@ -224,8 +226,10 @@ func TestSearchIndexPrintsJSONWithoutQueryEmbedding(t *testing.T) {
 	t.Chdir(root)
 	t.Setenv("HOME", t.TempDir())
 	useGeneralEmbeddingProvider(t)
-	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("release notes live here\n"), 0o644); err != nil {
-		t.Fatal(err)
+	for i := range 3 {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("notes%d.txt", i)), []byte("release notes live here\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	var calls atomic.Int64

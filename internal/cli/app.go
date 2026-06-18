@@ -117,6 +117,10 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	var debugLog func(string)
+	if cfg.Debug {
+		debugLog = func(line string) { fmt.Fprintln(a.stderr, line) }
+	}
 	root, err := os.Getwd()
 	if err != nil {
 		return err
@@ -135,6 +139,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 		APIKey:              cfg.APIKey,
 		BaseURL:             cfg.BaseURL,
 		Debug:               cfg.Debug,
+		DebugLog:            debugLog,
 	}, query)
 	if err != nil {
 		if cfg.Debug {
@@ -152,13 +157,14 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 
 func (a *App) writeSearchDebug(output searchtask.Output) {
 	diag := output.Diagnostics
-	fmt.Fprintf(a.stderr, "search_index=%s results=%d files=%d chunks=%d reused_chunks=%d embedded_chunks=%d index_dir=%s total=%s\n",
+	fmt.Fprintf(a.stderr, "search_index=%s results=%d files=%d chunks=%d reused_chunks=%d embedded_chunks=%d embedded_done=%d index_dir=%s total=%s\n",
 		output.Retrieval.Index,
 		len(output.Results),
 		diag.Files,
 		diag.Chunks,
 		diag.ReusedChunks,
 		diag.EmbeddedChunks,
+		diag.EmbeddedDone,
 		diag.IndexDir,
 		diag.Total.Round(time.Millisecond),
 	)

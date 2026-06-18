@@ -17,7 +17,7 @@
 - `internal/trace/`: JSON session traces and human console trace rendering.
 - `docs/spec.md`: behavioral specification and execution-flow diagrams.
 - `README.md`: user-facing command, configuration, build, and debug
-  documentation.
+  documentation. DO NOT REPEAT CONTRACT FROM SPEC TO README.
 - `completions/git-agent.*`: shell completions; current support is fish.
 - `Makefile`: build, test, and install targets.
 - `bin/`: local build output; do not treat generated binaries as source.
@@ -42,3 +42,4 @@
   errors.
 - Prefer tests that use temporary repositories and fake servers over tests that
   depend on local Git configuration, network access, or real provider calls.
+- DO NOT PRODUCE ANY ARTIFACT TO THE REPO, ESPECIALLY BUILT BINARY HANGING IN THE PROJECT ROOT
