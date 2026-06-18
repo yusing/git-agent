@@ -129,9 +129,10 @@ Filesystem mode is the default: it searches current files under the current
 working directory exactly as they exist on disk and does not require a Git
 repository. Staged, unstaged, and untracked files are included when physically
 under the search root unless skipped by dot-path rules, `.gitignore`,
-`.gitagentignore`, or binary, oversized-file, and symlink safety checks.
+`.gitagentignore`, non-text MIME type, or binary, oversized-file, and symlink
+safety checks.
 `.gitagentignore` uses the same pattern syntax and per-directory base behavior
-as `.gitignore`, but only affects `git-agent search` filesystem discovery.
+as `.gitignore`, but only affects `git-agent search` discovery.
 
 Go files with a pre-package heading comment containing `DO NOT EDIT` are indexed
 as path-only chunks. Search embeds the filename/language metadata for those
@@ -139,7 +140,8 @@ files but excludes generated body content.
 
 `--rev <rev>` switches to revision mode. The command must be inside a Git
 repository, resolves the revision to a commit, searches only that committed tree,
-and ignores current filesystem contents.
+and ignores current filesystem contents. Revision mode reads `.gitignore` and
+`.gitagentignore` from the resolved commit tree, not from the working tree.
 
 Search does not run the Responses API, does not call model tools, does not
 create `.git-agent/sessions/` traces, does not generate explanations, and does
@@ -161,6 +163,12 @@ lexical fallback.
 source, writes the same JSON envelope with an empty result list, and skips query
 embedding, scoring, replay history, and semantic search. `--index --reindex`
 rebuilds embeddings even when cache entries already exist.
+
+With `--debug`, search writes one `search_skip` stderr line per file or
+directory skipped by git-agent's own safety rules, including dot paths,
+symlinks, oversized files, binary files, non-text MIME types, unreadable paths,
+and non-regular files. Paths skipped only by `.gitignore` or `.gitagentignore`
+patterns are not reported.
 
 ### Flags
 

@@ -141,6 +141,84 @@ func TestSearchPrintsJSONAndUsesEmbeddingsOnly(t *testing.T) {
 	}
 }
 
+func TestSearchDebugPrintsNonIgnoreSkippedFiles(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("HOME", t.TempDir())
+	useGeneralEmbeddingProvider(t)
+	if err := os.WriteFile(filepath.Join(root, ".gitagentignore"), []byte("ignored.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("release notes live here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "ignored.txt"), []byte("release notes live here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "icon.svg"), []byte(`<svg xmlns="http://www.w3.org/2000/svg"><title>release notes</title></svg>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "binary.dat"), []byte("release\x00notes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Input      any `json:"input"`
+			Dimensions int `json:"dimensions"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		inputs, ok := payload.Input.([]any)
+		count := 1
+		if ok {
+			count = len(inputs)
+		}
+		data := make([]map[string]any, count)
+		for i := range count {
+			data[i] = map[string]any{"object": "embedding", "index": i, "embedding": embeddingTestVector(payload.Dimensions, 1)}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"model":  "text-embedding-3-small",
+			"data":   data,
+			"usage":  map[string]any{"prompt_tokens": 1, "total_tokens": 1},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"search", "--debug", "release", "notes"}); err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(stdout.Bytes()) {
+		t.Fatalf("stdout is not JSON: %q", stdout.String())
+	}
+	debug := stderr.String()
+	for _, want := range []string{
+		`search_skip path="binary.dat" reason=binary`,
+		`search_skip path="icon.svg" reason=non_text`,
+	} {
+		if !strings.Contains(debug, want) {
+			t.Fatalf("debug missing %q:\n%s", want, debug)
+		}
+	}
+	for _, unwanted := range []string{"ignored.txt", ".gitagentignore"} {
+		if strings.Contains(debug, unwanted) {
+			t.Fatalf("debug includes ignored/control file %q:\n%s", unwanted, debug)
+		}
+	}
+}
+
 func TestSearchIndexPrintsJSONWithoutQueryEmbedding(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)

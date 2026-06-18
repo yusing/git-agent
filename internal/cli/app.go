@@ -165,6 +165,9 @@ func (a *App) writeSearchDebug(output searchtask.Output) {
 	for _, timing := range diag.Timings {
 		fmt.Fprintf(a.stderr, "search_timing step=%s duration=%s\n", timing.Step, timing.Duration.Round(time.Millisecond))
 	}
+	for _, skipped := range diag.SkippedFiles {
+		fmt.Fprintf(a.stderr, "search_skip path=%q reason=%s\n", skipped.Path, skipped.Reason)
+	}
 }
 
 func (a *App) runCommitMsg(ctx context.Context, args []string) error {

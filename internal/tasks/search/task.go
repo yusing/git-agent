@@ -14,6 +14,8 @@ import (
 	"go/token"
 	"io/fs"
 	"math"
+	"mime"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -24,6 +26,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/openai"
 	"golang.org/x/sync/errgroup"
@@ -49,6 +52,8 @@ var searchIgnoreFileNames = map[string]bool{
 	".gitignore":      true,
 	".gitagentignore": true,
 }
+
+var searchIgnoreFileOrder = []string{".gitignore", ".gitagentignore"}
 
 type Options struct {
 	Root                string
@@ -82,8 +87,14 @@ type Diagnostics struct {
 	Chunks         int
 	ReusedChunks   int
 	EmbeddedChunks int
+	SkippedFiles   []SkippedFile
 	Timings        []Timing
 	Total          time.Duration
+}
+
+type SkippedFile struct {
+	Path   string
+	Reason string
 }
 
 type Timing struct {
@@ -114,6 +125,7 @@ type Filters struct {
 type SkippedCounts struct {
 	Dirs       int `json:"dirs,omitempty"`
 	Binary     int `json:"binary,omitempty"`
+	NonText    int `json:"non_text,omitempty"`
 	Oversized  int `json:"oversized,omitempty"`
 	Symlink    int `json:"symlink,omitempty"`
 	Unreadable int `json:"unreadable,omitempty"`
@@ -264,6 +276,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	var resolvedRev string
 	var files []fileContent
 	var skipped SkippedCounts
+	var skippedFiles []SkippedFile
 	if opts.Rev != "" {
 		repo, err := gitctx.Open(root)
 		if err != nil {
@@ -275,7 +288,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		}
 		indexRoot = repo.RootPath
 		source = Source{Mode: "revision", Rev: opts.Rev, ResolvedRev: resolvedRev}
-		files, skipped, err = discoverRevisionFiles(repo, resolvedRev)
+		files, skipped, skippedFiles, err = discoverRevisionFiles(repo, resolvedRev)
 		if err != nil {
 			return fail(err)
 		}
@@ -283,11 +296,12 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		if repo, err := gitctx.Open(root); err == nil {
 			indexRoot = repo.RootPath
 		}
-		files, skipped, err = discoverFilesystemFiles(root)
+		files, skipped, skippedFiles, err = discoverFilesystemFiles(root)
 		if err != nil {
 			return fail(err)
 		}
 	}
+	diag.SkippedFiles = skippedFiles
 	if opts.CodeOnly {
 		files = filterCodeFiles(files)
 	}
@@ -427,13 +441,15 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}), nil
 }
 
-func discoverFilesystemFiles(root string) ([]fileContent, SkippedCounts, error) {
+func discoverFilesystemFiles(root string) ([]fileContent, SkippedCounts, []SkippedFile, error) {
 	var files []fileContent
 	var skipped SkippedCounts
+	var skippedFiles []SkippedFile
 	ignoreMatcher := filesystemIgnoreMatcher(root)
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			skipped.Unreadable++
+			skippedFiles = append(skippedFiles, SkippedFile{Path: filepath.ToSlash(path), Reason: "unreadable"})
 			return nil
 		}
 		name := entry.Name()
@@ -443,38 +459,61 @@ func discoverFilesystemFiles(root string) ([]fileContent, SkippedCounts, error) 
 		}
 		rel = filepath.ToSlash(rel)
 		if entry.IsDir() {
-			if path != root && (shouldSkipDir(name) || ignoreMatcher.Match(pathParts(rel), true)) {
+			if path != root && shouldSkipDir(name) {
+				skipped.Dirs++
+				skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "dot_dir"})
+				return filepath.SkipDir
+			}
+			if path != root && ignoreMatcher.Match(pathParts(rel), true) {
 				skipped.Dirs++
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if shouldSkipFile(name) || ignoreMatcher.Match(pathParts(rel), false) {
+		if shouldSkipFile(name) {
+			if searchIgnoreFileNames[name] {
+				return nil
+			}
+			skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "dot_file"})
+			return nil
+		}
+		if ignoreMatcher.Match(pathParts(rel), false) {
 			return nil
 		}
 		info, err := entry.Info()
 		if err != nil {
 			skipped.Unreadable++
+			skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "unreadable"})
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			skipped.Symlink++
+			skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "symlink"})
 			return nil
 		}
 		if !info.Mode().IsRegular() {
+			skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "non_regular"})
 			return nil
 		}
 		if info.Size() > MaxFileBytes {
 			skipped.Oversized++
+			skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "oversized"})
 			return nil
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			skipped.Unreadable++
+			skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "unreadable"})
 			return nil
 		}
 		if isBinary(data) {
 			skipped.Binary++
+			skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "binary"})
+			return nil
+		}
+		if !isIndexableText(rel, data) {
+			skipped.NonText++
+			skippedFiles = append(skippedFiles, SkippedFile{Path: rel, Reason: "non_text"})
 			return nil
 		}
 		files = append(files, fileContent{
@@ -487,19 +526,29 @@ func discoverFilesystemFiles(root string) ([]fileContent, SkippedCounts, error) 
 		return nil
 	})
 	slices.SortFunc(files, func(a, b fileContent) int { return strings.Compare(a.path, b.path) })
-	return files, skipped, err
+	return files, skipped, skippedFiles, err
 }
 
-func discoverRevisionFiles(repo *gitctx.Repository, rev string) ([]fileContent, SkippedCounts, error) {
+func discoverRevisionFiles(repo *gitctx.Repository, rev string) ([]fileContent, SkippedCounts, []SkippedFile, error) {
 	var files []fileContent
 	var skipped SkippedCounts
-	err := repo.WalkCommitTextFiles(rev, MaxFileBytes, func(file gitctx.CommitFile) error {
+	var skippedFiles []SkippedFile
+	ignoreMatcher, err := revisionIgnoreMatcher(repo, rev)
+	if err != nil {
+		return nil, skipped, nil, err
+	}
+	err = repo.WalkCommitTextFiles(rev, MaxFileBytes, func(file gitctx.CommitFile) error {
 		if shouldSkipPath(file.Path) {
 			skipped.Dirs++
+			skippedFiles = append(skippedFiles, SkippedFile{Path: filepath.ToSlash(file.Path), Reason: "dot_path"})
 			return nil
 		}
-		if file.Size > MaxFileBytes {
-			skipped.Oversized++
+		if revisionPathIgnored(ignoreMatcher, file.Path) {
+			return nil
+		}
+		if !isIndexableText(file.Path, []byte(file.Text)) {
+			skipped.NonText++
+			skippedFiles = append(skippedFiles, SkippedFile{Path: filepath.ToSlash(file.Path), Reason: "non_text"})
 			return nil
 		}
 		files = append(files, fileContent{
@@ -510,9 +559,27 @@ func discoverRevisionFiles(repo *gitctx.Repository, rev string) ([]fileContent, 
 			size:   file.Size,
 		})
 		return nil
+	}, func(file gitctx.CommitFileSkip) error {
+		if shouldSkipPath(file.Path) {
+			skipped.Dirs++
+			skippedFiles = append(skippedFiles, SkippedFile{Path: filepath.ToSlash(file.Path), Reason: "dot_path"})
+			return nil
+		}
+		if revisionPathIgnored(ignoreMatcher, file.Path) {
+			return nil
+		}
+		switch file.Reason {
+		case "oversized":
+			skipped.Oversized++
+			skippedFiles = append(skippedFiles, SkippedFile{Path: filepath.ToSlash(file.Path), Reason: "oversized"})
+		case "binary":
+			skipped.Binary++
+			skippedFiles = append(skippedFiles, SkippedFile{Path: filepath.ToSlash(file.Path), Reason: "binary"})
+		}
+		return nil
 	})
 	slices.SortFunc(files, func(a, b fileContent) int { return strings.Compare(a.path, b.path) })
-	return files, skipped, err
+	return files, skipped, skippedFiles, err
 }
 
 func filterCodeFiles(files []fileContent) []fileContent {
@@ -1232,6 +1299,38 @@ func isBinary(data []byte) bool {
 	return slices.Contains(prefix, 0)
 }
 
+func isIndexableText(path string, data []byte) bool {
+	if isCodePath(path) {
+		return true
+	}
+	mediaType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
+	if mediaType == "" {
+		mediaType = http.DetectContentType(data)
+	}
+	mediaType, _, err := mime.ParseMediaType(mediaType)
+	if err != nil {
+		return true
+	}
+	if strings.HasPrefix(mediaType, "text/") {
+		return true
+	}
+	switch mediaType {
+	case "application/ecmascript",
+		"application/javascript",
+		"application/json",
+		"application/sql",
+		"application/toml",
+		"application/yaml",
+		"application/x-ndjson",
+		"application/x-sh",
+		"application/x-yaml",
+		"application/xml":
+		return true
+	}
+	return strings.HasPrefix(mediaType, "application/") &&
+		(strings.HasSuffix(mediaType, "+json") || strings.HasSuffix(mediaType, "+xml"))
+}
+
 func shouldSkipDir(name string) bool {
 	return strings.HasPrefix(name, ".")
 }
@@ -1265,37 +1364,141 @@ func filesystemIgnoreMatcher(root string) gitignore.Matcher {
 					return filepath.SkipDir
 				}
 			}
-			return nil
-		}
-		if !searchIgnoreFileNames[entry.Name()] {
-			return nil
-		}
-		relDir := ""
-		if dir := filepath.Dir(path); dir != root {
-			rel, err := filepath.Rel(root, dir)
-			if err != nil {
-				return nil
+			relDir := ""
+			if path != root {
+				rel, err := filepath.Rel(root, path)
+				if err != nil {
+					return nil
+				}
+				relDir = filepath.ToSlash(rel)
 			}
-			relDir = filepath.ToSlash(rel)
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
+			patterns = appendSearchIgnoreFilesFromDir(patterns, path, relDir)
 			return nil
-		}
-		var base []string
-		if relDir != "" {
-			base = pathParts(relDir)
-		}
-		for line := range strings.Lines(string(data)) {
-			line = strings.TrimRight(line, "\r\n")
-			if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			patterns = append(patterns, gitignore.ParsePattern(line, base))
 		}
 		return nil
 	})
 	return gitignore.NewMatcher(patterns)
+}
+
+func appendSearchIgnoreFilesFromDir(patterns []gitignore.Pattern, dir, relDir string) []gitignore.Pattern {
+	var base []string
+	if relDir != "" {
+		base = pathParts(relDir)
+	}
+	for _, name := range searchIgnoreFileOrder {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		patterns = appendSearchIgnorePatterns(patterns, string(data), base)
+	}
+	return patterns
+}
+
+func revisionIgnoreMatcher(repo *gitctx.Repository, rev string) (gitignore.Matcher, error) {
+	commit, err := repo.ResolveCommit(rev)
+	if err != nil {
+		return nil, err
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return nil, err
+	}
+	type ignoreFile struct {
+		path string
+		dir  string
+		name string
+		text string
+	}
+	var ignoreFiles []ignoreFile
+	iter := tree.Files()
+	defer iter.Close()
+	if err := iter.ForEach(func(file *object.File) error {
+		if !searchIgnoreFileNames[filepath.Base(file.Name)] {
+			return nil
+		}
+		if hasSkippedDir(filepath.Dir(file.Name)) {
+			return nil
+		}
+		text, err := file.Contents()
+		if err != nil {
+			return err
+		}
+		dir := ""
+		if found := filepath.ToSlash(filepath.Dir(file.Name)); found != "." {
+			dir = found
+		}
+		ignoreFiles = append(ignoreFiles, ignoreFile{
+			path: filepath.ToSlash(file.Name),
+			dir:  dir,
+			name: filepath.Base(file.Name),
+			text: text,
+		})
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	slices.SortFunc(ignoreFiles, func(a, b ignoreFile) int {
+		if order := strings.Compare(a.dir, b.dir); order != 0 {
+			return order
+		}
+		if order := cmp.Compare(ignoreFileOrder(a.name), ignoreFileOrder(b.name)); order != 0 {
+			return order
+		}
+		return strings.Compare(a.path, b.path)
+	})
+
+	var patterns []gitignore.Pattern
+	for _, file := range ignoreFiles {
+		if file.dir != "" && gitignore.NewMatcher(patterns).Match(pathParts(file.dir), true) {
+			continue
+		}
+		var base []string
+		if file.dir != "" {
+			base = pathParts(file.dir)
+		}
+		patterns = appendSearchIgnorePatterns(patterns, file.text, base)
+	}
+	return gitignore.NewMatcher(patterns), nil
+}
+
+func ignoreFileOrder(name string) int {
+	for i, candidate := range searchIgnoreFileOrder {
+		if name == candidate {
+			return i
+		}
+	}
+	return len(searchIgnoreFileOrder)
+}
+
+func appendSearchIgnorePatterns(patterns []gitignore.Pattern, text string, base []string) []gitignore.Pattern {
+	for line := range strings.Lines(text) {
+		line = strings.TrimRight(line, "\r\n")
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		patterns = append(patterns, gitignore.ParsePattern(line, base))
+	}
+	return patterns
+}
+
+func revisionPathIgnored(matcher gitignore.Matcher, path string) bool {
+	parts := pathParts(path)
+	for i := 1; i < len(parts); i++ {
+		if matcher.Match(parts[:i], true) {
+			return true
+		}
+	}
+	return matcher.Match(parts, false)
+}
+
+func hasSkippedDir(path string) bool {
+	for _, part := range pathParts(path) {
+		if shouldSkipDir(part) {
+			return true
+		}
+	}
+	return false
 }
 
 func pathParts(path string) []string {

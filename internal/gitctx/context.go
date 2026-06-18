@@ -92,6 +92,13 @@ type CommitFile struct {
 	Size int64
 }
 
+type CommitFileSkip struct {
+	Path   string
+	Blob   string
+	Size   int64
+	Reason string
+}
+
 type SubmoduleChange struct {
 	Path string `json:"path"`
 	Old  string `json:"old,omitempty"`
@@ -551,7 +558,7 @@ func (r *Repository) ResolveCommit(ref string) (*object.Commit, error) {
 	return r.Repo.CommitObject(*hash)
 }
 
-func (r *Repository) WalkCommitTextFiles(ref string, maxBytes int64, visit func(CommitFile) error) error {
+func (r *Repository) WalkCommitTextFiles(ref string, maxBytes int64, visit func(CommitFile) error, skip func(CommitFileSkip) error) error {
 	commit, err := r.ResolveCommit(ref)
 	if err != nil {
 		return err
@@ -563,18 +570,39 @@ func (r *Repository) WalkCommitTextFiles(ref string, maxBytes int64, visit func(
 	iter := tree.Files()
 	defer iter.Close()
 	return iter.ForEach(func(file *object.File) error {
+		path := filepath.ToSlash(file.Name)
 		if maxBytes > 0 && file.Size > maxBytes {
-			return nil
+			if skip == nil {
+				return nil
+			}
+			return skip(CommitFileSkip{
+				Path:   path,
+				Blob:   file.Hash.String(),
+				Size:   file.Size,
+				Reason: "oversized",
+			})
 		}
-		if binary, err := file.IsBinary(); err != nil || binary {
+		binary, err := file.IsBinary()
+		if err != nil {
 			return err
+		}
+		if binary {
+			if skip == nil {
+				return nil
+			}
+			return skip(CommitFileSkip{
+				Path:   path,
+				Blob:   file.Hash.String(),
+				Size:   file.Size,
+				Reason: "binary",
+			})
 		}
 		text, err := file.Contents()
 		if err != nil {
 			return err
 		}
 		return visit(CommitFile{
-			Path: filepath.ToSlash(file.Name),
+			Path: path,
 			Blob: file.Hash.String(),
 			Text: text,
 			Size: file.Size,

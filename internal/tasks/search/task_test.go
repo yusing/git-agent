@@ -7,10 +7,15 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/config"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/yusing/git-agent/internal/openai"
 )
 
@@ -69,6 +74,7 @@ func TestFilesystemSearchDoesNotRequireGitAndIndexesCurrentFiles(t *testing.T) {
 	writeFile(t, root, ".gitignore", "node_modules/\n")
 	writeFile(t, root, ".gitagentignore", "search-only.txt\n")
 	writeFile(t, root, "notes.txt", "release notes live here\n")
+	writeFile(t, root, "icon.svg", `<svg xmlns="http://www.w3.org/2000/svg"><title>release notes live here</title></svg>`)
 	writeFile(t, root, "search-only.txt", "release notes live here\n")
 	writeFile(t, root, "node_modules/ignored.txt", "release notes live here\n")
 	writeFile(t, root, ".omx/ignored.txt", "release notes live here\n")
@@ -99,6 +105,9 @@ func TestFilesystemSearchDoesNotRequireGitAndIndexesCurrentFiles(t *testing.T) {
 	}
 	if strings.Contains(out.Results[0].Range, "search-only.txt") {
 		t.Fatalf("range includes .gitagentignore file: %s", out.Results[0].Range)
+	}
+	if out.Retrieval.Skipped.NonText != 1 {
+		t.Fatalf("non-text skipped = %d, want 1", out.Retrieval.Skipped.NonText)
 	}
 }
 
@@ -154,6 +163,199 @@ func TestSearchCodeOnlyFiltersDocs(t *testing.T) {
 	}
 	if got := out.Results[0].Range; !strings.HasPrefix(got, "main.go:") {
 		t.Fatalf("range = %q", got)
+	}
+}
+
+func TestRevisionSearchUsesIgnoreFilesFromResolvedCommit(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".gitignore", "ignored-by-gitignore.txt\n")
+	writeFile(t, root, ".gitagentignore", "ignored-by-rev.txt\nignored-dir/\nignored-binary.dat\n")
+	writeFile(t, root, "notes.txt", "release notes live here\n")
+	writeFile(t, root, "ignored-by-gitignore.txt", "release notes live here\n")
+	writeFile(t, root, "ignored-by-rev.txt", "release notes live here\n")
+	writeFile(t, root, "ignored-binary.dat", "release\x00notes\n")
+	writeFile(t, root, "ignored-dir/file.txt", "release notes live here\n")
+	writeFile(t, root, "icon.svg", `<svg xmlns="http://www.w3.org/2000/svg"><title>release notes live here</title></svg>`)
+	writeFile(t, root, "binary.dat", "release\x00notes\n")
+	writeFile(t, root, "large.txt", strings.Repeat("x", int(MaxFileBytes)+1))
+	rev := commitSearchRepo(t, root)
+
+	writeFile(t, root, ".gitagentignore", "notes.txt\n")
+
+	out, err := Run(t.Context(), fakeEmbedder{}, Options{
+		Root:                root,
+		Rev:                 rev,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}, "release notes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Results) != 1 {
+		t.Fatalf("results = %#v", out.Results)
+	}
+	if got := out.Results[0].Range; got != "notes.txt:1-1" {
+		t.Fatalf("range = %q", got)
+	}
+	if out.Retrieval.Skipped.NonText != 1 {
+		t.Fatalf("non-text skipped = %d, want 1", out.Retrieval.Skipped.NonText)
+	}
+	if out.Retrieval.Skipped.Binary != 1 {
+		t.Fatalf("binary skipped = %d, want 1", out.Retrieval.Skipped.Binary)
+	}
+	if out.Retrieval.Skipped.Oversized != 1 {
+		t.Fatalf("oversized skipped = %d, want 1", out.Retrieval.Skipped.Oversized)
+	}
+	for _, want := range []SkippedFile{
+		{Path: "binary.dat", Reason: "binary"},
+		{Path: "icon.svg", Reason: "non_text"},
+		{Path: "large.txt", Reason: "oversized"},
+	} {
+		if !slices.Contains(out.Diagnostics.SkippedFiles, want) {
+			t.Fatalf("skipped files missing %#v: %#v", want, out.Diagnostics.SkippedFiles)
+		}
+	}
+	if slices.ContainsFunc(out.Diagnostics.SkippedFiles, func(file SkippedFile) bool {
+		return file.Path == "ignored-binary.dat"
+	}) {
+		t.Fatalf("skipped files include ignored binary: %#v", out.Diagnostics.SkippedFiles)
+	}
+}
+
+func TestIsIndexableTextContentTypes(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		data string
+		want bool
+	}{
+		{
+			name: "go source bypasses mime table",
+			path: "main.go",
+			data: "package main\nfunc main() {}\n",
+			want: true,
+		},
+		{
+			name: "tsx source bypasses non-code mime mapping",
+			path: "component.tsx",
+			data: "export function Component() { return <div /> }\n",
+			want: true,
+		},
+		{
+			name: "markdown text",
+			path: "README.md",
+			data: "# title\n",
+			want: true,
+		},
+		{
+			name: "json application text",
+			path: "data.json",
+			data: `{"release":"notes"}`,
+			want: true,
+		},
+		{
+			name: "yaml application text",
+			path: "config.yaml",
+			data: "release: notes\n",
+			want: true,
+		},
+		{
+			name: "toml application text",
+			path: "config.toml",
+			data: "release = \"notes\"\n",
+			want: true,
+		},
+		{
+			name: "sql application text",
+			path: "schema.sql",
+			data: "select 1;\n",
+			want: true,
+		},
+		{
+			name: "xml text",
+			path: "feed.xml",
+			data: "<feed />\n",
+			want: true,
+		},
+		{
+			name: "unknown plain text",
+			path: "LOCKFILE",
+			data: "release notes\n",
+			want: true,
+		},
+		{
+			name: "svg image xml",
+			path: "icon.svg",
+			data: `<svg xmlns="http://www.w3.org/2000/svg"><title>release notes</title></svg>`,
+			want: false,
+		},
+		{
+			name: "pdf by extension",
+			path: "doc.pdf",
+			data: "%PDF-1.7\nrelease notes\n",
+			want: false,
+		},
+		{
+			name: "png by extension",
+			path: "image.png",
+			data: "release notes\n",
+			want: false,
+		},
+		{
+			name: "octet stream by extension",
+			path: "archive.bin",
+			data: "release notes\n",
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isIndexableText(tt.path, []byte(tt.data)); got != tt.want {
+				t.Fatalf("isIndexableText(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDiscoverFilesystemFilesClassifiesSkipReasons(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "keep.txt", "release notes\n")
+	writeFile(t, root, "config.yaml", "release: notes\n")
+	writeFile(t, root, "component.tsx", "export const releaseNotes = true\n")
+	writeFile(t, root, "icon.svg", `<svg xmlns="http://www.w3.org/2000/svg"><title>release notes</title></svg>`)
+	writeFile(t, root, "manual.pdf", "%PDF-1.7\nrelease notes\n")
+	writeFile(t, root, "binary.dat", "release\x00notes\n")
+
+	files, skipped, skippedFiles, err := discoverFilesystemFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, file := range files {
+		paths = append(paths, file.path)
+	}
+	wantPaths := []string{"component.tsx", "config.yaml", "keep.txt"}
+	if strings.Join(paths, ",") != strings.Join(wantPaths, ",") {
+		t.Fatalf("paths = %#v, want %#v", paths, wantPaths)
+	}
+	if skipped.Binary != 1 {
+		t.Fatalf("binary skipped = %d, want 1", skipped.Binary)
+	}
+	if skipped.NonText != 2 {
+		t.Fatalf("non-text skipped = %d, want 2", skipped.NonText)
+	}
+	wantSkipped := []SkippedFile{
+		{Path: "binary.dat", Reason: "binary"},
+		{Path: "icon.svg", Reason: "non_text"},
+		{Path: "manual.pdf", Reason: "non_text"},
+	}
+	if fmt.Sprint(skippedFiles) != fmt.Sprint(wantSkipped) {
+		t.Fatalf("skipped files = %#v, want %#v", skippedFiles, wantSkipped)
 	}
 }
 
@@ -487,6 +689,40 @@ func writeFile(t *testing.T, root, name, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func commitSearchRepo(t *testing.T, root string) string {
+	t.Helper()
+	repo, err := git.PlainInit(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := repo.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Commit.GpgSign = config.OptBoolFalse
+	if err := repo.SetConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worktree.AddGlob("."); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := worktree.Commit("initial", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Search Test",
+			Email: "search@example.test",
+			When:  time.Unix(0, 0),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hash.String()
 }
 
 func vectorFor(input string) []float64 {
