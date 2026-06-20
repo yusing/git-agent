@@ -139,7 +139,6 @@ type SkippedCounts struct {
 
 type Result struct {
 	Relatedness float64        `json:"relatedness"`
-	Description string         `json:"description"`
 	Range       string         `json:"range"`
 	Symbol      *Symbol        `json:"symbol"`
 	Scores      map[string]any `json:"scores"`
@@ -1331,7 +1330,6 @@ func renderResults(scored []scoredChunk) []Result {
 		chunk := item.chunk
 		results[i] = Result{
 			Relatedness: item.relatedness,
-			Description: description(chunk),
 			Range:       fmt.Sprintf("%s:%d-%d", chunk.Path, chunk.StartLine, chunk.EndLine),
 			Symbol:      chunk.Symbol,
 			Scores:      map[string]any{"cosine": item.cosine},
@@ -1424,13 +1422,6 @@ func resultIDs(results []scoredChunk) []string {
 		ids[i] = result.chunk.ID
 	}
 	return ids
-}
-
-func description(chunk Chunk) string {
-	if chunk.Symbol != nil && chunk.Symbol.Name != "" {
-		return fmt.Sprintf("Semantic match in %s %s.", chunk.Symbol.Type, chunk.Symbol.Name)
-	}
-	return fmt.Sprintf("Semantic match in %s.", chunk.Path)
 }
 
 func excerpt(chunk Chunk) string {
