@@ -16,6 +16,8 @@ import (
 
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/config"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/yusing/git-agent/internal/openai"
 )
@@ -120,6 +122,37 @@ func TestFilesystemSearchDoesNotRequireGitAndIndexesCurrentFiles(t *testing.T) {
 	}
 	if out.Retrieval.Skipped.NonText != 1 {
 		t.Fatalf("non-text skipped = %d, want 1", out.Retrieval.Skipped.NonText)
+	}
+}
+
+func TestFilesystemSearchScopeKeepsRootIgnoreRules(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".gitagentignore", "ignored.txt\n")
+	writeFile(t, root, "foo/keep.txt", "alpha\n")
+	writeFile(t, root, "foo/ignored.txt", "alpha\n")
+	writeFile(t, root, "bar/keep.txt", "alpha\n")
+
+	out, err := Run(t.Context(), fakeEmbedder{}, Options{
+		Root:                root,
+		Scope:               []string{"foo/"},
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out.Retrieval.Filters.Scope; !slices.Equal(got, []string{"foo"}) {
+		t.Fatalf("scope filter = %#v", got)
+	}
+	if len(out.Results) != 1 || out.Results[0].Range != "foo/keep.txt:1-1" {
+		t.Fatalf("results = %#v", out.Results)
+	}
+	if !strings.Contains(out.Diagnostics.IndexDir, "scope-") {
+		t.Fatalf("index dir = %q, want scoped cache", out.Diagnostics.IndexDir)
 	}
 }
 
@@ -238,6 +271,58 @@ func TestRevisionSearchUsesIgnoreFilesFromResolvedCommit(t *testing.T) {
 	}
 }
 
+func TestRevisionSearchScopeKeepsRootIgnoreRules(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".gitagentignore", "ignored.txt\n")
+	writeFile(t, root, "foo/keep.txt", "alpha\n")
+	writeFile(t, root, "foo/ignored.txt", "alpha\n")
+	writeFile(t, root, "bar/keep.txt", "alpha\n")
+	rev := commitSearchRepo(t, root)
+
+	out, err := Run(t.Context(), fakeEmbedder{}, Options{
+		Root:                root,
+		Rev:                 rev,
+		Scope:               []string{"foo"},
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Results) != 1 || out.Results[0].Range != "foo/keep.txt:1-1" {
+		t.Fatalf("results = %#v", out.Results)
+	}
+}
+
+func TestRevisionSearchScopeSkipsOutOfScopeBlobsBeforeLoading(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "foo/keep.txt", "alpha\n")
+	rev := commitSearchRepo(t, root)
+	rev = addMissingBlobToCommittedTree(t, root, rev, "bar.txt")
+
+	out, err := Run(t.Context(), fakeEmbedder{}, Options{
+		Root:                root,
+		Rev:                 rev,
+		Scope:               []string{"foo"},
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Results) != 1 || out.Results[0].Range != "foo/keep.txt:1-1" {
+		t.Fatalf("results = %#v", out.Results)
+	}
+}
+
 func TestIsIndexableTextContentTypes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -343,7 +428,7 @@ func TestDiscoverFilesystemFilesClassifiesSkipReasons(t *testing.T) {
 	writeFile(t, root, "manual.pdf", "%PDF-1.7\nrelease notes\n")
 	writeFile(t, root, "binary.dat", "release\x00notes\n")
 
-	files, skipped, skippedFiles, err := discoverFilesystemFiles(root, func(string, ...slog.Attr) {})
+	files, skipped, skippedFiles, err := discoverFilesystemFiles(root, nil, func(string, ...slog.Attr) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -795,6 +880,48 @@ func commitSearchRepo(t *testing.T, root string) string {
 			When:  time.Unix(0, 0),
 		},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hash.String()
+}
+
+func addMissingBlobToCommittedTree(t *testing.T, root, rev, path string) string {
+	t.Helper()
+	repo, err := git.PlainOpen(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := repo.CommitObject(plumbing.NewHash(rev))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree.Entries = append(tree.Entries, object.TreeEntry{
+		Name: path,
+		Mode: filemode.Regular,
+		Hash: plumbing.NewHash("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+	})
+	slices.SortFunc(tree.Entries, func(a, b object.TreeEntry) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	treeObj := repo.Storer.NewEncodedObject()
+	if err := tree.Encode(treeObj); err != nil {
+		t.Fatal(err)
+	}
+	treeHash, err := repo.Storer.SetEncodedObject(treeObj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit.TreeHash = treeHash
+	commitObj := repo.Storer.NewEncodedObject()
+	if err := commit.Encode(commitObj); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := repo.Storer.SetEncodedObject(commitObj)
 	if err != nil {
 		t.Fatal(err)
 	}

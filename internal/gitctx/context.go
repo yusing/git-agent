@@ -558,7 +558,7 @@ func (r *Repository) ResolveCommit(ref string) (*object.Commit, error) {
 	return r.Repo.CommitObject(*hash)
 }
 
-func (r *Repository) WalkCommitTextFiles(ref string, maxBytes int64, visit func(CommitFile) error, skip func(CommitFileSkip) error) error {
+func (r *Repository) WalkCommitTextFiles(ref string, maxBytes int64, include func(string) bool, visit func(CommitFile) error, skip func(CommitFileSkip) error) error {
 	commit, err := r.ResolveCommit(ref)
 	if err != nil {
 		return err
@@ -567,20 +567,41 @@ func (r *Repository) WalkCommitTextFiles(ref string, maxBytes int64, visit func(
 	if err != nil {
 		return err
 	}
-	iter := tree.Files()
-	defer iter.Close()
-	return iter.ForEach(func(file *object.File) error {
-		path := filepath.ToSlash(file.Name)
+	walker := object.NewTreeWalker(tree, true, nil)
+	defer walker.Close()
+	for {
+		name, entry, err := walker.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if entry.Mode == filemode.Dir || entry.Mode == filemode.Submodule {
+			continue
+		}
+		path := filepath.ToSlash(name)
+		if include != nil && !include(path) {
+			continue
+		}
+		blob, err := object.GetBlob(r.Repo.Storer, entry.Hash)
+		if err != nil {
+			return err
+		}
+		file := object.NewFile(path, entry.Mode, blob)
 		if maxBytes > 0 && file.Size > maxBytes {
 			if skip == nil {
-				return nil
+				continue
 			}
-			return skip(CommitFileSkip{
+			if err := skip(CommitFileSkip{
 				Path:   path,
 				Blob:   file.Hash.String(),
 				Size:   file.Size,
 				Reason: "oversized",
-			})
+			}); err != nil {
+				return err
+			}
+			continue
 		}
 		binary, err := file.IsBinary()
 		if err != nil {
@@ -588,26 +609,31 @@ func (r *Repository) WalkCommitTextFiles(ref string, maxBytes int64, visit func(
 		}
 		if binary {
 			if skip == nil {
-				return nil
+				continue
 			}
-			return skip(CommitFileSkip{
+			if err := skip(CommitFileSkip{
 				Path:   path,
 				Blob:   file.Hash.String(),
 				Size:   file.Size,
 				Reason: "binary",
-			})
+			}); err != nil {
+				return err
+			}
+			continue
 		}
 		text, err := file.Contents()
 		if err != nil {
 			return err
 		}
-		return visit(CommitFile{
+		if err := visit(CommitFile{
 			Path: path,
 			Blob: file.Hash.String(),
 			Text: text,
 			Size: file.Size,
-		})
-	})
+		}); err != nil {
+			return err
+		}
+	}
 }
 
 func (r *Repository) PullRequestBase() (CommitInfo, error) {

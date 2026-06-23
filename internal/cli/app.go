@@ -79,6 +79,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	var indexOnly bool
 	var reindex bool
 	var codeOnly bool
+	var scope string
 	var embeddingModel string
 	embeddingDimensions, err := config.ResolveEmbeddingDimensions(0)
 	if err != nil {
@@ -110,6 +111,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	fs.BoolVar(&indexOnly, "index", false, "build embeddings for the selected source without searching")
 	fs.BoolVar(&reindex, "reindex", false, "rebuild embeddings for the selected source")
 	fs.BoolVar(&codeOnly, "code", false, "search code files only")
+	fs.StringVar(&scope, "scope", "", "comma-separated relative paths to search or index")
 	fs.StringVar(&embeddingModel, "embedding-model", config.ResolveEmbeddingModel(""), "embedding model")
 	fs.IntVar(&embeddingDimensions, "embedding-dimensions", embeddingDimensions, "embedding dimensions")
 
@@ -134,6 +136,13 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	if err := a.maybeStartPprof(ctx, opts); err != nil {
 		return err
 	}
+	var scopes []string
+	if strings.TrimSpace(scope) != "" {
+		scopes = strings.FieldsFunc(scope, func(r rune) bool { return r == ',' })
+		if len(scopes) == 0 {
+			return errors.New("--scope requires at least one relative path")
+		}
+	}
 	var debugLog func(string, ...slog.Attr)
 	if cfg.Debug {
 		debugLog = a.writeDebugEvent
@@ -150,6 +159,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 		IndexOnly:              indexOnly,
 		Reindex:                reindex,
 		CodeOnly:               codeOnly,
+		Scope:                  scopes,
 		EmbeddingModel:         embeddingModel,
 		EmbeddingDimensions:    embeddingDimensions,
 		EmbeddingMaxInput:      embeddingMaxInput,

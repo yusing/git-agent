@@ -51,6 +51,7 @@ complete -c git-agent -n '__git_agent_using_command release-note' -a 'patch mino
 complete -c git-agent -n '__git_agent_using_command release-note' -a '(__git_agent_git_refs)' -d 'Git ref'
 
 complete -c git-agent -n '__git_agent_using_command search' -l rev -r -a '(__git_agent_git_refs)' -d 'Search a committed Git tree'
+complete -c git-agent -n '__git_agent_using_command search' -l scope -r -d 'Comma-separated relative paths to search or index'
 complete -c git-agent -n '__git_agent_using_command search' -l min-relatedness -r -d 'Minimum semantic relatedness'
 complete -c git-agent -n '__git_agent_using_command search' -l limit -r -d 'Maximum results'
 complete -c git-agent -n '__git_agent_using_command search' -l index -d 'Build embeddings without searching'

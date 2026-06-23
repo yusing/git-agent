@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -164,6 +165,108 @@ func TestSearchPrintsJSONAndUsesEmbeddingsOnly(t *testing.T) {
 	}
 	if len(paths) == 0 {
 		t.Fatal("expected embeddings request")
+	}
+}
+
+func TestSearchScopeAcceptsCommaSeparatedPaths(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("HOME", t.TempDir())
+	useGeneralEmbeddingProvider(t)
+	for name, content := range map[string]string{
+		".gitagentignore": "ignored.txt\n",
+		"foo/keep.txt":    "alpha\n",
+		"foo/ignored.txt": "alpha\n",
+		"docs/readme.md":  "alpha\n",
+		"bar/keep.txt":    "alpha\n",
+	} {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Input      any    `json:"input"`
+			Model      string `json:"model"`
+			Dimensions int    `json:"dimensions"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		inputs, ok := payload.Input.([]any)
+		count := 1
+		if ok {
+			count = len(inputs)
+		}
+		data := make([]map[string]any, count)
+		for i := range count {
+			data[i] = map[string]any{"object": "embedding", "index": i, "embedding": embeddingTestVector(payload.Dimensions, 1)}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"model":  payload.Model,
+			"data":   data,
+			"usage":  map[string]any{"prompt_tokens": 1, "total_tokens": 1},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"search", "--scope", "foo,docs", "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	var out struct {
+		Retrieval struct {
+			Filters struct {
+				Scope []string `json:"scope"`
+			} `json:"filters"`
+		} `json:"retrieval"`
+		Results []struct {
+			Range string `json:"range"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("stdout is not JSON: %q: %v", stdout.String(), err)
+	}
+	if !slices.Equal(out.Retrieval.Filters.Scope, []string{"docs", "foo"}) {
+		t.Fatalf("scope = %#v", out.Retrieval.Filters.Scope)
+	}
+	got := fmt.Sprint(out.Results)
+	for _, want := range []string{"docs/readme.md:1-1", "foo/keep.txt:1-1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("results missing %s: %#v", want, out.Results)
+		}
+	}
+	for _, unwanted := range []string{"bar/keep.txt", "foo/ignored.txt"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("results include %s: %#v", unwanted, out.Results)
+		}
+	}
+}
+
+func TestSearchScopeRequiresPath(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	err := app.Run(t.Context(), []string{"search", "--scope", ",,", "alpha"})
+	if err == nil || !strings.Contains(err.Error(), "--scope requires at least one relative path") {
+		t.Fatalf("err = %v", err)
 	}
 }
 

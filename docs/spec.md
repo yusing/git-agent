@@ -25,7 +25,7 @@ Supported workflows:
 - `git-agent pr-message`
 - `git-agent release-note [--out <file>] <base> <release>`
 - `git-agent release-note [--out <file>] patch|minor|major`
-- `git-agent search [--index] [--rev <rev>] [--min-relatedness <score>] [--limit <n>] <query...>`
+- `git-agent search [--index] [--rev <rev>] [--scope <paths>] [--min-relatedness <score>] [--limit <n>] <query...>`
 
 ### Non-goals
 
@@ -122,7 +122,7 @@ the target is writable before generation, streams the human console trace to
 stdout, writes the rendered Markdown to the file, and does not write a JSON
 trace session.
 
-#### `git-agent search [--index] [--rev <rev>] <query...>`
+#### `git-agent search [--index] [--rev <rev>] [--scope <paths>] <query...>`
 
 Run embeddings-only semantic context search and print machine-readable JSON.
 Filesystem mode is the default: it searches current files under the current
@@ -133,6 +133,10 @@ under the search root unless skipped by dot-path rules, `.gitignore`,
 safety checks.
 `.gitagentignore` uses the same pattern syntax and per-directory base behavior
 as `.gitignore`, but only affects `git-agent search` discovery.
+`--scope` accepts comma-separated root-relative file or directory paths and
+limits filesystem or revision discovery to those paths. Ignore files are still
+resolved from the search root or committed tree, so root `.gitagentignore`
+patterns apply normally to scoped paths such as `--scope foo/`.
 
 Go files with a pre-package heading comment containing `DO NOT EDIT` are indexed
 as path-only chunks. Search embeds the filename/language metadata for those
@@ -160,10 +164,11 @@ otherwise rank above code. It does not change scoring and does not introduce a
 lexical fallback.
 
 `--index` builds missing embeddings for the selected filesystem or revision
-source, writes the same JSON envelope with an empty result list, and skips query
-embedding, scoring, replay history, and semantic search. `--index --reindex`
-rebuilds embeddings even when cache entries already exist. Successful indexing
-writes the local cache after all missing embeddings complete.
+source, including any `--scope` and `--code` filters, writes the same JSON
+envelope with an empty result list, and skips query embedding, scoring, replay
+history, and semantic search. `--index --reindex` rebuilds embeddings even when
+cache entries already exist. Successful indexing writes the local cache after all
+missing embeddings complete.
 
 With `--debug`, search writes live human console diagnostic events to stderr
 using the same renderer as streamed traces. It writes one `search_skip` event per
@@ -208,6 +213,7 @@ Message-generation subcommands reserve this shared flag surface:
 - `--debug`: enable diagnostics on stderr
 - `--pprof <addr>`: serve Go pprof endpoints on the requested address
 - `--code`: search source-code files only
+- `--scope <paths>`: comma-separated root-relative paths to search or index
 - `--rev <rev>`: search a committed Git tree instead of current filesystem files
 - `--min-relatedness <score>`: default `0.70`, valid `0 < score <= 1`
 - `--limit <n>`: default `20`, valid `1..100`

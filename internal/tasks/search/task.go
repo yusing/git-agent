@@ -27,7 +27,6 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
-	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/openai"
 	"golang.org/x/sync/errgroup"
@@ -64,6 +63,7 @@ type Options struct {
 	IndexOnly              bool
 	Reindex                bool
 	CodeOnly               bool
+	Scope                  []string
 	EmbeddingModel         string
 	EmbeddingDimensions    int
 	EmbeddingMaxInput      int
@@ -125,7 +125,8 @@ type Retrieval struct {
 }
 
 type Filters struct {
-	Code bool `json:"code,omitempty"`
+	Code  bool     `json:"code,omitempty"`
+	Scope []string `json:"scope,omitempty"`
 }
 
 type SkippedCounts struct {
@@ -293,6 +294,10 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	if err != nil {
 		return fail(err)
 	}
+	scope, err := normalizeScopes(opts.Scope)
+	if err != nil {
+		return fail(err)
+	}
 
 	source := Source{Mode: "filesystem", Root: root}
 	indexRoot := root
@@ -311,7 +316,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		}
 		indexRoot = repo.RootPath
 		source = Source{Mode: "revision", Rev: opts.Rev, ResolvedRev: resolvedRev}
-		files, skipped, skippedFiles, err = discoverRevisionFiles(repo, resolvedRev, debugLog)
+		files, skipped, skippedFiles, err = discoverRevisionFiles(repo, resolvedRev, scope, debugLog)
 		if err != nil {
 			return fail(err)
 		}
@@ -319,7 +324,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		if repo, err := gitctx.Open(root); err == nil {
 			indexRoot = repo.RootPath
 		}
-		files, skipped, skippedFiles, err = discoverFilesystemFiles(root, debugLog)
+		files, skipped, skippedFiles, err = discoverFilesystemFiles(root, scope, debugLog)
 		if err != nil {
 			return fail(err)
 		}
@@ -335,7 +340,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	diag.Chunks = len(chunks)
 	mark("chunk")
 
-	indexDir := indexDir(indexRoot, source.Mode, root, resolvedRev, opts.CodeOnly)
+	indexDir := indexDir(indexRoot, source.Mode, root, resolvedRev, opts.CodeOnly, scope)
 	diag.IndexDir = indexDir
 	oldVectors, _ := loadVectors(indexDir)
 	vectors, records, reused := reuseVectors(chunks, oldVectors, opts)
@@ -499,7 +504,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 				EmbeddingModel: opts.EmbeddingModel,
 				Index:          indexStatus,
 				Dimensions:     dimensions,
-				Filters:        Filters{Code: opts.CodeOnly},
+				Filters:        Filters{Code: opts.CodeOnly, Scope: scope},
 				Skipped:        skipped,
 			},
 			Results: []Result{},
@@ -554,7 +559,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 			EmbeddingModel: opts.EmbeddingModel,
 			Index:          indexStatus,
 			Dimensions:     dimensions,
-			Filters:        Filters{Code: opts.CodeOnly},
+			Filters:        Filters{Code: opts.CodeOnly, Scope: scope},
 			Skipped:        skipped,
 		},
 		Results: results,
@@ -562,7 +567,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}), nil
 }
 
-func discoverFilesystemFiles(root string, debugLog func(string, ...slog.Attr)) ([]fileContent, SkippedCounts, []SkippedFile, error) {
+func discoverFilesystemFiles(root string, scope []string, debugLog func(string, ...slog.Attr)) ([]fileContent, SkippedCounts, []SkippedFile, error) {
 	var files []fileContent
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
@@ -586,6 +591,12 @@ func discoverFilesystemFiles(root string, debugLog func(string, ...slog.Attr)) (
 			return err
 		}
 		rel = filepath.ToSlash(rel)
+		if !pathInScope(rel, scope) {
+			if entry.IsDir() && !scopeMayContainDir(rel, scope) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if entry.IsDir() {
 			if path != root && shouldSkipDir(name) {
 				skipped.Dirs++
@@ -657,7 +668,7 @@ func discoverFilesystemFiles(root string, debugLog func(string, ...slog.Attr)) (
 	return files, skipped, skippedFiles, err
 }
 
-func discoverRevisionFiles(repo *gitctx.Repository, rev string, debugLog func(string, ...slog.Attr)) ([]fileContent, SkippedCounts, []SkippedFile, error) {
+func discoverRevisionFiles(repo *gitctx.Repository, rev string, scope []string, debugLog func(string, ...slog.Attr)) ([]fileContent, SkippedCounts, []SkippedFile, error) {
 	var files []fileContent
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
@@ -672,7 +683,9 @@ func discoverRevisionFiles(repo *gitctx.Repository, rev string, debugLog func(st
 	if err != nil {
 		return nil, skipped, nil, err
 	}
-	err = repo.WalkCommitTextFiles(rev, MaxFileBytes, func(file gitctx.CommitFile) error {
+	err = repo.WalkCommitTextFiles(rev, MaxFileBytes, func(path string) bool {
+		return pathInScope(path, scope)
+	}, func(file gitctx.CommitFile) error {
 		if shouldSkipPath(file.Path) {
 			skipped.Dirs++
 			skip(filepath.ToSlash(file.Path), "dot_path")
@@ -695,6 +708,9 @@ func discoverRevisionFiles(repo *gitctx.Repository, rev string, debugLog func(st
 		})
 		return nil
 	}, func(file gitctx.CommitFileSkip) error {
+		if !pathInScope(file.Path, scope) {
+			return nil
+		}
 		if shouldSkipPath(file.Path) {
 			skipped.Dirs++
 			skip(filepath.ToSlash(file.Path), "dot_path")
@@ -1563,14 +1579,6 @@ func appendSearchIgnoreFilesFromDir(patterns []gitignore.Pattern, dir, relDir st
 }
 
 func revisionIgnoreMatcher(repo *gitctx.Repository, rev string) (gitignore.Matcher, error) {
-	commit, err := repo.ResolveCommit(rev)
-	if err != nil {
-		return nil, err
-	}
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil, err
-	}
 	type ignoreFile struct {
 		path string
 		dir  string
@@ -1578,31 +1586,22 @@ func revisionIgnoreMatcher(repo *gitctx.Repository, rev string) (gitignore.Match
 		text string
 	}
 	var ignoreFiles []ignoreFile
-	iter := tree.Files()
-	defer iter.Close()
-	if err := iter.ForEach(func(file *object.File) error {
-		if !searchIgnoreFileNames[filepath.Base(file.Name)] {
-			return nil
-		}
-		if hasSkippedDir(filepath.Dir(file.Name)) {
-			return nil
-		}
-		text, err := file.Contents()
-		if err != nil {
-			return err
-		}
+	err := repo.WalkCommitTextFiles(rev, 0, func(path string) bool {
+		return searchIgnoreFileNames[filepath.Base(path)] && !hasSkippedDir(filepath.Dir(path))
+	}, func(file gitctx.CommitFile) error {
 		dir := ""
-		if found := filepath.ToSlash(filepath.Dir(file.Name)); found != "." {
+		if found := filepath.ToSlash(filepath.Dir(file.Path)); found != "." {
 			dir = found
 		}
 		ignoreFiles = append(ignoreFiles, ignoreFile{
-			path: filepath.ToSlash(file.Name),
+			path: filepath.ToSlash(file.Path),
 			dir:  dir,
-			name: filepath.Base(file.Name),
-			text: text,
+			name: filepath.Base(file.Path),
+			text: file.Text,
 		})
 		return nil
-	}); err != nil {
+	}, nil)
+	if err != nil {
 		return nil, err
 	}
 	slices.SortFunc(ignoreFiles, func(a, b ignoreFile) int {
@@ -1676,10 +1675,84 @@ func pathParts(path string) []string {
 	return strings.Split(path, "/")
 }
 
-func indexDir(base, mode, root, resolvedRev string, codeOnly bool) string {
+func normalizeScopes(scopes []string) ([]string, error) {
+	if len(scopes) == 0 {
+		return nil, nil
+	}
+	seen := map[string]bool{}
+	normalized := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		scope = strings.TrimSpace(scope)
+		if scope == "" {
+			continue
+		}
+		if filepath.IsAbs(scope) {
+			return nil, fmt.Errorf("--scope path %q must be relative", scope)
+		}
+		scope = filepath.ToSlash(filepath.Clean(scope))
+		if scope == "." {
+			return nil, nil
+		}
+		if strings.HasPrefix(scope, "../") || scope == ".." {
+			return nil, fmt.Errorf("--scope path %q must stay under the search root", scope)
+		}
+		scope = strings.Trim(scope, "/")
+		if scope == "" {
+			return nil, nil
+		}
+		if seen[scope] {
+			continue
+		}
+		seen[scope] = true
+		normalized = append(normalized, scope)
+	}
+	if len(normalized) == 0 {
+		return nil, errors.New("--scope requires at least one relative path")
+	}
+	slices.Sort(normalized)
+	return normalized, nil
+}
+
+func pathInScope(path string, scope []string) bool {
+	if len(scope) == 0 {
+		return true
+	}
+	path = strings.Trim(filepath.ToSlash(path), "/")
+	if path == "" || path == "." {
+		return true
+	}
+	for _, item := range scope {
+		if path == item || strings.HasPrefix(path, item+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func scopeMayContainDir(dir string, scope []string) bool {
+	if len(scope) == 0 {
+		return true
+	}
+	dir = strings.Trim(filepath.ToSlash(dir), "/")
+	if dir == "" || dir == "." {
+		return true
+	}
+	for _, item := range scope {
+		if item == dir || strings.HasPrefix(item, dir+"/") || strings.HasPrefix(dir, item+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func indexDir(base, mode, root, resolvedRev string, codeOnly bool, scope []string) string {
 	filter := ""
 	if codeOnly {
 		filter = "code"
+	}
+	if len(scope) > 0 {
+		sum := sha256.Sum256([]byte(strings.Join(scope, "\x00")))
+		filter = filepath.Join("scope-"+hex.EncodeToString(sum[:])[:16], filter)
 	}
 	if mode == "revision" {
 		return filepath.Join(base, ".git-agent", "search", "revs", resolvedRev, filter)
