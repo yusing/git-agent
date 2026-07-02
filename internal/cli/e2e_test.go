@@ -238,6 +238,69 @@ Accept braced do-option maps while preserving positional help order and validati
 	assertTraceArtifacts(t, fixture.repoDir, "*-commit-msg", 1)
 }
 
+func TestCommitMsgSubmoduleOnlySkipsProviderAuth(t *testing.T) {
+	fixture := buildStagedSubmoduleOnlyFixture(t, "feat: add webui submodule")
+	t.Chdir(fixture.repoDir)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_BASE_URL", "")
+	t.Setenv("OPENAI_MODEL", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"commit-msg"}); err != nil {
+		t.Fatal(err)
+	}
+	output := strings.TrimSpace(stdout.String())
+	want := `chore(deps): update webui submodule
+
+webui
+  - ` + fixture.submoduleReleaseSHA[:7] + `: fix(webui): refresh login`
+	if output != want {
+		t.Fatalf("output:\n%s\nwant:\n%s", output, want)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(fixture.repoDir, ".git-agent", "sessions")); !os.IsNotExist(err) {
+		t.Fatalf("deterministic commit-msg should not create trace sessions, stat err = %v", err)
+	}
+}
+
+func TestCommitSubmoduleOnlySkipsProviderAuthAndCreatesCommit(t *testing.T) {
+	fixture := buildStagedSubmoduleOnlyFixture(t, "Add webui submodule")
+	t.Chdir(fixture.repoDir)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_BASE_URL", "")
+	t.Setenv("OPENAI_MODEL", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"commit"}); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Update webui submodule") {
+		t.Fatalf("stdout missing git commit summary:\n%s", stdout.String())
+	}
+
+	want := `Update webui submodule
+
+webui
+  - ` + fixture.submoduleReleaseSHA[:7] + `: fix(webui): refresh login`
+	if got := gitHeadMessage(t, fixture.repoDir); got != want {
+		t.Fatalf("HEAD message:\n%s\nwant:\n%s", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.repoDir, ".git-agent", "sessions")); !os.IsNotExist(err) {
+		t.Fatalf("deterministic commit should not create trace sessions, stat err = %v", err)
+	}
+}
+
 func TestCommitMsgAmendEndToEndWithRealisticFixture(t *testing.T) {
 	fixture := buildCommitMsgAmendFixture(t)
 	t.Chdir(fixture.repoDir)
@@ -765,6 +828,11 @@ type commitMsgFixture struct {
 	repoDir string
 }
 
+type stagedSubmoduleOnlyFixture struct {
+	repoDir             string
+	submoduleReleaseSHA string
+}
+
 func buildCommitMsgFixture(t *testing.T) commitMsgFixture {
 	t.Helper()
 
@@ -926,6 +994,37 @@ func buildCommitMsgFixture(t *testing.T) commitMsgFixture {
 	runGit(t, repoDir, "add", "internal/route/do_parser.go", "internal/route/do_types.go", "README.md", "docs/routing.md")
 
 	return commitMsgFixture{repoDir: repoDir}
+}
+
+func buildStagedSubmoduleOnlyFixture(t *testing.T, parentInitialMessage string) stagedSubmoduleOnlyFixture {
+	t.Helper()
+
+	submoduleDir := t.TempDir()
+	runGit(t, submoduleDir, "init")
+	runGit(t, submoduleDir, "config", "user.name", "Test User")
+	runGit(t, submoduleDir, "config", "user.email", "test@example.com")
+	writeFixtureFile(t, filepath.Join(submoduleDir, "ui.txt"), "v1\n")
+	runGit(t, submoduleDir, "add", "ui.txt")
+	runGit(t, submoduleDir, "commit", "-m", "feat(webui): initial")
+	baseSHA := gitHead(t, submoduleDir)
+	writeFixtureFile(t, filepath.Join(submoduleDir, "ui.txt"), "v2\n")
+	runGit(t, submoduleDir, "add", "ui.txt")
+	runGit(t, submoduleDir, "commit", "-m", "fix(webui): refresh login")
+	releaseSHA := gitHead(t, submoduleDir)
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "config", "user.name", "Test User")
+	runGit(t, repoDir, "config", "user.email", "test@example.com")
+	runGit(t, repoDir, "-c", "protocol.file.allow=always", "submodule", "add", submoduleDir, "webui")
+	runGit(t, filepath.Join(repoDir, "webui"), "checkout", baseSHA)
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-m", parentInitialMessage)
+
+	runGit(t, filepath.Join(repoDir, "webui"), "checkout", releaseSHA)
+	runGit(t, repoDir, "add", "webui")
+
+	return stagedSubmoduleOnlyFixture{repoDir: repoDir, submoduleReleaseSHA: releaseSHA}
 }
 
 type prMessageFixture struct {
@@ -1465,6 +1564,18 @@ func gitHead(t *testing.T, dir string) string {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git rev-parse HEAD failed: %v\n%s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func gitHeadMessage(t *testing.T, dir string) string {
+	t.Helper()
+
+	cmd := exec.Command("git", "log", "-1", "--format=%B")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git log HEAD failed: %v\n%s", err, out)
 	}
 	return strings.TrimSpace(string(out))
 }

@@ -71,6 +71,102 @@ func TestValidateWithPreparedCommitContextRequiresSubmoduleSummaries(t *testing.
 	}
 }
 
+func TestFormatSubmoduleOnlyCommitUsesConventionalHistory(t *testing.T) {
+	t.Parallel()
+
+	prepared := PreparedCommitContext{
+		StagedPaths: []string{"webui"},
+		StagedSubmodules: []PreparedSubmodule{{
+			Path: "webui",
+			Commits: []gitctx.CommitInfo{
+				{SHA: "cafebabecafebabecafebabecafebabecafebabe", Summary: "fix(webui): refresh login"},
+				{SHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", Summary: "docs(webui): update routing docs"},
+			},
+		}},
+		RecentCommits: []gitctx.CommitInfo{{Summary: "feat(route): add option blocks"}},
+	}
+
+	got, ok := FormatSubmoduleOnlyCommit(prepared)
+	if !ok {
+		t.Fatal("expected deterministic submodule commit message")
+	}
+	want := `chore(deps): update webui submodule
+
+webui
+  - cafebab: fix(webui): refresh login
+  - deadbee: docs(webui): update routing docs`
+	if got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestFormatSubmoduleOnlyCommitUsesTitleCaseHistory(t *testing.T) {
+	t.Parallel()
+
+	prepared := PreparedCommitContext{
+		StagedPaths: []string{"webui"},
+		StagedSubmodules: []PreparedSubmodule{{
+			Path:   "webui",
+			NewSHA: "cafebabecafebabecafebabecafebabecafebabe",
+		}},
+		RecentCommits: []gitctx.CommitInfo{{Summary: "Update route parser"}},
+	}
+
+	got, ok := FormatSubmoduleOnlyCommit(prepared)
+	if !ok {
+		t.Fatal("expected deterministic submodule commit message")
+	}
+	want := `Update webui submodule
+
+webui
+  - cafebab: update submodule pointer`
+	if got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestFormatSubmoduleOnlyCommitSimplifiesManySubmoduleSubject(t *testing.T) {
+	t.Parallel()
+
+	prepared := PreparedCommitContext{
+		StagedPaths: []string{"api", "docs", "sdk", "webui"},
+		StagedSubmodules: []PreparedSubmodule{
+			{Path: "webui", NewSHA: "1111111111111111111111111111111111111111"},
+			{Path: "sdk", NewSHA: "2222222222222222222222222222222222222222"},
+			{Path: "docs", NewSHA: "3333333333333333333333333333333333333333"},
+			{Path: "api", NewSHA: "4444444444444444444444444444444444444444"},
+		},
+		RecentCommits: []gitctx.CommitInfo{{Summary: "chore(deps): update module refs"}},
+	}
+
+	got, ok := FormatSubmoduleOnlyCommit(prepared)
+	if !ok {
+		t.Fatal("expected deterministic submodule commit message")
+	}
+	if !strings.HasPrefix(got, "chore(deps): update submodules\n\n") {
+		t.Fatalf("subject should not list every submodule:\n%s", got)
+	}
+	for _, want := range []string{"api\n  - 4444444: update submodule pointer", "docs\n  - 3333333: update submodule pointer", "sdk\n  - 2222222: update submodule pointer", "webui\n  - 1111111: update submodule pointer"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("message missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestFormatSubmoduleOnlyCommitRejectsMixedStagedChanges(t *testing.T) {
+	t.Parallel()
+
+	prepared := PreparedCommitContext{
+		StagedPaths:      []string{"README.md", "webui"},
+		StagedSubmodules: []PreparedSubmodule{{Path: "webui"}},
+		RecentCommits:    []gitctx.CommitInfo{{Summary: "feat(route): add option blocks"}},
+	}
+
+	if got, ok := FormatSubmoduleOnlyCommit(prepared); ok {
+		t.Fatalf("unexpected deterministic message for mixed changes:\n%s", got)
+	}
+}
+
 func TestPromptsNameRequiredScope(t *testing.T) {
 	t.Parallel()
 

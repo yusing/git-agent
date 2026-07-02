@@ -209,14 +209,14 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Resolve(opts)
+	localCfg, err := config.ResolveLocal(opts)
 	if err != nil {
 		return err
 	}
 	if err := a.maybeStartPprof(ctx, opts); err != nil {
 		return err
 	}
-	taskCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	taskCtx, cancel := context.WithTimeout(ctx, localCfg.Timeout)
 	defer cancel()
 
 	repo, err := gitctx.Open(".")
@@ -229,6 +229,16 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 	}
 	if len(stagedPaths) == 0 {
 		return errors.New("commit-msg requires staged changes")
+	}
+	if result, ok, err := deterministicCommitMessage(repo, mode); err != nil {
+		return err
+	} else if ok {
+		return a.writeResult(localCfg, result)
+	}
+
+	cfg, err := config.Resolve(opts)
+	if err != nil {
+		return err
 	}
 	recorder, err := trace.New(repo.RootPath, "commit-msg")
 	if err != nil {
@@ -249,14 +259,14 @@ func (a *App) runCommit(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Resolve(opts)
+	localCfg, err := config.ResolveLocal(opts)
 	if err != nil {
 		return err
 	}
 	if err := a.maybeStartPprof(ctx, opts); err != nil {
 		return err
 	}
-	taskCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	taskCtx, cancel := context.WithTimeout(ctx, localCfg.Timeout)
 	defer cancel()
 
 	repo, err := gitctx.Open(".")
@@ -269,6 +279,29 @@ func (a *App) runCommit(ctx context.Context, args []string) error {
 	}
 	if len(stagedPaths) == 0 {
 		return errors.New("commit requires staged changes")
+	}
+	if result, ok, err := deterministicCommitMessage(repo, mode); err != nil {
+		return err
+	} else if ok {
+		if localCfg.Debug {
+			a.writeDebugEvent("agent_summary", slog.Int("tool_calls", result.ToolCalls), slog.Int("repair_calls", result.RepairCalls))
+		}
+		commitOutput, err := gitCommit(taskCtx, repo, result.Text, mode == commitmsg.ModeAmend)
+		if err != nil {
+			return commitFailureError(result.Text, err)
+		}
+		if commitOutput.stderr != "" {
+			if _, err := fmt.Fprint(a.stderr, commitOutput.stderr); err != nil {
+				return err
+			}
+		}
+		_, err = fmt.Fprint(a.stdout, commitOutput.stdout)
+		return err
+	}
+
+	cfg, err := config.Resolve(opts)
+	if err != nil {
+		return err
 	}
 	recorder, err := trace.NewStream("commit", a.stdout)
 	if err != nil {
@@ -299,6 +332,21 @@ func (a *App) runCommit(ctx context.Context, args []string) error {
 	}
 	_, err = fmt.Fprint(a.stdout, commitOutput.stdout)
 	return err
+}
+
+func deterministicCommitMessage(repo *gitctx.Repository, mode commitmsg.Mode) (agent.Result, bool, error) {
+	if mode != commitmsg.ModeNormal {
+		return agent.Result{}, false, nil
+	}
+	prepared, err := commitmsg.PrepareCommitContext(repo)
+	if err != nil {
+		return agent.Result{}, false, err
+	}
+	message, ok := commitmsg.FormatSubmoduleOnlyCommit(prepared)
+	if !ok {
+		return agent.Result{}, false, nil
+	}
+	return agent.Result{Text: message}, true, nil
 }
 
 func parseCommitFlags(command string, args []string) (commitmsg.Mode, config.Options, error) {

@@ -88,6 +88,25 @@ type codexAuthFile struct {
 }
 
 func Resolve(opts Options) (Config, error) {
+	cfg, err := ResolveLocal(opts)
+	if err != nil {
+		return Config{}, err
+	}
+
+	auth, err := resolveAuth(opts)
+	if err != nil {
+		return Config{}, err
+	}
+
+	cfg.APIKey = auth.apiKey
+	cfg.AuthMode = auth.mode
+	cfg.AuthAccountID = auth.accountID
+	cfg.BaseURL = resolveBaseURL(opts.BaseURL, auth)
+	cfg.Model = firstNonEmpty(opts.Model, os.Getenv("OPENAI_MODEL"), DefaultModel)
+	return cfg, nil
+}
+
+func ResolveLocal(opts Options) (Config, error) {
 	timeout := DefaultTimeout
 	if opts.Timeout != "" {
 		parsed, err := time.ParseDuration(opts.Timeout)
@@ -117,11 +136,6 @@ func Resolve(opts Options) (Config, error) {
 		return Config{}, errors.New("--low, --medium, --high, and --xhigh are mutually exclusive")
 	}
 
-	auth, err := resolveAuth(opts)
-	if err != nil {
-		return Config{}, err
-	}
-
 	thinkingEffort := ""
 	switch {
 	case opts.Low:
@@ -140,11 +154,6 @@ func Resolve(opts Options) (Config, error) {
 	}
 
 	return Config{
-		APIKey:         auth.apiKey,
-		AuthMode:       auth.mode,
-		AuthAccountID:  auth.accountID,
-		BaseURL:        resolveBaseURL(opts.BaseURL, auth),
-		Model:          firstNonEmpty(opts.Model, os.Getenv("OPENAI_MODEL"), DefaultModel),
 		ServiceTier:    serviceTier,
 		ThinkingEffort: thinkingEffort,
 		Timeout:        timeout,

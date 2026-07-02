@@ -136,3 +136,7 @@ the human console trace to stdout, then run `git commit --file -` or
 the command exits nonzero and includes both the generated message and Git error.
 In amend mode, the current HEAD message is treated as the message anchor so
 small staged refinements preserve the original subject.
+
+For normal non-amend commits where the staged changes are only submodule
+gitlink updates, `commit-msg` and `commit` format the message locally without an
+LLM call or provider auth.

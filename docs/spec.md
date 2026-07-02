@@ -55,6 +55,15 @@ clusters. Large or capped staged diffs expose a path-filtered staged-diff tool
 so the model can inspect omitted high-churn or secondary clusters without
 reading unrelated hunks.
 
+When the staged changes are exclusively submodule gitlink updates, normal
+`commit-msg` does not call the model or require provider auth. It formats a
+deterministic message from prepared submodule history, using recent commits to
+choose conventional style (`chore(deps): update ... submodule`) or Title-case
+style (`Update ... submodule`). The body mirrors the release-note submodule
+changelog shape with each submodule heading followed by indented
+`short-sha: summary` entries. If more than three submodules are staged, the
+subject says `submodules` instead of listing every path.
+
 #### `git-agent commit-msg --amend`
 
 Generate a commit message for the final post-amend commit result, not a delta
@@ -84,6 +93,10 @@ creation fails after message generation, including because signing fails or a ke
 is locked, the command returns nonzero, keeps the streamed trace events on
 stdout, and reports both the generated message and the Git error so the user can
 commit manually.
+
+For normal submodule-only staged changes, `commit` uses the same deterministic
+local formatter as `commit-msg`, skips provider auth and trace generation, then
+passes the formatted message directly to `git commit --file -`.
 
 #### `git-agent commit --amend`
 
@@ -419,30 +432,35 @@ including:
 
 ### Agent loop lifecycle
 
-1. resolve config and repo context
+1. parse shared flags and validate auth-independent options
 2. for commit-message tasks, collect staged paths
-3. create a JSON trace session, or a stdout-streaming human console trace for
+3. precompute normal staged context early enough to detect deterministic
+   submodule-only messages before provider auth is required
+4. for normal submodule-only staged changes, format and return the local
+   message without the SDK-backed agent loop
+5. resolve provider config and create a JSON trace session, or a
+   stdout-streaming human console trace for
    `commit` / `commit --amend`
-4. precompute task context before the first provider call: staged context for
+6. precompute task context before the first provider call: staged context for
    normal commit messages, amend context for `--amend`, PR context for
    `pr-message`, or release-note context for `release-note` including resolved
    refs, parent commits, submodule gitlink changes, submodule history when
    locally available, and repository ownership/link hints
-5. resolve project guidance for the task target paths, after context prep when
+7. resolve project guidance for the task target paths, after context prep when
    prepared paths define the target scope
-6. build task-specific instructions, developer context, and initial user prompt,
+8. build task-specific instructions, developer context, and initial user prompt,
    appending any `--append-prompt` hint as lower-priority escaped prompt data
-7. send request to the Responses API through the official OpenAI Go SDK
-8. record each request and response in the active trace
-9. if the model requests tools, execute only registered read-only tools
-10. record each tool call and tool output in the active trace
-11. append function-call and function-call-output items and continue until final
+9. send request to the Responses API through the official OpenAI Go SDK
+10. record each request and response in the active trace
+11. if the model requests tools, execute only registered read-only tools
+12. record each tool call and tool output in the active trace
+13. append function-call and function-call-output items and continue until final
     text is returned
-12. if the local budget is exhausted, force a no-tool finalization request while
+14. if the local budget is exhausted, force a no-tool finalization request while
     preserving any structured text format required by the task
-13. validate output against task rules
-14. if invalid and repair budget remains, run exactly one repair pass
-15. print final text to stdout for generation-only commands, write it to
+15. validate output against task rules
+16. if invalid and repair budget remains, run exactly one repair pass
+17. print final text to stdout for generation-only commands, write it to
     `--out` for `release-note --out <file>`, or stream human console trace
     lines while generating the message and then print Git's raw commit summary
     after creating or amending through `git commit`
@@ -454,12 +472,16 @@ including:
 ```mermaid
 flowchart TD
     Start([git-agent commit-msg]) --> Parse[Parse shared flags]
-    Parse --> Resolve[Resolve config from flags, env, defaults]
-    Resolve --> Timeout[Create task timeout context]
+    Parse --> LocalConfig[Validate auth-independent flags]
+    LocalConfig --> Timeout[Create task timeout context]
     Timeout --> OpenRepo[Open repository]
     OpenRepo --> StagedPaths[Collect staged paths]
     StagedPaths --> Prepare[Precompute staged commit context]
-    Prepare --> Guidance[Resolve project guidance for staged paths]
+    Prepare --> SubmoduleOnly{Only submodule gitlinks?}
+    SubmoduleOnly -- yes --> LocalMessage[Format local submodule message]
+    LocalMessage --> Stdout
+    SubmoduleOnly -- no --> Resolve[Resolve provider config from flags, env, defaults]
+    Resolve --> Guidance[Resolve project guidance for staged paths]
     Guidance --> Trace[Create .git-agent session trace]
     Trace --> Registry[Register read-only commit-message tools]
     Registry --> Runner[Build OpenAI runner with validator and tool specs]
@@ -530,15 +552,21 @@ flowchart TD
 ```mermaid
 flowchart TD
     Start([git-agent commit --optional-amend]) --> Parse[Parse --amend and shared flags]
-    Parse --> Resolve[Resolve config from flags, env, defaults]
-    Resolve --> Timeout[Create task timeout context]
+    Parse --> LocalConfig[Validate auth-independent flags]
+    LocalConfig --> Timeout[Create task timeout context]
     Timeout --> OpenRepo[Open repository]
     OpenRepo --> StagedPaths[Collect staged paths]
     StagedPaths --> Mode{Amend?}
     Mode -- no --> Prepare[Precompute staged commit context]
     Mode -- yes --> PrepareAmend[Precompute amend context]
-    PrepareAmend --> Guidance[Resolve project guidance for final amended paths]
-    Prepare --> Guidance
+    Prepare --> SubmoduleOnly{Only submodule gitlinks?}
+    SubmoduleOnly -- yes --> LocalMessage[Format local submodule message]
+    LocalMessage --> LocalGitCommit[Run git commit --file]
+    LocalGitCommit --> Summary
+    LocalGitCommit -- failure --> Manual
+    SubmoduleOnly -- no --> Resolve[Resolve provider config from flags, env, defaults]
+    PrepareAmend --> Resolve
+    Resolve --> Guidance[Resolve project guidance for task paths]
     Guidance --> Trace[Create stdout-streaming console trace]
     Trace --> Registry[Register read-only commit-message tools]
     Registry --> Runner[Build OpenAI runner with validator and tool specs]
@@ -928,6 +956,11 @@ Behavior:
 - when staged submodule commit summaries are available, include those summaries
   in the generated message rather than emitting only a generic submodule-ref
   update subject
+- for normal submodule-only staged changes, skip model generation and format a
+  deterministic message locally from staged submodule history; detect
+  conventional versus Title-case subject style from recent commits, use a
+  release-note-like submodule body, and collapse subjects with more than three
+  submodules to `submodules`
 
 Output rules:
 
@@ -1198,10 +1231,12 @@ The in-repository implementation is complete when:
 - `make test` / `go test ./...` pass
 - `make install DESTDIR=<tmp> PREFIX=/usr/local` installs an executable binary
 - `git-agent commit-msg` and `git-agent commit-msg --amend` route through the
-  bounded SDK-backed agent loop
+  bounded SDK-backed agent loop except for normal submodule-only staged changes,
+  which are formatted locally without provider auth
 - `git-agent commit` and `git-agent commit --amend` route through the same
-  bounded SDK-backed commit-message loop, stream human console trace lines to
-  stdout, write no on-disk NDJSON session trace, create or amend the commit
+  bounded SDK-backed commit-message loop except for normal submodule-only
+  staged changes, stream human console trace lines to stdout for SDK-backed
+  generation, write no on-disk NDJSON session trace, create or amend the commit
   through `git commit`, and print Git's raw commit summary after success
 - `git-agent pr-message` routes through the bounded SDK-backed agent loop,
   targets `origin/HEAD..HEAD`, and sends prepared branch context without

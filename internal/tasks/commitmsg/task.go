@@ -99,6 +99,173 @@ type PreparedSubmodule struct {
 	Commits               []gitctx.CommitInfo `json:"commits,omitempty"`
 }
 
+type commitMessageStyle int
+
+const (
+	commitMessageStyleConventional commitMessageStyle = iota
+	commitMessageStyleTitle
+)
+
+func FormatSubmoduleOnlyCommit(prepared PreparedCommitContext) (string, bool) {
+	if !isSubmoduleOnlyCommit(prepared) {
+		return "", false
+	}
+
+	submodules := slices.Clone(prepared.StagedSubmodules)
+	slices.SortFunc(submodules, func(a, b PreparedSubmodule) int {
+		return strings.Compare(a.Path, b.Path)
+	})
+
+	paths := make([]string, 0, len(submodules))
+	for _, submodule := range submodules {
+		paths = append(paths, submodule.Path)
+	}
+
+	subject := formatSubmoduleSubject(detectCommitMessageStyle(prepared.RecentCommits), paths)
+	body := formatSubmoduleBody(submodules)
+	if body == "" {
+		return subject, true
+	}
+	return Shape(subject + "\n\n" + body), true
+}
+
+func isSubmoduleOnlyCommit(prepared PreparedCommitContext) bool {
+	if len(prepared.StagedPaths) == 0 || len(prepared.StagedSubmodules) == 0 {
+		return false
+	}
+	if len(prepared.StagedPaths) != len(prepared.StagedSubmodules) {
+		return false
+	}
+
+	submodulePaths := map[string]bool{}
+	for _, submodule := range prepared.StagedSubmodules {
+		if strings.TrimSpace(submodule.Path) == "" {
+			return false
+		}
+		submodulePaths[filepath.ToSlash(submodule.Path)] = true
+	}
+	for _, path := range prepared.StagedPaths {
+		if !submodulePaths[filepath.ToSlash(path)] {
+			return false
+		}
+	}
+	return true
+}
+
+func detectCommitMessageStyle(recent []gitctx.CommitInfo) commitMessageStyle {
+	for _, commit := range recent {
+		summary := strings.TrimSpace(commit.Summary)
+		switch {
+		case isConventionalSummary(summary):
+			return commitMessageStyleConventional
+		case isTitleCaseSummary(summary):
+			return commitMessageStyleTitle
+		}
+	}
+	return commitMessageStyleConventional
+}
+
+func isConventionalSummary(summary string) bool {
+	prefix, _, ok := strings.Cut(summary, ":")
+	return ok && conventionalSubjectPrefixPattern.MatchString(strings.TrimSpace(prefix))
+}
+
+func isTitleCaseSummary(summary string) bool {
+	if summary == "" || isConventionalSummary(summary) {
+		return false
+	}
+	first := summary[0]
+	return first >= 'A' && first <= 'Z'
+}
+
+func formatSubmoduleSubject(style commitMessageStyle, paths []string) string {
+	target := formatSubmoduleSubjectTarget(paths)
+	if style == commitMessageStyleTitle {
+		return "Update " + target
+	}
+	return "chore(deps): update " + target
+}
+
+func formatSubmoduleSubjectTarget(paths []string) string {
+	switch len(paths) {
+	case 0:
+		return "submodules"
+	case 1:
+		return paths[0] + " submodule"
+	}
+	if len(paths) > 3 {
+		return "submodules"
+	}
+	return humanList(paths) + " submodules"
+}
+
+func humanList(items []string) string {
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0]
+	case 2:
+		return items[0] + " and " + items[1]
+	default:
+		return strings.Join(items[:len(items)-1], ", ") + ", and " + items[len(items)-1]
+	}
+}
+
+func formatSubmoduleBody(submodules []PreparedSubmodule) string {
+	var out []string
+	for _, submodule := range submodules {
+		if submodule.Path == "" {
+			continue
+		}
+		if len(out) > 0 {
+			out = append(out, "")
+		}
+		out = append(out, submodule.Path)
+		entries := formatSubmoduleEntries(submodule)
+		for _, entry := range entries {
+			out = append(out, "  - "+entry)
+		}
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func formatSubmoduleEntries(submodule PreparedSubmodule) []string {
+	entries := make([]string, 0, len(submodule.Commits))
+	for _, commit := range submodule.Commits {
+		summary := strings.TrimSpace(commit.Summary)
+		if summary == "" {
+			continue
+		}
+		sha := shortSHA(commit.SHA)
+		if sha == "" {
+			entries = append(entries, summary)
+			continue
+		}
+		entries = append(entries, sha+": "+summary)
+	}
+	if len(entries) > 0 {
+		return entries
+	}
+
+	switch {
+	case submodule.NewSHA != "":
+		return []string{shortSHA(submodule.NewSHA) + ": update submodule pointer"}
+	case submodule.OldSHA != "":
+		return []string{shortSHA(submodule.OldSHA) + ": remove submodule pointer"}
+	default:
+		return []string{"update submodule pointer"}
+	}
+}
+
+func shortSHA(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
+}
+
 func SystemPrompt(mode Mode) string {
 	common := `
 # Identity

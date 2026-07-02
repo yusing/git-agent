@@ -34,6 +34,13 @@ func TestRunCommitMsgRequiresAPIKey(t *testing.T) {
 	t.Setenv("OPENAI_BASE_URL", "")
 	t.Setenv("OPENAI_MODEL", "")
 	t.Setenv("HOME", t.TempDir())
+	repoDir := initRepo(t)
+	runGit(t, repoDir, "commit", "-m", "Initial commit")
+	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("content\nupdated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "add", "app.txt")
+	t.Chdir(repoDir)
 
 	app := &App{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
 	err := app.Run(t.Context(), []string{"commit-msg"})
@@ -833,7 +840,11 @@ func TestCommitMsgRepairsSubmoduleUpdateThatDropsCommitSummary(t *testing.T) {
 	runGit(t, repoDir, "commit", "-m", "feat: add wiki submodule")
 
 	runGit(t, filepath.Join(repoDir, "wiki"), "checkout", releaseSHA)
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("wiki docs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	runGit(t, repoDir, "add", "wiki")
+	runGit(t, repoDir, "add", "README.md")
 	t.Chdir(repoDir)
 
 	server := commitMessageSequenceServer(t,
