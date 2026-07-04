@@ -80,10 +80,9 @@ any optional follow-up tool calls.
 
 Generate a commit message from staged changes using the same prompt,
 validation, shaping, guidance, and read-only model tools as `commit-msg`, then
-create the commit by running `git commit --file -` in the
-repository root. This mode writes no `.git-agent/sessions/*/events.ndjson`
-trace. On success, stdout streams a human console trace while
-generating the message, then prints Git's raw commit summary after `git commit`
+create the commit by running `git commit --file -` in the repository root. This
+mode writes no on-disk NDJSON trace. On success, stdout streams a human console
+trace while generating the message, then prints Git's raw commit summary after `git commit`
 succeeds. Trace lines use short local times such as `15:04:05 INF final`, color
 field keys when stdout is a terminal, and render long or multiline values as
 indented preview blocks. Because commit creation is delegated to Git, normal Git
@@ -130,10 +129,10 @@ The command precomputes release-note evidence in Go before generation and then
 asks the model to write from that prepared context, with only a minimal
 read-only fallback tool available for rare gaps.
 By default the rendered Markdown is printed to stdout and a JSON trace is
-written under `.git-agent/sessions/`. With `--out <file>`, the command checks
-the target is writable before generation, streams the human console trace to
-stdout, writes the rendered Markdown to the file, and does not write a JSON
-trace session.
+written under `~/.git-agent/<path-sha>/sessions/`. With `--out <file>`, the
+command checks the target is writable before generation, streams the human
+console trace to stdout, writes the rendered Markdown to the file, and does not
+write a JSON trace session.
 
 #### `git-agent search [--index] [--rev <rev>] [--scope <paths>] <query...>`
 
@@ -161,10 +160,16 @@ and ignores current filesystem contents. Revision mode reads `.gitignore` and
 `.gitagentignore` from the resolved commit tree, not from the working tree.
 
 Search does not run the Responses API, does not call model tools, does not
-create `.git-agent/sessions/` traces, does not generate explanations, and does
-not use lexical fallback, lexical ranking, token overlap, or path/name boosts.
-It embeds the query and local chunks, then performs an exact cosine scan over
-the local binary vector cache.
+create `~/.git-agent/<path-sha>/sessions/` traces, does not generate
+explanations, and does not use lexical fallback, lexical ranking, token overlap,
+or path/name boosts. It embeds the query and local chunks, then performs an
+exact cosine scan over the local binary vector cache.
+
+Persistent metadata is stored under `~/.git-agent/<path-sha>/`, where
+`<path-sha>` is the SHA-256 of the cleaned absolute project root. Search writes
+indexes under `~/.git-agent/<path-sha>/search/`. When a legacy
+`<project>/.git-agent/` directory exists, the next project run migrates its
+contents into the home metadata directory before writing new data.
 
 Chunk embedding text clamps each physical source line to `4000` characters
 before applying the per-input embedding character cap. This bounds minified or
@@ -320,7 +325,8 @@ Resolution order:
   a successful delegated `git commit`
 - `search` writes errors and optional `--debug` diagnostics to stderr only and
   never writes a model trace session
-- generation-only commands write a JSON trace session under `.git-agent/sessions/`
+- generation-only commands write a JSON trace session under
+  `~/.git-agent/<path-sha>/sessions/`
   regardless of `--debug`, except `release-note --out <file>`; `--debug`
   prints the session directory on stderr when a JSON trace session is used
 - `release-note --out <file>` does not write an on-disk NDJSON trace session;
@@ -482,7 +488,7 @@ flowchart TD
     LocalMessage --> Stdout
     SubmoduleOnly -- no --> Resolve[Resolve provider config from flags, env, defaults]
     Resolve --> Guidance[Resolve project guidance for staged paths]
-    Guidance --> Trace[Create .git-agent session trace]
+    Guidance --> Trace[Create home metadata session trace]
     Trace --> Registry[Register read-only commit-message tools]
     Registry --> Runner[Build OpenAI runner with validator and tool specs]
     Runner --> Request[Assemble request layers]
@@ -520,7 +526,7 @@ flowchart TD
     StagedPaths --> Prepare[Precompute amend context]
     Prepare --> Evidence[Collect original HEAD message, HEAD diff, final amended diff, staged diagnostics]
     Evidence --> Guidance[Resolve project guidance for final amended paths]
-    Guidance --> Trace[Create .git-agent session trace with amend mode]
+    Guidance --> Trace[Create home metadata session trace with amend mode]
     Trace --> Registry[Register read-only commit-message tools]
     Registry --> Runner[Build OpenAI runner with amend validator and tool specs]
     Runner --> Request[Assemble amend request layers with prepared amend context]
@@ -601,7 +607,7 @@ flowchart TD
     OpenRepo --> Prepare[Precompute PR context for origin/HEAD..HEAD]
     Prepare --> Evidence[Collect base, changed paths, stats, branch commits, recent commits, bounded diff]
     Evidence --> Guidance[Resolve project guidance for changed paths]
-    Guidance --> Trace[Create .git-agent session trace]
+    Guidance --> Trace[Create home metadata session trace]
     Trace --> Runner[Build OpenAI runner without model tools]
     Runner --> Request[Assemble request layers with prepared PR context]
     Request --> Model[Call Responses API]
@@ -633,7 +639,7 @@ flowchart TD
     Timeout --> OpenRepo[Open repository]
     OpenRepo --> Guidance[Resolve project guidance for repository root]
     Guidance --> Trace{--out set?}
-    Trace -- no --> JSONTrace[Create .git-agent session trace]
+    Trace -- no --> JSONTrace[Create home metadata session trace]
     Trace -- yes --> StreamTrace[Create stdout-streaming console trace]
     JSONTrace --> Registry[Register repo_summary fallback tool]
     StreamTrace --> Registry
@@ -685,8 +691,12 @@ The runtime must enforce:
 Generation-only commands store persistent traces under:
 
 ```text
-.git-agent/sessions/<timestamp>-<command>/
+~/.git-agent/<path-sha>/sessions/<timestamp>-<command>/
 ```
+
+`<path-sha>` is the SHA-256 of the cleaned absolute project root. Existing
+`<project>/.git-agent/` metadata is migrated into this home directory on the
+next project run.
 
 Persistent trace directories contain:
 
@@ -725,7 +735,9 @@ On-disk trace contents include:
 - every tool output returned to the model
 - final generated artifacts and commit errors when relevant
 
-Trace files are diagnostic artifacts and are ignored by Git via `/.git-agent/`.
+Trace files are diagnostic artifacts and live outside the repository. The
+legacy `/.git-agent/` path remains ignored by Git for projects that have not
+run migration yet.
 
 ## 4. Guidance resolution
 
@@ -1211,14 +1223,15 @@ Mitigation:
 Session traces intentionally store prompts, provider responses, tool arguments,
 and tool outputs. They are useful for debugging but may include repository
 content. For `git-agent commit` and `git-agent commit --amend`, the same trace
-data is streamed to stdout instead of being written under `.git-agent/sessions/`;
-large string values are compacted inline with preview metadata.
+data is streamed to stdout instead of being written under
+`~/.git-agent/<path-sha>/sessions/`; large string values are compacted inline
+with preview metadata.
 
 Mitigation:
 
 - redact API keys from request traces
-- store generation-only traces under `.git-agent/`
-- ignore `.git-agent/` in Git
+- store generation-only traces under `~/.git-agent/<path-sha>/`
+- keep legacy `.git-agent/` ignored in Git until migration removes it
 - print trace directory only when `--debug` is enabled
 - document that commit-command stdout may contain repository context and should
   be handled like trace data
@@ -1250,7 +1263,8 @@ The in-repository implementation is complete when:
   guidance resolves against the final amended paths
 - tools are read-only and exposed as strict function tools
 - tool outputs use the stable JSON envelope
-- generation-only commands write a `.git-agent/sessions/<timestamp>-<command>/`
+- generation-only commands write a
+  `~/.git-agent/<path-sha>/sessions/<timestamp>-<command>/`
   trace, except `release-note --out <file>`
 - generation-only stdout contains only the final generated artifact, except
   `release-note --out <file>` streams human console trace lines and writes the

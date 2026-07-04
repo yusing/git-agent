@@ -22,6 +22,7 @@ import (
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/guidance"
+	"github.com/yusing/git-agent/internal/metadata"
 	"github.com/yusing/git-agent/internal/openai"
 	"github.com/yusing/git-agent/internal/tasks/commitmsg"
 	"github.com/yusing/git-agent/internal/tasks/releasenote"
@@ -223,6 +224,9 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := migrateProjectMetadata(repo.RootPath); err != nil {
+		return err
+	}
 	stagedPaths, err := repo.StagedPaths()
 	if err != nil {
 		return err
@@ -271,6 +275,9 @@ func (a *App) runCommit(ctx context.Context, args []string) error {
 
 	repo, err := gitctx.Open(".")
 	if err != nil {
+		return err
+	}
+	if err := migrateProjectMetadata(repo.RootPath); err != nil {
 		return err
 	}
 	stagedPaths, err := repo.StagedPaths()
@@ -521,6 +528,11 @@ func (o gitCommitOutput) ErrorDetails() string {
 	return strings.Join(parts, "\n")
 }
 
+func migrateProjectMetadata(root string) error {
+	_, err := metadata.Dir(root)
+	return err
+}
+
 func commitFailureError(message string, err error) error {
 	return fmt.Errorf("commit failed after message generation: %w\n\nGenerated commit message:\n%s", err, strings.TrimSpace(message))
 }
@@ -550,6 +562,9 @@ func (a *App) runPRMessage(ctx context.Context, args []string) error {
 
 	repo, err := gitctx.Open(".")
 	if err != nil {
+		return err
+	}
+	if err := migrateProjectMetadata(repo.RootPath); err != nil {
 		return err
 	}
 	prepared, err := commitmsg.PreparePRContext(repo)
@@ -656,6 +671,9 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 
 	repo, err := gitctx.Open(".")
 	if err != nil {
+		return err
+	}
+	if err := migrateProjectMetadata(repo.RootPath); err != nil {
 		return err
 	}
 	rangeArgs, err := releaseNoteRangeForArgs(repo, fs.Args())

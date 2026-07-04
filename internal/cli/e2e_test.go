@@ -96,21 +96,21 @@ func runSearch() {
 		t.Fatalf("changed run should re-embed changed chunks and reuse cached query embedding; calls = %d", got)
 	}
 
-	manifests, err := filepath.Glob(filepath.Join(root, ".git-agent", "search", "fs", "*", "manifest.json"))
+	manifests, err := filepath.Glob(filepath.Join(projectMetadataDir(t, root), "search", "fs", "*", "manifest.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(manifests) == 0 {
 		t.Fatal("search index manifest was not written")
 	}
-	vectorFiles, err := filepath.Glob(filepath.Join(root, ".git-agent", "search", "fs", "*", "vectors.f32"))
+	vectorFiles, err := filepath.Glob(filepath.Join(projectMetadataDir(t, root), "search", "fs", "*", "vectors.f32"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(vectorFiles) == 0 {
 		t.Fatal("search binary vector cache was not written")
 	}
-	if _, err := os.Stat(filepath.Join(root, ".git-agent", "sessions")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(projectMetadataDir(t, root), "sessions")); !os.IsNotExist(err) {
 		t.Fatalf("search should not create model sessions, stat err = %v", err)
 	}
 }
@@ -245,6 +245,13 @@ func TestCommitMsgSubmoduleOnlySkipsProviderAuth(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("OPENAI_BASE_URL", "")
 	t.Setenv("OPENAI_MODEL", "")
+	legacyMarker := filepath.Join(fixture.repoDir, ".git-agent", "search", "legacy.txt")
+	if err := os.MkdirAll(filepath.Dir(legacyMarker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyMarker, []byte("legacy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -263,8 +270,15 @@ webui
 	if stderr.String() != "" {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
-	if _, err := os.Stat(filepath.Join(fixture.repoDir, ".git-agent", "sessions")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(projectMetadataDir(t, fixture.repoDir), "sessions")); !os.IsNotExist(err) {
 		t.Fatalf("deterministic commit-msg should not create trace sessions, stat err = %v", err)
+	}
+	migratedMarker := filepath.Join(projectMetadataDir(t, fixture.repoDir), "search", "legacy.txt")
+	if data, err := os.ReadFile(migratedMarker); err != nil || string(data) != "legacy\n" {
+		t.Fatalf("legacy metadata marker = %q, %v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.repoDir, ".git-agent")); !os.IsNotExist(err) {
+		t.Fatalf("legacy metadata dir stat err = %v, want migrated", err)
 	}
 }
 
@@ -296,7 +310,7 @@ webui
 	if got := gitHeadMessage(t, fixture.repoDir); got != want {
 		t.Fatalf("HEAD message:\n%s\nwant:\n%s", got, want)
 	}
-	if _, err := os.Stat(filepath.Join(fixture.repoDir, ".git-agent", "sessions")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(projectMetadataDir(t, fixture.repoDir), "sessions")); !os.IsNotExist(err) {
 		t.Fatalf("deterministic commit should not create trace sessions, stat err = %v", err)
 	}
 }
@@ -1510,7 +1524,7 @@ func streamCompletedEvent(responseJSON string) string {
 func assertTraceArtifacts(t *testing.T, repoDir, pattern string, minToolCalls int) {
 	t.Helper()
 
-	sessions, err := filepath.Glob(filepath.Join(repoDir, ".git-agent", "sessions", pattern))
+	sessions, err := filepath.Glob(filepath.Join(projectMetadataDir(t, repoDir), "sessions", pattern))
 	if err != nil {
 		t.Fatal(err)
 	}

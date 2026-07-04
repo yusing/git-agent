@@ -28,6 +28,7 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
 	"github.com/yusing/git-agent/internal/gitctx"
+	"github.com/yusing/git-agent/internal/metadata"
 	"github.com/yusing/git-agent/internal/openai"
 	"golang.org/x/sync/errgroup"
 )
@@ -340,7 +341,11 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	diag.Chunks = len(chunks)
 	mark("chunk")
 
-	indexDir := indexDir(indexRoot, source.Mode, root, resolvedRev, opts.CodeOnly, scope)
+	metadataDir, err := metadata.Dir(indexRoot)
+	if err != nil {
+		return fail(err)
+	}
+	indexDir := indexDir(metadataDir, source.Mode, root, resolvedRev, opts.CodeOnly, scope)
 	diag.IndexDir = indexDir
 	oldVectors, _ := loadVectors(indexDir)
 	vectors, records, reused := reuseVectors(chunks, oldVectors, opts)
@@ -1755,10 +1760,10 @@ func indexDir(base, mode, root, resolvedRev string, codeOnly bool, scope []strin
 		filter = filepath.Join("scope-"+hex.EncodeToString(sum[:])[:16], filter)
 	}
 	if mode == "revision" {
-		return filepath.Join(base, ".git-agent", "search", "revs", resolvedRev, filter)
+		return filepath.Join(base, "search", "revs", resolvedRev, filter)
 	}
 	sum := sha256.Sum256([]byte(root))
-	return filepath.Join(base, ".git-agent", "search", "fs", hex.EncodeToString(sum[:])[:16], filter)
+	return filepath.Join(base, "search", "fs", hex.EncodeToString(sum[:])[:16], filter)
 }
 
 func chunkVectorKey(chunk Chunk, model string, dimensions int) string {

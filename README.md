@@ -114,12 +114,18 @@ If `$(FISH_CONFIG_DIR)` exists, `make install` also installs fish completions to
 Message-generation commands store a JSON trace under:
 
 ```text
-.git-agent/sessions/<timestamp>-<command>/
+~/.git-agent/<path-sha>/sessions/<timestamp>-<command>/
 ```
 
 Trace files include session metadata, provider requests/responses, tool calls,
 and returned tool output. API keys are redacted. `--debug` prints the trace
 directory to stderr.
+
+The `<path-sha>` component is the SHA-256 of the cleaned absolute project root.
+Search indexes use the same project metadata root under
+`~/.git-agent/<path-sha>/search/`. On the next run for an existing project,
+legacy metadata from `<project>/.git-agent/` is migrated into the home metadata
+directory automatically.
 
 `--pprof <addr>` serves Go pprof endpoints on the requested address, for example
 `:7777`.

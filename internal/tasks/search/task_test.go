@@ -22,6 +22,19 @@ import (
 	"github.com/yusing/git-agent/internal/openai"
 )
 
+func TestMain(m *testing.M) {
+	home, err := os.MkdirTemp("", "git-agent-search-home-*")
+	if err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("HOME", home); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(home)
+	os.Exit(code)
+}
+
 type fakeEmbedder struct{}
 
 func (fakeEmbedder) CreateEmbeddings(_ context.Context, request openai.EmbeddingRequest) (openai.EmbeddingResponse, error) {

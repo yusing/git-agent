@@ -20,6 +20,7 @@ import (
 
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/gitctx"
+	"github.com/yusing/git-agent/internal/metadata"
 )
 
 func TestRunWithoutArgsReturnsUsage(t *testing.T) {
@@ -167,7 +168,7 @@ func TestSearchPrintsJSONAndUsesEmbeddingsOnly(t *testing.T) {
 	if len(out.Results) != 1 || out.Results[0].Range != "notes.txt:1-1" {
 		t.Fatalf("results = %#v", out.Results)
 	}
-	if _, err := os.Stat(filepath.Join(root, ".git-agent", "sessions")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(projectMetadataDir(t, root), "sessions")); !os.IsNotExist(err) {
 		t.Fatalf("sessions stat err = %v, want not exist", err)
 	}
 	if len(paths) == 0 {
@@ -728,7 +729,7 @@ func TestCommitMsgPrintsOnlyProviderArtifact(t *testing.T) {
 	if stderr.String() != "" {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
-	sessions, err := filepath.Glob(filepath.Join(repoDir, ".git-agent", "sessions", "*-commit-msg"))
+	sessions, err := filepath.Glob(filepath.Join(projectMetadataDir(t, repoDir), "sessions", "*-commit-msg"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1269,7 +1270,7 @@ func TestPRMessageUsesPreparedOriginHeadContextAndPrintsArtifact(t *testing.T) {
 	if strings.Contains(requests[0], "git_pr_") {
 		t.Fatalf("pr-message request should not expose PR tools:\n%s", requests[0])
 	}
-	sessions, err := filepath.Glob(filepath.Join(repoDir, ".git-agent", "sessions", "*-pr-message"))
+	sessions, err := filepath.Glob(filepath.Join(projectMetadataDir(t, repoDir), "sessions", "*-pr-message"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1444,7 +1445,7 @@ func TestReleaseNoteOutWritesFileAndStreamsTrace(t *testing.T) {
 	if got := eventValue(t, events, "final")["tool_calls"]; got != "0" {
 		t.Fatalf("final tool_calls = %#v", got)
 	}
-	sessions, err := filepath.Glob(filepath.Join(repoDir, ".git-agent", "sessions", "*-release-note"))
+	sessions, err := filepath.Glob(filepath.Join(projectMetadataDir(t, repoDir), "sessions", "*-release-note"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1554,6 +1555,19 @@ func initRepo(t *testing.T) string {
 	}
 	runGit(t, dir, "add", "app.txt")
 	return dir
+}
+
+func projectMetadataDir(t *testing.T, root string) string {
+	t.Helper()
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		t.Fatal("HOME is not set")
+	}
+	return filepath.Join(home, ".git-agent", metadata.PathSHA(abs))
 }
 
 func runGit(t *testing.T, dir string, args ...string) {

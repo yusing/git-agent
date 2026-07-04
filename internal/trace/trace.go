@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bytedance/sonic"
+	"github.com/yusing/git-agent/internal/metadata"
 )
 
 type Recorder struct {
@@ -89,7 +90,11 @@ func New(root, command string) (*Recorder, error) {
 	now := time.Now().UTC()
 	stamp := now.Format("20060102T150405.000000000Z")
 	sessionID := stamp + "-" + command
-	dir := filepath.Join(root, ".git-agent", "sessions", sessionID)
+	metadataDir, err := metadata.Dir(root)
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(metadataDir, "sessions", sessionID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
