@@ -52,7 +52,7 @@ func migrate(legacyDir, dir string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("legacy metadata path %s is not a directory", legacyDir)
 	}
-	if samePath(legacyDir, dir) {
+	if sameOrContainsPath(legacyDir, dir) || sameExistingPath(legacyDir, filepath.Dir(dir)) {
 		return nil
 	}
 	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
@@ -152,11 +152,21 @@ func conflictSuffix(i int) string {
 	return fmt.Sprintf("-%d", i)
 }
 
-func samePath(left, right string) bool {
-	leftAbs, leftErr := filepath.Abs(left)
-	rightAbs, rightErr := filepath.Abs(right)
-	if leftErr != nil || rightErr != nil {
+func sameOrContainsPath(parent, child string) bool {
+	parentAbs, parentErr := filepath.Abs(parent)
+	childAbs, childErr := filepath.Abs(child)
+	if parentErr != nil || childErr != nil {
 		return false
 	}
-	return filepath.Clean(leftAbs) == filepath.Clean(rightAbs)
+	rel, err := filepath.Rel(filepath.Clean(parentAbs), filepath.Clean(childAbs))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+func sameExistingPath(left, right string) bool {
+	leftInfo, leftErr := os.Stat(left)
+	rightInfo, rightErr := os.Stat(right)
+	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }

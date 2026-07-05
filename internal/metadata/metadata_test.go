@@ -79,3 +79,63 @@ func TestDirPreservesConflictingNewFilesDuringMigration(t *testing.T) {
 		t.Fatalf("legacy file = %q at %s", legacy, matches[0])
 	}
 }
+
+func TestDirSkipsMigrationWhenHomeMetadataContainsDestination(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+
+	metadataRoot := filepath.Join(root, dirName)
+	if err := os.MkdirAll(metadataRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataRoot, "marker.txt"), []byte("home metadata\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dir, err := Dir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(metadataRoot, PathSHA(root))
+	if dir != want {
+		t.Fatalf("dir = %q, want %q", dir, want)
+	}
+	if _, err := os.Stat(filepath.Join(metadataRoot, "marker.txt")); err != nil {
+		t.Fatalf("home metadata marker missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(want, PathSHA(root))); !os.IsNotExist(err) {
+		t.Fatalf("nested metadata stat err = %v, want not exist", err)
+	}
+}
+
+func TestDirSkipsMigrationWhenHomeSymlinkContainsDestination(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.Symlink(root, home); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	t.Setenv("HOME", home)
+
+	metadataRoot := filepath.Join(root, dirName)
+	if err := os.MkdirAll(metadataRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataRoot, "marker.txt"), []byte("home metadata\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dir, err := Dir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, dirName, PathSHA(root))
+	if dir != want {
+		t.Fatalf("dir = %q, want %q", dir, want)
+	}
+	if _, err := os.Stat(filepath.Join(metadataRoot, "marker.txt")); err != nil {
+		t.Fatalf("home metadata marker missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(want, PathSHA(root))); !os.IsNotExist(err) {
+		t.Fatalf("nested metadata stat err = %v, want not exist", err)
+	}
+}
