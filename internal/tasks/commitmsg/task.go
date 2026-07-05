@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/bytedance/sonic"
 	"github.com/yusing/git-agent/internal/contextpack"
@@ -127,6 +128,24 @@ func FormatSubmoduleOnlyCommit(prepared PreparedCommitContext) (string, bool) {
 		return subject, true
 	}
 	return Shape(subject + "\n\n" + body), true
+}
+
+// FormatSubmoduleOnlyCommitForRepo checks the submodule-only path without preparing full commit context.
+func FormatSubmoduleOnlyCommitForRepo(repo *gitctx.Repository, stagedPaths []string) (string, bool, error) {
+	stagedSubmodules, err := prepareStagedSubmodules(repo)
+	if err != nil {
+		return "", false, err
+	}
+	if len(stagedSubmodules) == 0 {
+		return "", false, nil
+	}
+	recentCommits, _ := repo.RecentCommits(10)
+	message, ok := FormatSubmoduleOnlyCommit(PreparedCommitContext{
+		StagedPaths:      stagedPaths,
+		StagedSubmodules: stagedSubmodules,
+		RecentCommits:    recentCommits,
+	})
+	return message, ok, nil
 }
 
 func isSubmoduleOnlyCommit(prepared PreparedCommitContext) bool {
@@ -432,142 +451,242 @@ Return only the commit message.
 `, maxSteps, maxToolCalls, strings.TrimSpace(originalMessage)))
 }
 
+type boundedDiffResult struct {
+	Text      string
+	Truncated bool
+}
+
+type focusDiffResult struct {
+	Text      string
+	Paths     []string
+	Truncated bool
+}
+
+type collected[T any] struct {
+	value T
+	err   error
+}
+
+func collectWithRepo[T any](wg *sync.WaitGroup, root string, fn func(*gitctx.Repository) (T, error)) *collected[T] {
+	result := &collected[T]{}
+	wg.Go(func() {
+		taskRepo, err := gitctx.Open(root)
+		if err != nil {
+			result.err = err
+			return
+		}
+		result.value, result.err = fn(taskRepo)
+	})
+	return result
+}
+
+func collectBestEffortWithRepo[T any](wg *sync.WaitGroup, root string, fn func(*gitctx.Repository) (T, error)) *collected[T] {
+	return collectWithRepo(wg, root, fn)
+}
+
 func PrepareCommitContext(repo *gitctx.Repository) (PreparedCommitContext, error) {
-	stagedPaths, err := repo.StagedPaths()
-	if err != nil {
-		return PreparedCommitContext{}, err
+	var wg sync.WaitGroup
+	root := repo.RootPath
+	stagedPaths := collectWithRepo(&wg, root, (*gitctx.Repository).StagedPaths)
+	stagedStatus := collectWithRepo(&wg, root, (*gitctx.Repository).StagedStatus)
+	stagedStats := collectWithRepo(&wg, root, (*gitctx.Repository).StagedStat)
+	stagedSubmodules := collectWithRepo(&wg, root, prepareStagedSubmodules)
+	diff := collectWithRepo(&wg, root, func(taskRepo *gitctx.Repository) (boundedDiffResult, error) {
+		text, truncated, err := taskRepo.StagedDiff(48*1024, 1200)
+		return boundedDiffResult{Text: text, Truncated: truncated}, err
+	})
+	recentCommits := collectBestEffortWithRepo(&wg, root, func(taskRepo *gitctx.Repository) ([]gitctx.CommitInfo, error) {
+		return taskRepo.RecentCommits(10)
+	})
+	previousHeadPaths := collectBestEffortWithRepo(&wg, root, (*gitctx.Repository).DiffAgainstParentPaths)
+	previousHeadStats := collectBestEffortWithRepo(&wg, root, (*gitctx.Repository).DiffAgainstParentStat)
+	previousHeadDiff := collectBestEffortWithRepo(&wg, root, func(taskRepo *gitctx.Repository) (boundedDiffResult, error) {
+		text, truncated, err := taskRepo.DiffAgainstParent(24*1024, 700)
+		return boundedDiffResult{Text: text, Truncated: truncated}, err
+	})
+	wg.Wait()
+
+	if stagedPaths.err != nil {
+		return PreparedCommitContext{}, stagedPaths.err
 	}
-	stagedStatus, err := repo.StagedStatus()
-	if err != nil {
-		return PreparedCommitContext{}, err
+	if stagedStatus.err != nil {
+		return PreparedCommitContext{}, stagedStatus.err
 	}
-	stagedStats, err := repo.StagedStat()
-	if err != nil {
-		return PreparedCommitContext{}, err
+	if stagedStats.err != nil {
+		return PreparedCommitContext{}, stagedStats.err
 	}
-	stagedSubmodules, err := prepareStagedSubmodules(repo)
-	if err != nil {
-		return PreparedCommitContext{}, err
+	if stagedSubmodules.err != nil {
+		return PreparedCommitContext{}, stagedSubmodules.err
 	}
-	recentCommits, _ := repo.RecentCommits(10)
-	previousHeadPaths, _ := repo.DiffAgainstParentPaths()
-	previousHeadStats, _ := repo.DiffAgainstParentStat()
-	previousHeadDiff, previousHeadDiffTruncated, _ := repo.DiffAgainstParent(24*1024, 700)
-	diff, diffTruncated, err := repo.StagedDiff(48*1024, 1200)
-	if err != nil {
-		return PreparedCommitContext{}, err
+	if diff.err != nil {
+		return PreparedCommitContext{}, diff.err
 	}
-	contextPack := prepareContextPack(repo, stagedPaths, stagedStatus, stagedStats)
-	previousHeadContextPack := prepareRevisionContextPack(repo, "HEAD", previousHeadPaths, previousHeadStats)
-	focusDiff, focusDiffPaths, focusDiffTruncated, err := prepareFocusDiff(repo, contextPack, diff, diffTruncated)
-	if err != nil {
-		return PreparedCommitContext{}, err
+
+	contextPack := collectWithRepo(&wg, root, func(taskRepo *gitctx.Repository) (contextpack.ContextPack, error) {
+		return prepareContextPack(taskRepo, stagedPaths.value, stagedStatus.value, stagedStats.value), nil
+	})
+	previousHeadContextPack := collectWithRepo(&wg, root, func(taskRepo *gitctx.Repository) (contextpack.ContextPack, error) {
+		return prepareRevisionContextPack(taskRepo, "HEAD", previousHeadPaths.value, previousHeadStats.value), nil
+	})
+	wg.Wait()
+	if contextPack.err != nil {
+		return PreparedCommitContext{}, contextPack.err
 	}
-	outlierDiff, outlierDiffTruncated, err := prepareOutlierDiff(repo, contextPack)
-	if err != nil {
-		return PreparedCommitContext{}, err
+	if previousHeadContextPack.err != nil {
+		return PreparedCommitContext{}, previousHeadContextPack.err
+	}
+
+	focusDiff := collectWithRepo(&wg, root, func(taskRepo *gitctx.Repository) (focusDiffResult, error) {
+		text, paths, truncated, err := prepareFocusDiff(taskRepo, contextPack.value, diff.value.Text, diff.value.Truncated)
+		return focusDiffResult{Text: text, Paths: paths, Truncated: truncated}, err
+	})
+	outlierDiff := collectWithRepo(&wg, root, func(taskRepo *gitctx.Repository) (boundedDiffResult, error) {
+		text, truncated, err := prepareOutlierDiff(taskRepo, contextPack.value)
+		return boundedDiffResult{Text: text, Truncated: truncated}, err
+	})
+	wg.Wait()
+	if focusDiff.err != nil {
+		return PreparedCommitContext{}, focusDiff.err
+	}
+	if outlierDiff.err != nil {
+		return PreparedCommitContext{}, outlierDiff.err
 	}
 
 	return PreparedCommitContext{
 		Mode:                      ModeNormal,
-		StagedPaths:               stagedPaths,
-		StagedStatus:              stagedStatus,
-		StagedStats:               stagedStats,
-		StagedSubmodules:          stagedSubmodules,
-		ContextPack:               contextPack,
-		RecentCommits:             recentCommits,
-		PreviousHeadPaths:         previousHeadPaths,
-		PreviousHeadStats:         previousHeadStats,
-		PreviousHeadContextPack:   previousHeadContextPack,
-		PreviousHeadDiff:          previousHeadDiff,
-		PreviousHeadDiffTruncated: previousHeadDiffTruncated,
-		FocusDiff:                 focusDiff,
-		FocusDiffPaths:            focusDiffPaths,
-		FocusDiffTruncated:        focusDiffTruncated,
-		OutlierDiff:               outlierDiff,
-		OutlierDiffTruncated:      outlierDiffTruncated,
-		Diff:                      diff,
-		DiffTruncated:             diffTruncated,
+		StagedPaths:               stagedPaths.value,
+		StagedStatus:              stagedStatus.value,
+		StagedStats:               stagedStats.value,
+		StagedSubmodules:          stagedSubmodules.value,
+		ContextPack:               contextPack.value,
+		RecentCommits:             recentCommits.value,
+		PreviousHeadPaths:         previousHeadPaths.value,
+		PreviousHeadStats:         previousHeadStats.value,
+		PreviousHeadContextPack:   previousHeadContextPack.value,
+		PreviousHeadDiff:          previousHeadDiff.value.Text,
+		PreviousHeadDiffTruncated: previousHeadDiff.value.Truncated,
+		FocusDiff:                 focusDiff.value.Text,
+		FocusDiffPaths:            focusDiff.value.Paths,
+		FocusDiffTruncated:        focusDiff.value.Truncated,
+		OutlierDiff:               outlierDiff.value.Text,
+		OutlierDiffTruncated:      outlierDiff.value.Truncated,
+		Diff:                      diff.value.Text,
+		DiffTruncated:             diff.value.Truncated,
 	}, nil
 }
 
 func PrepareAmendContext(repo *gitctx.Repository) (PreparedAmendContext, error) {
-	originalMessage, err := repo.HeadMessage()
-	if err != nil {
-		return PreparedAmendContext{}, err
+	var wg sync.WaitGroup
+	root := repo.RootPath
+	originalMessage := collectWithRepo(&wg, root, (*gitctx.Repository).HeadMessage)
+	head := collectWithRepo(&wg, root, (*gitctx.Repository).HeadInfo)
+	stagedPaths := collectWithRepo(&wg, root, (*gitctx.Repository).StagedPaths)
+	stagedStatus := collectWithRepo(&wg, root, (*gitctx.Repository).StagedStatus)
+	stagedStats := collectWithRepo(&wg, root, (*gitctx.Repository).StagedStat)
+	stagedSubmodules := collectWithRepo(&wg, root, prepareStagedSubmodules)
+	finalPaths := collectWithRepo(&wg, root, (*gitctx.Repository).FinalAmendedPaths)
+	finalStats := collectWithRepo(&wg, root, (*gitctx.Repository).FinalAmendedStat)
+	finalDiff := collectWithRepo(&wg, root, func(taskRepo *gitctx.Repository) (boundedDiffResult, error) {
+		text, truncated, err := taskRepo.FinalAmendedDiff(48*1024, 1200)
+		return boundedDiffResult{Text: text, Truncated: truncated}, err
+	})
+	headPaths := collectWithRepo(&wg, root, (*gitctx.Repository).DiffAgainstParentPaths)
+	headStats := collectWithRepo(&wg, root, (*gitctx.Repository).DiffAgainstParentStat)
+	headDiff := collectWithRepo(&wg, root, func(taskRepo *gitctx.Repository) (boundedDiffResult, error) {
+		text, truncated, err := taskRepo.DiffAgainstParent(24*1024, 700)
+		return boundedDiffResult{Text: text, Truncated: truncated}, err
+	})
+	amendDelta := collectWithRepo(&wg, root, func(taskRepo *gitctx.Repository) (boundedDiffResult, error) {
+		text, truncated, err := taskRepo.AmendDelta(24*1024, 700)
+		return boundedDiffResult{Text: text, Truncated: truncated}, err
+	})
+	recentCommits := collectBestEffortWithRepo(&wg, root, func(taskRepo *gitctx.Repository) ([]gitctx.CommitInfo, error) {
+		return taskRepo.RecentCommits(10)
+	})
+	wg.Wait()
+
+	if originalMessage.err != nil {
+		return PreparedAmendContext{}, originalMessage.err
 	}
-	head, err := repo.HeadInfo()
-	if err != nil {
-		return PreparedAmendContext{}, err
+	if head.err != nil {
+		return PreparedAmendContext{}, head.err
 	}
-	stagedPaths, err := repo.StagedPaths()
-	if err != nil {
-		return PreparedAmendContext{}, err
+	if stagedPaths.err != nil {
+		return PreparedAmendContext{}, stagedPaths.err
 	}
-	stagedStatus, err := repo.StagedStatus()
-	if err != nil {
-		return PreparedAmendContext{}, err
+	if stagedStatus.err != nil {
+		return PreparedAmendContext{}, stagedStatus.err
 	}
-	stagedStats, err := repo.StagedStat()
-	if err != nil {
-		return PreparedAmendContext{}, err
+	if stagedStats.err != nil {
+		return PreparedAmendContext{}, stagedStats.err
 	}
-	stagedSubmodules, err := prepareStagedSubmodules(repo)
-	if err != nil {
-		return PreparedAmendContext{}, err
+	if stagedSubmodules.err != nil {
+		return PreparedAmendContext{}, stagedSubmodules.err
 	}
-	finalPaths, err := repo.FinalAmendedPaths()
-	if err != nil {
-		return PreparedAmendContext{}, err
+	if finalPaths.err != nil {
+		return PreparedAmendContext{}, finalPaths.err
 	}
-	finalStats, err := repo.FinalAmendedStat()
-	if err != nil {
-		return PreparedAmendContext{}, err
+	if finalStats.err != nil {
+		return PreparedAmendContext{}, finalStats.err
 	}
-	finalDiff, finalDiffTruncated, err := repo.FinalAmendedDiff(48*1024, 1200)
-	if err != nil {
-		return PreparedAmendContext{}, err
+	if finalDiff.err != nil {
+		return PreparedAmendContext{}, finalDiff.err
 	}
-	headPaths, err := repo.DiffAgainstParentPaths()
-	if err != nil {
-		return PreparedAmendContext{}, err
+	if headPaths.err != nil {
+		return PreparedAmendContext{}, headPaths.err
 	}
-	headStats, err := repo.DiffAgainstParentStat()
-	if err != nil {
-		return PreparedAmendContext{}, err
+	if headStats.err != nil {
+		return PreparedAmendContext{}, headStats.err
 	}
-	headDiff, headDiffTruncated, err := repo.DiffAgainstParent(24*1024, 700)
-	if err != nil {
-		return PreparedAmendContext{}, err
+	if headDiff.err != nil {
+		return PreparedAmendContext{}, headDiff.err
 	}
-	amendDelta, amendDeltaTruncated, err := repo.AmendDelta(24*1024, 700)
-	if err != nil {
-		return PreparedAmendContext{}, err
+	if amendDelta.err != nil {
+		return PreparedAmendContext{}, amendDelta.err
 	}
-	recentCommits, _ := repo.RecentCommits(10)
+
+	finalContextPack := collectWithRepo(&wg, root, func(taskRepo *gitctx.Repository) (contextpack.ContextPack, error) {
+		return prepareIndexContextPack(taskRepo, finalPaths.value, finalStats.value, "final"), nil
+	})
+	headContextPack := collectWithRepo(&wg, root, func(taskRepo *gitctx.Repository) (contextpack.ContextPack, error) {
+		return prepareRevisionContextPack(taskRepo, "HEAD", headPaths.value, headStats.value), nil
+	})
+	stagedContextPack := collectWithRepo(&wg, root, func(taskRepo *gitctx.Repository) (contextpack.ContextPack, error) {
+		return prepareContextPack(taskRepo, stagedPaths.value, stagedStatus.value, stagedStats.value), nil
+	})
+	wg.Wait()
+	if finalContextPack.err != nil {
+		return PreparedAmendContext{}, finalContextPack.err
+	}
+	if headContextPack.err != nil {
+		return PreparedAmendContext{}, headContextPack.err
+	}
+	if stagedContextPack.err != nil {
+		return PreparedAmendContext{}, stagedContextPack.err
+	}
 
 	return PreparedAmendContext{
 		Mode:                ModeAmend,
-		OriginalHeadMessage: strings.TrimSpace(originalMessage),
-		Head:                head,
-		RecentCommits:       recentCommits,
-		FinalPaths:          finalPaths,
-		FinalStats:          finalStats,
-		FinalContextPack:    prepareIndexContextPack(repo, finalPaths, finalStats, "final"),
-		FinalDiff:           finalDiff,
-		FinalDiffTruncated:  finalDiffTruncated,
-		HeadPaths:           headPaths,
-		HeadStats:           headStats,
-		HeadContextPack:     prepareRevisionContextPack(repo, "HEAD", headPaths, headStats),
-		HeadDiff:            headDiff,
-		HeadDiffTruncated:   headDiffTruncated,
-		StagedPaths:         stagedPaths,
-		StagedStatus:        stagedStatus,
-		StagedStats:         stagedStats,
-		StagedSubmodules:    stagedSubmodules,
-		StagedContextPack:   prepareContextPack(repo, stagedPaths, stagedStatus, stagedStats),
-		AmendDelta:          amendDelta,
-		AmendDeltaTruncated: amendDeltaTruncated,
+		OriginalHeadMessage: strings.TrimSpace(originalMessage.value),
+		Head:                head.value,
+		RecentCommits:       recentCommits.value,
+		FinalPaths:          finalPaths.value,
+		FinalStats:          finalStats.value,
+		FinalContextPack:    finalContextPack.value,
+		FinalDiff:           finalDiff.value.Text,
+		FinalDiffTruncated:  finalDiff.value.Truncated,
+		HeadPaths:           headPaths.value,
+		HeadStats:           headStats.value,
+		HeadContextPack:     headContextPack.value,
+		HeadDiff:            headDiff.value.Text,
+		HeadDiffTruncated:   headDiff.value.Truncated,
+		StagedPaths:         stagedPaths.value,
+		StagedStatus:        stagedStatus.value,
+		StagedStats:         stagedStats.value,
+		StagedSubmodules:    stagedSubmodules.value,
+		StagedContextPack:   stagedContextPack.value,
+		AmendDelta:          amendDelta.value.Text,
+		AmendDeltaTruncated: amendDelta.value.Truncated,
 	}, nil
 }
 

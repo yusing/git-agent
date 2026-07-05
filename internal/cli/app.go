@@ -234,10 +234,11 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 	if len(stagedPaths) == 0 {
 		return errors.New("commit-msg requires staged changes")
 	}
-	if result, ok, err := deterministicCommitMessage(repo, mode); err != nil {
+	deterministicResult, ok, err := deterministicCommitMessage(repo, mode, stagedPaths)
+	if err != nil {
 		return err
 	} else if ok {
-		return a.writeResult(localCfg, result)
+		return a.writeResult(localCfg, deterministicResult)
 	}
 
 	cfg, err := config.Resolve(opts)
@@ -287,15 +288,16 @@ func (a *App) runCommit(ctx context.Context, args []string) error {
 	if len(stagedPaths) == 0 {
 		return errors.New("commit requires staged changes")
 	}
-	if result, ok, err := deterministicCommitMessage(repo, mode); err != nil {
+	deterministicResult, ok, err := deterministicCommitMessage(repo, mode, stagedPaths)
+	if err != nil {
 		return err
 	} else if ok {
 		if localCfg.Debug {
-			a.writeDebugEvent("agent_summary", slog.Int("tool_calls", result.ToolCalls), slog.Int("repair_calls", result.RepairCalls))
+			a.writeDebugEvent("agent_summary", slog.Int("tool_calls", deterministicResult.ToolCalls), slog.Int("repair_calls", deterministicResult.RepairCalls))
 		}
-		commitOutput, err := gitCommit(taskCtx, repo, result.Text, mode == commitmsg.ModeAmend)
+		commitOutput, err := gitCommit(taskCtx, repo, deterministicResult.Text, mode == commitmsg.ModeAmend)
 		if err != nil {
-			return commitFailureError(result.Text, err)
+			return commitFailureError(deterministicResult.Text, err)
 		}
 		if commitOutput.stderr != "" {
 			if _, err := fmt.Fprint(a.stderr, commitOutput.stderr); err != nil {
@@ -341,17 +343,13 @@ func (a *App) runCommit(ctx context.Context, args []string) error {
 	return err
 }
 
-func deterministicCommitMessage(repo *gitctx.Repository, mode commitmsg.Mode) (agent.Result, bool, error) {
+func deterministicCommitMessage(repo *gitctx.Repository, mode commitmsg.Mode, stagedPaths []string) (agent.Result, bool, error) {
 	if mode != commitmsg.ModeNormal {
 		return agent.Result{}, false, nil
 	}
-	prepared, err := commitmsg.PrepareCommitContext(repo)
-	if err != nil {
+	message, ok, err := commitmsg.FormatSubmoduleOnlyCommitForRepo(repo, stagedPaths)
+	if err != nil || !ok {
 		return agent.Result{}, false, err
-	}
-	message, ok := commitmsg.FormatSubmoduleOnlyCommit(prepared)
-	if !ok {
-		return agent.Result{}, false, nil
 	}
 	return agent.Result{Text: message}, true, nil
 }
