@@ -13,7 +13,7 @@ final Git commit after message generation.
 - `git-agent pr-message`
 - `git-agent release-note [--out <file>] <base> <release>`
 - `git-agent release-note [--out <file>] patch|minor|major`
-- `git-agent search [--index] [--rev <rev>] [--scope <paths>] [--code] [--format json|brief] [--min-relatedness <score>] [--limit <n>] <query...>`
+- `git-agent search [flags] <query...>`
 
 ## Configuration
 
@@ -76,14 +76,20 @@ Common flags:
 `search` is embeddings-only semantic retrieval for agents. It searches the
 current filesystem by default, or a committed tree with `--rev <rev>`, and
 writes JSON results to stdout by default. Use `--format brief` for compact
-line-oriented results. Use `--code` to limit candidates to source-code files.
+line-oriented results. Use `--code` to limit candidates to source-code files by
+extension. The code filter does not exclude tests by name, and filesystem mode
+still includes staged, unstaged, and untracked files when they are present under
+the search root and not ignored or skipped. Generated Go files with a
+pre-package `DO NOT EDIT` heading are included as path-only chunks so generated
+body content is not embedded.
 Use `--scope foo,bar/baz` to limit search or indexing to comma-separated
 root-relative paths. Use `--index` without a query to build or refresh missing
 embeddings without searching; add `--reindex` to rebuild existing embeddings too.
 Search uses `OPENAI_EMBEDDING_API_KEY` when set, then falls back to
 `OPENAI_API_KEY`; Codex/ChatGPT auth is not used for embeddings. Successful
 indexing writes the local cache after embedding completes. See `docs/spec.md`
-for exact output, file discovery, ignore-file, skip, cache, and debug behavior.
+for exact output, file discovery, ignore-file, skip, cache, and debug behavior;
+run `git-agent search --help` for the current search flag list.
 
 Behavior defaults:
 

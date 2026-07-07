@@ -28,7 +28,10 @@
   behavior.
 - When behavior, commands, flags, output contracts, or architecture change,
   update the related docs in the same patch.
-- When CLI usage changes, update shell completions in the same patch.
+- When CLI flags change, update every related surface in the same patch:
+  `docs/spec.md` for the normative contract, `README.md` for user-facing usage,
+  `internal/cli/app.go` help text and related tests, and
+  `completions/git-agent.*` when completion candidates change.
 - Do not use `exec.Command*` outside tests, including for `git`, unless the
   user explicitly asks to change that policy.
 - Do not add write-capable model tools, arbitrary shell tools, or generic

@@ -25,7 +25,7 @@ Supported workflows:
 - `git-agent pr-message`
 - `git-agent release-note [--out <file>] <base> <release>`
 - `git-agent release-note [--out <file>] patch|minor|major`
-- `git-agent search [--index] [--rev <rev>] [--scope <paths>] [--code] [--format json|brief] [--min-relatedness <score>] [--limit <n>] <query...>`
+- `git-agent search [flags] <query...>`
 
 ### Non-goals
 
@@ -134,7 +134,7 @@ command checks the target is writable before generation, streams the human
 console trace to stdout, writes the rendered Markdown to the file, and does not
 write a JSON trace session.
 
-#### `git-agent search [--index] [--rev <rev>] [--scope <paths>] [--code] [--format json|brief] <query...>`
+#### `git-agent search [flags] <query...>`
 
 Run embeddings-only semantic context search and print machine-readable JSON by
 default.
@@ -185,8 +185,21 @@ result excerpts.
 
 `--code` narrows the candidate set to source-code files before chunking and
 embedding. It is intended for implementation-location searches where docs would
-otherwise rank above code. It does not change scoring and does not introduce a
-lexical fallback.
+otherwise rank above code. The filter is extension-based and currently includes:
+`.go`, `.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`, `.py`, `.rb`, `.rs`,
+`.java`, `.kt`, `.kts`, `.c`, `.h`, `.cc`, `.hh`, `.cpp`, `.hpp`, `.cs`,
+`.php`, `.swift`, `.scala`, `.sh`, `.bash`, `.zsh`, `.fish`, `.ps1`, `.sql`,
+`.html`, `.css`, `.scss`, `.sass`, `.vue`, and `.svelte`.
+`--code` runs after normal filesystem or revision discovery, ignore matching,
+and safety checks. It does not exclude test files or test directories by name,
+so files such as `foo_test.go` and `*.spec.ts` are included when their extension
+matches. In filesystem mode, staged, unstaged, and untracked matching files are
+included when physically under the search root and not skipped or ignored. In
+revision mode, only matching files from the resolved committed tree are
+included. Generated Go files with a pre-package heading comment containing
+`DO NOT EDIT` are still included by `--code`, but they are indexed as path-only
+chunks; their generated body content is not embedded. `--code` does not change
+scoring and does not introduce a lexical fallback.
 
 `--index` builds missing embeddings for the selected filesystem or revision
 source, including any `--scope` and `--code` filters, writes the same JSON
@@ -233,20 +246,20 @@ Message-generation subcommands reserve this shared flag surface:
 
 `search` additionally supports:
 
-- `--base-url`: override provider base URL
-- `--timeout`: override default request timeout
-- `--debug`: enable diagnostics on stderr
-- `--pprof <addr>`: serve Go pprof endpoints on the requested address
-- `--code`: search source-code files only
 - `--scope <paths>`: comma-separated root-relative paths to search or index
-- `--rev <rev>`: search a committed Git tree instead of current filesystem files
-- `--format json|brief`: default `json`; `brief` writes ranked result lines
-- `--min-relatedness <score>`: default `0.70`, valid `0 < score <= 1`
 - `--limit <n>`: default `20`, valid `1..100`
+- `--format json|brief`: default `json`; `brief` writes ranked result lines
+- `--code`: search source-code files only
 - `--index`: build embeddings for the selected source without searching
 - `--reindex`: rebuild embeddings for the selected source
+- `--rev <rev>`: search a committed Git tree instead of current filesystem files
+- `--min-relatedness <score>`: default `0.70`, valid `0 < score <= 1`
 - `--embedding-model <model>`: default `text-embedding-3-small`
 - `--embedding-dimensions <n>`: default `1024`, valid positive integer
+- `--base-url <url>`: override provider base URL
+- `--timeout <duration>`: override default request timeout
+- `--debug`: enable diagnostics on stderr
+- `--pprof <addr>`: serve Go pprof endpoints on the requested address
 
 Flag behavior:
 

@@ -28,8 +28,95 @@ func TestRunWithoutArgsReturnsUsage(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected usage error")
 	}
-	if !strings.Contains(err.Error(), "git-agent search [--index] [--rev <rev>] [--code] [flags] <query...>") {
-		t.Fatalf("usage missing search --code synopsis:\n%s", err)
+	if !strings.Contains(err.Error(), "git-agent search [flags] <query...>") {
+		t.Fatalf("usage missing search synopsis:\n%s", err)
+	}
+	if !strings.Contains(err.Error(), "git-agent search --help") {
+		t.Fatalf("usage missing search help hint:\n%s", err)
+	}
+}
+
+func TestSearchHelpReturnsUsage(t *testing.T) {
+	t.Setenv(config.EnvEmbeddingDimensions, "invalid")
+
+	err := New().Run(t.Context(), []string{"search", "--help"})
+	if err == nil {
+		t.Fatal("expected help error")
+	}
+	help := err.Error()
+	if !strings.Contains(help, "Usage: git-agent search [flags] <query...>") {
+		t.Fatalf("help missing usage:\n%s", help)
+	}
+	if !strings.Contains(help, "Flags:") {
+		t.Fatalf("help missing flags header:\n%s", help)
+	}
+	expectedFlags := map[string]string{
+		"--scope <paths>":            "comma-separated relative paths to search or index",
+		"--limit <n>":                "maximum results",
+		"--format json|brief":        "output format: json or brief",
+		"--code":                     "search code files only",
+		"--index":                    "build embeddings for the selected source without searching",
+		"--reindex":                  "rebuild embeddings for the selected source",
+		"--rev <rev>":                "search a committed Git tree",
+		"--min-relatedness <score>":  "minimum semantic relatedness",
+		"--embedding-model <model>":  "embedding model",
+		"--embedding-dimensions <n>": "embedding dimensions",
+		"--base-url <url>":           "override provider base URL",
+		"--timeout <duration>":       "override default request timeout",
+		"--debug":                    "enable debug output on stderr",
+		"--pprof <addr>":             "serve pprof on address",
+	}
+	descriptionColumn := -1
+	for _, line := range strings.Split(help, "\n") {
+		for flagText, description := range expectedFlags {
+			if !strings.HasPrefix(line, "  "+flagText) {
+				continue
+			}
+			if strings.TrimSpace(strings.TrimPrefix(line, "  "+flagText)) != description {
+				t.Fatalf("flag %q description mismatch:\n%s", flagText, line)
+			}
+			column := strings.Index(line, description)
+			if column < 0 {
+				t.Fatalf("flag %q description missing:\n%s", flagText, line)
+			}
+			if descriptionColumn < 0 {
+				descriptionColumn = column
+			} else if column != descriptionColumn {
+				t.Fatalf("flag %q description column = %d, want %d:\n%s", flagText, column, descriptionColumn, help)
+			}
+			delete(expectedFlags, flagText)
+		}
+	}
+	if len(expectedFlags) > 0 {
+		t.Fatalf("help missing flags %#v:\n%s", expectedFlags, help)
+	}
+}
+
+func TestSearchUsageErrorsPrecedeEmbeddingEnvValidation(t *testing.T) {
+	t.Setenv(config.EnvEmbeddingDimensions, "invalid")
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "missing query",
+			args: []string{"search"},
+			want: "search requires a query",
+		},
+		{
+			name: "index rejects query",
+			args: []string{"search", "--index", "release", "notes"},
+			want: "search --index does not accept a query",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := New().Run(t.Context(), tc.args)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 

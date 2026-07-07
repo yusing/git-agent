@@ -83,26 +83,11 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	var scope string
 	var format string
 	var embeddingModel string
-	embeddingDimensions, err := config.ResolveEmbeddingDimensions(0)
-	if err != nil {
-		return err
-	}
-	embeddingMaxInput, err := config.ResolveEmbeddingMaxInput(searchtask.DefaultEmbeddingMaxInputChars)
-	if err != nil {
-		return err
-	}
-	embeddingBatchInputs, err := config.ResolveEmbeddingBatchInputs(searchtask.DefaultEmbeddingBatchInputs)
-	if err != nil {
-		return err
-	}
-	embeddingBatchMaxChars, err := config.ResolveEmbeddingBatchMaxChars(searchtask.DefaultEmbeddingBatchMaxChars)
-	if err != nil {
-		return err
-	}
-	embeddingConcurrency, err := config.ResolveEmbeddingConcurrency(0)
-	if err != nil {
-		return err
-	}
+	var embeddingDimensions int
+	embeddingMaxInput := searchtask.DefaultEmbeddingMaxInputChars
+	embeddingBatchInputs := searchtask.DefaultEmbeddingBatchInputs
+	embeddingBatchMaxChars := searchtask.DefaultEmbeddingBatchMaxChars
+	var embeddingConcurrency int
 	fs.StringVar(&opts.BaseURL, "base-url", "", "override provider base URL")
 	fs.StringVar(&opts.Timeout, "timeout", "", "override default request timeout")
 	fs.BoolVar(&opts.Debug, "debug", false, "enable debug output on stderr")
@@ -115,18 +100,17 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	fs.BoolVar(&codeOnly, "code", false, "search code files only")
 	fs.StringVar(&scope, "scope", "", "comma-separated relative paths to search or index")
 	fs.StringVar(&format, "format", "json", "output format: json or brief")
-	fs.StringVar(&embeddingModel, "embedding-model", config.ResolveEmbeddingModel(""), "embedding model")
+	fs.StringVar(&embeddingModel, "embedding-model", "", "embedding model")
 	fs.IntVar(&embeddingDimensions, "embedding-dimensions", embeddingDimensions, "embedding dimensions")
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return searchUsageError(fs)
+		}
 		return err
 	}
 	if format != "json" && format != "brief" {
 		return fmt.Errorf("--format must be json or brief, got %q", format)
-	}
-	embeddingDimensions, err = config.ResolveEmbeddingDimensions(embeddingDimensions)
-	if err != nil {
-		return err
 	}
 	query := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if indexOnly && query != "" {
@@ -134,6 +118,27 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	}
 	if query == "" && !indexOnly {
 		return errors.New("search requires a query")
+	}
+	embeddingModel = config.ResolveEmbeddingModel(embeddingModel)
+	embeddingDimensions, err := config.ResolveEmbeddingDimensions(embeddingDimensions)
+	if err != nil {
+		return err
+	}
+	embeddingMaxInput, err = config.ResolveEmbeddingMaxInput(embeddingMaxInput)
+	if err != nil {
+		return err
+	}
+	embeddingBatchInputs, err = config.ResolveEmbeddingBatchInputs(embeddingBatchInputs)
+	if err != nil {
+		return err
+	}
+	embeddingBatchMaxChars, err = config.ResolveEmbeddingBatchMaxChars(embeddingBatchMaxChars)
+	if err != nil {
+		return err
+	}
+	embeddingConcurrency, err = config.ResolveEmbeddingConcurrency(embeddingConcurrency)
+	if err != nil {
+		return err
 	}
 	cfg, err := config.ResolveEmbeddings(opts)
 	if err != nil {
@@ -1124,6 +1129,77 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent pr-message [flags]\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] patch|minor|major\n")
-	b.WriteString("  git-agent search [--index] [--rev <rev>] [--code] [flags] <query...>\n")
+	b.WriteString("  git-agent search [flags] <query...>\n")
+	b.WriteString("\nRun `git-agent search --help` for search flags.\n")
 	return errors.New(b.String())
+}
+
+func searchUsageError(fs *flag.FlagSet) error {
+	var b strings.Builder
+	b.WriteString("Usage: git-agent search [flags] <query...>\n\n")
+	b.WriteString("Flags:\n")
+	writeSearchFlags(&b, fs)
+	return errors.New(b.String())
+}
+
+func writeSearchFlags(b *strings.Builder, fs *flag.FlagSet) {
+	placeholders := map[string]string{
+		"base-url":             "<url>",
+		"embedding-dimensions": "<n>",
+		"embedding-model":      "<model>",
+		"format":               "json|brief",
+		"limit":                "<n>",
+		"min-relatedness":      "<score>",
+		"pprof":                "<addr>",
+		"rev":                  "<rev>",
+		"scope":                "<paths>",
+		"timeout":              "<duration>",
+	}
+	ordered := []string{
+		"scope",
+		"limit",
+		"format",
+		"code",
+		"index",
+		"reindex",
+		"rev",
+		"min-relatedness",
+		"embedding-model",
+		"embedding-dimensions",
+		"base-url",
+		"timeout",
+		"debug",
+		"pprof",
+	}
+	type searchFlagLine struct {
+		text        string
+		description string
+	}
+	var lines []searchFlagLine
+	written := make(map[string]bool, len(ordered))
+	addFlag := func(name string) {
+		flag := fs.Lookup(name)
+		if flag == nil || written[name] {
+			return
+		}
+		written[name] = true
+		text := "--" + name
+		if placeholder := placeholders[name]; placeholder != "" {
+			text += " " + placeholder
+		}
+		lines = append(lines, searchFlagLine{text: text, description: flag.Usage})
+	}
+	for _, name := range ordered {
+		addFlag(name)
+	}
+	fs.VisitAll(func(flag *flag.Flag) {
+		addFlag(flag.Name)
+	})
+	width := 0
+	for _, line := range lines {
+		width = max(width, len(line.text))
+	}
+	for _, line := range lines {
+		fmt.Fprintf(b, "  %-*s  %s\n", width, line.text, line.description)
+	}
 }
