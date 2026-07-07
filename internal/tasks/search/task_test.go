@@ -854,8 +854,9 @@ func TestSearchReportsProgressWhenIndexNeedsUpdate(t *testing.T) {
 
 	writeFile(t, root, "second.txt", "alpha\n")
 	var calls []Progress
-	opts.ProgressLog = func(progress Progress) {
+	opts.ProgressLog = func(progress Progress) error {
 		calls = append(calls, Progress{Done: progress.Done, Total: progress.Total, Reused: progress.Reused})
+		return nil
 	}
 	if _, err := Run(t.Context(), fakeEmbedder{}, opts, "alpha"); err != nil {
 		t.Fatal(err)
@@ -866,6 +867,32 @@ func TestSearchReportsProgressWhenIndexNeedsUpdate(t *testing.T) {
 	}
 	if !slices.Equal(calls, want) {
 		t.Fatalf("progress calls = %#v, want %#v", calls, want)
+	}
+}
+
+func TestSearchProgressErrorStopsBeforeEmbedding(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "alpha.txt", "alpha\n")
+	progressErr := errors.New("progress unavailable")
+	embedder := &countingEmbedder{}
+
+	_, err := Run(t.Context(), embedder, Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+		ProgressLog: func(Progress) error {
+			return progressErr
+		},
+	}, "alpha")
+	if !errors.Is(err, progressErr) {
+		t.Fatalf("error = %v, want %v", err, progressErr)
+	}
+	if embedder.callCount() != 0 {
+		t.Fatalf("embedding calls = %d, want 0", embedder.callCount())
 	}
 }
 

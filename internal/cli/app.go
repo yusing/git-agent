@@ -102,7 +102,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	fs.BoolVar(&reindex, "reindex", false, "rebuild embeddings for the selected source")
 	fs.BoolVar(&codeOnly, "code", false, "search code files only")
 	fs.BoolVar(&noTests, "no-tests", false, "exclude common test files and directories")
-	fs.BoolVar(&agentMode, "agent", false, "serve search indexing progress on localhost")
+	fs.BoolVar(&agentMode, "agent", false, "serve search indexing progress on localhost when embeddings need work")
 	fs.StringVar(&scope, "scope", "", "comma-separated relative paths to search or index")
 	fs.StringVar(&format, "format", "json", "output format: json or brief")
 	fs.StringVar(&embeddingModel, "embedding-model", "", "embedding model")
@@ -172,18 +172,30 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	if cfg.Debug {
 		debugLog = a.writeDebugEvent
 	}
-	var progressLog func(searchtask.Progress)
+	var progressLog func(searchtask.Progress) error
 	var progressAgent *searchProgressAgent
+	progressStarted := false
 	if agentMode {
-		progressAgent, err = startSearchProgressAgent()
-		if err != nil {
-			return err
+		progressLog = func(progress searchtask.Progress) error {
+			if progressAgent == nil {
+				var err error
+				progressAgent, err = startSearchProgressAgent()
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(a.stderr, "search: progress agent listening on %s\n", progressAgent.URL())
+			}
+			progressAgent.Update(progress)
+			return nil
 		}
-		defer progressAgent.Close()
-		progressLog = progressAgent.Update
-		fmt.Fprintf(a.stderr, "search: progress agent listening on %s\n", progressAgent.URL())
 	} else if !cfg.Debug && isInteractiveFile(a.stderr) {
-		progressLog = a.writeSearchProgress
+		progressLog = func(progress searchtask.Progress) error {
+			if progress.Done < progress.Total {
+				progressStarted = true
+			}
+			a.writeSearchProgress(progress)
+			return nil
+		}
 	}
 	root, err := os.Getwd()
 	if err != nil {
@@ -211,8 +223,11 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 		DebugLog:               debugLog,
 		ProgressLog:            progressLog,
 	}, query)
+	if progressAgent != nil {
+		defer progressAgent.Close()
+	}
 	if err != nil {
-		if progressAgent == nil && progressLog != nil {
+		if progressStarted {
 			a.clearSearchProgress()
 		}
 		if progressAgent != nil {

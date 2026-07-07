@@ -57,7 +57,7 @@ func TestSearchHelpReturnsUsage(t *testing.T) {
 		"--format json|brief":        "output format: json or brief",
 		"--code":                     "search code files only",
 		"--no-tests":                 "exclude common test files and directories",
-		"--agent":                    "serve search indexing progress on localhost",
+		"--agent":                    "serve search indexing progress on localhost when embeddings need work",
 		"--index":                    "build embeddings for the selected source without searching",
 		"--reindex":                  "rebuild embeddings for the selected source",
 		"--rev <rev>":                "search a committed Git tree",
@@ -419,7 +419,7 @@ func TestSearchProgressAgentServesCurrentProgress(t *testing.T) {
 	}
 }
 
-func TestSearchAgentPrintsProgressURL(t *testing.T) {
+func TestSearchAgentPrintsProgressURLOnlyWhenIndexNeedsWork(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
 	t.Setenv("HOME", t.TempDir())
@@ -452,7 +452,7 @@ func TestSearchAgentPrintsProgressURL(t *testing.T) {
 	if err := app.Run(t.Context(), []string{"search", "--agent", "--format", "json", "release", "notes"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stderr.String(), "search: progress agent listening on http://127.0.0.1:") {
+	if stderr.String() != "" {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 	var out struct {

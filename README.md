@@ -87,8 +87,8 @@ root-relative paths. Use `--no-tests` to exclude common test files and test
 directories. Use `--index` without a query to build or refresh missing
 embeddings without searching; add `--reindex` to rebuild existing embeddings too.
 Use `--agent` to serve live indexing progress at a printed
-`http://127.0.0.1:<port>/progress` URL while the command runs; when `--format`
-is omitted, `--agent` defaults output to brief.
+`http://127.0.0.1:<port>/progress` URL when embeddings need to be built or
+rebuilt; when `--format` is omitted, `--agent` defaults output to brief.
 Search uses `OPENAI_EMBEDDING_API_KEY` when set, then falls back to
 `OPENAI_API_KEY`; Codex/ChatGPT auth is not used for embeddings. Successful
 indexing writes the local cache after embedding completes. See `docs/spec.md`

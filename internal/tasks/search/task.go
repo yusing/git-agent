@@ -76,7 +76,7 @@ type Options struct {
 	BaseURL                string
 	Debug                  bool
 	DebugLog               func(string, ...slog.Attr)
-	ProgressLog            func(Progress)
+	ProgressLog            func(Progress) error
 }
 
 type Progress struct {
@@ -405,7 +405,10 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 			slog.String("index_dir", indexDir),
 		)
 		if opts.ProgressLog != nil {
-			opts.ProgressLog(Progress{Total: len(missing), Reused: reused})
+			if err := opts.ProgressLog(Progress{Total: len(missing), Reused: reused}); err != nil {
+				mark("embed_index")
+				return fail(err)
+			}
 		}
 
 		embedStarted := time.Now()
@@ -492,7 +495,13 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 				slog.Duration("client_elapsed", result.clientElapsed.Round(time.Millisecond)),
 			)
 			if opts.ProgressLog != nil {
-				opts.ProgressLog(Progress{Done: diag.EmbeddedDone, Total: len(missing), Reused: reused, Elapsed: elapsedRaw})
+				if err := opts.ProgressLog(Progress{Done: diag.EmbeddedDone, Total: len(missing), Reused: reused, Elapsed: elapsedRaw}); err != nil {
+					if embedErr == nil {
+						embedErr = err
+					}
+					cancelEmbeddings()
+					continue
+				}
 			}
 		}
 		cancelEmbeddings()

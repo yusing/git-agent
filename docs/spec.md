@@ -179,12 +179,14 @@ When stderr is an interactive terminal and `--debug` is not enabled, search
 shows transient indexing progress while missing embeddings are built or updated.
 The progress line is rewritten and cleared with ANSI control sequences before
 stdout is written. Non-interactive stderr receives no progress output.
-`--agent` starts a local progress probe server instead of terminal progress. The
-server listens on `127.0.0.1:0`, prints its actual `http://127.0.0.1:<port>/progress`
-URL to stderr, and returns JSON for `GET /progress` with status, completed chunk
-count, total chunk count, reused chunk count, percent, elapsed milliseconds, and
-last update time. When `--format` is omitted, `--agent` changes the output format
-default from JSON to brief. The server shuts down when the search command exits.
+`--agent` starts a local progress probe server instead of terminal progress, but
+only when embeddings need to be built or rebuilt. The server listens on
+`127.0.0.1:0`, prints its actual `http://127.0.0.1:<port>/progress` URL to stderr,
+and returns JSON for `GET /progress` with status, completed chunk count, total
+chunk count, reused chunk count, percent, elapsed milliseconds, and last update
+time. When `--format` is omitted, `--agent` changes the output format default
+from JSON to brief. The server shuts down when the search command exits. Cache-hit
+searches do not start the server and do not print a progress URL.
 
 Persistent metadata is stored under `~/.git-agent/<path-sha>/`, where
 `<path-sha>` is the SHA-256 of the cleaned absolute project root. Search writes
@@ -271,8 +273,9 @@ Message-generation subcommands reserve this shared flag surface:
   result lines
 - `--code`: search source-code files only
 - `--no-tests`: exclude common test files and test directories
-- `--agent`: serve current indexing progress on `127.0.0.1:<port>/progress`;
-  defaults output to brief unless `--format` is set
+- `--agent`: serve current indexing progress on `127.0.0.1:<port>/progress`
+  when embeddings need to be built or rebuilt; defaults output to brief unless
+  `--format` is set
 - `--index`: build embeddings for the selected source without searching
 - `--reindex`: rebuild embeddings for the selected source
 - `--rev <rev>`: search a committed Git tree instead of current filesystem files

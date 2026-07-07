@@ -59,7 +59,7 @@ complete -c git-agent -n '__git_agent_using_command search' -l index -d 'Build e
 complete -c git-agent -n '__git_agent_using_command search' -l reindex -d 'Rebuild embeddings for the selected source'
 complete -c git-agent -n '__git_agent_using_command search' -l code -d 'Search code files only'
 complete -c git-agent -n '__git_agent_using_command search' -l no-tests -d 'Exclude common test files and directories'
-complete -c git-agent -n '__git_agent_using_command search' -l agent -d 'Serve indexing progress on localhost'
+complete -c git-agent -n '__git_agent_using_command search' -l agent -d 'Serve indexing progress on localhost when embeddings need work'
 complete -c git-agent -n '__git_agent_using_command search' -l embedding-model -r -a 'text-embedding-3-small text-embedding-3-large' -d 'Embedding model'
 complete -c git-agent -n '__git_agent_using_command search' -l embedding-dimensions -r -a '512 768 1024 1536 3072' -d 'Embedding dimensions'
 complete -c git-agent -n '__git_agent_using_command search' -l base-url -r -d 'Override provider base URL'
