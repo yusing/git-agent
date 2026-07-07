@@ -13,7 +13,7 @@ final Git commit after message generation.
 - `git-agent pr-message`
 - `git-agent release-note [--out <file>] <base> <release>`
 - `git-agent release-note [--out <file>] patch|minor|major`
-- `git-agent search [--index] [--rev <rev>] [--scope <paths>] [--min-relatedness <score>] [--limit <n>] <query...>`
+- `git-agent search [--index] [--rev <rev>] [--scope <paths>] [--format json|brief] [--min-relatedness <score>] [--limit <n>] <query...>`
 
 ## Configuration
 
@@ -75,14 +75,15 @@ Common flags:
 
 `search` is embeddings-only semantic retrieval for agents. It searches the
 current filesystem by default, or a committed tree with `--rev <rev>`, and
-writes JSON results to stdout. Use `--code` to limit candidates to source-code
-files. Use `--scope foo,bar/baz` to limit search or indexing to comma-separated
+writes JSON results to stdout by default. Use `--format brief` for compact
+line-oriented results. Use `--code` to limit candidates to source-code files.
+Use `--scope foo,bar/baz` to limit search or indexing to comma-separated
 root-relative paths. Use `--index` without a query to build or refresh missing
-embeddings without searching; add `--reindex` to rebuild existing embeddings too. Search
-uses `OPENAI_EMBEDDING_API_KEY` when set, then falls back to `OPENAI_API_KEY`;
-Codex/ChatGPT auth is not used for embeddings. Successful indexing writes the
-local cache after embedding completes. See `docs/spec.md` for exact file
-discovery, ignore-file, skip, cache, and debug behavior.
+embeddings without searching; add `--reindex` to rebuild existing embeddings too.
+Search uses `OPENAI_EMBEDDING_API_KEY` when set, then falls back to
+`OPENAI_API_KEY`; Codex/ChatGPT auth is not used for embeddings. Successful
+indexing writes the local cache after embedding completes. See `docs/spec.md`
+for exact output, file discovery, ignore-file, skip, cache, and debug behavior.
 
 Behavior defaults:
 

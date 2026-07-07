@@ -176,6 +176,48 @@ func TestSearchPrintsJSONAndUsesEmbeddingsOnly(t *testing.T) {
 	}
 }
 
+func TestSearchPrintsBriefFormat(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("HOME", t.TempDir())
+	useGeneralEmbeddingProvider(t)
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("release notes live here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	server, _ := newSearchEmbeddingsServer(t)
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"search", "--format", "brief", "release", "notes"}); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if got, want := stdout.String(), "1.00 notes.txt:1 release notes live here\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestSearchRejectsUnknownFormat(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	err := app.Run(t.Context(), []string{"search", "--format", "xml", "release", "notes"})
+	if err == nil || !strings.Contains(err.Error(), `--format must be json or brief, got "xml"`) {
+		t.Fatalf("err = %v", err)
+	}
+	if stdout.String() != "" || stderr.String() != "" {
+		t.Fatalf("stdout = %q stderr = %q", stdout.String(), stderr.String())
+	}
+}
+
 func TestSearchScopeAcceptsCommaSeparatedPaths(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)

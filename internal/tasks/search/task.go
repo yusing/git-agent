@@ -145,6 +145,8 @@ type Result struct {
 	Symbol      *Symbol        `json:"symbol"`
 	Scores      map[string]any `json:"scores"`
 	Excerpt     string         `json:"excerpt"`
+	Path        string         `json:"-"`
+	StartLine   int            `json:"-"`
 }
 
 type Replay struct {
@@ -1355,6 +1357,8 @@ func renderResults(scored []scoredChunk) []Result {
 			Symbol:      chunk.Symbol,
 			Scores:      map[string]any{"cosine": item.cosine},
 			Excerpt:     excerpt(chunk),
+			Path:        chunk.Path,
+			StartLine:   chunk.StartLine,
 		}
 	}
 	return results

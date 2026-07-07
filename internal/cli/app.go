@@ -81,6 +81,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	var reindex bool
 	var codeOnly bool
 	var scope string
+	var format string
 	var embeddingModel string
 	embeddingDimensions, err := config.ResolveEmbeddingDimensions(0)
 	if err != nil {
@@ -113,11 +114,15 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	fs.BoolVar(&reindex, "reindex", false, "rebuild embeddings for the selected source")
 	fs.BoolVar(&codeOnly, "code", false, "search code files only")
 	fs.StringVar(&scope, "scope", "", "comma-separated relative paths to search or index")
+	fs.StringVar(&format, "format", "json", "output format: json or brief")
 	fs.StringVar(&embeddingModel, "embedding-model", config.ResolveEmbeddingModel(""), "embedding model")
 	fs.IntVar(&embeddingDimensions, "embedding-dimensions", embeddingDimensions, "embedding dimensions")
 
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if format != "json" && format != "brief" {
+		return fmt.Errorf("--format must be json or brief, got %q", format)
 	}
 	embeddingDimensions, err = config.ResolveEmbeddingDimensions(embeddingDimensions)
 	if err != nil {
@@ -181,9 +186,48 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	if cfg.Debug {
 		a.writeSearchDebug(output)
 	}
+	if format == "brief" {
+		return writeSearchBrief(a.stdout, output)
+	}
 	encoder := sonic.ConfigDefault.NewEncoder(a.stdout)
 	encoder.SetEscapeHTML(false)
 	return encoder.Encode(output)
+}
+
+func writeSearchBrief(w io.Writer, output searchtask.Output) error {
+	for _, result := range output.Results {
+		if _, err := fmt.Fprintf(w, "%.2f %s %s\n", result.Relatedness, briefLocation(result), briefSummary(result)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func briefLocation(result searchtask.Result) string {
+	if result.Path == "" || result.StartLine <= 0 {
+		return result.Range
+	}
+	return fmt.Sprintf("%s:%d", result.Path, result.StartLine)
+}
+
+func briefSummary(result searchtask.Result) string {
+	if result.Symbol != nil && result.Symbol.Name != "" {
+		return result.Symbol.Name
+	}
+	for line := range strings.SplitSeq(result.Excerpt, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if prefix, text, ok := strings.Cut(line, ": "); ok {
+			if _, err := strconv.Atoi(prefix); err != nil {
+				return line
+			}
+			line = strings.TrimSpace(text)
+		}
+		return line
+	}
+	return ""
 }
 
 func (a *App) writeSearchDebug(output searchtask.Output) {

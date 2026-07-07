@@ -54,6 +54,7 @@ complete -c git-agent -n '__git_agent_using_command search' -l rev -r -a '(__git
 complete -c git-agent -n '__git_agent_using_command search' -l scope -r -d 'Comma-separated relative paths to search or index'
 complete -c git-agent -n '__git_agent_using_command search' -l min-relatedness -r -d 'Minimum semantic relatedness'
 complete -c git-agent -n '__git_agent_using_command search' -l limit -r -d 'Maximum results'
+complete -c git-agent -n '__git_agent_using_command search' -l format -r -a 'json brief' -d 'Output format'
 complete -c git-agent -n '__git_agent_using_command search' -l index -d 'Build embeddings without searching'
 complete -c git-agent -n '__git_agent_using_command search' -l reindex -d 'Rebuild embeddings for the selected source'
 complete -c git-agent -n '__git_agent_using_command search' -l code -d 'Search code files only'

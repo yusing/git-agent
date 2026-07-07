@@ -25,7 +25,7 @@ Supported workflows:
 - `git-agent pr-message`
 - `git-agent release-note [--out <file>] <base> <release>`
 - `git-agent release-note [--out <file>] patch|minor|major`
-- `git-agent search [--index] [--rev <rev>] [--scope <paths>] [--min-relatedness <score>] [--limit <n>] <query...>`
+- `git-agent search [--index] [--rev <rev>] [--scope <paths>] [--format json|brief] [--min-relatedness <score>] [--limit <n>] <query...>`
 
 ### Non-goals
 
@@ -134,9 +134,10 @@ command checks the target is writable before generation, streams the human
 console trace to stdout, writes the rendered Markdown to the file, and does not
 write a JSON trace session.
 
-#### `git-agent search [--index] [--rev <rev>] [--scope <paths>] <query...>`
+#### `git-agent search [--index] [--rev <rev>] [--scope <paths>] [--format json|brief] <query...>`
 
-Run embeddings-only semantic context search and print machine-readable JSON.
+Run embeddings-only semantic context search and print machine-readable JSON by
+default.
 Filesystem mode is the default: it searches current files under the current
 working directory exactly as they exist on disk and does not require a Git
 repository. Staged, unstaged, and untracked files are included when physically
@@ -164,6 +165,12 @@ create `~/.git-agent/<path-sha>/sessions/` traces, does not generate
 explanations, and does not use lexical fallback, lexical ranking, token overlap,
 or path/name boosts. It embeds the query and local chunks, then performs an
 exact cosine scan over the local binary vector cache.
+
+`--format json` is the default stdout contract. `--format brief` writes one
+result per line as `<score> <path>:<start-line> <summary>`, with the score
+rounded to two decimals. The summary is the indexed symbol name when available,
+otherwise the first excerpt line without its excerpt line-number prefix.
+`--index --format brief` writes no result lines because indexing skips scoring.
 
 Persistent metadata is stored under `~/.git-agent/<path-sha>/`, where
 `<path-sha>` is the SHA-256 of the cleaned absolute project root. Search writes
@@ -233,6 +240,7 @@ Message-generation subcommands reserve this shared flag surface:
 - `--code`: search source-code files only
 - `--scope <paths>`: comma-separated root-relative paths to search or index
 - `--rev <rev>`: search a committed Git tree instead of current filesystem files
+- `--format json|brief`: default `json`; `brief` writes ranked result lines
 - `--min-relatedness <score>`: default `0.70`, valid `0 < score <= 1`
 - `--limit <n>`: default `20`, valid `1..100`
 - `--index`: build embeddings for the selected source without searching
@@ -313,7 +321,8 @@ Resolution order:
 ### stdout / stderr contract
 
 - stdout for generation-only commands: final generated artifact only
-- stdout for `search`: JSON result only
+- stdout for `search`: JSON result by default; brief result lines with
+  `--format brief`
 - stdout for `release-note --out <file>`: streaming human console trace lines
   while generating the release note; the rendered Markdown is written to the
   requested file after a preflight writable check
