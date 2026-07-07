@@ -1124,6 +1124,6 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent pr-message [flags]\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] patch|minor|major\n")
-	b.WriteString("  git-agent search [--index] [--rev <rev>] [flags] <query...>\n")
+	b.WriteString("  git-agent search [--index] [--rev <rev>] [--code] [flags] <query...>\n")
 	return errors.New(b.String())
 }

@@ -25,7 +25,7 @@ Supported workflows:
 - `git-agent pr-message`
 - `git-agent release-note [--out <file>] <base> <release>`
 - `git-agent release-note [--out <file>] patch|minor|major`
-- `git-agent search [--index] [--rev <rev>] [--scope <paths>] [--format json|brief] [--min-relatedness <score>] [--limit <n>] <query...>`
+- `git-agent search [--index] [--rev <rev>] [--scope <paths>] [--code] [--format json|brief] [--min-relatedness <score>] [--limit <n>] <query...>`
 
 ### Non-goals
 
@@ -134,7 +134,7 @@ command checks the target is writable before generation, streams the human
 console trace to stdout, writes the rendered Markdown to the file, and does not
 write a JSON trace session.
 
-#### `git-agent search [--index] [--rev <rev>] [--scope <paths>] [--format json|brief] <query...>`
+#### `git-agent search [--index] [--rev <rev>] [--scope <paths>] [--code] [--format json|brief] <query...>`
 
 Run embeddings-only semantic context search and print machine-readable JSON by
 default.

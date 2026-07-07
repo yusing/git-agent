@@ -13,7 +13,7 @@ final Git commit after message generation.
 - `git-agent pr-message`
 - `git-agent release-note [--out <file>] <base> <release>`
 - `git-agent release-note [--out <file>] patch|minor|major`
-- `git-agent search [--index] [--rev <rev>] [--scope <paths>] [--format json|brief] [--min-relatedness <score>] [--limit <n>] <query...>`
+- `git-agent search [--index] [--rev <rev>] [--scope <paths>] [--code] [--format json|brief] [--min-relatedness <score>] [--limit <n>] <query...>`
 
 ## Configuration
 

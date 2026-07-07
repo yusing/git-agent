@@ -28,6 +28,9 @@ func TestRunWithoutArgsReturnsUsage(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected usage error")
 	}
+	if !strings.Contains(err.Error(), "git-agent search [--index] [--rev <rev>] [--code] [flags] <query...>") {
+		t.Fatalf("usage missing search --code synopsis:\n%s", err)
+	}
 }
 
 func TestRunCommitMsgRequiresAPIKey(t *testing.T) {
