@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/openai"
@@ -20,6 +21,7 @@ type Request struct {
 	SystemPrompt      string
 	ToolPolicy        string
 	Environment       string
+	SkillInstructions string
 	ProjectGuidance   string
 	UserPrompt        string
 	TextFormat        *openai.TextFormat
@@ -88,6 +90,9 @@ func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error)
 	}
 	if request.Environment != "" {
 		messages = append(messages, openai.NewMessage("developer", request.Environment))
+	}
+	if request.SkillInstructions != "" {
+		messages = append(messages, openai.NewMessage("developer", request.SkillInstructions))
 	}
 	if request.ProjectGuidance != "" {
 		messages = append(messages, openai.NewMessage("developer", request.ProjectGuidance))
@@ -349,7 +354,7 @@ func toolAllowed(name string, toolSpecs []openai.ToolSpec, allowedToolNames []st
 		return slices.Contains(allowedToolNames, name)
 	}
 	if len(toolSpecs) == 0 {
-		return true
+		return false
 	}
 	return slices.ContainsFunc(toolSpecs, func(spec openai.ToolSpec) bool {
 		return spec.Name == name
@@ -375,13 +380,26 @@ func requestInstructions(taskInstructions string, toolSpecs []openai.ToolSpec) s
 	if len(toolSpecs) == 0 {
 		return prefix + "No tools are available. Return only the final artifact."
 	}
-	return prefix + `# Agent loop
+	var toolsList strings.Builder
+	toolsList.WriteString("# Available tools\n")
+	for _, spec := range toolSpecs {
+		fmt.Fprintf(&toolsList, "- %s: %s\n", spec.Name, spec.Description)
+	}
+	return prefix + toolsList.String() + `
+# Agent loop
 You are in a bounded agent loop.
 Use only listed read-only tools.
 Call tools only when they reduce material uncertainty; do not call tools just to repeat provided context.
-Prefer narrow tool calls that target the missing evidence.
+` + skillToolInstruction(toolSpecs) + `Prefer narrow tool calls that target the missing evidence.
 Do not ask the user for more evidence.
 Return only the final artifact when enough evidence has been gathered.`
+}
+
+func skillToolInstruction(toolSpecs []openai.ToolSpec) string {
+	if !slices.ContainsFunc(toolSpecs, func(spec openai.ToolSpec) bool { return spec.Name == tools.SkillReadToolName }) {
+		return ""
+	}
+	return "Use " + tools.SkillReadToolName + " only after a listed skill is relevant, and only to read that skill's SKILL.md or text files under its references/ directory.\n"
 }
 
 func finalArtifactInstructions(taskInstructions string) string {

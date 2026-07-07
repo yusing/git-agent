@@ -7,6 +7,7 @@ toolchain go1.26.3
 require (
 	github.com/bytedance/sonic v1.15.2
 	github.com/go-git/go-git/v6 v6.0.0-alpha.4
+	github.com/goccy/go-yaml v1.19.2
 	github.com/openai/openai-go/v3 v3.40.0
 	golang.org/x/sync v0.21.0
 )

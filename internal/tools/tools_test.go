@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/yusing/git-agent/internal/gitctx"
+	skillctx "github.com/yusing/git-agent/internal/skills"
 )
 
 func TestToolDefinitionsAreStrictAndEnvelopeResults(t *testing.T) {
@@ -147,48 +148,6 @@ func TestLegacyReleaseNoteToolsAreMarkedDeprecated(t *testing.T) {
 	}
 }
 
-func TestPRMessageToolsExposeOriginHeadComparison(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	runGit(t, dir, "init")
-	runGit(t, dir, "config", "user.name", "Test User")
-	runGit(t, dir, "config", "user.email", "test@example.com")
-	mustWriteFile(t, filepath.Join(dir, "app.txt"), "base\n")
-	runGit(t, dir, "add", "app.txt")
-	runGit(t, dir, "commit", "-m", "base")
-	runGit(t, dir, "update-ref", "refs/remotes/origin/HEAD", gitHead(t, dir))
-	mustWriteFile(t, filepath.Join(dir, "app.txt"), "branch\n")
-	runGit(t, dir, "add", "app.txt")
-	runGit(t, dir, "commit", "-m", "feat: branch change")
-
-	repo, err := gitctx.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	registry := NewRegistry(repo)
-	defs := registry.Definitions(PRMessageToolNames())
-	if len(defs) != len(PRMessageToolNames()) {
-		t.Fatalf("defs = %d, want %d", len(defs), len(PRMessageToolNames()))
-	}
-
-	diffResult, err := registry.Execute(t.Context(), Invocation{Name: "git_pr_diff", Arguments: `{"max_bytes":4096,"max_lines":200}`})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(diffResult.Content, "-base") || !strings.Contains(diffResult.Content, "+branch") {
-		t.Fatalf("git_pr_diff missing branch diff:\n%s", diffResult.Content)
-	}
-
-	commitsResult, err := registry.Execute(t.Context(), Invocation{Name: "git_pr_commits", Arguments: `{"limit":5}`})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(commitsResult.Content, "feat: branch change") || strings.Contains(commitsResult.Content, `"base"`) {
-		t.Fatalf("git_pr_commits content = %s", commitsResult.Content)
-	}
-}
-
 func TestStagedDiffForPathsReturnsSelectedStagedPatch(t *testing.T) {
 	t.Parallel()
 
@@ -223,6 +182,101 @@ func TestStagedDiffForPathsReturnsSelectedStagedPatch(t *testing.T) {
 	}
 	if strings.Contains(result.Content, "one.txt") || strings.Contains(result.Content, "+new one") {
 		t.Fatalf("selected patch leaked one.txt diff:\n%s", result.Content)
+	}
+}
+
+func TestSkillsReadToolReadsDiscoveredSkillFiles(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	skillDir := filepath.Join(dir, ".agents", "skills", "commit-writer")
+	mustWriteFile(t, filepath.Join(skillDir, "SKILL.md"), "---\nname: commit-writer\ndescription: Draft commit messages.\n---\n\nUse evidence.\n")
+	mustWriteFile(t, filepath.Join(skillDir, "references", "style.md"), "Prefer concise subjects.\n")
+	repo, err := gitctx.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := skillctx.Discover(skillctx.Options{RepoRoot: dir, WorkDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.Len() != 1 {
+		t.Fatalf("skills = %d, want 1", store.Len())
+	}
+	locator := store.Skills()[0].Locator
+	registry := NewRegistryWithSkills(repo, store)
+	defs := registry.Definitions(SkillToolNames())
+	if len(defs) != 1 || defs[0].Name != "skills_read" || !defs[0].Strict {
+		t.Fatalf("skill defs = %#v", defs)
+	}
+	required, ok := defs[0].Schema["required"].([]string)
+	if !ok || strings.Join(required, ",") != "max_bytes,max_lines,path,source_locator" {
+		t.Fatalf("skills_read required fields = %#v", defs[0].Schema["required"])
+	}
+
+	result, err := registry.Execute(t.Context(), Invocation{Name: "skills_read", Arguments: `{"source_locator":"` + locator + `","path":"SKILL.md","max_bytes":4096,"max_lines":200}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, "Use evidence.") {
+		t.Fatalf("skill read missing SKILL.md content:\n%s", result.Content)
+	}
+	result, err = registry.Execute(t.Context(), Invocation{Name: "skills_read", Arguments: `{"source_locator":"` + locator + `","path":"references/style.md","max_bytes":4096,"max_lines":200}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, "Prefer concise subjects.") {
+		t.Fatalf("skill read missing reference content:\n%s", result.Content)
+	}
+}
+
+func TestSkillsReadToolRejectsUnknownAndEscapingPaths(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	skillDir := filepath.Join(dir, ".agents", "skills", "commit-writer")
+	mustWriteFile(t, filepath.Join(skillDir, "SKILL.md"), "---\nname: commit-writer\ndescription: Draft commit messages.\n---\n")
+	mustWriteFile(t, filepath.Join(skillDir, "scripts", "helper.sh"), "#!/bin/sh\n")
+	mustWriteFile(t, filepath.Join(skillDir, "references", "binary.bin"), "ok\x00no\n")
+	mustWriteFile(t, filepath.Join(dir, "secret.txt"), "secret\n")
+	if err := os.Symlink(filepath.Join(dir, "secret.txt"), filepath.Join(skillDir, "secret-link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "scripts", "helper.sh"), filepath.Join(skillDir, "references", "helper-link")); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := gitctx.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := skillctx.Discover(skillctx.Options{RepoRoot: dir, WorkDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	locator := store.Skills()[0].Locator
+	registry := NewRegistryWithSkills(repo, store)
+	for _, tc := range []struct {
+		name string
+		args string
+	}{
+		{name: "unknown locator", args: `{"source_locator":"/missing/SKILL.md"}`},
+		{name: "absolute path", args: `{"source_locator":"` + locator + `","path":"/etc/passwd"}`},
+		{name: "traversal", args: `{"source_locator":"` + locator + `","path":"../other.md"}`},
+		{name: "normalized traversal", args: `{"source_locator":"` + locator + `","path":"references/../SKILL.md"}`},
+		{name: "symlink escape", args: `{"source_locator":"` + locator + `","path":"secret-link"}`},
+		{name: "reference symlink to non-reference file", args: `{"source_locator":"` + locator + `","path":"references/helper-link"}`},
+		{name: "script", args: `{"source_locator":"` + locator + `","path":"scripts/helper.sh"}`},
+		{name: "binary", args: `{"source_locator":"` + locator + `","path":"references/binary.bin"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := registry.Execute(t.Context(), Invocation{Name: "skills_read", Arguments: tc.args})
+			if err == nil {
+				t.Fatalf("expected error for %s", tc.name)
+			}
+		})
 	}
 }
 

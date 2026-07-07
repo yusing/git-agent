@@ -163,6 +163,9 @@ func TestRunnerExecutesToolCallRoundTrip(t *testing.T) {
 	if instructions := client.requests[0].Instructions; !containsAll(instructions, "bounded agent loop", "reduce material uncertainty", "do not call tools just to repeat provided context", "Do not ask the user for more evidence") {
 		t.Fatalf("request instructions missing tool economy guidance: %s", instructions)
 	}
+	if strings.Contains(client.requests[0].Instructions, "Use skills_read") {
+		t.Fatalf("request instructions should not mention unavailable skills_read: %s", client.requests[0].Instructions)
+	}
 }
 
 func TestRunnerRejectsToolCallsOutsideAllowedSet(t *testing.T) {

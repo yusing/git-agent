@@ -24,6 +24,7 @@ import (
 	"github.com/yusing/git-agent/internal/guidance"
 	"github.com/yusing/git-agent/internal/metadata"
 	"github.com/yusing/git-agent/internal/openai"
+	skillctx "github.com/yusing/git-agent/internal/skills"
 	"github.com/yusing/git-agent/internal/tasks/commitmsg"
 	"github.com/yusing/git-agent/internal/tasks/releasenote"
 	searchtask "github.com/yusing/git-agent/internal/tasks/search"
@@ -560,11 +561,18 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 	if err != nil {
 		return agent.Result{}, err
 	}
+	skillStore, err := resolveSkills(repo)
+	if err != nil {
+		return agent.Result{}, err
+	}
 	session := map[string]any{
 		"command":      command,
 		"mode":         mode,
 		"repo":         repo.Summary(),
 		"staged_paths": stagedPaths,
+	}
+	if skillStore.Len() > 0 {
+		session["skills"] = skillStore.Summary()
 	}
 	if preparedCommit != nil {
 		session["prepared_commit_context"] = preparedCommit.TraceValue()
@@ -589,12 +597,13 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 			return commitmsg.ValidateAmendAgainstOriginal(originalAmendMessage, text)
 		}
 	}
-	registry := tools.NewRegistry(repo)
+	allowedTools := withSkillTools(tools.CommitMessageToolNames(), skillStore)
+	registry := tools.NewRegistryWithSkills(repo, skillStore)
 	runner := agent.OpenAIRunner{
 		Config:    cfg,
 		Client:    openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
 		Tools:     registry,
-		ToolSpecs: registry.Definitions(tools.CommitMessageToolNames()),
+		ToolSpecs: registry.Definitions(allowedTools),
 		Validator: validator,
 		Normalize: commitmsg.Shape,
 		Trace:     recorder,
@@ -605,9 +614,10 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 		SystemPrompt:      commitmsg.SystemPrompt(mode),
 		ToolPolicy:        toolPolicy(),
 		Environment:       environment,
+		SkillInstructions: skillStore.Render(),
 		ProjectGuidance:   renderedGuidance,
 		UserPrompt:        appendUserPrompt(userPrompt, cfg.AppendPrompt),
-		AllowedToolNames:  tools.CommitMessageToolNames(),
+		AllowedToolNames:  allowedTools,
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
 	})
@@ -726,6 +736,10 @@ func (a *App) runPRMessage(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	skillStore, err := resolveSkills(repo)
+	if err != nil {
+		return err
+	}
 	recorder, err := trace.New(repo.RootPath, "pr-message")
 	if err != nil {
 		return err
@@ -733,19 +747,32 @@ func (a *App) runPRMessage(ctx context.Context, args []string) error {
 	if cfg.Debug {
 		a.writeDebugEvent("trace", slog.String("trace_dir", recorder.Dir()))
 	}
-	if err := recorder.Write("session", map[string]any{
+	session := map[string]any{
 		"command":       "pr-message",
 		"mode":          commitmsg.ModePR,
 		"repo":          repo.Summary(),
 		"base_ref":      gitctx.PullRequestBaseRef,
 		"changed_paths": prepared.ChangedPaths,
 		"prepared":      prepared,
-	}); err != nil {
+	}
+	if skillStore.Len() > 0 {
+		session["skills"] = skillStore.Summary()
+	}
+	if err := recorder.Write("session", session); err != nil {
 		return err
+	}
+	allowedTools := withSkillTools(nil, skillStore)
+	var registry *tools.Registry
+	var toolSpecs []tools.Definition
+	if len(allowedTools) > 0 {
+		registry = tools.NewRegistryWithSkills(repo, skillStore)
+		toolSpecs = registry.Definitions(allowedTools)
 	}
 	runner := agent.OpenAIRunner{
 		Config:    cfg,
 		Client:    openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
+		Tools:     registry,
+		ToolSpecs: toolSpecs,
 		Validator: func(text string) []string { return commitmsg.Validate(commitmsg.ModePR, text) },
 		Normalize: commitmsg.Shape,
 		Trace:     recorder,
@@ -754,9 +781,12 @@ func (a *App) runPRMessage(ctx context.Context, args []string) error {
 	environment := environmentContext(repo, "pr-message", gitctx.PullRequestBaseRef+"..HEAD", cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
 	result, err := runner.Run(taskCtx, agent.Request{
 		SystemPrompt:      commitmsg.SystemPrompt(commitmsg.ModePR),
+		ToolPolicy:        toolPolicy(),
 		Environment:       environment,
+		SkillInstructions: skillStore.Render(),
 		ProjectGuidance:   renderedGuidance,
 		UserPrompt:        appendUserPrompt(commitmsg.UserPromptWithPreparedPRContext(prepared, cfg.MaxSteps, cfg.MaxToolCalls), cfg.AppendPrompt),
+		AllowedToolNames:  allowedTools,
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
 	})
@@ -835,6 +865,10 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	skillStore, err := resolveSkills(repo)
+	if err != nil {
+		return err
+	}
 	var recorder *trace.Recorder
 	if outSet {
 		recorder, err = trace.NewStream("release-note", a.stdout)
@@ -852,6 +886,9 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 		"range":   rangeArgs.BaseRef + ".." + rangeArgs.ReleaseRef,
 		"repo":    repo.Summary(),
 	}
+	if skillStore.Len() > 0 {
+		session["skills"] = skillStore.Summary()
+	}
 	if rangeArgs.Inferred {
 		session["inferred_from"] = rangeArgs.Bump
 		session["release_revision"] = rangeArgs.ReleaseRevision
@@ -862,17 +899,18 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 	if err := recorder.Write("session", session); err != nil {
 		return err
 	}
-	registry := tools.NewRegistry(repo)
+	registry := tools.NewRegistryWithSkills(repo, skillStore)
 	prepared, err := releasenote.PrepareContextFromRevision(repo, rangeArgs.BaseRef, rangeArgs.ReleaseRef, rangeArgs.ReleaseRevision)
 	if err != nil {
 		return err
 	}
 	const releaseNoteFallbackTools = "repo_summary"
+	allowedTools := withSkillTools([]string{releaseNoteFallbackTools}, skillStore)
 	runner := agent.OpenAIRunner{
 		Config:    cfg,
 		Client:    openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
 		Tools:     registry,
-		ToolSpecs: registry.Definitions([]string{releaseNoteFallbackTools}),
+		ToolSpecs: registry.Definitions(allowedTools),
 		Validator: releasenote.Validate,
 		Trace:     recorder,
 		Budget:    a.budgetHandler(),
@@ -882,10 +920,11 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 		SystemPrompt:      releasenote.SystemPrompt(),
 		ToolPolicy:        toolPolicy(),
 		Environment:       environment,
+		SkillInstructions: skillStore.Render(),
 		ProjectGuidance:   renderedGuidance,
 		UserPrompt:        appendUserPrompt(releasenote.UserPrompt(prepared, cfg.MaxSteps, cfg.MaxToolCalls), cfg.AppendPrompt),
 		TextFormat:        releasenote.TextFormat(),
-		AllowedToolNames:  []string{releaseNoteFallbackTools},
+		AllowedToolNames:  allowedTools,
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
 	})
@@ -1136,9 +1175,29 @@ func resolveGuidanceForPaths(repo *gitctx.Repository, requestedFamily string, pa
 	return resolved.Rendered, nil
 }
 
+func resolveSkills(repo *gitctx.Repository) (*skillctx.Store, error) {
+	workDir, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	store, err := skillctx.Discover(skillctx.DefaultOptions(repo.RootPath, workDir))
+	if err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+func withSkillTools(names []string, store *skillctx.Store) []string {
+	result := append([]string(nil), names...)
+	if store.Len() > 0 {
+		result = append(result, tools.SkillToolNames()...)
+	}
+	return result
+}
+
 func toolPolicy() string {
 	return `<tool_policy>
-Tools are read-only repository inspection functions.
+Tools are read-only repository and skill inspection functions.
 No tool can execute arbitrary shell commands.
 No tool can mutate files, the Git index, refs, remotes, network state, or provider state.
 Tool outputs use a JSON envelope with ok, tool, data, and truncated fields.

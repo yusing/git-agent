@@ -157,3 +157,10 @@ small staged refinements preserve the original subject.
 For normal non-amend commits where the staged changes are only submodule
 gitlink updates, `commit-msg` and `commit` format the message locally without an
 LLM call or provider auth.
+
+Message-generation commands also expose local Codex-style skills as read-only
+workflow guidance when valid `SKILL.md` files are discovered under standard
+skill roots such as repository `.agents/skills`, user `.agents/skills`, or
+Codex skills directories. Skill metadata is included in the request, and the
+model may read a selected skill file with a bounded read-only tool before
+applying it.

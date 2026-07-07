@@ -443,9 +443,11 @@ Every task request is assembled using Codex-style layering:
 1. top-level Responses `instructions` containing task-level system behavior
 2. developer message containing the read-only tool policy
 3. developer message containing environment context
-4. developer message containing project guidance
-5. task-specific user prompt
-6. strict function tool registry for that task, if that task exposes tools
+4. optional developer message containing available skill metadata and skill-use
+   rules
+5. developer message containing project guidance
+6. task-specific user prompt
+7. strict function tool registry for that task, if that task exposes tools
 
 The project guidance block is not treated as ordinary user text. It is a
 separate injected layer mirroring Codex’s style.
@@ -459,9 +461,10 @@ Environment context includes:
 - selected guidance family
 - stdout contract
 
-Tool policy states that tools are read-only, cannot run arbitrary shell, cannot
-mutate files/index/refs/remotes/network/provider state, and return JSON
-envelopes with truncation metadata.
+Tool policy states that tools are read-only repository and skill inspection
+functions, cannot run arbitrary shell, cannot mutate
+files/index/refs/remotes/network/provider state, and return JSON envelopes with
+truncation metadata.
 
 Task prompts use explicit evidence boundaries: repository-sourced text such as
 diffs, file contents, commit messages, filenames, refs, and prepared JSON/XML
@@ -535,7 +538,7 @@ flowchart TD
     SubmoduleOnly -- no --> Resolve[Resolve provider config from flags, env, defaults]
     Resolve --> Guidance[Resolve project guidance for staged paths]
     Guidance --> Trace[Create home metadata session trace]
-    Trace --> Registry[Register read-only commit-message tools]
+    Trace --> Registry[Register read-only commit-message tools plus optional skills_read]
     Registry --> Runner[Build OpenAI runner with validator and tool specs]
     Runner --> Request[Assemble request layers]
     Request --> Model[Call Responses API]
@@ -573,7 +576,7 @@ flowchart TD
     Prepare --> Evidence[Collect original HEAD message, HEAD diff, final amended diff, staged diagnostics]
     Evidence --> Guidance[Resolve project guidance for final amended paths]
     Guidance --> Trace[Create home metadata session trace with amend mode]
-    Trace --> Registry[Register read-only commit-message tools]
+    Trace --> Registry[Register read-only commit-message tools plus optional skills_read]
     Registry --> Runner[Build OpenAI runner with amend validator and tool specs]
     Runner --> Request[Assemble amend request layers with prepared amend context]
     Request --> Model[Call Responses API]
@@ -620,7 +623,7 @@ flowchart TD
     PrepareAmend --> Resolve
     Resolve --> Guidance[Resolve project guidance for task paths]
     Guidance --> Trace[Create stdout-streaming console trace]
-    Trace --> Registry[Register read-only commit-message tools]
+    Trace --> Registry[Register read-only commit-message tools plus optional skills_read]
     Registry --> Runner[Build OpenAI runner with validator and tool specs]
     Runner --> Request[Assemble request layers]
     Request --> Model[Call Responses API]
@@ -654,12 +657,16 @@ flowchart TD
     Prepare --> Evidence[Collect base, changed paths, stats, branch commits, recent commits, bounded diff]
     Evidence --> Guidance[Resolve project guidance for changed paths]
     Guidance --> Trace[Create home metadata session trace]
-    Trace --> Runner[Build OpenAI runner without model tools]
+    Trace --> Registry[Register optional skills_read tool]
+    Registry --> Runner[Build OpenAI runner with prepared context and optional skill tool specs]
     Runner --> Request[Assemble request layers with prepared PR context]
     Request --> Model[Call Responses API]
-    Model --> ToolGuard{Tool calls returned?}
-    ToolGuard -- yes --> Error[Fail: no tool registry configured for pr-message]
-    ToolGuard -- no --> Shape[Shape body wrapping]
+    Model --> ToolDecision{Skill tool call?}
+    ToolDecision -- yes --> ExecuteSkill[Execute skills_read]
+    ExecuteSkill --> RecordSkill[Trace tool call and output]
+    RecordSkill --> Continue[Append function call and output items]
+    Continue --> Model
+    ToolDecision -- no --> Shape[Shape body wrapping]
     Shape --> Validate[Validate shaped squash commit message]
     Validate --> Valid{Valid?}
     Valid -- no --> Repair[Run one repair pass without tools]
@@ -687,7 +694,7 @@ flowchart TD
     Guidance --> Trace{--out set?}
     Trace -- no --> JSONTrace[Create home metadata session trace]
     Trace -- yes --> StreamTrace[Create stdout-streaming console trace]
-    JSONTrace --> Registry[Register repo_summary fallback tool]
+    JSONTrace --> Registry[Register repo_summary plus optional skills_read]
     StreamTrace --> Registry
     Registry --> Infer{Version bump shortcut?}
     Infer -- yes --> Bump[Find latest reachable semver tag and bump patch/minor/major; use HEAD for evidence]
@@ -700,9 +707,9 @@ flowchart TD
     SubHistory --> Runner[Build OpenAI runner with release-note validator and JSON format]
     Runner --> Request[Assemble request layers with prepared release context]
     Request --> Model[Call Responses API]
-    Model --> ToolDecision{Fallback tool call?}
+    Model --> ToolDecision{Fallback or skill tool call?}
     ToolDecision -- yes --> ToolBudget{Within tool budget?}
-    ToolBudget -- yes --> ExecuteTool[Execute repo_summary fallback tool]
+    ToolBudget -- yes --> ExecuteTool[Execute repo_summary or skills_read]
     ExecuteTool --> RecordTools[Trace tool call and output]
     RecordTools --> Continue[Append function call and output items]
     Continue --> Model
@@ -888,6 +895,28 @@ request. Sources are de-duplicated while preserving root-to-leaf order.
 `pr-message` uses the same family-selection behavior, but its target paths come
 from the current-branch diff against `origin/HEAD`.
 
+## 4.1 Skill discovery
+
+Message-generation commands discover reusable Codex-style skills from local
+`SKILL.md` files before request assembly. A valid skill has YAML frontmatter
+with nonempty `name` and `description`, parsed with `github.com/goccy/go-yaml`.
+Invalid or incomplete skill files are skipped.
+
+Discovery roots:
+
+- `.agents/skills` in each directory from the current working directory up to
+  the repository root
+- `$HOME/.agents/skills`
+- `$CODEX_HOME/skills`, defaulting to `$HOME/.codex/skills`
+- `/etc/codex/skills`
+- plugin cache skills under `$CODEX_HOME/plugins/cache/**/skills/*/SKILL.md`
+
+The injected `## Skills` developer message lists only metadata and source
+locators. The model must call `skills_read` before applying a listed skill.
+Skill instructions are lower priority than task instructions, tool policy,
+output contracts, validators, project guidance priority, and authoritative
+Git/release evidence.
+
 ## 5. Tool system
 
 ### Principles
@@ -907,6 +936,22 @@ Shared tools:
 - `read_file`
 - `search_files`
 
+### Skill tools
+
+Message-generation commands discover Codex-style skills before the provider
+request and inject a developer `## Skills` section containing skill names,
+descriptions, and source locators. Skill bodies are not inlined. When at least
+one valid skill is discovered, the model receives:
+
+- `skills_read`
+
+`skills_read` reads `SKILL.md` or a text file under the selected skill's
+`references/` directory. It requires the exact source locator from the initial
+Skills section, rejects unknown locators, absolute paths, traversal, symlink
+escapes, non-`references/` resource paths, and binary content, and applies the
+standard byte/line caps. It cannot execute skill scripts or expose arbitrary
+host files.
+
 ### Commit message tools
 
 Commit message tools:
@@ -923,19 +968,22 @@ Commit message tools:
 - `git_amend_delta`
 - `git_show_file_at_rev`
 
-`pr-message` does not expose tools to the model. It precomputes `origin/HEAD`
-base metadata, changed paths, diff stats, branch commits, recent style commits,
-and a bounded full diff in Go before the first provider call.
+`commit-msg` and `commit` expose these tools plus `skills_read` when skills are
+available. `pr-message` exposes no PR/repository diff tools; when skills are
+available, it exposes only `skills_read`. It precomputes `origin/HEAD` base
+metadata, changed paths, diff stats, branch commits, recent style commits, and
+a bounded full diff in Go before the first provider call.
 
 ### Release note tools
 
 Release-note generation precomputes ref resolution, parent logs, submodule
 gitlink changes, submodule history, and repository ownership in Go before the
 first provider call. The model receives only the `repo_summary` fallback tool
-for rare metadata gaps; legacy range/submodule tools are intentionally not
-exposed to the model. `resolve_ref`, `git_log_range`, `gitmodules_table`,
-`submodule_gitlink_range`, `submodule_log_range`, and `repo_kind` remain in the
-registry only as deprecated legacy tools.
+for rare metadata gaps, plus `skills_read` when skills are available; legacy
+range/submodule tools are intentionally not exposed to the model. `resolve_ref`,
+`git_log_range`, `gitmodules_table`, `submodule_gitlink_range`,
+`submodule_log_range`, and `repo_kind` remain in the registry only as deprecated
+legacy tools.
 
 ### Tool I/O expectations
 
@@ -1074,9 +1122,9 @@ Behavior:
 
 - describe the current branch as one squash merge commit versus `origin/HEAD`
 - treat the `origin/HEAD` to `HEAD` diff as authoritative scope
-- use the prepared PR context as authoritative evidence without tool calls
+- use the prepared PR context as authoritative evidence before any skill lookup
 - do not reference or request PR-specific tools; `pr-message` intentionally
-  exposes no model tools
+  exposes no PR/repository diff tools and may expose only `skills_read`
 - use branch commits only as supporting evidence for intent, grouping, and task
   IDs
 - ignore staged and unstaged work unless it is already committed at `HEAD`

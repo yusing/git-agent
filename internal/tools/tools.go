@@ -1,8 +1,10 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/yusing/git-agent/internal/gitctx"
+	"github.com/yusing/git-agent/internal/skills"
 	"github.com/yusing/git-agent/internal/textutil"
 )
 
@@ -40,7 +43,13 @@ type Registry struct {
 	tools map[string]Tool
 }
 
+const SkillReadToolName = "skills_read"
+
 func NewRegistry(repo *gitctx.Repository) *Registry {
+	return NewRegistryWithSkills(repo, nil)
+}
+
+func NewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Store) *Registry {
 	registry := &Registry{tools: map[string]Tool{}}
 	for _, tool := range []Tool{
 		repoSummaryTool{repo: repo},
@@ -70,6 +79,10 @@ func NewRegistry(repo *gitctx.Repository) *Registry {
 		submoduleLogRangeTool{repo: repo},
 		repoKindTool{repo: repo},
 	} {
+		registry.tools[tool.Definition().Name] = tool
+	}
+	if skillStore.Len() > 0 {
+		tool := skillsReadTool{store: skillStore}
 		registry.tools[tool.Definition().Name] = tool
 	}
 	return registry
@@ -113,20 +126,8 @@ func CommitMessageToolNames() []string {
 	}
 }
 
-func PRMessageToolNames() []string {
-	return []string{
-		"repo_summary",
-		"list_files",
-		"read_file",
-		"search_files",
-		"git_pr_base",
-		"git_pr_paths",
-		"git_pr_stat",
-		"git_pr_diff",
-		"git_pr_commits",
-		"git_recent_commits",
-		"git_show_file_at_rev",
-	}
+func SkillToolNames() []string {
+	return []string{SkillReadToolName}
 }
 
 // ReleaseNoteToolNames returns the legacy release-note tool set.
@@ -349,6 +350,100 @@ func (t readFileTool) Execute(_ context.Context, invocation Invocation) (Result,
 	maxBytes, maxLines := normalizeCaps(args.MaxBytes, args.MaxLines)
 	limited, truncated := textutil.Limit(string(content), maxBytes, maxLines)
 	return jsonResult("read_file", map[string]any{"path": args.Path, "content": limited}, truncated)
+}
+
+type skillsReadTool struct {
+	store *skills.Store
+}
+
+func (t skillsReadTool) Definition() Definition {
+	return Definition{Name: SkillReadToolName, Description: "Read SKILL.md or a text file under references/ for a discovered skill root.", Schema: skillsReadSchema(), Strict: true}
+}
+
+func (t skillsReadTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
+	args, err := parseArgs[struct {
+		SourceLocator string `json:"source_locator"`
+		Path          string `json:"path"`
+		MaxBytes      int    `json:"max_bytes"`
+		MaxLines      int    `json:"max_lines"`
+	}](invocation.Arguments)
+	if err != nil {
+		return Result{}, err
+	}
+	skill, ok := t.store.Lookup(args.SourceLocator)
+	if !ok {
+		return Result{}, fmt.Errorf("unknown skill source locator: %s", args.SourceLocator)
+	}
+	rel, ok := cleanSkillReadPath(args.Path)
+	if !ok {
+		return Result{}, fmt.Errorf("skill path is not readable by this tool: %s", args.Path)
+	}
+	file, err := openSkillReadFile(skill, rel)
+	if err != nil {
+		return Result{}, err
+	}
+	defer file.Close()
+	maxBytes, maxLines := normalizeCaps(args.MaxBytes, args.MaxLines)
+	content, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)+1))
+	if err != nil {
+		return Result{}, err
+	}
+	if bytes.Contains(content, []byte{0}) {
+		return Result{}, fmt.Errorf("skill path is not a text file: %s", rel)
+	}
+	limited, truncated := textutil.Limit(string(content), maxBytes, maxLines)
+	if len(content) > maxBytes {
+		truncated = true
+	}
+	return jsonResult(SkillReadToolName, map[string]any{"source_locator": args.SourceLocator, "path": rel, "content": limited}, truncated)
+}
+
+func openSkillReadFile(skill skills.Skill, rel string) (*os.File, error) {
+	rootPath := skill.Root
+	openPath := rel
+	if strings.HasPrefix(rel, "references/") {
+		rootPath = filepath.Join(skill.Root, "references")
+		openPath = strings.TrimPrefix(rel, "references/")
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return nil, err
+	}
+	file, err := root.Open(openPath)
+	if err != nil {
+		root.Close()
+		return nil, err
+	}
+	if err := root.Close(); err != nil {
+		file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
+func skillsReadSchema() map[string]any {
+	return schema(map[string]any{
+		"source_locator": stringProp("Exact source locator from the initial Skills section."),
+		"path":           stringProp(`Relative path under the selected skill root. Use "SKILL.md" for the skill body; only files under references/ are readable otherwise.`),
+		"max_bytes":      intProp("Maximum bytes to return.", 1, 65536),
+		"max_lines":      intProp("Maximum lines to return.", 1, 2000),
+	}, "source_locator", "path", "max_bytes", "max_lines")
+}
+
+func cleanSkillReadPath(rel string) (string, bool) {
+	if strings.TrimSpace(rel) == "" {
+		return "SKILL.md", true
+	}
+	for part := range strings.SplitSeq(filepath.ToSlash(rel), "/") {
+		if part == ".." {
+			return "", false
+		}
+	}
+	cleaned := filepath.ToSlash(filepath.Clean(rel))
+	if cleaned == "SKILL.md" || strings.HasPrefix(cleaned, "references/") {
+		return cleaned, true
+	}
+	return "", false
 }
 
 type searchFilesTool repoTool
@@ -896,8 +991,13 @@ func safePath(root, rel string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if resolvedPath != resolvedRoot && !strings.HasPrefix(resolvedPath, resolvedRoot+string(filepath.Separator)) {
+	if !pathInsideRoot(resolvedRoot, resolvedPath) {
 		return "", fmt.Errorf("path escapes repository: %s", rel)
 	}
 	return resolvedPath, nil
+}
+
+func pathInsideRoot(root, path string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	return err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))))
 }
