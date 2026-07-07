@@ -899,23 +899,6 @@ func (r *Repository) indexFileContent(path string) (string, error) {
 	return b.String(), nil
 }
 
-func fileContentAtCommit(commit *object.Commit, path string) string {
-	file, err := commit.File(path)
-	if err != nil {
-		return ""
-	}
-	reader, err := file.Reader()
-	if err != nil {
-		return ""
-	}
-	defer reader.Close()
-	var b bytes.Buffer
-	if _, err := io.Copy(&b, reader); err != nil {
-		return ""
-	}
-	return b.String()
-}
-
 func discoverRoot(start string) (string, error) {
 	abs, err := filepath.Abs(start)
 	if err != nil {

@@ -45,10 +45,6 @@ type Registry struct {
 
 const SkillReadToolName = "skills_read"
 
-func NewRegistry(repo *gitctx.Repository) *Registry {
-	return NewRegistryWithSkills(repo, nil)
-}
-
 func NewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Store) *Registry {
 	registry := &Registry{tools: map[string]Tool{}}
 	for _, tool := range []Tool{
@@ -128,25 +124,6 @@ func CommitMessageToolNames() []string {
 
 func SkillToolNames() []string {
 	return []string{SkillReadToolName}
-}
-
-// ReleaseNoteToolNames returns the legacy release-note tool set.
-//
-// Deprecated: release-note generation now precomputes release evidence in Go
-// and exposes only repo_summary as a fallback tool.
-func ReleaseNoteToolNames() []string {
-	return []string{
-		"repo_summary",
-		"list_files",
-		"read_file",
-		"search_files",
-		"resolve_ref",
-		"git_log_range",
-		"gitmodules_table",
-		"submodule_gitlink_range",
-		"submodule_log_range",
-		"repo_kind",
-	}
 }
 
 const (

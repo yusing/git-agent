@@ -128,10 +128,6 @@ type PreparedSubmodule struct {
 	Commits               []PreparedCommit `json:"commits,omitempty"`
 }
 
-func PrepareContext(repo *gitctx.Repository, baseRef, releaseRef string) (PreparedContext, error) {
-	return PrepareContextFromRevision(repo, baseRef, releaseRef, releaseRef)
-}
-
 func PrepareContextFromRevision(repo *gitctx.Repository, baseRef, releaseRef, releaseRevision string) (PreparedContext, error) {
 	baseSHA, err := repo.ResolveRef(baseRef)
 	if err != nil {
@@ -688,14 +684,6 @@ func normalizeDraftFact(lines []string) string {
 	return strings.TrimSuffix(fact, ".") + "."
 }
 
-func commitPaths(files []PreparedChangedFile) []string {
-	paths := make([]string, 0, len(files))
-	for _, file := range files {
-		paths = append(paths, file.Path)
-	}
-	return paths
-}
-
 func stripConventionalPrefix(summary string) string {
 	_, rest, ok := strings.Cut(summary, ": ")
 	if ok {
@@ -773,16 +761,6 @@ func isConfigSchemaPath(path string) bool {
 func isChoreSummary(summary string) bool {
 	lower := strings.ToLower(summary)
 	return strings.HasPrefix(lower, "chore(") || strings.HasPrefix(lower, "chore:")
-}
-
-func ExpectedSubmoduleHeadings(prepared PreparedContext) map[string]string {
-	headings := make(map[string]string, len(prepared.Submodules))
-	for _, submodule := range prepared.Submodules {
-		if submodule.LocalHistoryAvailable && submodule.GroupHeading != "" {
-			headings[submodule.Path] = submodule.GroupHeading
-		}
-	}
-	return headings
 }
 
 func parseGitmodulesURLs(path string) (map[string]string, error) {

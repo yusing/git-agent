@@ -190,9 +190,6 @@ func TestPromptsNameRequiredScope(t *testing.T) {
 	if got := UserPrompt(ModeAmend, 12, 9); !containsAll(got, "Current limits: 12 total model steps, 9 total tool calls.", "How to read the evidence", "authoritative", "do not dual-narrate", "subject, tone, scope, and task IDs") {
 		t.Fatalf("amend user prompt missing evidence framing: %s", got)
 	}
-	if got := UserPromptWithOriginalAmendMessage("feat(cli): add commit command", 12, 9); !containsAll(got, "original_head_message is the anchor", "keep the original subject", "return original_head_message unchanged", "feat(cli): add commit command") {
-		t.Fatalf("amend original-message prompt missing preservation framing: %s", got)
-	}
 	if got := UserPrompt(ModePR, 12, 9); !containsAll(got, "Current limits: 12 total model steps, 9 total tool calls.", "squash merge commit message", "origin/HEAD", "No PR-specific tools are available", "branch commits") {
 		t.Fatalf("pr prompt missing branch scope: %s", got)
 	}
@@ -267,6 +264,8 @@ Store verified providers in config after successful verification.`,
 		"prepared_amend_context is authoritative initial evidence",
 		"latest HEAD commit being amended",
 		"original_head_message is the default answer and anchor",
+		"keep the original subject",
+		"return original_head_message unchanged",
 		"final_paths, final_stats, final_context_pack, and final_diff describe the final amended commit",
 		"head, head_paths, head_stats, head_context_pack, and head_diff describe the current HEAD/latest commit being amended",
 		"staged_paths, staged_status, staged_stats, staged_context_pack, staged_submodules, and amend_delta are diagnostics only",

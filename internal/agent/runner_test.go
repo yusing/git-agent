@@ -138,7 +138,7 @@ func TestRunnerExecutesToolCallRoundTrip(t *testing.T) {
 		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: "{}"}}},
 		{Text: "Add parser"},
 	}}
-	registry := tools.NewRegistry(repo)
+	registry := tools.NewRegistryWithSkills(repo, nil)
 	runner := OpenAIRunner{
 		Config:    config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 3, MaxToolCalls: 2},
 		Client:    client,
@@ -183,7 +183,7 @@ func TestRunnerRejectsToolCallsOutsideAllowedSet(t *testing.T) {
 	runner := OpenAIRunner{
 		Config: config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1},
 		Client: client,
-		Tools:  tools.NewRegistry(repo),
+		Tools:  tools.NewRegistryWithSkills(repo, nil),
 	}
 
 	_, err = runner.Run(t.Context(), Request{
@@ -210,7 +210,7 @@ func TestRunnerFinalizesWhenStepBudgetRunsOut(t *testing.T) {
 		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: "{}"}}},
 		{Text: "Add parser"},
 	}}
-	registry := tools.NewRegistry(repo)
+	registry := tools.NewRegistryWithSkills(repo, nil)
 	runner := OpenAIRunner{
 		Config:    config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1, MaxToolCalls: 2},
 		Client:    client,
@@ -266,7 +266,7 @@ func TestRunnerFinalizesWhenToolBudgetRunsOut(t *testing.T) {
 		}},
 		{Text: "Add parser"},
 	}}
-	registry := tools.NewRegistry(repo)
+	registry := tools.NewRegistryWithSkills(repo, nil)
 	runner := OpenAIRunner{
 		Config:    config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 3, MaxToolCalls: 1},
 		Client:    client,

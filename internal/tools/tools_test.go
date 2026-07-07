@@ -22,7 +22,7 @@ func TestToolDefinitionsAreStrictAndEnvelopeResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewRegistry(repo)
+	registry := NewRegistryWithSkills(repo, nil)
 	defs := registry.Definitions([]string{"repo_summary", "read_file"})
 	if len(defs) != 2 {
 		t.Fatalf("defs = %d", len(defs))
@@ -67,7 +67,7 @@ func TestRepositoryWalkToolsSkipInternalState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewRegistry(repo)
+	registry := NewRegistryWithSkills(repo, nil)
 
 	listResult, err := registry.Execute(t.Context(), Invocation{Name: "list_files", Arguments: "{}"})
 	if err != nil {
@@ -133,7 +133,7 @@ func TestLegacyReleaseNoteToolsAreMarkedDeprecated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	registry := NewRegistry(repo)
+	registry := NewRegistryWithSkills(repo, nil)
 	for _, def := range registry.Definitions([]string{
 		"resolve_ref",
 		"git_log_range",
@@ -167,7 +167,7 @@ func TestStagedDiffForPathsReturnsSelectedStagedPatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewRegistry(repo)
+	registry := NewRegistryWithSkills(repo, nil)
 	defs := registry.Definitions(CommitMessageToolNames())
 	if len(defs) != len(CommitMessageToolNames()) {
 		t.Fatalf("defs = %d, want %d", len(defs), len(CommitMessageToolNames()))
