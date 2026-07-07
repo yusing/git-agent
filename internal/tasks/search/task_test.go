@@ -836,6 +836,39 @@ func TestSearchBatchesIndexEmbeddingsAndCachesExactQueryEmbedding(t *testing.T) 
 	}
 }
 
+func TestSearchReportsProgressWhenIndexNeedsUpdate(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "first.txt", "alpha\n")
+	opts := Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}
+	if _, err := Run(t.Context(), fakeEmbedder{}, opts, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+
+	writeFile(t, root, "second.txt", "alpha\n")
+	var calls []Progress
+	opts.ProgressLog = func(progress Progress) {
+		calls = append(calls, Progress{Done: progress.Done, Total: progress.Total, Reused: progress.Reused})
+	}
+	if _, err := Run(t.Context(), fakeEmbedder{}, opts, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	want := []Progress{
+		{Total: 1, Reused: 1},
+		{Done: 1, Total: 1, Reused: 1},
+	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("progress calls = %#v, want %#v", calls, want)
+	}
+}
+
 func TestSearchSplitsRejectedEmbeddingBatches(t *testing.T) {
 	root := t.TempDir()
 	for i := range 12 {

@@ -21,6 +21,7 @@ import (
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/metadata"
+	searchtask "github.com/yusing/git-agent/internal/tasks/search"
 )
 
 func TestRunWithoutArgsReturnsUsage(t *testing.T) {
@@ -56,6 +57,7 @@ func TestSearchHelpReturnsUsage(t *testing.T) {
 		"--format json|brief":        "output format: json or brief",
 		"--code":                     "search code files only",
 		"--no-tests":                 "exclude common test files and directories",
+		"--agent":                    "serve search indexing progress on localhost",
 		"--index":                    "build embeddings for the selected source without searching",
 		"--reindex":                  "rebuild embeddings for the selected source",
 		"--rev <rev>":                "search a committed Git tree",
@@ -291,8 +293,176 @@ func TestSearchPrintsBriefFormat(t *testing.T) {
 	if stderr.String() != "" {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
-	if got, want := stdout.String(), "1.00 notes.txt:1 release notes live here\n"; got != want {
+	if got, want := stdout.String(), "# mode=filesystem index=built\n1.00 notes.txt:1 release notes live here\n"; got != want {
 		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := app.Run(t.Context(), []string{"search", "--format", "brief", "release", "notes"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stdout.String(), "# mode=filesystem index=fresh\n1.00 notes.txt:1 release notes live here\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestSearchBriefSuppressesPackageResultWhenFileHasSymbol(t *testing.T) {
+	var stdout bytes.Buffer
+	output := searchtask.Output{
+		Source:    searchtask.Source{Mode: "filesystem"},
+		Retrieval: searchtask.Retrieval{Index: "hit"},
+		Diagnostics: searchtask.Diagnostics{
+			Chunks:       3,
+			ReusedChunks: 3,
+		},
+		Results: []searchtask.Result{
+			{
+				Relatedness: 0.99,
+				Range:       "foo.go:1-1",
+				Path:        "foo.go",
+				StartLine:   1,
+				Excerpt:     "1: package foo\n",
+			},
+			{
+				Relatedness: 0.98,
+				Range:       "foo.go:3-3",
+				Path:        "foo.go",
+				StartLine:   3,
+				Symbol:      &searchtask.Symbol{Type: "function", Name: "Target"},
+				Excerpt:     "3: func Target() {}\n",
+			},
+			{
+				Relatedness: 0.70,
+				Range:       "bar.go:1-1",
+				Path:        "bar.go",
+				StartLine:   1,
+				Excerpt:     "1: package bar\n",
+			},
+		},
+	}
+	if err := writeSearchBrief(&stdout, output); err != nil {
+		t.Fatal(err)
+	}
+	want := "# mode=filesystem index=fresh\n" +
+		"0.98 foo.go:3 Target\n" +
+		"0.70 bar.go:1 package bar\n"
+	if got := stdout.String(); got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestSearchProgressRewritesAndClearsLine(t *testing.T) {
+	var stderr bytes.Buffer
+	app := &App{stderr: &stderr}
+
+	app.writeSearchProgress(searchtask.Progress{Total: 5})
+	app.writeSearchProgress(searchtask.Progress{Done: 2, Total: 5, Elapsed: 1500 * time.Millisecond})
+	app.writeSearchProgress(searchtask.Progress{Done: 5, Total: 5, Elapsed: 2 * time.Second})
+
+	want := "\r\x1b[2Ksearch: building embeddings 0/5 chunks" +
+		"\r\x1b[2Ksearch: building embeddings 2/5 chunks (40.0%, 1.5s)" +
+		"\r\x1b[2K"
+	if got := stderr.String(); got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+}
+
+func TestSearchProgressAgentServesCurrentProgress(t *testing.T) {
+	agent, err := startSearchProgressAgent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Close()
+
+	if !strings.HasPrefix(agent.URL(), "http://127.0.0.1:") || !strings.HasSuffix(agent.URL(), "/progress") {
+		t.Fatalf("agent URL = %q", agent.URL())
+	}
+	agent.Update(searchtask.Progress{Done: 2, Total: 5, Reused: 1, Elapsed: 1500 * time.Millisecond})
+
+	resp, err := http.Get(agent.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var snapshot searchProgressSnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Status != "indexing" || snapshot.Done != 2 || snapshot.Total != 5 || snapshot.Reused != 1 || snapshot.Percent != 40 || snapshot.ElapsedMS != 1500 {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+
+	agent.Update(searchtask.Progress{Done: 5, Total: 5, Reused: 1, Elapsed: 2 * time.Second})
+	resp, err = http.Get(agent.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Status != "done" || snapshot.Percent != 100 {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+
+	resp, err = http.Get(strings.TrimSuffix(agent.URL(), "/progress") + "/not-progress")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestSearchAgentPrintsProgressURL(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("HOME", t.TempDir())
+	useGeneralEmbeddingProvider(t)
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("release notes live here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	server, _ := newSearchEmbeddingsServer(t)
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"search", "--agent", "release", "notes"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "search: progress agent listening on http://127.0.0.1:") || !strings.Contains(stderr.String(), "/progress\n") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if got := stdout.String(); !strings.HasPrefix(got, "# mode=filesystem index=built\n1.00 notes.txt:1 release notes live here\n") {
+		t.Fatalf("stdout = %q", got)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := app.Run(t.Context(), []string{"search", "--agent", "--format", "json", "release", "notes"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "search: progress agent listening on http://127.0.0.1:") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	var out struct {
+		Results []any `json:"results"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("stdout is not JSON: %q: %v", stdout.String(), err)
+	}
+	if len(out.Results) == 0 {
+		t.Fatalf("output = %#v", out)
 	}
 }
 

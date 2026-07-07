@@ -81,6 +81,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	var reindex bool
 	var codeOnly bool
 	var noTests bool
+	var agentMode bool
 	var scope string
 	var format string
 	var embeddingModel string
@@ -100,6 +101,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	fs.BoolVar(&reindex, "reindex", false, "rebuild embeddings for the selected source")
 	fs.BoolVar(&codeOnly, "code", false, "search code files only")
 	fs.BoolVar(&noTests, "no-tests", false, "exclude common test files and directories")
+	fs.BoolVar(&agentMode, "agent", false, "serve search indexing progress on localhost")
 	fs.StringVar(&scope, "scope", "", "comma-separated relative paths to search or index")
 	fs.StringVar(&format, "format", "json", "output format: json or brief")
 	fs.StringVar(&embeddingModel, "embedding-model", "", "embedding model")
@@ -110,6 +112,15 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 			return searchUsageError(fs)
 		}
 		return err
+	}
+	formatSet := false
+	fs.Visit(func(flag *flag.Flag) {
+		if flag.Name == "format" {
+			formatSet = true
+		}
+	})
+	if agentMode && !formatSet {
+		format = "brief"
 	}
 	if format != "json" && format != "brief" {
 		return fmt.Errorf("--format must be json or brief, got %q", format)
@@ -160,6 +171,19 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	if cfg.Debug {
 		debugLog = a.writeDebugEvent
 	}
+	var progressLog func(searchtask.Progress)
+	var progressAgent *searchProgressAgent
+	if agentMode {
+		progressAgent, err = startSearchProgressAgent()
+		if err != nil {
+			return err
+		}
+		defer progressAgent.Close()
+		progressLog = progressAgent.Update
+		fmt.Fprintf(a.stderr, "search: progress agent listening on %s\n", progressAgent.URL())
+	} else if !cfg.Debug && isInteractiveFile(a.stderr) {
+		progressLog = a.writeSearchProgress
+	}
 	root, err := os.Getwd()
 	if err != nil {
 		return err
@@ -184,12 +208,22 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 		BaseURL:                cfg.BaseURL,
 		Debug:                  cfg.Debug,
 		DebugLog:               debugLog,
+		ProgressLog:            progressLog,
 	}, query)
 	if err != nil {
+		if progressAgent == nil && progressLog != nil {
+			a.clearSearchProgress()
+		}
+		if progressAgent != nil {
+			progressAgent.Fail(err)
+		}
 		if cfg.Debug {
 			a.writeSearchDebug(output)
 		}
 		return err
+	}
+	if progressAgent != nil {
+		progressAgent.Complete()
 	}
 	if cfg.Debug {
 		a.writeSearchDebug(output)
@@ -203,12 +237,50 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 }
 
 func writeSearchBrief(w io.Writer, output searchtask.Output) error {
-	for _, result := range output.Results {
+	if _, err := fmt.Fprintf(w, "# mode=%s index=%s\n", output.Source.Mode, briefIndexFreshness(output)); err != nil {
+		return err
+	}
+	for _, result := range briefResults(output.Results) {
 		if _, err := fmt.Fprintf(w, "%.2f %s %s\n", result.Relatedness, briefLocation(result), briefSummary(result)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func briefIndexFreshness(output searchtask.Output) string {
+	switch {
+	case output.Diagnostics.Chunks == 0:
+		return "empty"
+	case output.Diagnostics.EmbeddedChunks == 0 && output.Retrieval.Index == "hit":
+		return "fresh"
+	case output.Diagnostics.ReusedChunks > 0:
+		return "refreshed"
+	case output.Diagnostics.EmbeddedChunks > 0 || output.Retrieval.Index == "miss":
+		return "built"
+	default:
+		return output.Retrieval.Index
+	}
+}
+
+func briefResults(results []searchtask.Result) []searchtask.Result {
+	filesWithSymbols := map[string]bool{}
+	for _, result := range results {
+		if result.Path != "" && result.Symbol != nil && result.Symbol.Name != "" {
+			filesWithSymbols[result.Path] = true
+		}
+	}
+	if len(filesWithSymbols) == 0 {
+		return results
+	}
+	filtered := make([]searchtask.Result, 0, len(results))
+	for _, result := range results {
+		if result.Symbol == nil && filepath.Ext(result.Path) == ".go" && filesWithSymbols[result.Path] && strings.HasPrefix(briefSummary(result), "package ") {
+			continue
+		}
+		filtered = append(filtered, result)
+	}
+	return filtered
 }
 
 func briefLocation(result searchtask.Result) string {
@@ -251,6 +323,35 @@ func (a *App) writeSearchDebug(output searchtask.Output) {
 		slog.String("index_dir", diag.IndexDir),
 		slog.Duration("total", diag.Total.Round(time.Millisecond)),
 	)
+}
+
+func (a *App) writeSearchProgress(progress searchtask.Progress) {
+	done, total, reused := progress.Done, progress.Total, progress.Reused
+	if total <= 0 {
+		return
+	}
+	if done >= total {
+		a.clearSearchProgress()
+		return
+	}
+	action := "building"
+	if reused > 0 {
+		action = "updating"
+	}
+	if done == 0 {
+		if reused > 0 {
+			fmt.Fprintf(a.stderr, "\r\x1b[2Ksearch: %s embeddings 0/%d chunks (%d reused)", action, total, reused)
+			return
+		}
+		fmt.Fprintf(a.stderr, "\r\x1b[2Ksearch: %s embeddings 0/%d chunks", action, total)
+		return
+	}
+	percent := float64(done) / float64(total) * 100
+	fmt.Fprintf(a.stderr, "\r\x1b[2Ksearch: %s embeddings %d/%d chunks (%.1f%%, %s)", action, done, total, percent, progress.Elapsed.Round(time.Millisecond))
+}
+
+func (a *App) clearSearchProgress() {
+	fmt.Fprint(a.stderr, "\r\x1b[2K")
 }
 
 func (a *App) writeDebugEvent(kind string, attrs ...slog.Attr) {
@@ -1059,7 +1160,7 @@ func environmentContext(repo *gitctx.Repository, command, mode, guidanceFamily s
 }
 
 func (a *App) budgetHandler() agent.BudgetHandler {
-	if !interactiveReader(a.stdin) {
+	if !isInteractiveFile(a.stdin) {
 		return nil
 	}
 	return func(_ context.Context, status agent.BudgetStatus) (agent.BudgetDecision, error) {
@@ -1100,8 +1201,8 @@ func (a *App) budgetHandler() agent.BudgetHandler {
 	}
 }
 
-func interactiveReader(reader io.Reader) bool {
-	file, ok := reader.(*os.File)
+func isInteractiveFile(value any) bool {
+	file, ok := value.(*os.File)
 	if !ok {
 		return false
 	}
@@ -1164,6 +1265,7 @@ func writeSearchFlags(b *strings.Builder, fs *flag.FlagSet) {
 		"format",
 		"code",
 		"no-tests",
+		"agent",
 		"index",
 		"reindex",
 		"rev",

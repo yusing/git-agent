@@ -166,11 +166,25 @@ explanations, and does not use lexical fallback, lexical ranking, token overlap,
 or path/name boosts. It embeds the query and local chunks, then performs an
 exact cosine scan over the local binary vector cache.
 
-`--format json` is the default stdout contract. `--format brief` writes one
-result per line as `<score> <path>:<start-line> <summary>`, with the score
-rounded to two decimals. The summary is the indexed symbol name when available,
-otherwise the first excerpt line without its excerpt line-number prefix.
-`--index --format brief` writes no result lines because indexing skips scoring.
+`--format json` is the default stdout contract. `--format brief` first writes a
+header line as `# mode=<filesystem|revision> index=<fresh|refreshed|built|empty>`,
+then writes one result per line as `<score> <path>:<start-line> <summary>`, with
+the score rounded to two decimals. The summary is the indexed symbol name when
+available, otherwise the first excerpt line without its excerpt line-number
+prefix. Brief output suppresses low-information Go `package <name>` results when
+another result for the same file has an indexed symbol. `--index --format brief`
+writes only the header line because indexing skips scoring.
+
+When stderr is an interactive terminal and `--debug` is not enabled, search
+shows transient indexing progress while missing embeddings are built or updated.
+The progress line is rewritten and cleared with ANSI control sequences before
+stdout is written. Non-interactive stderr receives no progress output.
+`--agent` starts a local progress probe server instead of terminal progress. The
+server listens on `127.0.0.1:0`, prints its actual `http://127.0.0.1:<port>/progress`
+URL to stderr, and returns JSON for `GET /progress` with status, completed chunk
+count, total chunk count, reused chunk count, percent, elapsed milliseconds, and
+last update time. When `--format` is omitted, `--agent` changes the output format
+default from JSON to brief. The server shuts down when the search command exits.
 
 Persistent metadata is stored under `~/.git-agent/<path-sha>/`, where
 `<path-sha>` is the SHA-256 of the cleaned absolute project root. Search writes
@@ -253,9 +267,12 @@ Message-generation subcommands reserve this shared flag surface:
 
 - `--scope <paths>`: comma-separated root-relative paths to search or index
 - `--limit <n>`: default `20`, valid `1..100`
-- `--format json|brief`: default `json`; `brief` writes ranked result lines
+- `--format json|brief`: default `json`; `brief` writes a header and ranked
+  result lines
 - `--code`: search source-code files only
 - `--no-tests`: exclude common test files and test directories
+- `--agent`: serve current indexing progress on `127.0.0.1:<port>/progress`;
+  defaults output to brief unless `--format` is set
 - `--index`: build embeddings for the selected source without searching
 - `--reindex`: rebuild embeddings for the selected source
 - `--rev <rev>`: search a committed Git tree instead of current filesystem files
@@ -340,17 +357,18 @@ Resolution order:
 ### stdout / stderr contract
 
 - stdout for generation-only commands: final generated artifact only
-- stdout for `search`: JSON result by default; brief result lines with
-  `--format brief`
+- stdout for `search`: JSON result by default; brief header and result lines
+  with `--format brief`
 - stdout for `release-note --out <file>`: streaming human console trace lines
   while generating the release note; the rendered Markdown is written to the
   requested file after a preflight writable check
 - stdout for `commit` / `commit --amend`: streaming human console trace lines
   while generating the message, followed by Git's raw commit summary after
   success
-- stderr: diagnostics, console-formatted debug output, validation failures,
-  provider/tool loop summaries when `--debug` is enabled, and stderr emitted by
-  a successful delegated `git commit`
+- stderr: diagnostics, console-formatted debug output, transient search
+  progress, `--agent` progress probe URLs, validation failures, provider/tool
+  loop summaries when `--debug` is enabled, and stderr emitted by a successful
+  delegated `git commit`
 - `search` writes errors and optional `--debug` diagnostics to stderr only and
   never writes a model trace session
 - generation-only commands write a JSON trace session under
