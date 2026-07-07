@@ -80,6 +80,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	var indexOnly bool
 	var reindex bool
 	var codeOnly bool
+	var noTests bool
 	var scope string
 	var format string
 	var embeddingModel string
@@ -98,6 +99,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	fs.BoolVar(&indexOnly, "index", false, "build embeddings for the selected source without searching")
 	fs.BoolVar(&reindex, "reindex", false, "rebuild embeddings for the selected source")
 	fs.BoolVar(&codeOnly, "code", false, "search code files only")
+	fs.BoolVar(&noTests, "no-tests", false, "exclude common test files and directories")
 	fs.StringVar(&scope, "scope", "", "comma-separated relative paths to search or index")
 	fs.StringVar(&format, "format", "json", "output format: json or brief")
 	fs.StringVar(&embeddingModel, "embedding-model", "", "embedding model")
@@ -170,6 +172,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 		IndexOnly:              indexOnly,
 		Reindex:                reindex,
 		CodeOnly:               codeOnly,
+		NoTests:                noTests,
 		Scope:                  scopes,
 		EmbeddingModel:         embeddingModel,
 		EmbeddingDimensions:    embeddingDimensions,
@@ -1160,6 +1163,7 @@ func writeSearchFlags(b *strings.Builder, fs *flag.FlagSet) {
 		"limit",
 		"format",
 		"code",
+		"no-tests",
 		"index",
 		"reindex",
 		"rev",

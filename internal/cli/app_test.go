@@ -55,6 +55,7 @@ func TestSearchHelpReturnsUsage(t *testing.T) {
 		"--limit <n>":                "maximum results",
 		"--format json|brief":        "output format: json or brief",
 		"--code":                     "search code files only",
+		"--no-tests":                 "exclude common test files and directories",
 		"--index":                    "build embeddings for the selected source without searching",
 		"--reindex":                  "rebuild embeddings for the selected source",
 		"--rev <rev>":                "search a committed Git tree",
@@ -397,6 +398,55 @@ func TestSearchScopeAcceptsCommaSeparatedPaths(t *testing.T) {
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("results include %s: %#v", unwanted, out.Results)
 		}
+	}
+}
+
+func TestSearchNoTestsFiltersCommonTestFiles(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("HOME", t.TempDir())
+	useGeneralEmbeddingProvider(t)
+	for name, content := range map[string]string{
+		"main.go":      "alpha\n",
+		"main_test.go": "alpha\n",
+	} {
+		writeFixtureFile(t, filepath.Join(root, filepath.FromSlash(name)), content)
+	}
+
+	server, _ := newSearchEmbeddingsServer(t)
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"search", "--no-tests", "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	var out struct {
+		Retrieval struct {
+			Filters struct {
+				NoTests bool `json:"no_tests"`
+			} `json:"filters"`
+		} `json:"retrieval"`
+		Results []struct {
+			Range string `json:"range"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("stdout is not JSON: %q: %v", stdout.String(), err)
+	}
+	if !out.Retrieval.Filters.NoTests {
+		t.Fatalf("filters = %#v", out.Retrieval.Filters)
+	}
+	got := searchResultRanges(out.Results)
+	if !slices.Equal(got, []string{"main.go:1-1"}) {
+		t.Fatalf("result ranges = %#v", got)
 	}
 }
 
@@ -1928,6 +1978,17 @@ func embeddingTestVector(dimensions int, first float64) []float64 {
 		vector[0] = first
 	}
 	return vector
+}
+
+func searchResultRanges(results []struct {
+	Range string `json:"range"`
+}) []string {
+	ranges := make([]string, 0, len(results))
+	for _, result := range results {
+		ranges = append(ranges, result.Range)
+	}
+	slices.Sort(ranges)
+	return ranges
 }
 
 func writeCodexAuth(t *testing.T, content string) {

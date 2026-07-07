@@ -83,7 +83,8 @@ the search root and not ignored or skipped. Generated Go files with a
 pre-package `DO NOT EDIT` heading are included as path-only chunks so generated
 body content is not embedded.
 Use `--scope foo,bar/baz` to limit search or indexing to comma-separated
-root-relative paths. Use `--index` without a query to build or refresh missing
+root-relative paths. Use `--no-tests` to exclude common test files and test
+directories. Use `--index` without a query to build or refresh missing
 embeddings without searching; add `--reindex` to rebuild existing embeddings too.
 Search uses `OPENAI_EMBEDDING_API_KEY` when set, then falls back to
 `OPENAI_API_KEY`; Codex/ChatGPT auth is not used for embeddings. Successful

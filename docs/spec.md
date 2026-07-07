@@ -201,12 +201,17 @@ included. Generated Go files with a pre-package heading comment containing
 chunks; their generated body content is not embedded. `--code` does not change
 scoring and does not introduce a lexical fallback.
 
+`--no-tests` excludes common test files from the selected source before chunking
+and embedding. It skips path segments named `test`, `tests`, `__tests__`, or
+`spec`, Go files ending in `_test.go`, and basenames matching `*.test.*`,
+`*.spec.*`, `test.*`, or `spec.*`.
+
 `--index` builds missing embeddings for the selected filesystem or revision
-source, including any `--scope` and `--code` filters, writes the same JSON
-envelope with an empty result list, and skips query embedding, scoring, replay
-history, and semantic search. `--index --reindex` rebuilds embeddings even when
-cache entries already exist. Successful indexing writes the local cache after all
-missing embeddings complete.
+source, including any `--scope`, `--code`, and `--no-tests` filters, writes the
+same JSON envelope with an empty result list, and skips query embedding,
+scoring, replay history, and semantic search. `--index --reindex` rebuilds
+embeddings even when cache entries already exist. Successful indexing writes the
+local cache after all missing embeddings complete.
 
 With `--debug`, search writes live human console diagnostic events to stderr
 using the same renderer as streamed traces. It writes one `search_skip` event per
@@ -250,6 +255,7 @@ Message-generation subcommands reserve this shared flag surface:
 - `--limit <n>`: default `20`, valid `1..100`
 - `--format json|brief`: default `json`; `brief` writes ranked result lines
 - `--code`: search source-code files only
+- `--no-tests`: exclude common test files and test directories
 - `--index`: build embeddings for the selected source without searching
 - `--reindex`: rebuild embeddings for the selected source
 - `--rev <rev>`: search a committed Git tree instead of current filesystem files

@@ -224,6 +224,78 @@ func TestSearchCodeOnlyFiltersDocs(t *testing.T) {
 	}
 }
 
+func TestSearchNoTestsFiltersCommonTestPaths(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"main.go":              "alpha\n",
+		"main_test.go":         "alpha\n",
+		"button.test.ts":       "alpha\n",
+		"button.spec.ts":       "alpha\n",
+		"test.js":              "alpha\n",
+		"spec.ts":              "alpha\n",
+		"tests/helper.go":      "alpha\n",
+		"test/helper.py":       "alpha\n",
+		"__tests__/view.ts":    "alpha\n",
+		"spec/model.rb":        "alpha\n",
+		"testdata/sample.json": "alpha\n",
+	} {
+		writeFile(t, root, name, content)
+	}
+
+	out, err := Run(t.Context(), fakeEmbedder{}, Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               20,
+		NoTests:             true,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Retrieval.Filters.NoTests {
+		t.Fatalf("filters = %#v", out.Retrieval.Filters)
+	}
+	got := resultRanges(out.Results)
+	want := []string{"main.go:1-1", "testdata/sample.json:1-1"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("result ranges = %#v, want %#v", got, want)
+	}
+	if !strings.Contains(out.Diagnostics.IndexDir, "no-tests") {
+		t.Fatalf("index dir = %q, want no-tests filter", out.Diagnostics.IndexDir)
+	}
+}
+
+func TestRevisionSearchNoTestsFiltersCommittedTestPaths(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "main.go", "alpha\n")
+	writeFile(t, root, "main_test.go", "alpha\n")
+	writeFile(t, root, "tests/helper.go", "alpha\n")
+	rev := commitSearchRepo(t, root)
+
+	out, err := Run(t.Context(), fakeEmbedder{}, Options{
+		Root:                root,
+		Rev:                 rev,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		NoTests:             true,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resultRanges(out.Results)
+	want := []string{"main.go:1-1"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("result ranges = %#v, want %#v", got, want)
+	}
+}
+
 func TestRevisionSearchUsesIgnoreFilesFromResolvedCommit(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, ".gitignore", "ignored-by-gitignore.txt\n")
@@ -441,7 +513,7 @@ func TestDiscoverFilesystemFilesClassifiesSkipReasons(t *testing.T) {
 	writeFile(t, root, "manual.pdf", "%PDF-1.7\nrelease notes\n")
 	writeFile(t, root, "binary.dat", "release\x00notes\n")
 
-	files, skipped, skippedFiles, err := discoverFilesystemFiles(root, nil, func(string, ...slog.Attr) {})
+	files, skipped, skippedFiles, err := discoverFilesystemFiles(root, nil, false, func(string, ...slog.Attr) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -953,6 +1025,15 @@ func vectorFor(input string) []float64 {
 	default:
 		return []float64{0, 0, 1}
 	}
+}
+
+func resultRanges(results []Result) []string {
+	ranges := make([]string, 0, len(results))
+	for _, result := range results {
+		ranges = append(ranges, result.Range)
+	}
+	slices.Sort(ranges)
+	return ranges
 }
 
 type lengthLimitEmbedder struct {
