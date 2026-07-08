@@ -663,7 +663,6 @@ func consoleRequestValue(value map[string]any) map[string]any {
 	if toolItems, ok := itemCount(value["tools"]); ok {
 		result["tools"] = toolItems
 	}
-	addConsoleValue(result, "instructions", value["instructions"])
 	return result
 }
 

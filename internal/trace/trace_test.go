@@ -94,6 +94,40 @@ func TestNewStreamCompactsLargeStringsInline(t *testing.T) {
 	}
 }
 
+func TestNewStreamRequestOmitsInstructions(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	recorder, err := NewStream("commit", &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.Write("request", map[string]any{
+		"model":        "test-model",
+		"instructions": "draft commit message",
+		"input": []map[string]any{
+			{"type": "message", "role": "user", "content": "hello"},
+		},
+		"tools": []map[string]any{
+			{"name": "git_staged_paths"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := out.String()
+	for _, want := range []string{" INF request ", "model=test-model", "input_items=1", "tools=1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stream request missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"instructions", "draft commit message"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("stream request kept %q:\n%s", forbidden, got)
+		}
+	}
+}
+
 func TestConsoleTraceColorsFieldKeys(t *testing.T) {
 	t.Parallel()
 
