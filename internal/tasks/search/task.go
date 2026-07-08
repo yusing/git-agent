@@ -238,6 +238,7 @@ type historyEntry struct {
 	Query          string    `json:"query"`
 	Normalized     string    `json:"normalized"`
 	QueryEmbedding []float64 `json:"query_embedding"`
+	EmbeddingOnly  bool      `json:"embedding_only,omitempty"`
 	EmbeddingModel string    `json:"embedding_model"`
 	Dimensions     int       `json:"dimensions"`
 	SourceMode     string    `json:"source_mode"`
@@ -360,8 +361,27 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 	indexDir := indexDir(metadataDir, source.Mode, root, resolvedRev, filters)
 	diag.IndexDir = indexDir
+	indexLock, err := lockIndex(ctx, indexDir)
+	if err != nil {
+		return fail(err)
+	}
+	indexLocked := true
+	unlockIndex := func() error {
+		if !indexLocked {
+			return nil
+		}
+		indexLocked = false
+		return indexLock.Unlock()
+	}
+	defer func() {
+		_ = unlockIndex()
+	}()
+	reuseOpts := opts
+	if opts.Reindex && indexBuiltSince(indexDir, started) {
+		reuseOpts.Reindex = false
+	}
 	oldVectors, _ := loadVectors(indexDir)
-	vectors, records, reused := reuseVectors(chunks, oldVectors, opts)
+	vectors, records, reused := reuseVectors(chunks, oldVectors, reuseOpts)
 	diag.ReusedChunks = reused
 	mark("cache")
 
@@ -515,13 +535,16 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 	mark("embed_index")
 
-	if len(chunks) > 0 && (len(missing) > 0 || opts.Reindex) {
+	if len(chunks) > 0 && (len(missing) > 0 || reuseOpts.Reindex) {
 		if err := saveIndex(indexDir, source, root, resolvedRev, opts.EmbeddingModel, dimensions, chunks, records); err != nil {
 			mark("persist")
 			return fail(err)
 		}
 	}
 	mark("persist")
+	if err := unlockIndex(); err != nil {
+		return fail(err)
+	}
 
 	indexStatus := "miss"
 	if reused > 0 {
@@ -545,15 +568,50 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 
 	normalizedQuery := normalizeQuery(query)
-	queryVector, queryDimensions, cachedQuery := cachedQueryEmbedding(indexDir, normalizedQuery, opts.EmbeddingModel, opts.EmbeddingDimensions, source, root, resolvedRev)
-	if !cachedQuery {
+	var queryVector []float64
+	var queryDimensions int
+	var cachedQuery bool
+	queryLock := queryLockDir(indexDir, normalizedQuery, opts.EmbeddingModel, opts.EmbeddingDimensions, source, root, resolvedRev)
+	if err := withIndexLock(ctx, queryLock, func() error {
+		if err := withIndexLock(ctx, indexDir, func() error {
+			queryVector, queryDimensions, cachedQuery = cachedQueryEmbedding(indexDir, normalizedQuery, opts.EmbeddingModel, opts.EmbeddingDimensions, source, root, resolvedRev)
+			return nil
+		}); err != nil {
+			return err
+		}
+		if cachedQuery {
+			return nil
+		}
 		queryVectors, dim, err := embedTexts(ctx, client, opts, []string{query})
 		if err != nil {
-			mark("embed_query")
-			return fail(err)
+			return err
 		}
 		queryVector = queryVectors[0]
 		queryDimensions = dim
+		historyErr := withIndexLock(ctx, indexDir, func() error {
+			return appendHistory(indexDir, historyEntry{
+				Query:          query,
+				Normalized:     normalizedQuery,
+				QueryEmbedding: queryVector,
+				EmbeddingOnly:  true,
+				EmbeddingModel: opts.EmbeddingModel,
+				Dimensions:     len(queryVector),
+				SourceMode:     source.Mode,
+				Root:           root,
+				ResolvedRev:    resolvedRev,
+				CreatedAt:      time.Now().UTC(),
+			})
+		})
+		if errors.Is(historyErr, context.Canceled) || errors.Is(historyErr, context.DeadlineExceeded) {
+			return historyErr
+		}
+		if historyErr != nil {
+			debugLog("search_history_error", slog.String("error", historyErr.Error()))
+		}
+		return nil
+	}); err != nil {
+		mark("embed_query")
+		return fail(err)
 	}
 	if dimensions == 0 {
 		dimensions = queryDimensions
@@ -568,19 +626,28 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	results := renderResults(scored)
 	mark("score")
 
-	replay := replayFor(indexDir, query, normalizedQuery, queryVector, opts.EmbeddingModel, opts.EmbeddingDimensions, source, root, resolvedRev)
-	_ = appendHistory(indexDir, historyEntry{
-		Query:          query,
-		Normalized:     normalizedQuery,
-		QueryEmbedding: queryVector,
-		EmbeddingModel: opts.EmbeddingModel,
-		Dimensions:     len(queryVector),
-		SourceMode:     source.Mode,
-		Root:           root,
-		ResolvedRev:    resolvedRev,
-		ResultChunkIDs: resultIDs(scored),
-		CreatedAt:      time.Now().UTC(),
+	replay := Replay{Mode: "none"}
+	historyErr := withIndexLock(ctx, indexDir, func() error {
+		replay = replayFor(indexDir, query, normalizedQuery, queryVector, opts.EmbeddingModel, opts.EmbeddingDimensions, source, root, resolvedRev)
+		return appendHistory(indexDir, historyEntry{
+			Query:          query,
+			Normalized:     normalizedQuery,
+			QueryEmbedding: queryVector,
+			EmbeddingModel: opts.EmbeddingModel,
+			Dimensions:     len(queryVector),
+			SourceMode:     source.Mode,
+			Root:           root,
+			ResolvedRev:    resolvedRev,
+			ResultChunkIDs: resultIDs(scored),
+			CreatedAt:      time.Now().UTC(),
+		})
 	})
+	if errors.Is(historyErr, context.Canceled) || errors.Is(historyErr, context.DeadlineExceeded) {
+		return fail(historyErr)
+	}
+	if historyErr != nil {
+		debugLog("search_history_error", slog.String("error", historyErr.Error()))
+	}
 	mark("replay")
 
 	return resultWithDiagnostics(Output{
@@ -999,21 +1066,55 @@ func clampEmbeddingLine(line string) string {
 }
 
 func loadVectors(dir string) ([]vectorRecord, error) {
-	var found manifest
-	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
-	if err != nil {
+	if _, err := loadManifest(dir); err != nil {
 		return nil, err
-	}
-	if err := sonic.Unmarshal(data, &found); err != nil {
-		return nil, err
-	}
-	if found.Version != indexVersion {
-		return nil, fmt.Errorf("index version = %d, want %d", found.Version, indexVersion)
 	}
 	if records, err := loadBinaryVectors(dir); err == nil {
 		return records, nil
 	}
 	return loadLegacyVectors(dir)
+}
+
+func loadManifest(dir string) (manifest, error) {
+	var found manifest
+	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		return manifest{}, err
+	}
+	if err := sonic.Unmarshal(data, &found); err != nil {
+		return manifest{}, err
+	}
+	if found.Version != indexVersion {
+		return manifest{}, fmt.Errorf("index version = %d, want %d", found.Version, indexVersion)
+	}
+	return found, nil
+}
+
+func indexBuiltSince(dir string, since time.Time) bool {
+	found, err := loadManifest(dir)
+	return err == nil && !found.CreatedAt.Before(since)
+}
+
+func withIndexLock(ctx context.Context, indexDir string, fn func() error) error {
+	lock, err := lockIndex(ctx, indexDir)
+	if err != nil {
+		return err
+	}
+	fnErr := fn()
+	return errors.Join(fnErr, lock.Unlock())
+}
+
+func queryLockDir(indexDir, normalized, model string, dimensions int, source Source, root, resolvedRev string) string {
+	key := strings.Join([]string{
+		normalized,
+		model,
+		fmt.Sprintf("%d", dimensions),
+		source.Mode,
+		root,
+		resolvedRev,
+	}, "\x00")
+	sum := sha256.Sum256([]byte(key))
+	return filepath.Join(indexDir, "query-locks", hex.EncodeToString(sum[:])[:16])
 }
 
 func loadBinaryVectors(dir string) ([]vectorRecord, error) {
@@ -1414,6 +1515,9 @@ func replayFor(dir, query, normalized string, queryVector []float64, model strin
 			continue
 		}
 		if source.Mode == "revision" && entry.ResolvedRev != resolvedRev {
+			continue
+		}
+		if entry.EmbeddingOnly {
 			continue
 		}
 		if entry.Normalized == normalized {

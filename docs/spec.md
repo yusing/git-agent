@@ -227,7 +227,11 @@ source, including any `--scope`, `--code`, and `--no-tests` filters, writes the
 same JSON envelope with an empty result list, and skips query embedding,
 scoring, replay history, and semantic search. `--index --reindex` rebuilds
 embeddings even when cache entries already exist. Successful indexing writes the
-local cache after all missing embeddings complete.
+local cache after all missing embeddings complete. Parallel searches for the
+same source and filters use one index writer. Other processes wait for the
+writer, reload the completed cache, and skip embedding chunks that the writer
+just stored; parallel `--reindex` waiters also reuse a cache completed after
+their command started.
 
 With `--debug`, search writes live human console diagnostic events to stderr
 using the same renderer as streamed traces. It writes one `search_skip` event per

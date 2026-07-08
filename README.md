@@ -91,7 +91,9 @@ Use `--agent` to serve live indexing progress at a printed
 rebuilt; when `--format` is omitted, `--agent` defaults output to brief.
 Search uses `OPENAI_EMBEDDING_API_KEY` when set, then falls back to
 `OPENAI_API_KEY`; Codex/ChatGPT auth is not used for embeddings. Successful
-indexing writes the local cache after embedding completes. See `docs/spec.md`
+indexing writes the local cache after embedding completes. Parallel searches for
+the same source and filters use a single index writer; waiters reuse the
+completed cache instead of embedding the same chunks again. See `docs/spec.md`
 for exact output, file discovery, ignore-file, skip, cache, and debug behavior;
 run `git-agent search --help` for the current search flag list.
 

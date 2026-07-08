@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -84,6 +85,65 @@ func (e failOnPathEmbedder) CreateEmbeddings(ctx context.Context, request openai
 		if strings.Contains(input, string(e)) {
 			return openai.EmbeddingResponse{}, errors.New("boom")
 		}
+	}
+	return fakeEmbedder{}.CreateEmbeddings(ctx, request)
+}
+
+type blockingEmbedder struct {
+	calls       atomic.Int64
+	entered     chan struct{}
+	secondCall  chan struct{}
+	secondSaved atomic.Bool
+	release     chan struct{}
+	released    atomic.Bool
+}
+
+func newBlockingEmbedder() *blockingEmbedder {
+	return &blockingEmbedder{
+		entered:    make(chan struct{}),
+		secondCall: make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+}
+
+func (e *blockingEmbedder) CreateEmbeddings(ctx context.Context, request openai.EmbeddingRequest) (openai.EmbeddingResponse, error) {
+	switch e.calls.Add(1) {
+	case 1:
+		close(e.entered)
+	default:
+		if e.secondSaved.CompareAndSwap(false, true) {
+			close(e.secondCall)
+		}
+	}
+	select {
+	case <-e.release:
+	case <-ctx.Done():
+		return openai.EmbeddingResponse{}, ctx.Err()
+	}
+	return fakeEmbedder{}.CreateEmbeddings(ctx, request)
+}
+
+func (e *blockingEmbedder) releaseEmbeddings() {
+	if e.released.CompareAndSwap(false, true) {
+		close(e.release)
+	}
+}
+
+type blockingQueryEmbedder struct {
+	query    string
+	blocking *blockingEmbedder
+}
+
+func newBlockingQueryEmbedder(query string) *blockingQueryEmbedder {
+	return &blockingQueryEmbedder{
+		query:    query,
+		blocking: newBlockingEmbedder(),
+	}
+}
+
+func (e *blockingQueryEmbedder) CreateEmbeddings(ctx context.Context, request openai.EmbeddingRequest) (openai.EmbeddingResponse, error) {
+	if len(request.Inputs) == 1 && request.Inputs[0] == e.query {
+		return e.blocking.CreateEmbeddings(ctx, request)
 	}
 	return fakeEmbedder{}.CreateEmbeddings(ctx, request)
 }
@@ -785,6 +845,141 @@ func TestSearchPersistsIndexAfterAllEmbeddingsSucceed(t *testing.T) {
 	}
 	if secondEmbedder.callCount() != 2 {
 		t.Fatalf("embedding calls = %d, want 2", secondEmbedder.callCount())
+	}
+}
+
+func TestParallelSearchWaitsForIndexWriterAndReusesIndex(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		reindex bool
+	}{
+		{name: "missing", reindex: false},
+		{name: "reindex", reindex: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeFile(t, root, "alpha.txt", "alpha\n")
+
+			embedder := newBlockingEmbedder()
+			opts := Options{
+				Root:                root,
+				MinRelatedness:      0.70,
+				Limit:               10,
+				IndexOnly:           true,
+				Reindex:             tt.reindex,
+				EmbeddingModel:      "text-embedding-3-small",
+				EmbeddingDimensions: 3,
+				APIKey:              "test-key",
+				BaseURL:             "http://example.test",
+			}
+
+			ctx := t.Context()
+			var wg sync.WaitGroup
+			errs := make(chan error, 6)
+			wg.Go(func() {
+				out, err := Run(ctx, embedder, opts, "")
+				if err == nil && out.Retrieval.Index != "miss" {
+					err = fmt.Errorf("first index = %q, want miss", out.Retrieval.Index)
+				}
+				errs <- err
+			})
+			select {
+			case <-embedder.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("first search did not start embedding")
+			}
+
+			for range 5 {
+				wg.Go(func() {
+					out, err := Run(ctx, embedder, opts, "")
+					if err == nil && out.Retrieval.Index != "hit" {
+						err = fmt.Errorf("waiter index = %q, want hit", out.Retrieval.Index)
+					}
+					errs <- err
+				})
+			}
+			select {
+			case <-embedder.secondCall:
+				t.Fatal("parallel waiter embedded before first writer finished")
+			case <-time.After(100 * time.Millisecond):
+			}
+
+			embedder.releaseEmbeddings()
+			wg.Wait()
+			close(errs)
+			for err := range errs {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := embedder.calls.Load(); got != 1 {
+				t.Fatalf("embedding calls after parallel searches = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestParallelSearchWaitsForQueryEmbeddingAndReusesHistory(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "alpha.txt", "alpha\n")
+
+	opts := Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		IndexOnly:           true,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}
+	if _, err := Run(t.Context(), fakeEmbedder{}, opts, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	opts.IndexOnly = false
+	embedder := newBlockingQueryEmbedder("alpha")
+	ctx := t.Context()
+	var wg sync.WaitGroup
+	errs := make(chan error, 6)
+	wg.Go(func() {
+		out, err := Run(ctx, embedder, opts, "alpha")
+		if err == nil && len(out.Results) == 0 {
+			err = errors.New("first search returned no results")
+		}
+		errs <- err
+	})
+	select {
+	case <-embedder.blocking.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first search did not start query embedding")
+	}
+
+	for range 5 {
+		wg.Go(func() {
+			out, err := Run(ctx, embedder, opts, "alpha")
+			if err == nil && len(out.Results) == 0 {
+				err = errors.New("waiter search returned no results")
+			}
+			errs <- err
+		})
+	}
+	select {
+	case <-embedder.blocking.secondCall:
+		t.Fatal("parallel waiter embedded query before first query embedding finished")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	embedder.blocking.releaseEmbeddings()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := embedder.blocking.calls.Load(); got != 1 {
+		t.Fatalf("query embedding calls after parallel searches = %d, want 1", got)
 	}
 }
 
