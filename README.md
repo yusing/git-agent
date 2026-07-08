@@ -1,29 +1,184 @@
 # git-agent
 
-`git-agent` is an OpenAI-compatible tool-calling agent harness for Git-related
-operations. Model tools are read-only; the explicit `commit` command can run the
-final Git commit after message generation.
+Commit, PR, release, and repository-search context for AI-assisted Git work.
 
-## Commands
+`git-agent` gathers Git evidence with typed Go code, runs a bounded
+OpenAI-compatible tool-calling loop, and keeps model tools read-only. The
+`commit` command is the only workflow that writes to Git, and it does that after
+message generation by handing the final message to `git commit`.
 
-- `git-agent commit-msg`
-- `git-agent commit-msg --amend`
-- `git-agent commit`
-- `git-agent commit --amend`
-- `git-agent pr-message`
-- `git-agent release-note [--out <file>] <base> <release>`
-- `git-agent release-note [--out <file>] patch|minor|major`
-- `git-agent search [flags] <query...>`
+TL;DR: use `commit-msg` when you want a grounded commit message on stdout, use
+`commit` when you want the same message created as a Git commit, use
+`release-note` for release Markdown, and use `search` when an agent needs fast
+local implementation context.
+
+## Quick Start
+
+```sh
+# 1. Install the binary
+go install github.com/yusing/git-agent/cmd/git-agent@latest
+
+# 2. Generate a commit message from staged changes
+git-agent commit-msg
+
+# 3. Or generate and create the commit
+git-agent commit
+```
+
+By default, message-generation commands use ChatGPT/Codex auth from
+`~/.codex/auth.json`. `OPENAI_API_KEY` is the fallback for OpenAI-compatible
+provider auth when that file is absent.
+
+`go install` writes to `$(go env GOPATH)/bin` by default; make sure that
+directory is on `PATH`.
+
+## Everyday Workflows
+
+<!-- markdownlint-disable MD013 -->
+
+| Workflow | Command | Output |
+| --- | --- | --- |
+| Staged commit message | `git-agent commit-msg` | Final commit message on stdout |
+| Amend commit message | `git-agent commit-msg --amend` | Final amended commit message on stdout |
+| Generate and commit | `git-agent commit` | Human trace, then Git commit output |
+| Generate and amend | `git-agent commit --amend` | Human trace, then Git amend output |
+| Squash PR message | `git-agent pr-message` | Squash merge message on stdout |
+| Release body | `git-agent release-note <base> <release>` | Release Markdown on stdout |
+| Version bump release body | `git-agent release-note patch` | Release Markdown for latest tag to `HEAD` |
+| Agent context search | `git-agent search --agent <query...>` | Brief results, plus progress URL when indexing |
+
+<!-- markdownlint-enable MD013 -->
+
+## Why git-agent?
+
+LLMs are useful for Git writing, but raw prompts miss repository facts easily:
+staged scope, amend intent, recent message style, generated-heavy diffs,
+submodule history, guidance files, release ranges, and stdout/stderr contracts.
+
+`git-agent` front-loads those facts before the model writes:
+
+1. It inspects the repository with typed Git plumbing.
+2. It builds task-specific evidence for commit, PR, release, or search work.
+3. It exposes only narrow read-only tools when the model needs more context.
+4. It validates and shapes final output for the requested workflow.
+
+For submodule-only staged updates, normal `commit-msg` and `commit` skip the LLM
+entirely and format a deterministic local message.
+
+## What It Provides
+
+<!-- markdownlint-disable MD013 -->
+
+| Surface | What it does |
+| --- | --- |
+| Prepared Git context | Staged paths, status, stats, diffs, amend base, branch diffs, release ranges, and recent style commits |
+| Read-only model tools | Bounded file, diff, and repository inspection tools for generation workflows |
+| Guidance discovery | AGENTS/CLAUDE-family project instructions, plus local Codex-style `SKILL.md` workflow guidance |
+| Commit execution | Optional explicit `git commit --file -` or `git commit --amend --file -` after message generation |
+| Release-note writing | Release Markdown from explicit refs or `patch`, `minor`, and `major` shortcuts |
+| Embedding search | Local filesystem or committed-tree context search for agents and humans |
+| Trace artifacts | JSON request/response/tool-call traces for message generation commands |
+| Debug output | Human console diagnostics with `--debug`; pprof with `--pprof <addr>` |
+
+<!-- markdownlint-enable MD013 -->
+
+## Search
+
+`git-agent search` is embedding-backed implementation-location search. It does
+not run the Responses API or create message-generation sessions.
+
+```sh
+# Search current filesystem files
+git-agent search "where is release note evidence prepared"
+
+# Compact output for humans
+git-agent search --format brief "where are search flags parsed"
+
+# Agent mode: compact output plus progress probe when indexing
+git-agent search --agent "where are search flags parsed"
+
+# Search code only, excluding common tests
+git-agent search --code --no-tests "commit amend validation"
+
+# Index first, without running a query
+git-agent search --index
+
+# Search a committed tree instead of the working filesystem
+git-agent search --rev HEAD~1 "guidance discovery"
+```
+
+Search reads `OPENAI_EMBEDDING_API_KEY` first, then falls back to
+`OPENAI_API_KEY`. Codex/ChatGPT auth is not used for embeddings. Use
+`OPENAI_EMBEDDING_BASE_URL`, `OPENAI_EMBEDDING_MODEL`, and
+`OPENAI_EMBEDDING_DIMENSIONS` to isolate search embedding config from normal
+message-generation config.
+
+Useful flags:
+
+<!-- markdownlint-disable MD013 -->
+
+| Flag | Purpose |
+| --- | --- |
+| `--scope <paths>` | Limit search or indexing to comma-separated root-relative paths |
+| `--rev <rev>` | Search a committed Git tree |
+| `--code` | Include source-code files only |
+| `--no-tests` | Exclude common test files and test directories |
+| `--min-relatedness <n>` | Set vector relatedness candidate threshold |
+| `--limit <n>` | Limit result count |
+| `--format json\|brief` | Choose output format; use `brief` for humans |
+| `--index` | Build missing embeddings without searching |
+| `--reindex` | Rebuild existing embeddings |
+| `--agent` | Use agent-friendly brief output and serve indexing progress on localhost when embeddings need work |
+
+<!-- markdownlint-enable MD013 -->
+
+See `git-agent search --help` and [docs/spec.md](docs/spec.md) for exact
+output, cache, ignore-file, and debug behavior.
+
+## CLI Reference
+
+Everyday commands:
+
+```sh
+git-agent commit-msg [--amend] [flags]
+git-agent commit [--amend] [flags]
+git-agent pr-message [flags]
+git-agent release-note [--out <file>] [flags] <base> <release>
+git-agent release-note [--out <file>] [flags] patch|minor|major
+git-agent search [flags] <query...>
+```
+
+Common message-generation flags:
+
+<!-- markdownlint-disable MD013 -->
+
+| Flag | Purpose |
+| --- | --- |
+| `--model <name>` | Override `OPENAI_MODEL` |
+| `--fast` | Request fast service tier |
+| `--low`, `--medium`, `--high`, `--xhigh` | Set reasoning effort |
+| `--base-url <url>` | Override provider base URL |
+| `--timeout <duration>` | Override request timeout |
+| `--max-steps <n>` | Bound agent loop steps |
+| `--guidance-family auto\|agents\|claude\|codex\|none` | Force guidance family |
+| `--append-prompt <text>` | Add a bounded operator hint |
+| `--debug` | Print diagnostics and trace location |
+| `--pprof <addr>` | Serve Go pprof endpoints |
+
+<!-- markdownlint-enable MD013 -->
+
+`release-note --out <file>` writes the rendered Markdown to the file, streams a
+human console trace to stdout, and skips the on-disk JSON trace session.
 
 ## Configuration
 
-By default, `git-agent` uses ChatGPT/Codex auth from:
+Default auth comes from:
 
 ```text
 ~/.codex/auth.json
 ```
 
-The auth file must include:
+The file must include ChatGPT auth:
 
 ```json
 {
@@ -36,99 +191,58 @@ The auth file must include:
 ```
 
 ChatGPT auth sends requests to `https://chatgpt.com/backend-api/codex` with
-`Authorization: Bearer <access_token>` and `ChatGPT-Account-ID: <account_id>`.
+`Authorization: Bearer <access_token>` and
+`ChatGPT-Account-ID: <account_id>`.
 
-`OPENAI_API_KEY` is a legacy fallback when `~/.codex/auth.json` is absent.
-`OPENAI_BASE_URL` only applies to that legacy API-key path; ChatGPT auth uses
-the ChatGPT backend unless `--base-url` is passed explicitly.
+When `~/.codex/auth.json` is absent, `OPENAI_API_KEY` is used as a legacy
+OpenAI-compatible fallback. `OPENAI_BASE_URL` only applies to that fallback path
+unless `--base-url` is passed explicitly.
+
 Supported environment variables:
 
-- `OPENAI_API_KEY`
-- `OPENAI_BASE_URL`
-- `OPENAI_MODEL`
-- `OPENAI_EMBEDDING_API_KEY`
-- `OPENAI_EMBEDDING_BASE_URL`
-- `OPENAI_EMBEDDING_MODEL`
-- `OPENAI_EMBEDDING_DIMENSIONS`
-- `OPENAI_EMBEDDING_MAX_INPUT_CHARS`
-- `OPENAI_EMBEDDING_BATCH_INPUTS`
-- `OPENAI_EMBEDDING_BATCH_MAX_CHARS`
-- `OPENAI_EMBEDDING_CONCURRENCY`
+<!-- markdownlint-disable MD013 -->
+
+| Variable | Used for |
+| --- | --- |
+| `OPENAI_API_KEY` | Message-generation fallback auth and search fallback auth |
+| `OPENAI_BASE_URL` | Message-generation fallback base URL and search fallback base URL |
+| `OPENAI_MODEL` | Message-generation model |
+| `OPENAI_EMBEDDING_API_KEY` | Search embedding auth |
+| `OPENAI_EMBEDDING_BASE_URL` | Search embedding base URL |
+| `OPENAI_EMBEDDING_MODEL` | Search embedding model |
+| `OPENAI_EMBEDDING_DIMENSIONS` | Search embedding dimensions |
+| `OPENAI_EMBEDDING_MAX_INPUT_CHARS` | Search per-input character cap |
+| `OPENAI_EMBEDDING_BATCH_INPUTS` | Search embedding request input count |
+| `OPENAI_EMBEDDING_BATCH_MAX_CHARS` | Search embedding request character budget |
+| `OPENAI_EMBEDDING_CONCURRENCY` | Search embedding request concurrency |
+
+<!-- markdownlint-enable MD013 -->
 
 CLI flags override environment values.
 
-Common flags:
-
-- `--model`
-- `--fast`
-- `--low`
-- `--medium`
-- `--high`
-- `--xhigh`
-- `--base-url`
-- `--timeout`
-- `--max-steps`
-- `--guidance-family`
-- `--append-prompt`
-- `--debug`
-- `--pprof <addr>`
-
-`search` is local embedding retrieval for agents. It searches the current
-filesystem by default, or a committed tree with `--rev <rev>`, and writes JSON
-results to stdout by default. Use `--format brief` for compact line-oriented
-results. It filters candidates by vector relatedness, then ranks them with a
-hybrid score that also considers body text, path, and indexed symbol matches.
-Use `--code` to limit candidates to source-code files by extension. The code
-filter does not exclude tests by name, and filesystem mode still includes
-staged, unstaged, and untracked files when they are present under the search
-root and not ignored or skipped. Generated Go files with a pre-package
-`DO NOT EDIT` heading are included as path-only chunks so generated body content
-is not embedded.
-Use `--scope foo,bar/baz` to limit search or indexing to comma-separated
-root-relative paths. Use `--no-tests` to exclude common test files and test
-directories. Use `--index` without a query to build or refresh missing
-embeddings without searching; add `--reindex` to rebuild existing embeddings too.
-Use `--agent` to serve live indexing progress at a printed
-`http://127.0.0.1:<port>/progress` URL when embeddings need to be built or
-rebuilt; when `--format` is omitted, `--agent` defaults output to brief.
-Search uses `OPENAI_EMBEDDING_API_KEY` when set, then falls back to
-`OPENAI_API_KEY`; Codex/ChatGPT auth is not used for embeddings. Search frames
-the embedded query as an implementation-location search while keeping the
-printed query unchanged. Successful indexing writes the local cache after
-embedding completes. Parallel searches for the same source and filters use a
-single index writer; waiters reuse the completed cache instead of embedding the
-same chunks again. See `docs/spec.md` for exact output, file discovery,
-ignore-file, skip, cache, and debug behavior; run `git-agent search --help` for
-the current search flag list.
-
 Behavior defaults:
 
-- omit `service_tier` unless `--fast` is set
-- omit reasoning mode unless one of `--low`, `--medium`, `--high`, or `--xhigh` is set
-- `--append-prompt` adds a bounded operator hint to the task prompt; it can
-  steer style or emphasis only when consistent with the task contract and
-  repository evidence
+- `service_tier` is omitted unless `--fast` is set.
+- Reasoning effort is omitted unless `--low`, `--medium`, `--high`, or
+  `--xhigh` is set.
+- `--append-prompt` can steer style or emphasis only when consistent with the
+  task contract and repository evidence.
 
-## Build and install
+## How It Works
 
-```sh
-make build
-make test
-make install PREFIX=/usr/local
+```mermaid
+flowchart TD
+    Start["git-agent command"] --> Inspect["Typed Git inspection"]
+    Inspect --> Context["Prepared task context"]
+    Context --> Guidance["Project guidance and skills"]
+    Guidance --> Agent["Bounded read-only agent loop"]
+    Agent --> Validate["Validate and shape output"]
+    Validate --> Output["stdout, file, or git commit"]
+    Inspect --> Search["search: embed and rank local chunks"]
+    Search --> SearchOutput["JSON or brief stdout"]
 ```
 
-`make install` also honors `DESTDIR` for package-style installs.
-
-If `$(FISH_CONFIG_DIR)` exists, `make install` also installs fish completions to
-`$(FISH_COMPLETIONS_DIR)/git-agent.fish`. Defaults:
-
-- `XDG_CONFIG_HOME ?= $(HOME)/.config`
-- `FISH_CONFIG_DIR ?= $(XDG_CONFIG_HOME)/fish`
-- `FISH_COMPLETIONS_DIR ?= $(FISH_CONFIG_DIR)/completions`
-
-## Debug sessions
-
-Message-generation commands store a JSON trace under:
+Message-generation commands write JSON traces under:
 
 ```text
 ~/.git-agent/<path-sha>/sessions/<timestamp>-<command>/
@@ -138,35 +252,51 @@ Trace files include session metadata, provider requests/responses, tool calls,
 and returned tool output. API keys are redacted. `--debug` prints the trace
 directory to stderr.
 
-The `<path-sha>` component is the SHA-256 of the cleaned absolute project root.
-Search indexes use the same project metadata root under
-`~/.git-agent/<path-sha>/search/`. On the next run for an existing project,
-legacy metadata from `<project>/.git-agent/` is migrated into the home metadata
-directory automatically.
+Search indexes use the same project metadata root:
 
-`--pprof <addr>` serves Go pprof endpoints on the requested address, for example
-`:7777`.
+```text
+~/.git-agent/<path-sha>/search/
+```
 
-`release-note --out <file>` writes the rendered Markdown to the requested file
-and skips the on-disk JSON trace session. `release-note patch|minor|major` finds
-the latest reachable semantic version tag, bumps the requested component, and
-uses `HEAD` as the release revision.
+On the next run for an existing project, legacy metadata from
+`<project>/.git-agent/` is migrated into the home metadata directory
+automatically.
 
-`commit` and `commit --amend` generate the same message as `commit-msg`, stream
-the human console trace to stdout, then run `git commit --file -` or
-`git commit --amend --file -`. Normal Git config, hooks, signing, and
-`gpg-agent` behavior apply. If commit creation fails after message generation,
-the command exits nonzero and includes both the generated message and Git error.
-In amend mode, the current HEAD message is treated as the message anchor so
-small staged refinements preserve the original subject.
+## Local Development
 
-For normal non-amend commits where the staged changes are only submodule
-gitlink updates, `commit-msg` and `commit` format the message locally without an
-LLM call or provider auth.
+```sh
+make build
+make test
+make install PREFIX=/usr/local
+```
 
-Message-generation commands also expose local Codex-style skills as read-only
-workflow guidance when valid `SKILL.md` files are discovered under standard
-skill roots such as repository `.agents/skills`, user `.agents/skills`, or
-Codex skills directories. Skill metadata is included in the request, and the
-model may read a selected skill file with a bounded read-only tool before
-applying it.
+`make install` installs the locally built binary and honors `DESTDIR` for
+package-style installs.
+
+Fish completion install defaults:
+
+| Variable | Default |
+| --- | --- |
+| `XDG_CONFIG_HOME` | `$(HOME)/.config` |
+| `FISH_CONFIG_DIR` | `$(XDG_CONFIG_HOME)/fish` |
+| `FISH_COMPLETIONS_DIR` | `$(FISH_CONFIG_DIR)/completions` |
+
+## Security and Privacy
+
+- Model tools are read-only and bounded.
+- No arbitrary shell command tool is exposed to the model.
+- `commit` and `commit --amend` are explicit Git write commands, run only after
+  message generation.
+- Normal Git config, hooks, signing, and `gpg-agent` behavior apply when
+  creating commits.
+- Message generation sends prepared repository context to the configured
+  provider.
+- Search sends indexed chunks and queries to the configured embedding provider.
+- API keys and bearer tokens are redacted from traces, debug output, and errors.
+
+## Specification
+
+[docs/spec.md](docs/spec.md) is the normative behavior contract for commands,
+flags, stdout/stderr, tracing, search indexing, guidance discovery, and model
+tool limits. Keep README changes user-facing; update the spec when behavior or
+contracts change.
