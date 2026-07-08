@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/bytedance/sonic"
 	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
@@ -150,13 +151,23 @@ type SkippedCounts struct {
 }
 
 type Result struct {
-	Relatedness float64        `json:"relatedness"`
-	Range       string         `json:"range"`
-	Symbol      *Symbol        `json:"symbol"`
-	Scores      map[string]any `json:"scores"`
-	Excerpt     string         `json:"excerpt"`
-	Path        string         `json:"-"`
-	StartLine   int            `json:"-"`
+	Relatedness float64      `json:"relatedness"`
+	Range       string       `json:"range"`
+	Symbol      *Symbol      `json:"symbol"`
+	Scores      ResultScores `json:"scores"`
+	Excerpt     string       `json:"excerpt"`
+	Path        string       `json:"-"`
+	StartLine   int          `json:"-"`
+}
+
+type ResultScores struct {
+	Cosine            float64 `json:"cosine"`
+	VectorRelatedness float64 `json:"vector_relatedness"`
+	Text              float64 `json:"text"`
+	Path              float64 `json:"path"`
+	Symbol            float64 `json:"symbol"`
+	Lexical           float64 `json:"lexical"`
+	Rank              float64 `json:"rank"`
 }
 
 type Replay struct {
@@ -237,6 +248,7 @@ type vectorIndexRecord struct {
 type historyEntry struct {
 	Query          string    `json:"query"`
 	Normalized     string    `json:"normalized"`
+	QueryTextHash  string    `json:"query_text_hash,omitempty"`
 	QueryEmbedding []float64 `json:"query_embedding"`
 	EmbeddingOnly  bool      `json:"embedding_only,omitempty"`
 	EmbeddingModel string    `json:"embedding_model"`
@@ -568,13 +580,16 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 
 	normalizedQuery := normalizeQuery(query)
+	queryText := queryEmbeddingText(query, opts.EmbeddingMaxInput)
+	sum := sha256.Sum256([]byte(queryText))
+	queryTextHash := hex.EncodeToString(sum[:])
 	var queryVector []float64
 	var queryDimensions int
 	var cachedQuery bool
-	queryLock := queryLockDir(indexDir, normalizedQuery, opts.EmbeddingModel, opts.EmbeddingDimensions, source, root, resolvedRev)
+	queryLock := queryLockDir(indexDir, normalizedQuery, queryTextHash, opts.EmbeddingModel, opts.EmbeddingDimensions, source, root, resolvedRev)
 	if err := withIndexLock(ctx, queryLock, func() error {
 		if err := withIndexLock(ctx, indexDir, func() error {
-			queryVector, queryDimensions, cachedQuery = cachedQueryEmbedding(indexDir, normalizedQuery, opts.EmbeddingModel, opts.EmbeddingDimensions, source, root, resolvedRev)
+			queryVector, queryDimensions, cachedQuery = cachedQueryEmbedding(indexDir, normalizedQuery, queryTextHash, opts.EmbeddingModel, opts.EmbeddingDimensions, source, root, resolvedRev)
 			return nil
 		}); err != nil {
 			return err
@@ -582,7 +597,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		if cachedQuery {
 			return nil
 		}
-		queryVectors, dim, err := embedTexts(ctx, client, opts, []string{query})
+		queryVectors, dim, err := embedTexts(ctx, client, opts, []string{queryText})
 		if err != nil {
 			return err
 		}
@@ -592,6 +607,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 			return appendHistory(indexDir, historyEntry{
 				Query:          query,
 				Normalized:     normalizedQuery,
+				QueryTextHash:  queryTextHash,
 				QueryEmbedding: queryVector,
 				EmbeddingOnly:  true,
 				EmbeddingModel: opts.EmbeddingModel,
@@ -618,7 +634,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 	mark("embed_query")
 
-	scored := scoreChunks(chunks, vectors, queryVector, opts.MinRelatedness)
+	scored := scoreChunks(chunks, vectors, queryVector, query, opts.MinRelatedness)
 	sortResults(scored)
 	if len(scored) > opts.Limit {
 		scored = scored[:opts.Limit]
@@ -628,10 +644,11 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 
 	replay := Replay{Mode: "none"}
 	historyErr := withIndexLock(ctx, indexDir, func() error {
-		replay = replayFor(indexDir, query, normalizedQuery, queryVector, opts.EmbeddingModel, opts.EmbeddingDimensions, source, root, resolvedRev)
+		replay = replayFor(indexDir, normalizedQuery, queryTextHash, queryVector, opts.EmbeddingModel, opts.EmbeddingDimensions, source, root, resolvedRev)
 		return appendHistory(indexDir, historyEntry{
 			Query:          query,
 			Normalized:     normalizedQuery,
+			QueryTextHash:  queryTextHash,
 			QueryEmbedding: queryVector,
 			EmbeddingModel: opts.EmbeddingModel,
 			Dimensions:     len(queryVector),
@@ -1104,9 +1121,10 @@ func withIndexLock(ctx context.Context, indexDir string, fn func() error) error 
 	return errors.Join(fnErr, lock.Unlock())
 }
 
-func queryLockDir(indexDir, normalized, model string, dimensions int, source Source, root, resolvedRev string) string {
+func queryLockDir(indexDir, normalized, queryTextHash, model string, dimensions int, source Source, root, resolvedRev string) string {
 	key := strings.Join([]string{
 		normalized,
+		queryTextHash,
 		model,
 		fmt.Sprintf("%d", dimensions),
 		source.Mode,
@@ -1272,22 +1290,25 @@ func embedTexts(ctx context.Context, client openai.EmbeddingClient, opts Options
 }
 
 func cappedEmbeddingInputs(texts []string, maxChars int) []string {
+	inputs := make([]string, len(texts))
+	for i, text := range texts {
+		inputs[i] = cappedEmbeddingInput(text, maxChars)
+	}
+	return inputs
+}
+
+func cappedEmbeddingInput(text string, maxChars int) string {
 	if maxChars == 0 {
 		maxChars = DefaultEmbeddingMaxInputChars
 	}
-	inputs := make([]string, len(texts))
-	for i, text := range texts {
-		chars := 0
-		for j := range text {
-			if chars == maxChars {
-				text = text[:j]
-				break
-			}
-			chars++
+	chars := 0
+	for i := range text {
+		if chars == maxChars {
+			return text[:i]
 		}
-		inputs[i] = text
+		chars++
 	}
-	return inputs
+	return text
 }
 
 func embedBatch(ctx context.Context, client openai.EmbeddingClient, opts Options, texts []string) (openai.EmbeddingResponse, error) {
@@ -1443,33 +1464,153 @@ func writeJSON(path string, value any) error {
 }
 
 type scoredChunk struct {
-	chunk       Chunk
-	cosine      float64
-	relatedness float64
+	chunk             Chunk
+	cosine            float64
+	vectorRelatedness float64
+	textScore         float64
+	pathScore         float64
+	symbolScore       float64
+	lexicalScore      float64
+	rank              float64
 }
 
-func scoreChunks(chunks []Chunk, vectors map[string][]float64, query []float64, minRelatedness float64) []scoredChunk {
+type scoreCandidate struct {
+	item       scoredChunk
+	textTerms  map[string]int
+	textLength int
+}
+
+func scoreChunks(chunks []Chunk, vectors map[string][]float64, queryVector []float64, query string, minRelatedness float64) []scoredChunk {
+	queryTerms := uniqueSearchTerms(searchTerms(query))
+	querySet := searchTermSet(queryTerms)
+	candidates := make([]scoreCandidate, 0, len(chunks))
 	var scored []scoredChunk
 	for _, chunk := range chunks {
 		vector := vectors[chunk.ID]
 		if len(vector) == 0 {
 			continue
 		}
-		cosine := cosineSimilarity(query, vector)
+		cosine := cosineSimilarity(queryVector, vector)
 		relatedness := math.Max(1e-9, min(1, max(0, (cosine+1)/2)))
-		if relatedness < minRelatedness || relatedness <= 0 {
+		if relatedness < minRelatedness {
 			continue
 		}
-		scored = append(scored, scoredChunk{chunk: chunk, cosine: cosine, relatedness: relatedness})
+		item := scoredChunk{
+			chunk:             chunk,
+			cosine:            cosine,
+			vectorRelatedness: relatedness,
+			rank:              relatedness,
+		}
+		if len(queryTerms) == 0 {
+			scored = append(scored, item)
+			continue
+		}
+		textTerms := searchTerms(chunk.text)
+		candidates = append(candidates, scoreCandidate{
+			item:       item,
+			textTerms:  matchingTermCounts(textTerms, querySet),
+			textLength: len(textTerms),
+		})
+	}
+	if len(queryTerms) == 0 {
+		return scored
+	}
+	scoreLexicalCandidates(candidates, queryTerms)
+	scored = make([]scoredChunk, len(candidates))
+	for i, candidate := range candidates {
+		scored[i] = candidate.item
 	}
 	return scored
+}
+
+func scoreLexicalCandidates(candidates []scoreCandidate, queryTerms []string) {
+	if len(candidates) == 0 || len(queryTerms) == 0 {
+		return
+	}
+	df := make(map[string]int, len(queryTerms))
+	totalTextLength := 0
+	for _, candidate := range candidates {
+		totalTextLength += candidate.textLength
+		for _, term := range queryTerms {
+			if candidate.textTerms[term] > 0 {
+				df[term]++
+			}
+		}
+	}
+	avgTextLength := float64(totalTextLength) / float64(len(candidates))
+	if avgTextLength == 0 {
+		avgTextLength = 1
+	}
+	for i := range candidates {
+		candidate := &candidates[i]
+		candidate.item.textScore = bm25Score(candidate.textTerms, candidate.textLength, avgTextLength, df, len(candidates), queryTerms)
+		candidate.item.pathScore = fieldMatchScore(searchTerms(candidate.item.chunk.Path), queryTerms)
+		candidate.item.symbolScore = symbolMatchScore(candidate.item.chunk.Symbol, queryTerms)
+		candidate.item.lexicalScore = min(1, candidate.item.textScore*0.45+candidate.item.pathScore*0.30+candidate.item.symbolScore*0.35)
+		candidate.item.rank = candidate.item.vectorRelatedness + (1-candidate.item.vectorRelatedness)*candidate.item.lexicalScore
+	}
+}
+
+func bm25Score(counts map[string]int, textLength int, avgTextLength float64, df map[string]int, docCount int, queryTerms []string) float64 {
+	if textLength == 0 || docCount == 0 {
+		return 0
+	}
+	const (
+		k1 = 1.2
+		b  = 0.75
+	)
+	var score float64
+	for _, term := range queryTerms {
+		freq := counts[term]
+		if freq == 0 {
+			continue
+		}
+		idf := math.Log(1 + (float64(docCount-df[term])+0.5)/(float64(df[term])+0.5))
+		denom := float64(freq) + k1*(1-b+b*float64(textLength)/avgTextLength)
+		score += idf * (float64(freq) * (k1 + 1) / denom)
+	}
+	return score / (score + 1)
+}
+
+func symbolMatchScore(symbol *Symbol, queryTerms []string) float64 {
+	if symbol == nil {
+		return 0
+	}
+	return fieldMatchScore(searchTerms(symbol.Type+" "+symbol.Name), queryTerms)
+}
+
+func fieldMatchScore(fieldTerms, queryTerms []string) float64 {
+	if len(fieldTerms) == 0 || len(queryTerms) == 0 {
+		return 0
+	}
+	fieldSet := make(map[string]bool, len(fieldTerms))
+	for _, term := range fieldTerms {
+		fieldSet[term] = true
+	}
+	matches := 0
+	for _, term := range queryTerms {
+		if fieldSet[term] {
+			matches++
+		}
+	}
+	return float64(matches) / float64(len(queryTerms))
+}
+
+func matchingTermCounts(terms []string, querySet map[string]bool) map[string]int {
+	counts := make(map[string]int, len(querySet))
+	for _, term := range terms {
+		if querySet[term] {
+			counts[term]++
+		}
+	}
+	return counts
 }
 
 func sortResults(results []scoredChunk) {
 	sort.SliceStable(results, func(i, j int) bool {
 		a, b := results[i], results[j]
-		if a.relatedness != b.relatedness {
-			return a.relatedness > b.relatedness
+		if a.rank != b.rank {
+			return a.rank > b.rank
 		}
 		aRange := a.chunk.EndLine - a.chunk.StartLine
 		bRange := b.chunk.EndLine - b.chunk.StartLine
@@ -1488,19 +1629,27 @@ func renderResults(scored []scoredChunk) []Result {
 	for i, item := range scored {
 		chunk := item.chunk
 		results[i] = Result{
-			Relatedness: item.relatedness,
+			Relatedness: item.rank,
 			Range:       fmt.Sprintf("%s:%d-%d", chunk.Path, chunk.StartLine, chunk.EndLine),
 			Symbol:      chunk.Symbol,
-			Scores:      map[string]any{"cosine": item.cosine},
-			Excerpt:     excerpt(chunk),
-			Path:        chunk.Path,
-			StartLine:   chunk.StartLine,
+			Scores: ResultScores{
+				Cosine:            item.cosine,
+				VectorRelatedness: item.vectorRelatedness,
+				Text:              item.textScore,
+				Path:              item.pathScore,
+				Symbol:            item.symbolScore,
+				Lexical:           item.lexicalScore,
+				Rank:              item.rank,
+			},
+			Excerpt:   excerpt(chunk),
+			Path:      chunk.Path,
+			StartLine: chunk.StartLine,
 		}
 	}
 	return results
 }
 
-func replayFor(dir, query, normalized string, queryVector []float64, model string, dimensions int, source Source, root, resolvedRev string) Replay {
+func replayFor(dir, normalized, queryTextHash string, queryVector []float64, model string, dimensions int, source Source, root, resolvedRev string) Replay {
 	entries, err := loadHistory(dir)
 	if err != nil {
 		return Replay{Mode: "none"}
@@ -1520,7 +1669,7 @@ func replayFor(dir, query, normalized string, queryVector []float64, model strin
 		if entry.EmbeddingOnly {
 			continue
 		}
-		if entry.Normalized == normalized {
+		if entry.Normalized == normalized && entry.QueryTextHash == queryTextHash {
 			from := entry.Query
 			return Replay{Mode: "hit", From: &from}
 		}
@@ -1535,14 +1684,14 @@ func replayFor(dir, query, normalized string, queryVector []float64, model strin
 	return Replay{Mode: "none"}
 }
 
-func cachedQueryEmbedding(dir, normalized, model string, dimensions int, source Source, root, resolvedRev string) ([]float64, int, bool) {
+func cachedQueryEmbedding(dir, normalized, queryTextHash, model string, dimensions int, source Source, root, resolvedRev string) ([]float64, int, bool) {
 	entries, err := loadHistory(dir)
 	if err != nil {
 		return nil, 0, false
 	}
 	for i := len(entries) - 1; i >= 0; i-- {
 		entry := entries[i]
-		if entry.Normalized != normalized || entry.EmbeddingModel != model || entry.Dimensions != dimensions || entry.SourceMode != source.Mode {
+		if entry.Normalized != normalized || entry.QueryTextHash != queryTextHash || entry.EmbeddingModel != model || entry.Dimensions != dimensions || entry.SourceMode != source.Mode {
 			continue
 		}
 		if source.Mode == "filesystem" && entry.Root != root {
@@ -1981,6 +2130,90 @@ func recordVectorKey(record vectorRecord) string {
 
 func normalizeQuery(query string) string {
 	return strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(query)), " "))
+}
+
+func searchTerms(value string) []string {
+	var terms []string
+	var b strings.Builder
+	flush := func() {
+		if b.Len() == 0 {
+			return
+		}
+		addSearchTerm(&terms, b.String())
+		b.Reset()
+	}
+	runes := []rune(value)
+	for i, r := range runes {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			if shouldSplitSearchTerm(runes, i) {
+				flush()
+			}
+			b.WriteRune(unicode.ToLower(r))
+			continue
+		}
+		flush()
+	}
+	flush()
+	return terms
+}
+
+func shouldSplitSearchTerm(runes []rune, index int) bool {
+	if index == 0 || !unicode.IsUpper(runes[index]) {
+		return false
+	}
+	previous := runes[index-1]
+	if unicode.IsLower(previous) || unicode.IsDigit(previous) {
+		return true
+	}
+	if !unicode.IsUpper(previous) || index+1 >= len(runes) {
+		return false
+	}
+	return unicode.IsLower(runes[index+1])
+}
+
+func addSearchTerm(terms *[]string, term string) {
+	if term == "" {
+		return
+	}
+	*terms = append(*terms, term)
+	if len(term) > 3 && strings.HasSuffix(term, "s") && !strings.HasSuffix(term, "ss") {
+		singular := strings.TrimSuffix(term, "s")
+		if singular != "" {
+			*terms = append(*terms, singular)
+		}
+	}
+}
+
+func uniqueSearchTerms(terms []string) []string {
+	seen := make(map[string]bool, len(terms))
+	unique := make([]string, 0, len(terms))
+	for _, term := range terms {
+		if seen[term] {
+			continue
+		}
+		seen[term] = true
+		unique = append(unique, term)
+	}
+	return unique
+}
+
+func searchTermSet(terms []string) map[string]bool {
+	set := make(map[string]bool, len(terms))
+	for _, term := range terms {
+		set[term] = true
+	}
+	return set
+}
+
+func queryEmbeddingText(query string, maxChars int) string {
+	framed := "implementation entrypoint for " + query
+	if maxChars == 0 {
+		maxChars = DefaultEmbeddingMaxInputChars
+	}
+	if len([]rune(framed)) > maxChars {
+		return cappedEmbeddingInput(query, maxChars)
+	}
+	return cappedEmbeddingInput(framed, maxChars)
 }
 
 func languageForPath(path string) string {

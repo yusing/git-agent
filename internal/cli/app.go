@@ -96,7 +96,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	fs.BoolVar(&opts.Debug, "debug", false, "enable debug output on stderr")
 	fs.StringVar(&opts.Pprof, "pprof", "", "serve pprof on address")
 	fs.StringVar(&rev, "rev", "", "search a committed Git tree")
-	fs.Float64Var(&minRelatedness, "min-relatedness", searchtask.DefaultMinRelatedness, "minimum semantic relatedness")
+	fs.Float64Var(&minRelatedness, "min-relatedness", searchtask.DefaultMinRelatedness, "minimum vector relatedness candidate threshold")
 	fs.IntVar(&limit, "limit", searchtask.DefaultLimit, "maximum results")
 	fs.BoolVar(&indexOnly, "index", false, "build embeddings for the selected source without searching")
 	fs.BoolVar(&reindex, "reindex", false, "rebuild embeddings for the selected source")

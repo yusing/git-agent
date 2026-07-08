@@ -61,7 +61,7 @@ func TestSearchHelpReturnsUsage(t *testing.T) {
 		"--index":                    "build embeddings for the selected source without searching",
 		"--reindex":                  "rebuild embeddings for the selected source",
 		"--rev <rev>":                "search a committed Git tree",
-		"--min-relatedness <score>":  "minimum semantic relatedness",
+		"--min-relatedness <score>":  "minimum vector relatedness candidate threshold",
 		"--embedding-model <model>":  "embedding model",
 		"--embedding-dimensions <n>": "embedding dimensions",
 		"--base-url <url>":           "override provider base URL",

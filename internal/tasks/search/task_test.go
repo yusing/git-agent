@@ -89,6 +89,37 @@ func (e failOnPathEmbedder) CreateEmbeddings(ctx context.Context, request openai
 	return fakeEmbedder{}.CreateEmbeddings(ctx, request)
 }
 
+type embeddingRule struct {
+	contains string
+	vector   []float64
+}
+
+type ruleEmbedder []embeddingRule
+
+func (e ruleEmbedder) CreateEmbeddings(_ context.Context, request openai.EmbeddingRequest) (openai.EmbeddingResponse, error) {
+	vectors := make([][]float64, len(request.Inputs))
+	for i, input := range request.Inputs {
+		vectors[i] = []float64{0, 0, 1}
+		for _, rule := range e {
+			if strings.Contains(input, rule.contains) {
+				vectors[i] = rule.vector
+				break
+			}
+		}
+	}
+	return openai.EmbeddingResponse{Model: request.Model, Vectors: vectors, Dimensions: 3}, nil
+}
+
+type recordingEmbedder struct {
+	fakeEmbedder
+	inputs []string
+}
+
+func (e *recordingEmbedder) CreateEmbeddings(ctx context.Context, request openai.EmbeddingRequest) (openai.EmbeddingResponse, error) {
+	e.inputs = append(e.inputs, request.Inputs...)
+	return e.fakeEmbedder.CreateEmbeddings(ctx, request)
+}
+
 type blockingEmbedder struct {
 	calls       atomic.Int64
 	entered     chan struct{}
@@ -229,7 +260,7 @@ func TestFilesystemSearchScopeKeepsRootIgnoreRules(t *testing.T) {
 	}
 }
 
-func TestSearchFiltersAndSortsByVectorOnly(t *testing.T) {
+func TestSearchFiltersByVectorThenSortsTiesByPath(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "b.txt", "alpha\n")
 	writeFile(t, root, "a.txt", "alpha\n")
@@ -252,6 +283,82 @@ func TestSearchFiltersAndSortsByVectorOnly(t *testing.T) {
 	}
 	if out.Results[0].Range != "a.txt:1-1" || out.Results[1].Range != "b.txt:1-1" {
 		t.Fatalf("unexpected sort order: %#v", out.Results)
+	}
+}
+
+func TestSearchHybridRankingLiftsPathAndTextMatch(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "service.txt", "semantically plausible but unrelated\n")
+	writeFile(t, root, "editors/integration.md", "editor integration setup\n")
+
+	out, err := Run(t.Context(), ruleEmbedder{
+		{contains: "implementation entrypoint for editor integration", vector: []float64{1, 0, 0}},
+		{contains: "path: service.txt", vector: []float64{0.94, 0.06, 0}},
+		{contains: "path: editors/integration.md", vector: []float64{0.93, 0.07, 0}},
+	}, Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}, "editor integration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Results) != 2 {
+		t.Fatalf("results = %#v", out.Results)
+	}
+	if got := out.Results[0].Range; got != "editors/integration.md:1-1" {
+		t.Fatalf("top result = %q, want path/text match before higher vector match; results = %#v", got, out.Results)
+	}
+	if out.Results[0].Scores.Path <= 0 {
+		t.Fatalf("path score = %v, want positive", out.Results[0].Scores.Path)
+	}
+	if out.Results[0].Scores.Text <= 0 {
+		t.Fatalf("text score = %v, want positive", out.Results[0].Scores.Text)
+	}
+	if out.Results[0].Scores.Rank != out.Results[0].Relatedness {
+		t.Fatalf("rank score = %v relatedness = %v", out.Results[0].Scores.Rank, out.Results[0].Relatedness)
+	}
+	if out.Results[0].Scores.VectorRelatedness >= out.Results[1].Scores.VectorRelatedness {
+		t.Fatalf("vector relatedness scores = %#v then %#v, want top to have lower vector score", out.Results[0].Scores, out.Results[1].Scores)
+	}
+}
+
+func TestSearchHybridRankingLiftsSymbolMatch(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "other.go", "package main\n\nfunc unrelated() {}\n")
+	writeFile(t, root, "server.go", "package main\n\nfunc languageServerCommand() {}\n")
+
+	out, err := Run(t.Context(), ruleEmbedder{
+		{contains: "implementation entrypoint for language server command", vector: []float64{1, 0, 0}},
+		{contains: "path: other.go", vector: []float64{0.94, 0.06, 0}},
+		{contains: "path: server.go", vector: []float64{0.93, 0.07, 0}},
+	}, Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}, "language server command")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Results) == 0 {
+		t.Fatalf("results = %#v", out.Results)
+	}
+	if got := out.Results[0].Range; !strings.HasPrefix(got, "server.go:") {
+		t.Fatalf("top result = %q, want symbol match before higher vector match; results = %#v", got, out.Results)
+	}
+	if out.Results[0].Symbol == nil || out.Results[0].Symbol.Name != "languageServerCommand" {
+		t.Fatalf("symbol = %#v", out.Results[0].Symbol)
+	}
+	if out.Results[0].Scores.Symbol <= 0 {
+		t.Fatalf("symbol score = %v, want positive", out.Results[0].Scores.Symbol)
 	}
 }
 
@@ -281,6 +388,99 @@ func TestSearchCodeOnlyFiltersDocs(t *testing.T) {
 	}
 	if got := out.Results[0].Range; !strings.HasPrefix(got, "main.go:") {
 		t.Fatalf("range = %q", got)
+	}
+}
+
+func TestSearchFramesQueryForImplementationRetrieval(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "main.go", "package main\n\nfunc releaseNotes() {}\n")
+
+	embedder := &recordingEmbedder{}
+	opts := Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}
+	first, err := Run(t.Context(), embedder, opts, "release notes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Query != "release notes" {
+		t.Fatalf("output query = %q", first.Query)
+	}
+	if !slices.Contains(embedder.inputs, queryEmbeddingText("release notes", 0)) {
+		t.Fatalf("embedding inputs = %#v, want framed query", embedder.inputs)
+	}
+	firstInputCount := len(embedder.inputs)
+
+	second, err := Run(t.Context(), embedder, opts, "release notes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Replay.Mode != "hit" {
+		t.Fatalf("second replay = %#v, want hit", second.Replay)
+	}
+	if len(embedder.inputs) != firstInputCount {
+		t.Fatalf("second search embedded again: inputs = %#v", embedder.inputs[firstInputCount:])
+	}
+}
+
+func TestQueryFramingPreservesQueryUnderSmallEmbeddingCap(t *testing.T) {
+	if got := queryEmbeddingText("alpha", len("implementation entrypoint for ")); got != "alpha" {
+		t.Fatalf("query embedding text = %q, want raw query", got)
+	}
+}
+
+func TestQueryEmbeddingTextReturnsCappedProviderInput(t *testing.T) {
+	query := "alpha beta gamma delta"
+	if got := queryEmbeddingText(query, 10); got != "alpha beta" {
+		t.Fatalf("query embedding text = %q, want capped raw query", got)
+	}
+}
+
+func TestSearchCachesQueryByFinalCappedEmbeddingInput(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "alpha.txt", "alpha beta gamma delta\n")
+
+	embedder := &recordingEmbedder{}
+	opts := Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingMaxInput:   24,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}
+	query := strings.Repeat("alpha ", 12)
+	if _, err := Run(t.Context(), embedder, opts, query); err != nil {
+		t.Fatal(err)
+	}
+	firstInputCount := len(embedder.inputs)
+
+	opts.EmbeddingMaxInput = 12
+	if _, err := Run(t.Context(), embedder, opts, query); err != nil {
+		t.Fatal(err)
+	}
+	if len(embedder.inputs) == firstInputCount {
+		t.Fatalf("second search reused query embedding despite different final capped input")
+	}
+	if got, want := embedder.inputs[len(embedder.inputs)-1], queryEmbeddingText(query, opts.EmbeddingMaxInput); got != want {
+		t.Fatalf("second query embedding input = %q, want %q", got, want)
+	}
+}
+
+func TestSearchTermsSplitGoInitialisms(t *testing.T) {
+	terms := searchTerms("HTTPServerCommand URLParser JSONEncoder")
+	for _, want := range []string{"http", "server", "command", "url", "parser", "json", "encoder"} {
+		if !slices.Contains(terms, want) {
+			t.Fatalf("search terms = %#v, missing %q", terms, want)
+		}
 	}
 }
 
@@ -938,7 +1138,7 @@ func TestParallelSearchWaitsForQueryEmbeddingAndReusesHistory(t *testing.T) {
 	}
 
 	opts.IndexOnly = false
-	embedder := newBlockingQueryEmbedder("alpha")
+	embedder := newBlockingQueryEmbedder(queryEmbeddingText("alpha", 0))
 	ctx := t.Context()
 	var wg sync.WaitGroup
 	errs := make(chan error, 6)

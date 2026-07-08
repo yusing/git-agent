@@ -136,7 +136,7 @@ write a JSON trace session.
 
 #### `git-agent search [flags] <query...>`
 
-Run embeddings-only semantic context search and print machine-readable JSON by
+Run local embedding-backed context search and print machine-readable JSON by
 default.
 Filesystem mode is the default: it searches current files under the current
 working directory exactly as they exist on disk and does not require a Git
@@ -162,14 +162,22 @@ and ignores current filesystem contents. Revision mode reads `.gitignore` and
 
 Search does not run the Responses API, does not call model tools, does not
 create `~/.git-agent/<path-sha>/sessions/` traces, does not generate
-explanations, and does not use lexical fallback, lexical ranking, token overlap,
-or path/name boosts. It embeds the query and local chunks, then performs an
-exact cosine scan over the local binary vector cache.
+explanations, and does not use lexical fallback. It frames and embeds the query
+as an implementation-location search when the configured embedding input cap can
+include the framing; otherwise it embeds the raw query so user query text is not
+truncated away. Search embeds local chunks, performs an exact cosine scan over
+the local binary vector cache, filters candidates by vector relatedness, then
+ranks surviving candidates with a hybrid score that combines vector relatedness,
+normalized BM25-style body text overlap, path token overlap, and indexed symbol
+token overlap. Output and replay history keep the original query string, not the
+framed embedding input.
 
 `--format json` is the default stdout contract. `--format brief` first writes a
 header line as `# mode=<filesystem|revision> index=<fresh|refreshed|built|empty>`,
 then writes one result per line as `<score> <path>:<start-line> <summary>`, with
-the score rounded to two decimals. The summary is the indexed symbol name when
+the score rounded to two decimals. The score is the final hybrid rank; JSON
+results expose the vector relatedness, text, path, symbol, lexical, cosine, and
+rank components in `scores`. The summary is the indexed symbol name when
 available, otherwise the first excerpt line without its excerpt line-number
 prefix. Brief output suppresses low-information Go `package <name>` results when
 another result for the same file has an indexed symbol. `--index --format brief`
@@ -214,8 +222,8 @@ included when physically under the search root and not skipped or ignored. In
 revision mode, only matching files from the resolved committed tree are
 included. Generated Go files with a pre-package heading comment containing
 `DO NOT EDIT` are still included by `--code`, but they are indexed as path-only
-chunks; their generated body content is not embedded. `--code` does not change
-scoring and does not introduce a lexical fallback.
+chunks; their generated body content is not embedded. `--code` does not
+introduce a lexical fallback.
 
 `--no-tests` excludes common test files from the selected source before chunking
 and embedding. It skips path segments named `test`, `tests`, `__tests__`, or
@@ -283,7 +291,8 @@ Message-generation subcommands reserve this shared flag surface:
 - `--index`: build embeddings for the selected source without searching
 - `--reindex`: rebuild embeddings for the selected source
 - `--rev <rev>`: search a committed Git tree instead of current filesystem files
-- `--min-relatedness <score>`: default `0.70`, valid `0 < score <= 1`
+- `--min-relatedness <score>`: minimum vector relatedness candidate threshold;
+  default `0.70`, valid `0 < score <= 1`
 - `--embedding-model <model>`: default `text-embedding-3-small`
 - `--embedding-dimensions <n>`: default `1024`, valid positive integer
 - `--base-url <url>`: override provider base URL
@@ -438,7 +447,7 @@ Defaults:
 - `internal/tasks/commitmsg`: commit message behavior
 - `internal/tasks/releasenote`: release note behavior
 - `internal/tasks/search`: filesystem/revision discovery, chunking, local
-  binary vector cache, cosine ranking, replay metadata, and JSON rendering
+  binary vector cache, hybrid ranking, replay metadata, and JSON rendering
 - `internal/textutil`: shared normalization and output shaping helpers
 - `internal/trace`: JSON session recorder for requests, responses, tool calls,
   and tool outputs

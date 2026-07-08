@@ -73,15 +73,17 @@ Common flags:
 - `--debug`
 - `--pprof <addr>`
 
-`search` is embeddings-only semantic retrieval for agents. It searches the
-current filesystem by default, or a committed tree with `--rev <rev>`, and
-writes JSON results to stdout by default. Use `--format brief` for compact
-line-oriented results. Use `--code` to limit candidates to source-code files by
-extension. The code filter does not exclude tests by name, and filesystem mode
-still includes staged, unstaged, and untracked files when they are present under
-the search root and not ignored or skipped. Generated Go files with a
-pre-package `DO NOT EDIT` heading are included as path-only chunks so generated
-body content is not embedded.
+`search` is local embedding retrieval for agents. It searches the current
+filesystem by default, or a committed tree with `--rev <rev>`, and writes JSON
+results to stdout by default. Use `--format brief` for compact line-oriented
+results. It filters candidates by vector relatedness, then ranks them with a
+hybrid score that also considers body text, path, and indexed symbol matches.
+Use `--code` to limit candidates to source-code files by extension. The code
+filter does not exclude tests by name, and filesystem mode still includes
+staged, unstaged, and untracked files when they are present under the search
+root and not ignored or skipped. Generated Go files with a pre-package
+`DO NOT EDIT` heading are included as path-only chunks so generated body content
+is not embedded.
 Use `--scope foo,bar/baz` to limit search or indexing to comma-separated
 root-relative paths. Use `--no-tests` to exclude common test files and test
 directories. Use `--index` without a query to build or refresh missing
@@ -90,12 +92,14 @@ Use `--agent` to serve live indexing progress at a printed
 `http://127.0.0.1:<port>/progress` URL when embeddings need to be built or
 rebuilt; when `--format` is omitted, `--agent` defaults output to brief.
 Search uses `OPENAI_EMBEDDING_API_KEY` when set, then falls back to
-`OPENAI_API_KEY`; Codex/ChatGPT auth is not used for embeddings. Successful
-indexing writes the local cache after embedding completes. Parallel searches for
-the same source and filters use a single index writer; waiters reuse the
-completed cache instead of embedding the same chunks again. See `docs/spec.md`
-for exact output, file discovery, ignore-file, skip, cache, and debug behavior;
-run `git-agent search --help` for the current search flag list.
+`OPENAI_API_KEY`; Codex/ChatGPT auth is not used for embeddings. Search frames
+the embedded query as an implementation-location search while keeping the
+printed query unchanged. Successful indexing writes the local cache after
+embedding completes. Parallel searches for the same source and filters use a
+single index writer; waiters reuse the completed cache instead of embedding the
+same chunks again. See `docs/spec.md` for exact output, file discovery,
+ignore-file, skip, cache, and debug behavior; run `git-agent search --help` for
+the current search flag list.
 
 Behavior defaults:
 
