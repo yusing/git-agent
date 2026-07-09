@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
@@ -22,6 +23,7 @@ import (
 type IndexInfo struct {
 	Mode           string    `json:"mode"`
 	Root           string    `json:"root,omitempty"`
+	Remote         string    `json:"remote,omitempty"`
 	ResolvedRev    string    `json:"resolved_rev,omitempty"`
 	EmbeddingModel string    `json:"embedding_model"`
 	Dimensions     int       `json:"dimensions"`
@@ -32,9 +34,18 @@ type IndexInfo struct {
 	Dir            string    `json:"dir"`
 }
 
+// RemoteInfo describes one cached remote repository.
+type RemoteInfo struct {
+	Remote          string    `json:"remote"`
+	LastFetchedAt   time.Time `json:"last_fetched_at,omitempty"`
+	LastResolvedRev string    `json:"last_resolved_rev,omitempty"`
+	Dir             string    `json:"dir"`
+}
+
 // ListFilesOptions selects which physical index ls-files should open.
 type ListFilesOptions struct {
 	Root    string
+	Remote  string
 	Rev     string
 	Scope   []string
 	NoTests bool
@@ -47,12 +58,22 @@ type IndexFiles struct {
 }
 
 // ListIndexes lists completed search indexes for the project containing root.
-func ListIndexes(ctx context.Context, root string) ([]IndexInfo, error) {
-	selection, err := resolveIndexSelection(root, "", Filters{})
-	if err != nil {
-		return nil, err
+func ListIndexes(ctx context.Context, root, remote string) ([]IndexInfo, error) {
+	var metadataDir string
+	if strings.TrimSpace(remote) != "" {
+		var err error
+		metadataDir, err = metadata.RemoteDir(sanitizeRemoteURL(remote))
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		selection, err := resolveIndexSelection(ctx, root, "", "", Filters{}, false, false)
+		if err != nil {
+			return nil, err
+		}
+		metadataDir = selection.metadataDir
 	}
-	searchRoot := filepath.Join(selection.metadataDir, "search")
+	searchRoot := filepath.Join(metadataDir, "search")
 	info, err := os.Stat(searchRoot)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -111,6 +132,54 @@ func ListIndexes(ctx context.Context, root string) ([]IndexInfo, error) {
 	return indexes, nil
 }
 
+// ListRemotes lists cached remote repositories.
+func ListRemotes() ([]RemoteInfo, error) {
+	root, err := metadata.RemoteRoot()
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("remote metadata path %s is not a directory", root)
+	}
+	var remotes []RemoteInfo
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if entry.Name() != "remote.json" {
+			return nil
+		}
+		cache := loadRemoteCache(path)
+		if cache.URL == "" {
+			return nil
+		}
+		remotes = append(remotes, RemoteInfo{
+			Remote:          cache.URL,
+			LastFetchedAt:   cache.LastFetchedAt,
+			LastResolvedRev: cache.LastResolvedRev,
+			Dir:             filepath.Dir(path),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(remotes, func(a, b RemoteInfo) int {
+		return cmp.Compare(a.Remote, b.Remote)
+	})
+	return remotes, nil
+}
+
 // ListIndexFiles lists unique file paths stored in the selected search index.
 func ListIndexFiles(ctx context.Context, opts ListFilesOptions) (IndexFiles, error) {
 	scope, err := normalizeScopes(opts.Scope)
@@ -118,7 +187,7 @@ func ListIndexFiles(ctx context.Context, opts ListFilesOptions) (IndexFiles, err
 		return IndexFiles{}, err
 	}
 	filters := Filters{Scope: scope}
-	selection, err := resolveIndexSelection(opts.Root, opts.Rev, filters)
+	selection, err := resolveIndexSelection(ctx, opts.Root, opts.Remote, opts.Rev, filters, false, false)
 	if err != nil {
 		return IndexFiles{}, err
 	}
@@ -201,6 +270,9 @@ func FormatIndexes(indexes []IndexInfo) string {
 		if index.Root != "" {
 			fmt.Fprintf(&b, " root=%s", index.Root)
 		}
+		if index.Remote != "" {
+			fmt.Fprintf(&b, " remote=%s", index.Remote)
+		}
 		if len(index.Filters) > 0 {
 			fmt.Fprintf(&b, " filters=%s", strings.Join(index.Filters, ","))
 		}
@@ -210,6 +282,38 @@ func FormatIndexes(indexes []IndexInfo) string {
 		fmt.Fprintf(&b, "  %s\n", index.Dir)
 	}
 	return b.String()
+}
+
+// FormatRemotes renders cached remote summaries for human stdout.
+func FormatRemotes(remotes []RemoteInfo) string {
+	if len(remotes) == 0 {
+		return "no cached remotes\n"
+	}
+	var b strings.Builder
+	for i, remote := range remotes {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		fmt.Fprintf(&b, "%s", remote.Remote)
+		if remote.LastResolvedRev != "" {
+			fmt.Fprintf(&b, " rev=%s", shortRev(remote.LastResolvedRev))
+		}
+		if !remote.LastFetchedAt.IsZero() {
+			fmt.Fprintf(&b, " fetched=%s", remote.LastFetchedAt.UTC().Format(time.RFC3339))
+		}
+		fmt.Fprintf(&b, "\n  %s\n", remote.Dir)
+	}
+	return b.String()
+}
+
+// FormatRemoteCompletions writes one cached remote URL per line.
+func FormatRemoteCompletions(w io.Writer, remotes []RemoteInfo) error {
+	for _, remote := range remotes {
+		if _, err := fmt.Fprintln(w, remote.Remote); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type treeNode struct {
@@ -249,7 +353,10 @@ type indexSelection struct {
 	repo        *gitctx.Repository
 }
 
-func resolveIndexSelection(rootOpt, rev string, filters Filters) (indexSelection, error) {
+func resolveIndexSelection(ctx context.Context, rootOpt, remote, rev string, filters Filters, reindex, fetchAllowed bool) (indexSelection, error) {
+	if strings.TrimSpace(remote) != "" {
+		return resolveRemoteIndexSelection(ctx, remote, rev, filters, reindex, fetchAllowed)
+	}
 	root, err := filepath.Abs(cmp.Or(rootOpt, "."))
 	if err != nil {
 		return indexSelection{}, err
@@ -321,6 +428,7 @@ func indexInfoFromManifest(found manifest, filters []string, dir string, files, 
 	return IndexInfo{
 		Mode:           found.Mode,
 		Root:           found.Root,
+		Remote:         found.Remote,
 		ResolvedRev:    found.ResolvedRev,
 		EmbeddingModel: found.EmbeddingModel,
 		Dimensions:     found.Dimensions,

@@ -705,7 +705,7 @@ func TestSearchCodeOnlyReindexPreservesSharedNonCodeVectors(t *testing.T) {
 	if second.Diagnostics.ReusedChunks != 0 || second.Diagnostics.EmbeddedChunks != 1 {
 		t.Fatalf("code reindex diagnostics = %#v, want one rebuilt code chunk", second.Diagnostics)
 	}
-	indexes, err := ListIndexes(t.Context(), root)
+	indexes, err := ListIndexes(t.Context(), root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1192,6 +1192,165 @@ func TestRevisionSearchNoTestsFiltersCommittedTestPaths(t *testing.T) {
 	want := []string{"main.go:1-1"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("result ranges = %#v, want %#v", got, want)
+	}
+}
+
+func TestRemoteSearchUsesCachedCommittedTree(t *testing.T) {
+	remote := t.TempDir()
+	writeFile(t, remote, "remote.txt", "remote alpha content\n")
+	rev := commitSearchRepo(t, remote)
+	root := t.TempDir()
+
+	out, err := Run(t.Context(), fakeEmbedder{}, Options{
+		Root:                root,
+		Remote:              remote,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+	}, "remote alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Source.Mode != "remote" || out.Source.Remote != remote || out.Source.Rev != "HEAD" || out.Source.ResolvedRev != rev {
+		t.Fatalf("source = %#v, want remote HEAD %s", out.Source, rev)
+	}
+	if len(out.Results) == 0 || !strings.Contains(out.Results[0].Range, "remote.txt") {
+		t.Fatalf("results = %#v, want remote.txt", out.Results)
+	}
+
+	remotes, err := ListRemotes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(remotes, func(info RemoteInfo) bool { return info.Remote == remote }) {
+		t.Fatalf("remotes = %#v, missing %q", remotes, remote)
+	}
+	var completions strings.Builder
+	if err := FormatRemoteCompletions(&completions, remotes); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(completions.String(), remote+"\n") {
+		t.Fatalf("completions = %q, missing %q", completions.String(), remote)
+	}
+
+	indexes, err := ListIndexes(t.Context(), root, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(indexes) != 1 || indexes[0].Mode != "remote" || indexes[0].Remote != remote || indexes[0].ResolvedRev != rev {
+		t.Fatalf("indexes = %#v, want remote index", indexes)
+	}
+	listed, err := ListIndexFiles(t.Context(), ListFilesOptions{Root: root, Remote: remote})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(listed.Files, "remote.txt") {
+		t.Fatalf("files = %#v, missing remote.txt", listed.Files)
+	}
+}
+
+func TestRemoteSearchReindexFetchesUpdatedHead(t *testing.T) {
+	remote := t.TempDir()
+	writeFile(t, remote, "remote.txt", "remote alpha content\n")
+	firstRev := commitSearchRepo(t, remote)
+	root := t.TempDir()
+	opts := Options{
+		Root:                root,
+		Remote:              remote,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+	}
+	first, err := Run(t.Context(), fakeEmbedder{}, opts, "remote alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Source.ResolvedRev != firstRev {
+		t.Fatalf("resolved rev = %q, want %q", first.Source.ResolvedRev, firstRev)
+	}
+
+	writeFile(t, remote, "remote.txt", "remote beta content\n")
+	secondRev := commitSearchRepoChange(t, remote, "second")
+	opts.Reindex = true
+	second, err := Run(t.Context(), fakeEmbedder{}, opts, "remote beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Source.ResolvedRev != secondRev || second.Source.ResolvedRev == firstRev {
+		t.Fatalf("resolved rev = %q, want new %q", second.Source.ResolvedRev, secondRev)
+	}
+	if len(second.Results) == 0 || !strings.Contains(second.Results[0].Excerpt, "remote beta content") {
+		t.Fatalf("results = %#v, want beta content", second.Results)
+	}
+}
+
+func TestRemoteSearchExplicitRevCanResolveParent(t *testing.T) {
+	remote := t.TempDir()
+	writeFile(t, remote, "remote.txt", "remote alpha content\n")
+	firstRev := commitSearchRepo(t, remote)
+	writeFile(t, remote, "remote.txt", "remote beta content\n")
+	_ = commitSearchRepoChange(t, remote, "second")
+
+	out, err := Run(t.Context(), fakeEmbedder{}, Options{
+		Root:                t.TempDir(),
+		Remote:              remote,
+		Rev:                 "HEAD~1",
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+	}, "remote alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Source.ResolvedRev != firstRev {
+		t.Fatalf("resolved rev = %q, want parent %q", out.Source.ResolvedRev, firstRev)
+	}
+	if len(out.Results) == 0 || !strings.Contains(out.Results[0].Excerpt, "remote alpha content") {
+		t.Fatalf("results = %#v, want alpha content", out.Results)
+	}
+}
+
+func TestRemoteSearchCanResolveParentAfterShallowHeadCache(t *testing.T) {
+	remote := t.TempDir()
+	writeFile(t, remote, "remote.txt", "remote alpha content\n")
+	firstRev := commitSearchRepo(t, remote)
+	writeFile(t, remote, "remote.txt", "remote beta content\n")
+	_ = commitSearchRepoChange(t, remote, "second")
+	root := t.TempDir()
+	baseOpts := Options{
+		Root:                root,
+		Remote:              remote,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+	}
+	if _, err := Run(t.Context(), fakeEmbedder{}, baseOpts, "remote beta"); err != nil {
+		t.Fatal(err)
+	}
+
+	baseOpts.Rev = "HEAD~1"
+	out, err := Run(t.Context(), fakeEmbedder{}, baseOpts, "remote alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Source.ResolvedRev != firstRev {
+		t.Fatalf("resolved rev = %q, want parent %q", out.Source.ResolvedRev, firstRev)
+	}
+}
+
+func TestSanitizeRemoteURLDropsCredentialsQueryAndFragment(t *testing.T) {
+	raw := "https://user:secret@example.test/repo.git?token=abc&x=1#access_token=def"
+	got := sanitizeRemoteURL(raw)
+	if got != "https://example.test/repo.git" {
+		t.Fatalf("sanitized remote = %q", got)
+	}
+	errText := sanitizeRemoteError(errors.New("clone "+raw+" failed"), raw, got)
+	if strings.Contains(errText, "secret") || strings.Contains(errText, "token=abc") || strings.Contains(errText, "access_token") {
+		t.Fatalf("sanitized error leaked credential material: %q", errText)
 	}
 }
 
@@ -2142,6 +2301,32 @@ func commitSearchRepo(t *testing.T, root string) string {
 		t.Fatal(err)
 	}
 	hash, err := worktree.Commit("initial", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Search Test",
+			Email: "search@example.test",
+			When:  time.Unix(0, 0),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hash.String()
+}
+
+func commitSearchRepoChange(t *testing.T, root, message string) string {
+	t.Helper()
+	repo, err := git.PlainOpen(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worktree.AddGlob("."); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := worktree.Commit(message, &git.CommitOptions{
 		Author: &object.Signature{
 			Name:  "Search Test",
 			Email: "search@example.test",

@@ -20,6 +20,16 @@ function __git_agent_git_refs
     command git rev-parse --short HEAD 2>/dev/null
 end
 
+function __git_agent_cached_remotes
+    command git-agent search --ls-remotes --format completion 2>/dev/null
+end
+
+function __git_agent_search_accepts_remote
+    __git_agent_using_command search; or return 1
+    set -l words (commandline -opc)
+    not contains -- --ls-remotes $words
+end
+
 complete -c git-agent -f
 
 complete -c git-agent -n '__git_agent_no_subcommand' -a commit -d 'Generate a message and commit staged changes'
@@ -51,6 +61,7 @@ complete -c git-agent -n '__git_agent_using_command release-note' -a 'patch mino
 complete -c git-agent -n '__git_agent_using_command release-note' -a '(__git_agent_git_refs)' -d 'Git ref'
 
 complete -c git-agent -n '__git_agent_using_command search' -l rev -r -a '(__git_agent_git_refs)' -d 'Search a committed Git tree'
+complete -c git-agent -n '__git_agent_search_accepts_remote' -l remote -r -a '(__git_agent_cached_remotes)' -d 'Search a cached remote Git repository URL'
 complete -c git-agent -n '__git_agent_using_command search' -l scope -r -d 'Comma-separated relative paths to search or index'
 complete -c git-agent -n '__git_agent_using_command search' -l min-relatedness -r -d 'Minimum semantic relatedness'
 complete -c git-agent -n '__git_agent_using_command search' -l limit -r -d 'Maximum results'
@@ -60,7 +71,8 @@ complete -c git-agent -n '__git_agent_using_command search' -l reindex -d 'Rebui
 complete -c git-agent -n '__git_agent_using_command search' -l code -d 'Search code files only'
 complete -c git-agent -n '__git_agent_using_command search' -l no-tests -d 'Exclude common test files and test directories from results and ls-files output'
 complete -c git-agent -n '__git_agent_using_command search' -l agent -d 'Serve indexing progress on localhost when embeddings need work'
-complete -c git-agent -n '__git_agent_using_command search' -l ls -d 'List local search indexes for the current project'
+complete -c git-agent -n '__git_agent_using_command search' -l ls -d 'List search indexes for the current project or remote'
+complete -c git-agent -n '__git_agent_using_command search' -l ls-remotes -d 'List cached remote repositories'
 complete -c git-agent -n '__git_agent_using_command search' -l ls-files -d 'List indexed files from a search index as a tree'
 complete -c git-agent -n '__git_agent_using_command search' -l embedding-model -r -a 'text-embedding-3-small text-embedding-3-large' -d 'Embedding model'
 complete -c git-agent -n '__git_agent_using_command search' -l embedding-dimensions -r -a '512 768 1024 1536 3072' -d 'Embedding dimensions'

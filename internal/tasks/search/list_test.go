@@ -29,7 +29,7 @@ func TestListIndexesAndFiles(t *testing.T) {
 		t.Fatal("expected index dir")
 	}
 
-	indexes, err := ListIndexes(t.Context(), root)
+	indexes, err := ListIndexes(t.Context(), root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestListIndexesAndFiles(t *testing.T) {
 
 func TestListIndexesEmpty(t *testing.T) {
 	root := t.TempDir()
-	indexes, err := ListIndexes(t.Context(), root)
+	indexes, err := ListIndexes(t.Context(), root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestListIndexFilesNoTestsSharesIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	indexes, err := ListIndexes(t.Context(), root)
+	indexes, err := ListIndexes(t.Context(), root, "")
 	if err != nil {
 		t.Fatal(err)
 	}

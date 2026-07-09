@@ -76,6 +76,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 
 	var opts config.Options
 	var rev string
+	var remote string
 	var minRelatedness float64
 	var limit int
 	var indexOnly bool
@@ -84,6 +85,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	var noTests bool
 	var agentMode bool
 	var listIndexes bool
+	var listRemotes bool
 	var listFiles bool
 	var scope string
 	var format string
@@ -97,6 +99,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	fs.StringVar(&opts.Timeout, "timeout", "", "override default request timeout")
 	fs.BoolVar(&opts.Debug, "debug", false, "enable debug output on stderr")
 	fs.StringVar(&opts.Pprof, "pprof", "", "serve pprof on address")
+	fs.StringVar(&remote, "remote", "", "search a cached remote Git repository URL")
 	fs.StringVar(&rev, "rev", "", "search a committed Git tree")
 	fs.Float64Var(&minRelatedness, "min-relatedness", searchtask.DefaultMinRelatedness, "minimum vector relatedness candidate threshold")
 	fs.IntVar(&limit, "limit", searchtask.DefaultLimit, "maximum results")
@@ -105,7 +108,8 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	fs.BoolVar(&codeOnly, "code", false, "search code files only")
 	fs.BoolVar(&noTests, "no-tests", false, "exclude common test files and test directories from results and ls-files output")
 	fs.BoolVar(&agentMode, "agent", false, "serve search indexing progress on localhost when embeddings need work")
-	fs.BoolVar(&listIndexes, "ls", false, "list local search indexes")
+	fs.BoolVar(&listIndexes, "ls", false, "list search indexes for the current project or remote")
+	fs.BoolVar(&listRemotes, "ls-remotes", false, "list cached remote repositories")
 	fs.BoolVar(&listFiles, "ls-files", false, "list indexed files from the selected search index")
 	fs.StringVar(&scope, "scope", "", "comma-separated relative paths to search or index")
 	fs.StringVar(&format, "format", "json", "output format by search mode")
@@ -123,14 +127,16 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 		visitedFlags[flag.Name] = true
 	})
 	query := strings.TrimSpace(strings.Join(fs.Args(), " "))
-	if listIndexes || listFiles {
+	if listIndexes || listRemotes || listFiles {
 		return a.runSearchListMode(ctx, searchListModeOptions{
 			listIndexes: listIndexes,
+			listRemotes: listRemotes,
 			listFiles:   listFiles,
 			format:      format,
 			formatSet:   visitedFlags["format"],
 			visited:     visitedFlags,
 			query:       query,
+			remote:      remote,
 			rev:         rev,
 			scope:       scope,
 			noTests:     noTests,
@@ -216,6 +222,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	output, err := searchtask.Run(ctx, openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}), searchtask.Options{
 		Root:                   root,
 		Rev:                    rev,
+		Remote:                 remote,
 		MinRelatedness:         minRelatedness,
 		Limit:                  limit,
 		IndexOnly:              indexOnly,
@@ -264,19 +271,27 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 
 type searchListModeOptions struct {
 	listIndexes bool
+	listRemotes bool
 	listFiles   bool
 	format      string
 	formatSet   bool
 	visited     map[string]bool
 	query       string
+	remote      string
 	rev         string
 	scope       string
 	noTests     bool
 }
 
 func (a *App) runSearchListMode(ctx context.Context, opts searchListModeOptions) error {
-	if opts.listIndexes && opts.listFiles {
-		return errors.New("search accepts only one of --ls or --ls-files")
+	listModes := 0
+	for _, enabled := range []bool{opts.listIndexes, opts.listRemotes, opts.listFiles} {
+		if enabled {
+			listModes++
+		}
+	}
+	if listModes > 1 {
+		return errors.New("search accepts only one of --ls, --ls-remotes, or --ls-files")
 	}
 	if err := rejectSearchListModeFlags(opts); err != nil {
 		return err
@@ -284,6 +299,9 @@ func (a *App) runSearchListMode(ctx context.Context, opts searchListModeOptions)
 	if opts.query != "" {
 		if opts.listIndexes {
 			return errors.New("search --ls does not accept a query")
+		}
+		if opts.listRemotes {
+			return errors.New("search --ls-remotes does not accept a query")
 		}
 		return errors.New("search --ls-files does not accept a query")
 	}
@@ -299,7 +317,7 @@ func (a *App) runSearchListMode(ctx context.Context, opts searchListModeOptions)
 		if format != "text" && format != "json" {
 			return fmt.Errorf("--format must be text or json with --ls, got %q", format)
 		}
-		indexes, err := searchtask.ListIndexes(ctx, root)
+		indexes, err := searchtask.ListIndexes(ctx, root, opts.remote)
 		if err != nil {
 			return err
 		}
@@ -307,6 +325,27 @@ func (a *App) runSearchListMode(ctx context.Context, opts searchListModeOptions)
 			return writeJSONOutput(a.stdout, indexes)
 		}
 		_, err = io.WriteString(a.stdout, searchtask.FormatIndexes(indexes))
+		return err
+	}
+	if opts.listRemotes {
+		format := opts.format
+		if !opts.formatSet {
+			format = "text"
+		}
+		if format != "text" && format != "json" && format != "completion" {
+			return fmt.Errorf("--format must be text, json, or completion with --ls-remotes, got %q", format)
+		}
+		remotes, err := searchtask.ListRemotes()
+		if err != nil {
+			return err
+		}
+		if format == "json" {
+			return writeJSONOutput(a.stdout, remotes)
+		}
+		if format == "completion" {
+			return searchtask.FormatRemoteCompletions(a.stdout, remotes)
+		}
+		_, err = io.WriteString(a.stdout, searchtask.FormatRemotes(remotes))
 		return err
 	}
 
@@ -323,6 +362,7 @@ func (a *App) runSearchListMode(ctx context.Context, opts searchListModeOptions)
 	}
 	output, err := searchtask.ListIndexFiles(ctx, searchtask.ListFilesOptions{
 		Root:    root,
+		Remote:  opts.remote,
 		Rev:     opts.rev,
 		Scope:   scopes,
 		NoTests: opts.noTests,
@@ -338,11 +378,15 @@ func (a *App) runSearchListMode(ctx context.Context, opts searchListModeOptions)
 }
 
 func rejectSearchListModeFlags(opts searchListModeOptions) error {
-	allowed := map[string]bool{"ls-files": true, "format": true, "rev": true, "scope": true, "no-tests": true}
+	allowed := map[string]bool{"ls-files": true, "format": true, "remote": true, "rev": true, "scope": true, "no-tests": true}
 	mode := "--ls-files"
 	if opts.listIndexes {
-		allowed = map[string]bool{"ls": true, "format": true}
+		allowed = map[string]bool{"ls": true, "format": true, "remote": true}
 		mode = "--ls"
+	}
+	if opts.listRemotes {
+		allowed = map[string]bool{"ls-remotes": true, "format": true}
+		mode = "--ls-remotes"
 	}
 	for name := range opts.visited {
 		if !allowed[name] {
@@ -1425,8 +1469,9 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] patch|minor|major\n")
 	b.WriteString("  git-agent search [flags] <query...>\n")
-	b.WriteString("  git-agent search --ls [--format text|json]\n")
-	b.WriteString("  git-agent search --ls-files [--format tree|json] [--rev <rev>] [--scope <paths>] [--no-tests]\n")
+	b.WriteString("  git-agent search --ls [--remote <url>] [--format text|json]\n")
+	b.WriteString("  git-agent search --ls-remotes [--format text|json|completion]\n")
+	b.WriteString("  git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]\n")
 	b.WriteString("\nRun `git-agent search --help` for search flags.\n")
 	return errors.New(b.String())
 }
@@ -1434,8 +1479,9 @@ func usageError(prefix string) error {
 func searchUsageError(fs *flag.FlagSet) error {
 	var b strings.Builder
 	b.WriteString("Usage: git-agent search [flags] <query...>\n")
-	b.WriteString("       git-agent search --ls [--format text|json]\n")
-	b.WriteString("       git-agent search --ls-files [--format tree|json] [--rev <rev>] [--scope <paths>] [--no-tests]\n\n")
+	b.WriteString("       git-agent search --ls [--remote <url>] [--format text|json]\n")
+	b.WriteString("       git-agent search --ls-remotes [--format text|json|completion]\n")
+	b.WriteString("       git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]\n\n")
 	b.WriteString("Flags:\n")
 	writeSearchFlags(&b, fs)
 	return errors.New(b.String())
@@ -1446,10 +1492,11 @@ func writeSearchFlags(b *strings.Builder, fs *flag.FlagSet) {
 		"base-url":             "<url>",
 		"embedding-dimensions": "<n>",
 		"embedding-model":      "<model>",
-		"format":               "json|brief; --ls: text|json; --ls-files: tree|json",
+		"format":               "json|brief; --ls: text|json; --ls-remotes: text|json|completion; --ls-files: tree|json",
 		"limit":                "<n>",
 		"min-relatedness":      "<score>",
 		"pprof":                "<addr>",
+		"remote":               "<url>",
 		"rev":                  "<rev>",
 		"scope":                "<paths>",
 		"timeout":              "<duration>",
@@ -1462,9 +1509,11 @@ func writeSearchFlags(b *strings.Builder, fs *flag.FlagSet) {
 		"no-tests",
 		"agent",
 		"ls",
+		"ls-remotes",
 		"ls-files",
 		"index",
 		"reindex",
+		"remote",
 		"rev",
 		"min-relatedness",
 		"embedding-model",

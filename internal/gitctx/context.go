@@ -116,12 +116,28 @@ func Open(start string) (*Repository, error) {
 	if err != nil {
 		return nil, err
 	}
+	return repositoryFromHead(root, root, repo)
+}
+
+func OpenGitDir(path string) (*Repository, error) {
+	root, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	repo, err := git.PlainOpen(root)
+	if err != nil {
+		return nil, err
+	}
+	return repositoryFromHead(root, "", repo)
+}
+
+func repositoryFromHead(root, workPath string, repo *git.Repository) (*Repository, error) {
 	head, err := repo.Head()
 	if err != nil && !errors.Is(err, plumbing.ErrReferenceNotFound) {
 		return nil, err
 	}
 
-	result := &Repository{RootPath: root, WorkPath: root, Repo: repo, IsDetached: true}
+	result := &Repository{RootPath: root, WorkPath: workPath, Repo: repo, IsDetached: true}
 	if head != nil {
 		result.HeadSHA = head.Hash().String()
 		result.IsDetached = !head.Name().IsBranch()

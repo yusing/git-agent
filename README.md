@@ -108,8 +108,14 @@ git-agent search --index
 # Search a committed tree instead of the working filesystem
 git-agent search --rev HEAD~1 "guidance discovery"
 
-# List local search indexes for this project
+# Search a cached remote repository
+git-agent search --remote https://github.com/yusing/git-agent.git "search flags"
+
+# List search indexes for this project
 git-agent search --ls
+
+# List cached remote repositories
+git-agent search --ls-remotes
 
 # List indexed files as a tree
 git-agent search --ls-files
@@ -129,15 +135,17 @@ Useful flags:
 | --- | --- |
 | `--scope <paths>` | Limit search or indexing to comma-separated root-relative paths |
 | `--rev <rev>` | Search a committed Git tree |
+| `--remote <url>` | Search a cached remote Git repository URL |
 | `--code` | Include source-code files only |
 | `--no-tests` | Exclude common test files and test directories from results and `--ls-files` output |
 | `--min-relatedness <n>` | Set vector relatedness candidate threshold |
 | `--limit <n>` | Limit result count |
-| `--format` | Use `json\|brief` for search, `text\|json` for `--ls`, and `tree\|json` for `--ls-files` |
+| `--format` | Use `json\|brief` for search, `text\|json` for `--ls`, `text\|json\|completion` for `--ls-remotes`, and `tree\|json` for `--ls-files` |
 | `--index` | Build missing embeddings without searching |
 | `--reindex` | Rebuild existing embeddings and drop stale cache entries |
 | `--agent` | Use agent-friendly brief output and serve indexing progress on localhost when embeddings need work |
-| `--ls` | List local search indexes without embedding or querying |
+| `--ls` | List search indexes for the current project or `--remote` cache without embedding or querying |
+| `--ls-remotes` | List cached remote repositories without embedding, fetching, or querying |
 | `--ls-files` | List files in the selected search index without embedding or querying; `--no-tests` filters listed paths without changing the selected index |
 
 <!-- markdownlint-enable MD013 -->
@@ -147,10 +155,14 @@ Index inspection commands:
 ```sh
 git-agent search --ls
 git-agent search --ls --format json
+git-agent search --ls-remotes
+git-agent search --ls-remotes --format json
+git-agent search --ls-remotes --format completion
 git-agent search --ls-files
 git-agent search --ls-files --format json
 git-agent search --ls-files --no-tests
 git-agent search --ls-files --rev HEAD --scope internal/
+git-agent search --ls-files --remote https://github.com/yusing/git-agent.git
 ```
 
 Use [docs/spec.md](docs/spec.md) for exact cache layout and index-selection
@@ -170,8 +182,9 @@ git-agent pr-message [flags]
 git-agent release-note [--out <file>] [flags] <base> <release>
 git-agent release-note [--out <file>] [flags] patch|minor|major
 git-agent search [flags] <query...>
-git-agent search --ls [--format text|json]
-git-agent search --ls-files [--format tree|json] [--rev <rev>] [--scope <paths>] [--no-tests]
+git-agent search --ls [--remote <url>] [--format text|json]
+git-agent search --ls-remotes [--format text|json|completion]
+git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]
 ```
 
 Common message-generation flags:

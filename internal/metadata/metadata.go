@@ -35,6 +35,24 @@ func Dir(projectRoot string) (string, error) {
 	return dir, nil
 }
 
+// RemoteDir returns the metadata directory for a cached remote repository URL.
+func RemoteDir(remoteURL string) (string, error) {
+	root, err := RemoteRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, PathSHA(remoteURL)), nil
+}
+
+// RemoteRoot returns the directory containing cached remote repository metadata.
+func RemoteRoot() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, dirName, "remotes"), nil
+}
+
 // PathSHA returns the SHA-256 hex digest for a cleaned project path.
 func PathSHA(path string) string {
 	sum := sha256.Sum256([]byte(filepath.Clean(path)))

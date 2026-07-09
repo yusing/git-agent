@@ -125,6 +125,25 @@ func TestSearchLsFilesMissingIndex(t *testing.T) {
 	}
 }
 
+func TestSearchListRemotesEmpty(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var stdout bytes.Buffer
+	app := &App{stdout: &stdout, stderr: io.Discard}
+	if err := app.Run(t.Context(), []string{"search", "--ls-remotes"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != "no cached remotes\n" {
+		t.Fatalf("stdout = %q", got)
+	}
+	stdout.Reset()
+	if err := app.Run(t.Context(), []string{"search", "--ls-remotes", "--format", "completion"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("completion stdout = %q", got)
+	}
+}
+
 func TestSearchListModesRejectIgnoredFlags(t *testing.T) {
 	tests := []struct {
 		name string
@@ -160,6 +179,16 @@ func TestSearchListModesRejectIgnoredFlags(t *testing.T) {
 			name: "ls rejects tree format",
 			args: []string{"search", "--ls", "--format", "tree"},
 			want: `--format must be text or json with --ls, got "tree"`,
+		},
+		{
+			name: "ls-remotes rejects remote selector",
+			args: []string{"search", "--ls-remotes", "--remote", "https://example.test/repo.git"},
+			want: "search --ls-remotes does not accept --remote",
+		},
+		{
+			name: "ls-remotes rejects tree format",
+			args: []string{"search", "--ls-remotes", "--format", "tree"},
+			want: `--format must be text, json, or completion with --ls-remotes, got "tree"`,
 		},
 		{
 			name: "ls-files rejects text format",
@@ -200,10 +229,13 @@ func TestSearchHelpReturnsUsage(t *testing.T) {
 	if !strings.Contains(help, "Usage: git-agent search [flags] <query...>") {
 		t.Fatalf("help missing usage:\n%s", help)
 	}
-	if !strings.Contains(help, "git-agent search --ls [--format text|json]") {
+	if !strings.Contains(help, "git-agent search --ls [--remote <url>] [--format text|json]") {
 		t.Fatalf("help missing ls usage:\n%s", help)
 	}
-	if !strings.Contains(help, "git-agent search --ls-files [--format tree|json]") {
+	if !strings.Contains(help, "git-agent search --ls-remotes [--format text|json|completion]") {
+		t.Fatalf("help missing ls-remotes usage:\n%s", help)
+	}
+	if !strings.Contains(help, "git-agent search --ls-files [--format tree|json] [--remote <url>]") {
 		t.Fatalf("help missing ls-files usage:\n%s", help)
 	}
 	if !strings.Contains(help, "Flags:") {
@@ -212,14 +244,16 @@ func TestSearchHelpReturnsUsage(t *testing.T) {
 	expectedFlags := map[string]string{
 		"--scope <paths>": "comma-separated relative paths to search or index",
 		"--limit <n>":     "maximum results",
-		"--format json|brief; --ls: text|json; --ls-files: tree|json": "output format by search mode",
+		"--format json|brief; --ls: text|json; --ls-remotes: text|json|completion; --ls-files: tree|json": "output format by search mode",
 		"--code":                     "search code files only",
 		"--no-tests":                 "exclude common test files and test directories from results and ls-files output",
 		"--agent":                    "serve search indexing progress on localhost when embeddings need work",
-		"--ls":                       "list local search indexes",
+		"--ls":                       "list search indexes for the current project or remote",
+		"--ls-remotes":               "list cached remote repositories",
 		"--ls-files":                 "list indexed files from the selected search index",
 		"--index":                    "build embeddings for the selected source without searching",
 		"--reindex":                  "rebuild embeddings for the selected source",
+		"--remote <url>":             "search a cached remote Git repository URL",
 		"--rev <rev>":                "search a committed Git tree",
 		"--min-relatedness <score>":  "minimum vector relatedness candidate threshold",
 		"--embedding-model <model>":  "embedding model",

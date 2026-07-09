@@ -100,6 +100,7 @@ var defaultSearchIgnorePatterns = []gitignore.Pattern{
 type Options struct {
 	Root                   string
 	Rev                    string
+	Remote                 string
 	MinRelatedness         float64
 	Limit                  int
 	IndexOnly              bool
@@ -162,6 +163,7 @@ type Timing struct {
 type Source struct {
 	Mode        string `json:"mode"`
 	Root        string `json:"root,omitempty"`
+	Remote      string `json:"remote,omitempty"`
 	Rev         string `json:"rev,omitempty"`
 	ResolvedRev string `json:"resolved_rev,omitempty"`
 }
@@ -249,6 +251,7 @@ type manifest struct {
 	Version        int       `json:"version"`
 	Mode           string    `json:"mode"`
 	Root           string    `json:"root,omitempty"`
+	Remote         string    `json:"remote,omitempty"`
 	ResolvedRev    string    `json:"resolved_rev,omitempty"`
 	EmbeddingModel string    `json:"embedding_model"`
 	Dimensions     int       `json:"dimensions"`
@@ -297,6 +300,7 @@ type historyEntry struct {
 	Dimensions     int       `json:"dimensions"`
 	SourceMode     string    `json:"source_mode"`
 	Root           string    `json:"root,omitempty"`
+	Remote         string    `json:"remote,omitempty"`
 	ResolvedRev    string    `json:"resolved_rev,omitempty"`
 	Filters        *Filters  `json:"filters,omitempty"`
 	ResultChunkIDs []string  `json:"result_chunk_ids"`
@@ -364,7 +368,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		return fail(err)
 	}
 	filters := Filters{Code: opts.CodeOnly, NoTests: opts.NoTests, Scope: scope}
-	selection, err := resolveIndexSelection(opts.Root, opts.Rev, filters)
+	selection, err := resolveIndexSelection(ctx, opts.Root, opts.Remote, opts.Rev, filters, opts.Reindex, true)
 	if err != nil {
 		return fail(err)
 	}
@@ -377,7 +381,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	var discoveredFiles []fileContent
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
-	if opts.Rev != "" {
+	if source.Mode == "revision" || source.Mode == "remote" {
 		files, skipped, skippedFiles, err = discoverRevisionFiles(selection.repo, resolvedRev, scope, debugLog)
 		if err != nil {
 			return fail(err)
@@ -665,6 +669,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 				Dimensions:     len(queryVector),
 				SourceMode:     source.Mode,
 				Root:           root,
+				Remote:         source.Remote,
 				ResolvedRev:    resolvedRev,
 				CreatedAt:      time.Now().UTC(),
 			})
@@ -711,6 +716,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 			Dimensions:     len(queryVector),
 			SourceMode:     source.Mode,
 			Root:           root,
+			Remote:         source.Remote,
 			ResolvedRev:    resolvedRev,
 			Filters:        &historyFilters,
 			ResultChunkIDs: resultIDs(scored),
@@ -1180,6 +1186,7 @@ func queryLockDir(indexDir, normalized, queryTextHash, model string, dimensions 
 		fmt.Sprintf("%d", dimensions),
 		source.Mode,
 		root,
+		source.Remote,
 		resolvedRev,
 	}, "\x00")
 	sum := sha256.Sum256([]byte(key))
@@ -1599,6 +1606,7 @@ func saveIndex(dir string, source Source, root, resolvedRev, model string, dimen
 		Version:        indexVersion,
 		Mode:           source.Mode,
 		Root:           root,
+		Remote:         source.Remote,
 		ResolvedRev:    resolvedRev,
 		EmbeddingModel: model,
 		Dimensions:     dimensions,
@@ -1871,6 +1879,9 @@ func replayFor(dir, normalized, queryTextHash string, queryVector []float64, mod
 		if source.Mode == "revision" && entry.ResolvedRev != resolvedRev {
 			continue
 		}
+		if source.Mode == "remote" && (entry.Remote != source.Remote || entry.ResolvedRev != resolvedRev) {
+			continue
+		}
 		if !sameFilters(entry.Filters, filters) {
 			continue
 		}
@@ -1913,6 +1924,9 @@ func cachedQueryEmbedding(dir, normalized, queryTextHash, model string, dimensio
 			continue
 		}
 		if source.Mode == "revision" && entry.ResolvedRev != resolvedRev {
+			continue
+		}
+		if source.Mode == "remote" && (entry.Remote != source.Remote || entry.ResolvedRev != resolvedRev) {
 			continue
 		}
 		if len(entry.QueryEmbedding) == 0 {
@@ -2320,7 +2334,7 @@ func indexDir(base, mode, root, resolvedRev string, filters Filters) string {
 		sum := sha256.Sum256([]byte(strings.Join(filters.Scope, "\x00")))
 		filter = "scope-" + hex.EncodeToString(sum[:])[:16]
 	}
-	if mode == "revision" {
+	if mode == "revision" || mode == "remote" {
 		return filepath.Join(base, "search", "revs", resolvedRev, filter)
 	}
 	sum := sha256.Sum256([]byte(root))

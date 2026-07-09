@@ -26,8 +26,9 @@ Supported workflows:
 - `git-agent release-note [--out <file>] <base> <release>`
 - `git-agent release-note [--out <file>] patch|minor|major`
 - `git-agent search [flags] <query...>`
-- `git-agent search --ls [--format text|json]`
-- `git-agent search --ls-files [--format tree|json] [--rev <rev>] [--scope <paths>] [--no-tests]`
+- `git-agent search --ls [--remote <url>] [--format text|json]`
+- `git-agent search --ls-remotes [--format text|json|completion]`
+- `git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]`
 
 ### Non-goals
 
@@ -174,6 +175,21 @@ repository, resolves the revision to a commit, searches only that committed tree
 and ignores current filesystem contents. Revision mode reads `.gitignore` and
 `.gitagentignore` from the resolved commit tree, not from the working tree.
 
+`--remote <url>` switches to remote mode. The command caches the sanitized remote
+URL under `~/.git-agent/remotes/<remote-sha>/`, keeps a bare repository at
+`repo.git`, resolves `--rev` against that cached repository, and searches the
+resolved committed tree. When `--rev` is omitted, remote mode resolves `HEAD`
+from the remote default branch and reports `rev` as `HEAD`. Remote mode never
+checks out a worktree and never includes untracked, staged, unstaged, or
+submodule working-tree content. Cached remote URLs are sanitized before they are
+written to manifests, output, debug logs, or completion metadata.
+
+Remote repositories are fetched on first use, when the last successful fetch is
+at least 15 minutes old, or whenever `--reindex` is set. Fresh cache hits do not
+touch the network. If a requested revision cannot be resolved from the cached
+repository, the command fetches and retries before failing. Fetch failures fail
+the command clearly rather than silently using stale data.
+
 Search does not run the Responses API, does not call model tools, does not
 create `~/.git-agent/<path-sha>/sessions/` traces, does not generate
 explanations, and does not use lexical fallback. It frames and embeds the query
@@ -187,7 +203,7 @@ token overlap. Output and replay history keep the original query string, not the
 framed embedding input.
 
 `--format json` is the default stdout contract. `--format brief` first writes a
-header line as `# mode=<filesystem|revision> index=<fresh|refreshed|built|empty>`,
+header line as `# mode=<filesystem|revision|remote> index=<fresh|refreshed|built|empty>`,
 then writes one result per line as `<score> <path>:<start-line> <summary>`, with
 the score rounded to two decimals. The score is the final hybrid rank; JSON
 results expose the vector relatedness, text, path, symbol, lexical, cosine, and
@@ -215,6 +231,11 @@ Persistent metadata is stored under `~/.git-agent/<path-sha>/`, where
 indexes under `~/.git-agent/<path-sha>/search/`. When a legacy
 `<project>/.git-agent/` directory exists, the next project run migrates its
 contents into the home metadata directory before writing new data.
+Remote metadata is stored under `~/.git-agent/remotes/<remote-sha>/`, where
+`<remote-sha>` is the SHA-256 of the sanitized remote URL. Remote search indexes
+are stored under that remote metadata root and are keyed by resolved commit SHA,
+so moving branches create new revision indexes while old commit indexes remain
+reusable.
 
 Chunk embedding text clamps each physical source line to `4000` characters
 before applying the per-input embedding character cap. This bounds minified or
@@ -270,13 +291,13 @@ one index writer. Other processes wait for the writer, reload the completed
 cache, and skip embedding chunks that the writer just stored; parallel
 `--reindex` waiters also reuse a cache completed after their command started.
 
-#### `git-agent search --ls [--format text|json]`
+#### `git-agent search --ls [--remote <url>] [--format text|json]`
 
-List completed local search indexes for the current project. The command resolves
-the project metadata root the same way search does (Git repository root when
-available, otherwise the absolute current working directory) and walks
-`~/.git-agent/<path-sha>/search/` for directories that contain a valid
-`manifest.json`. Incomplete or incompatible index directories are skipped.
+List completed local search indexes for the current project. With `--remote
+<url>`, list completed indexes for that cached remote instead. The command
+resolves the metadata root the same way search does and walks its `search/`
+directory for valid `manifest.json` files. Incomplete or incompatible index
+directories are skipped.
 
 Default `--format text` writes one human-readable entry per index with mode,
 optional short revision, root, path-derived filters (`scope-*` only for scopes
@@ -285,17 +306,29 @@ count, embedding model, dimensions, created time, and the absolute index
 directory path. `--format json` writes a JSON array of the same fields. The
 command does not call embedding providers and does not require API keys.
 
-#### `git-agent search --ls-files [--format tree|json] [--rev <rev>] [--scope <paths>] [--no-tests]`
+#### `git-agent search --ls-remotes [--format text|json|completion]`
+
+List cached remote repositories from `~/.git-agent/remotes/`. The command reads
+remote metadata only; it does not clone, fetch, embed, query, or require API
+keys. Default `--format text` writes one entry per remote with sanitized URL,
+optional last resolved revision, last successful fetch time, and cache
+directory. `--format json` writes a JSON array of the same fields.
+`--format completion` writes one sanitized URL per line for shell completion
+helpers.
+
+#### `git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]`
 
 List unique file paths stored in one selected search index. Filesystem indexes
-use search-root-relative paths; revision indexes use repository-relative paths.
+use search-root-relative paths; revision and remote indexes use
+repository-relative paths.
 Index selection uses the same physical cache keying as search for filesystem or
-`--rev` sources. Visible `--scope` values use the shared source cache and filter
-listed output to the scoped paths. Scopes that include normally skipped paths use
-their separate `scope-*` cache. With `--no-tests`, the command uses the same
-index and filters test paths from the listed output. When no usable index is
-present, the command fails with an error that points at the expected index
-directory and suggests `git-agent search --index`.
+`--rev`/`--remote` sources. Visible `--scope` values use the shared source cache
+and filter listed output to the scoped paths. Scopes that include normally
+skipped paths use their separate `scope-*` cache. With `--no-tests`, the command
+uses the same index and filters test paths from the listed output. The command
+does not clone or fetch remote repositories. When no usable index is present, the
+command fails with an error that points at the expected index directory and
+suggests `git-agent search --index`.
 
 Default `--format tree` writes a rooted tree of indexed files using box-drawing
 characters. `--format json` writes an object with the selected index summary and
@@ -344,8 +377,9 @@ Message-generation subcommands reserve this shared flag surface:
 - `--scope <paths>`: comma-separated root-relative paths to search or index
 - `--limit <n>`: default `20`, valid `1..100`
 - `--format`: search accepts `json|brief` and defaults to `json`; `--ls`
-  accepts `text|json` and defaults to `text`; `--ls-files` accepts `tree|json`
-  and defaults to `tree`
+  accepts `text|json` and defaults to `text`; `--ls-remotes` accepts
+  `text|json|completion` and defaults to `text`; `--ls-files` accepts
+  `tree|json` and defaults to `tree`
 - `--code`: search source-code files only
 - `--no-tests`: exclude common test files and test directories from results and
   `--ls-files` output
@@ -355,9 +389,13 @@ Message-generation subcommands reserve this shared flag surface:
 - `--index`: build embeddings for the selected source without searching
 - `--reindex`: rebuild embeddings for the selected source and drop stale cache
   entries
-- `--ls`: list local search indexes without embedding or querying
+- `--ls`: list search indexes for the current project or `--remote` cache
+  without embedding or querying
+- `--ls-remotes`: list cached remote repositories without embedding, fetching,
+  or querying
 - `--ls-files`: list files in the selected search index without embedding or
   querying
+- `--remote <url>`: search or inspect a cached remote Git repository URL
 - `--rev <rev>`: search a committed Git tree instead of current filesystem files
 - `--min-relatedness <score>`: minimum vector relatedness candidate threshold;
   default `0.70`, valid `0 < score <= 1`
