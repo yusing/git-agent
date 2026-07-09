@@ -57,6 +57,46 @@ var searchIgnoreFileNames = map[string]bool{
 
 var searchIgnoreFileOrder = []string{".gitignore", ".gitagentignore"}
 
+var defaultSearchIgnorePatterns = []gitignore.Pattern{
+	gitignore.ParsePattern("*.lock", nil),
+	gitignore.ParsePattern("*.lockfile", nil),
+	gitignore.ParsePattern("bun.lock", nil),
+	gitignore.ParsePattern("bun.lockb", nil),
+	gitignore.ParsePattern("Cartfile.resolved", nil),
+	gitignore.ParsePattern("cabal.project.freeze", nil),
+	gitignore.ParsePattern("Cargo.lock", nil),
+	gitignore.ParsePattern("composer.lock", nil),
+	gitignore.ParsePattern("conda-lock.yaml", nil),
+	gitignore.ParsePattern("conda-lock.yml", nil),
+	gitignore.ParsePattern("cpanfile.snapshot", nil),
+	gitignore.ParsePattern("deno.lock", nil),
+	gitignore.ParsePattern("flake.lock", nil),
+	gitignore.ParsePattern("Gemfile.lock", nil),
+	gitignore.ParsePattern("go.sum", nil),
+	gitignore.ParsePattern("mix.lock", nil),
+	gitignore.ParsePattern("npm-shrinkwrap.json", nil),
+	gitignore.ParsePattern("package-lock.json", nil),
+	gitignore.ParsePattern("Package.resolved", nil),
+	gitignore.ParsePattern("packages.lock.json", nil),
+	gitignore.ParsePattern("pdm.lock", nil),
+	gitignore.ParsePattern("Pipfile.lock", nil),
+	gitignore.ParsePattern("pixi.lock", nil),
+	gitignore.ParsePattern("Podfile.lock", nil),
+	gitignore.ParsePattern("poetry.lock", nil),
+	gitignore.ParsePattern("pnpm-lock.yaml", nil),
+	gitignore.ParsePattern("pubspec.lock", nil),
+	gitignore.ParsePattern("renv.lock", nil),
+	gitignore.ParsePattern("shard.lock", nil),
+	gitignore.ParsePattern("stack.yaml.lock", nil),
+	gitignore.ParsePattern("uv.lock", nil),
+	gitignore.ParsePattern("yarn.lock", nil),
+	gitignore.ParsePattern("*.bazel", nil),
+	gitignore.ParsePattern("*.sha256", nil),
+	gitignore.ParsePattern("LICENSE", nil),
+	gitignore.ParsePattern("COPYING", nil),
+	gitignore.ParsePattern("NOTICE", nil),
+}
+
 type Options struct {
 	Root                   string
 	Rev                    string
@@ -2021,7 +2061,7 @@ func scopeAllowsHiddenPathPrefix(prefix string, scope []string) bool {
 }
 
 func filesystemIgnoreMatcher(root string, scope []string) gitignore.Matcher {
-	var patterns []gitignore.Pattern
+	patterns := slices.Clone(defaultSearchIgnorePatterns)
 	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -2068,7 +2108,7 @@ func filesystemIgnoreMatcherForPaths(root string, paths []string) gitignore.Matc
 			dirs[strings.Join(parts[:i+1], "/")] = true
 		}
 	}
-	var patterns []gitignore.Pattern
+	patterns := slices.Clone(defaultSearchIgnorePatterns)
 	for _, dir := range slices.Sorted(maps.Keys(dirs)) {
 		abs := root
 		if dir != "" {
@@ -2134,7 +2174,7 @@ func revisionIgnoreMatcher(repo *gitctx.Repository, rev string, scope []string) 
 		return strings.Compare(a.path, b.path)
 	})
 
-	var patterns []gitignore.Pattern
+	patterns := slices.Clone(defaultSearchIgnorePatterns)
 	for _, file := range ignoreFiles {
 		if file.dir != "" && gitignore.NewMatcher(patterns).Match(pathParts(file.dir), true) {
 			continue

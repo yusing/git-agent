@@ -143,9 +143,17 @@ default.
 Filesystem mode is the default: it searches current files under the current
 working directory exactly as they exist on disk and does not require a Git
 repository. Staged, unstaged, and untracked files are included when physically
-under the search root unless skipped by dot-path rules, `.gitignore`,
-`.gitagentignore`, non-text MIME type, or binary, oversized-file, and symlink
-safety checks.
+under the search root unless skipped by dot-path rules, built-in low-signal
+ignore patterns, `.gitignore`, `.gitagentignore`, non-text MIME type, or binary,
+oversized-file, and symlink safety checks. Built-in search ignores exclude paths
+matching `*.lock`, `*.lockfile`, `bun.lock`, `bun.lockb`,
+`Cartfile.resolved`, `cabal.project.freeze`, `Cargo.lock`, `composer.lock`,
+`conda-lock.yaml`, `conda-lock.yml`, `cpanfile.snapshot`, `deno.lock`,
+`flake.lock`, `Gemfile.lock`, `go.sum`, `mix.lock`, `npm-shrinkwrap.json`,
+`package-lock.json`, `Package.resolved`, `packages.lock.json`, `pdm.lock`,
+`Pipfile.lock`, `pixi.lock`, `Podfile.lock`, `poetry.lock`, `pnpm-lock.yaml`,
+`pubspec.lock`, `renv.lock`, `shard.lock`, `stack.yaml.lock`, `uv.lock`,
+`yarn.lock`, `*.bazel`, `*.sha256`, `LICENSE`, `COPYING`, or `NOTICE`.
 `.gitagentignore` uses the same pattern syntax and per-directory base behavior
 as `.gitignore`, but only affects `git-agent search` discovery.
 `--scope` accepts comma-separated root-relative file or directory paths and
@@ -298,8 +306,9 @@ With `--debug`, search writes live human console diagnostic events to stderr
 using the same renderer as streamed traces. It writes one `search_skip` event per
 file or directory skipped by git-agent's own safety rules, including dot paths,
 symlinks, oversized files, binary files, non-text MIME types, unreadable paths,
-and non-regular files. Paths skipped only by `.gitignore` or `.gitagentignore`
-patterns are not reported. While embedding missing index chunks, `--debug`
+and non-regular files. Paths skipped only by built-in low-signal ignores,
+`.gitignore`, or `.gitagentignore` patterns are not reported. While embedding
+missing index chunks, `--debug`
 writes live `search_timing`, `search_embed_plan`, and `search_embed_progress`
 events. `search_embed_plan` includes the number of embedding batches and the
 concurrent request limit chosen for the run. `search_embed_progress` includes

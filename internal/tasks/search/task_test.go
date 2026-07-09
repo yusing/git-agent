@@ -229,6 +229,82 @@ func TestFilesystemSearchDoesNotRequireGitAndIndexesCurrentFiles(t *testing.T) {
 	}
 }
 
+func TestSearchUsesDefaultIgnorePatterns(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		rev  bool
+	}{
+		{name: "filesystem"},
+		{name: "revision", rev: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeFile(t, root, "notes.txt", "release notes live here\n")
+			for _, path := range []string{
+				"build.gradle.lockfile",
+				"bun.lock",
+				"bun.lockb",
+				"Cartfile.resolved",
+				"cabal.project.freeze",
+				"Cargo.lock",
+				"composer.lock",
+				"conda-lock.yaml",
+				"conda-lock.yml",
+				"cpanfile.snapshot",
+				"deno.lock",
+				"flake.lock",
+				"Gemfile.lock",
+				"go.sum",
+				"mix.lock",
+				"MODULE.bazel",
+				"npm-shrinkwrap.json",
+				"package-lock.json",
+				"Package.resolved",
+				"packages.lock.json",
+				"pdm.lock",
+				"Pipfile.lock",
+				"pixi.lock",
+				"Podfile.lock",
+				"poetry.lock",
+				"pnpm-lock.yaml",
+				"pubspec.lock",
+				"renv.lock",
+				"shard.lock",
+				"stack.yaml.lock",
+				"uv.lock",
+				"yarn.lock",
+				"dist/checksums.sha256",
+				"LICENSE",
+				"third_party/COPYING",
+				"third_party/NOTICE",
+			} {
+				writeFile(t, root, path, "release notes live here\n")
+			}
+
+			opts := Options{
+				Root:                root,
+				MinRelatedness:      0.70,
+				Limit:               10,
+				EmbeddingModel:      "text-embedding-3-small",
+				EmbeddingDimensions: 3,
+				APIKey:              "test-key",
+				BaseURL:             "http://example.test",
+			}
+			if tt.rev {
+				opts.Rev = commitSearchRepo(t, root)
+			}
+
+			out, err := Run(t.Context(), fakeEmbedder{}, opts, "release notes")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := resultRanges(out.Results); !slices.Equal(got, []string{"notes.txt:1-1"}) {
+				t.Fatalf("result ranges = %#v", got)
+			}
+		})
+	}
+}
+
 func TestFilesystemSearchScopeKeepsRootIgnoreRules(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, ".gitagentignore", "ignored.txt\n")
