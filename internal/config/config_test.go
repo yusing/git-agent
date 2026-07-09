@@ -315,10 +315,14 @@ func TestResolveRejectsIncompleteChatGPTAuthFile(t *testing.T) {
 func TestResolveUsesRaisedDefaultMaxSteps(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("OPENAI_API_KEY", "env-key")
+	t.Setenv("OPENAI_MODEL", "")
 
 	cfg, err := Resolve(Options{})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if cfg.Model != "gpt-5.3-codex-spark" {
+		t.Fatalf("default Model = %q", cfg.Model)
 	}
 	if cfg.MaxSteps != DefaultMaxSteps {
 		t.Fatalf("MaxSteps = %d", cfg.MaxSteps)

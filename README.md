@@ -232,7 +232,7 @@ Supported environment variables:
 | --- | --- |
 | `OPENAI_API_KEY` | Message-generation fallback auth and search fallback auth |
 | `OPENAI_BASE_URL` | Message-generation fallback base URL and search fallback base URL |
-| `OPENAI_MODEL` | Message-generation model |
+| `OPENAI_MODEL` | Message-generation model; defaults to `gpt-5.3-codex-spark` |
 | `OPENAI_EMBEDDING_API_KEY` | Search embedding auth |
 | `OPENAI_EMBEDDING_BASE_URL` | Search embedding base URL |
 | `OPENAI_EMBEDDING_MODEL` | Search embedding model |

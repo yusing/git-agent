@@ -412,7 +412,8 @@ Supported environment variables:
 
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
-- `OPENAI_MODEL`
+- `OPENAI_MODEL` (overrides the default message-generation model,
+  `gpt-5.3-codex-spark`)
 - `OPENAI_EMBEDDING_API_KEY`
 - `OPENAI_EMBEDDING_BASE_URL`
 - `OPENAI_EMBEDDING_MODEL`
