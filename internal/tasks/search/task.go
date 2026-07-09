@@ -702,7 +702,7 @@ func discoverFilesystemFiles(root string, scope []string, noTests bool, debugLog
 			slog.String("reason", reason),
 		)
 	}
-	ignoreMatcher := filesystemIgnoreMatcher(root)
+	ignoreMatcher := filesystemIgnoreMatcher(root, scope)
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			skipped.Unreadable++
@@ -725,7 +725,7 @@ func discoverFilesystemFiles(root string, scope []string, noTests bool, debugLog
 			if path != root && noTests && isTestDirPath(rel) {
 				return filepath.SkipDir
 			}
-			if path != root && shouldSkipDir(name) {
+			if path != root && shouldSkipDir(name) && shouldSkipPath(rel, scope) {
 				skipped.Dirs++
 				skip(rel, "dot_dir")
 				return filepath.SkipDir
@@ -740,8 +740,10 @@ func discoverFilesystemFiles(root string, scope []string, noTests bool, debugLog
 			if searchIgnoreFileNames[name] {
 				return nil
 			}
-			skip(rel, "dot_file")
-			return nil
+			if shouldSkipPath(rel, scope) {
+				skip(rel, "dot_file")
+				return nil
+			}
 		}
 		if ignoreMatcher.Match(pathParts(rel), false) {
 			return nil
@@ -809,14 +811,14 @@ func discoverRevisionFiles(repo *gitctx.Repository, rev string, scope []string, 
 			slog.String("reason", reason),
 		)
 	}
-	ignoreMatcher, err := revisionIgnoreMatcher(repo, rev)
+	ignoreMatcher, err := revisionIgnoreMatcher(repo, rev, scope)
 	if err != nil {
 		return nil, skipped, nil, err
 	}
 	err = repo.WalkCommitTextFiles(rev, MaxFileBytes, func(path string) bool {
 		return pathInScope(path, scope) && (!noTests || !isTestPath(path))
 	}, func(file gitctx.CommitFile) error {
-		if shouldSkipPath(file.Path) {
+		if shouldSkipPath(file.Path, scope) {
 			skipped.Dirs++
 			skip(filepath.ToSlash(file.Path), "dot_path")
 			return nil
@@ -844,7 +846,7 @@ func discoverRevisionFiles(repo *gitctx.Repository, rev string, scope []string, 
 		if noTests && isTestPath(file.Path) {
 			return nil
 		}
-		if shouldSkipPath(file.Path) {
+		if shouldSkipPath(file.Path, scope) {
 			skipped.Dirs++
 			skip(filepath.ToSlash(file.Path), "dot_path")
 			return nil
@@ -1876,38 +1878,56 @@ func shouldSkipFile(name string) bool {
 	return strings.HasPrefix(name, ".")
 }
 
-func shouldSkipPath(path string) bool {
-	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
+func shouldSkipPath(path string, scope []string) bool {
+	parts := pathParts(path)
+	for i, part := range parts {
 		if shouldSkipDir(part) {
+			prefix := strings.Join(parts[:i+1], "/")
+			if scopeAllowsHiddenPathPrefix(prefix, scope) {
+				continue
+			}
 			return true
 		}
 	}
 	return false
 }
 
-func filesystemIgnoreMatcher(root string) gitignore.Matcher {
+func scopeAllowsHiddenPathPrefix(prefix string, scope []string) bool {
+	for _, item := range scope {
+		if item == prefix || strings.HasPrefix(item, prefix+"/") {
+			return true
+		}
+		if pathHasSkippedDir(item) && strings.HasPrefix(prefix, item+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func filesystemIgnoreMatcher(root string, scope []string) gitignore.Matcher {
 	var patterns []gitignore.Pattern
 	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		if entry.IsDir() {
-			if path != root {
-				rel, err := filepath.Rel(root, path)
-				if err != nil {
-					return nil
-				}
-				if shouldSkipDir(entry.Name()) || gitignore.NewMatcher(patterns).Match(pathParts(rel), true) {
-					return filepath.SkipDir
-				}
-			}
 			relDir := ""
 			if path != root {
 				rel, err := filepath.Rel(root, path)
 				if err != nil {
 					return nil
 				}
-				relDir = filepath.ToSlash(rel)
+				rel = filepath.ToSlash(rel)
+				if !scopeMayContainDir(rel, scope) {
+					return filepath.SkipDir
+				}
+				if shouldSkipDir(entry.Name()) && shouldSkipPath(rel, scope) {
+					return filepath.SkipDir
+				}
+				if gitignore.NewMatcher(patterns).Match(pathParts(rel), true) {
+					return filepath.SkipDir
+				}
+				relDir = rel
 			}
 			patterns = appendSearchIgnoreFilesFromDir(patterns, path, relDir)
 			return nil
@@ -1932,7 +1952,7 @@ func appendSearchIgnoreFilesFromDir(patterns []gitignore.Pattern, dir, relDir st
 	return patterns
 }
 
-func revisionIgnoreMatcher(repo *gitctx.Repository, rev string) (gitignore.Matcher, error) {
+func revisionIgnoreMatcher(repo *gitctx.Repository, rev string, scope []string) (gitignore.Matcher, error) {
 	type ignoreFile struct {
 		path string
 		dir  string
@@ -1941,7 +1961,11 @@ func revisionIgnoreMatcher(repo *gitctx.Repository, rev string) (gitignore.Match
 	}
 	var ignoreFiles []ignoreFile
 	err := repo.WalkCommitTextFiles(rev, 0, func(path string) bool {
-		return searchIgnoreFileNames[filepath.Base(path)] && !hasSkippedDir(filepath.Dir(path))
+		if !searchIgnoreFileNames[filepath.Base(path)] {
+			return false
+		}
+		dir := filepath.ToSlash(filepath.Dir(path))
+		return scopeMayContainDir(dir, scope) && !shouldSkipPath(dir, scope)
 	}, func(file gitctx.CommitFile) error {
 		dir := ""
 		if found := filepath.ToSlash(filepath.Dir(file.Path)); found != "." {
@@ -2012,7 +2036,7 @@ func revisionPathIgnored(matcher gitignore.Matcher, path string) bool {
 	return matcher.Match(parts, false)
 }
 
-func hasSkippedDir(path string) bool {
+func pathHasSkippedDir(path string) bool {
 	for _, part := range pathParts(path) {
 		if shouldSkipDir(part) {
 			return true

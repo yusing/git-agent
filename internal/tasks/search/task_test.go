@@ -260,6 +260,55 @@ func TestFilesystemSearchScopeKeepsRootIgnoreRules(t *testing.T) {
 	}
 }
 
+func TestFilesystemSearchScopeIncludesHiddenDir(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".foo/keep.txt", "alpha\n")
+	writeFile(t, root, ".foo/.foo/.foo/deep.txt", "alpha\n")
+	writeFile(t, root, "visible.txt", "alpha\n")
+
+	out, err := Run(t.Context(), fakeEmbedder{}, Options{
+		Root:                root,
+		Scope:               []string{".foo"},
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{".foo/.foo/.foo/deep.txt:1-1", ".foo/keep.txt:1-1"}
+	if got := resultRanges(out.Results); !slices.Equal(got, want) {
+		t.Fatalf("result ranges = %#v", got)
+	}
+}
+
+func TestFilesystemSearchScopeUsesIgnoreRulesInsideHiddenDir(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".foo/.gitagentignore", "ignored.txt\n")
+	writeFile(t, root, ".foo/keep.txt", "alpha\n")
+	writeFile(t, root, ".foo/ignored.txt", "alpha\n")
+
+	out, err := Run(t.Context(), fakeEmbedder{}, Options{
+		Root:                root,
+		Scope:               []string{".foo"},
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := resultRanges(out.Results); !slices.Equal(got, []string{".foo/keep.txt:1-1"}) {
+		t.Fatalf("result ranges = %#v", got)
+	}
+}
+
 func TestSearchFiltersByVectorThenSortsTiesByPath(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "b.txt", "alpha\n")
@@ -874,6 +923,95 @@ func TestRevisionSearchScopeKeepsRootIgnoreRules(t *testing.T) {
 	}
 	if len(out.Results) != 1 || out.Results[0].Range != "foo/keep.txt:1-1" {
 		t.Fatalf("results = %#v", out.Results)
+	}
+}
+
+func TestRevisionSearchScopeIncludesHiddenDir(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".foo/keep.txt", "alpha\n")
+	writeFile(t, root, ".foo/.foo/.foo/deep.txt", "alpha\n")
+	writeFile(t, root, "visible.txt", "alpha\n")
+	rev := commitSearchRepo(t, root)
+
+	out, err := Run(t.Context(), fakeEmbedder{}, Options{
+		Root:                root,
+		Rev:                 rev,
+		Scope:               []string{".foo"},
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{".foo/.foo/.foo/deep.txt:1-1", ".foo/keep.txt:1-1"}
+	if got := resultRanges(out.Results); !slices.Equal(got, want) {
+		t.Fatalf("result ranges = %#v", got)
+	}
+}
+
+func TestRevisionSearchScopeUsesIgnoreRulesInsideHiddenDir(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".foo/.gitagentignore", "ignored.txt\n")
+	writeFile(t, root, ".foo/keep.txt", "alpha\n")
+	writeFile(t, root, ".foo/ignored.txt", "alpha\n")
+	rev := commitSearchRepo(t, root)
+
+	out, err := Run(t.Context(), fakeEmbedder{}, Options{
+		Root:                root,
+		Rev:                 rev,
+		Scope:               []string{".foo"},
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := resultRanges(out.Results); !slices.Equal(got, []string{".foo/keep.txt:1-1"}) {
+		t.Fatalf("result ranges = %#v", got)
+	}
+}
+
+func TestShouldSkipPathHonorsScopedHiddenSubtree(t *testing.T) {
+	tests := []struct {
+		name  string
+		path  string
+		scope []string
+		want  bool
+	}{
+		{
+			name:  "scoped hidden dir includes nested hidden dirs",
+			path:  ".foo/.foo/.foo/deep.txt",
+			scope: []string{".foo"},
+			want:  false,
+		},
+		{
+			name:  "visible scope does not include nested hidden dirs",
+			path:  "foo/.foo/deep.txt",
+			scope: []string{"foo"},
+			want:  true,
+		},
+		{
+			name:  "specific nested hidden scope includes subtree",
+			path:  "foo/.foo/.bar/deep.txt",
+			scope: []string{"foo/.foo"},
+			want:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldSkipPath(tt.path, tt.scope); got != tt.want {
+				t.Fatalf("shouldSkipPath(%q, %#v) = %v, want %v", tt.path, tt.scope, got, tt.want)
+			}
+		})
 	}
 }
 
