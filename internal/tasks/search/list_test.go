@@ -203,7 +203,7 @@ func TestListIndexFilesNoTestsFiltersSharedIndex(t *testing.T) {
 	}
 }
 
-func TestListIndexFilesSelectsScopedRevisionIndex(t *testing.T) {
+func TestListIndexFilesFiltersSharedRevisionIndexByScope(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "pkg/app.go", "package pkg\n")
 	writeFile(t, root, "README.md", "# demo\n")
@@ -213,7 +213,6 @@ func TestListIndexFilesSelectsScopedRevisionIndex(t *testing.T) {
 		Root:                root,
 		Rev:                 rev,
 		IndexOnly:           true,
-		Scope:               []string{"pkg"},
 		MinRelatedness:      DefaultMinRelatedness,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "test-model",

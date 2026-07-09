@@ -255,8 +255,21 @@ func TestFilesystemSearchScopeKeepsRootIgnoreRules(t *testing.T) {
 	if len(out.Results) != 1 || out.Results[0].Range != "foo/keep.txt:1-1" {
 		t.Fatalf("results = %#v", out.Results)
 	}
-	if !strings.Contains(out.Diagnostics.IndexDir, "scope-") {
-		t.Fatalf("index dir = %q, want scoped cache", out.Diagnostics.IndexDir)
+	unscoped := Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}
+	base, err := Run(t.Context(), fakeEmbedder{}, unscoped, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Diagnostics.IndexDir != base.Diagnostics.IndexDir {
+		t.Fatalf("index dir = %q, want shared %q", out.Diagnostics.IndexDir, base.Diagnostics.IndexDir)
 	}
 }
 
@@ -282,6 +295,9 @@ func TestFilesystemSearchScopeIncludesHiddenDir(t *testing.T) {
 	want := []string{".foo/.foo/.foo/deep.txt:1-1", ".foo/keep.txt:1-1"}
 	if got := resultRanges(out.Results); !slices.Equal(got, want) {
 		t.Fatalf("result ranges = %#v", got)
+	}
+	if !strings.Contains(out.Diagnostics.IndexDir, "scope-") {
+		t.Fatalf("index dir = %q, want scoped cache for hidden scope", out.Diagnostics.IndexDir)
 	}
 }
 
@@ -463,15 +479,19 @@ func TestSearchFilteringOptionsShareIndexDir(t *testing.T) {
 		name    string
 		code    bool
 		noTests bool
+		scope   []string
 	}{
 		{name: "code", code: true},
 		{name: "no-tests", noTests: true},
 		{name: "code-no-tests", code: true, noTests: true},
+		{name: "scope", scope: []string{"app.go"}},
+		{name: "scope-code-no-tests", code: true, noTests: true, scope: []string{"app.go"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			opts := opts
 			opts.CodeOnly = tt.code
 			opts.NoTests = tt.noTests
+			opts.Scope = tt.scope
 			out, err := Run(t.Context(), fakeEmbedder{}, opts, "")
 			if err != nil {
 				t.Fatal(err)
@@ -774,6 +794,57 @@ func TestSearchNoTestsStaleCleanupRetainsSharedTestVectors(t *testing.T) {
 	}
 	if !slices.ContainsFunc(records, func(record vectorRecord) bool { return record.Path == "app_test.go" }) {
 		t.Fatalf("shared test vector was dropped: %#v", records)
+	}
+}
+
+func TestSearchScopeStaleCleanupRetainsSharedOutOfScopeVectors(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "pkg/app.txt", "alpha app\n")
+	writeFile(t, root, "pkg/stale.txt", "alpha stale\n")
+	writeFile(t, root, "docs/guide.txt", "alpha guide\n")
+
+	embedder := &countingEmbedder{}
+	opts := Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		IndexOnly:           true,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}
+	first, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Diagnostics.EmbeddedChunks != 3 {
+		t.Fatalf("first embedded chunks = %d, want 3", first.Diagnostics.EmbeddedChunks)
+	}
+	if err := os.Remove(filepath.Join(root, "pkg/stale.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	opts.Scope = []string{"pkg"}
+	second, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Diagnostics.IndexDir != first.Diagnostics.IndexDir {
+		t.Fatalf("index dir = %q, want shared %q", second.Diagnostics.IndexDir, first.Diagnostics.IndexDir)
+	}
+	if second.Diagnostics.ReusedChunks != 1 || second.Diagnostics.EmbeddedChunks != 0 {
+		t.Fatalf("second diagnostics = %#v, want one reused scoped chunk and no embeddings", second.Diagnostics)
+	}
+	records, err := loadVectors(second.Diagnostics.IndexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(records, func(record vectorRecord) bool { return record.Path == "pkg/stale.txt" }) {
+		t.Fatalf("stale scoped record was preserved: %#v", records)
+	}
+	if !slices.ContainsFunc(records, func(record vectorRecord) bool { return record.Path == "docs/guide.txt" }) {
+		t.Fatalf("shared out-of-scope vector was dropped: %#v", records)
 	}
 }
 

@@ -130,6 +130,9 @@ func ListIndexFiles(ctx context.Context, opts ListFilesOptions) (IndexFiles, err
 		}
 		return IndexFiles{}, err
 	}
+	if len(scope) > 0 {
+		entries.paths = slices.DeleteFunc(entries.paths, func(path string) bool { return !pathInScope(path, scope) })
+	}
 	if opts.NoTests {
 		entries.paths = slices.DeleteFunc(entries.paths, isTestPath)
 	}

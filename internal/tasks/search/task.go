@@ -14,6 +14,7 @@ import (
 	"go/token"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"math"
 	"mime"
 	"net/http"
@@ -330,8 +331,10 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	root := selection.root
 	source := selection.source
 	resolvedRev := selection.resolvedRev
+	sharedScope := len(scope) > 0 && !scopeUsesSkippedPath(scope)
 
 	var files []fileContent
+	var discoveredFiles []fileContent
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
 	if opts.Rev != "" {
@@ -339,14 +342,15 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		if err != nil {
 			return fail(err)
 		}
+		discoveredFiles = files
 	} else {
 		files, skipped, skippedFiles, err = discoverFilesystemFiles(root, scope, debugLog)
 		if err != nil {
 			return fail(err)
 		}
+		discoveredFiles = files
 	}
 	diag.SkippedFiles = skippedFiles
-	discoveredFiles := files
 	if filters.Code {
 		files = filterCodeFiles(files)
 	}
@@ -533,11 +537,28 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 	mark("embed_index")
 
-	records = preserveCodeFilteredRecords(records, oldVectors, discoveredFiles, filters, opts)
+	if filters.Code {
+		records = preserveSharedFilteredRecords(records, oldVectors, discoveredFiles, opts)
+	}
+	shouldSave := len(missing) > 0 || reuseOpts.Reindex
+	if !shouldSave {
+		if sharedScope {
+			shouldSave = scopedRecordsChanged(records, oldVectors, scope, opts)
+		} else {
+			shouldSave = len(records) != len(oldVectors)
+		}
+	}
+	if shouldSave && sharedScope {
+		if opts.Rev != "" {
+			records = preserveOutOfScopeRevisionRecords(records, oldVectors, scope, opts)
+		} else {
+			records = preserveOutOfScopeFilesystemRecords(records, oldVectors, root, scope, opts)
+		}
+	}
 	if dimensions == 0 {
 		dimensions = opts.EmbeddingDimensions
 	}
-	if len(missing) > 0 || reuseOpts.Reindex || len(records) != len(oldVectors) {
+	if shouldSave {
 		if err := saveIndex(indexDir, source, root, resolvedRev, opts.EmbeddingModel, dimensions, chunks, records); err != nil {
 			mark("persist")
 			return fail(err)
@@ -1210,24 +1231,22 @@ func reusableVectorRecord(record vectorRecord, opts Options) bool {
 		len(record.Vector) == record.Dimensions
 }
 
-func preserveCodeFilteredRecords(records, old []vectorRecord, files []fileContent, filters Filters, opts Options) []vectorRecord {
-	if !filters.Code || len(old) == 0 {
+func preserveSharedFilteredRecords(records, old []vectorRecord, files []fileContent, opts Options) []vectorRecord {
+	if len(old) == 0 {
 		return records
 	}
 	existing := make(map[string]bool, len(records))
-	for _, record := range records {
-		existing[recordVectorKey(record)] = true
-	}
-	var currentNonCode map[string]bool
+	addRecordVectorKeys(existing, records)
+	var current map[string]bool
 	for _, record := range old {
-		if isCodePath(record.Path) || !reusableVectorRecord(record, opts) {
+		if !reusableVectorRecord(record, opts) {
 			continue
 		}
 		key := recordVectorKey(record)
-		if currentNonCode == nil {
-			currentNonCode = currentNonCodeVectorKeys(files, opts)
+		if current == nil {
+			current = currentVectorKeys(files, opts)
 		}
-		if !currentNonCode[key] {
+		if !current[key] {
 			continue
 		}
 		if existing[key] {
@@ -1239,17 +1258,126 @@ func preserveCodeFilteredRecords(records, old []vectorRecord, files []fileConten
 	return records
 }
 
-func currentNonCodeVectorKeys(files []fileContent, opts Options) map[string]bool {
-	keys := map[string]bool{}
-	for _, file := range files {
-		if isCodePath(file.path) {
+func scopedRecordsChanged(records, old []vectorRecord, scope []string, opts Options) bool {
+	oldScoped := 0
+	current := recordVectorKeySet(records)
+	for _, record := range old {
+		if !pathInScope(record.Path, scope) || !reusableVectorRecord(record, opts) {
 			continue
 		}
+		oldScoped++
+		if !current[recordVectorKey(record)] {
+			return true
+		}
+	}
+	return oldScoped != len(records)
+}
+
+func currentVectorKeys(files []fileContent, opts Options) map[string]bool {
+	keys := map[string]bool{}
+	for _, file := range files {
 		for _, chunk := range chunksForFile(file) {
 			keys[chunkVectorKey(chunk, opts.EmbeddingModel, opts.EmbeddingDimensions)] = true
 		}
 	}
 	return keys
+}
+
+func preserveOutOfScopeRevisionRecords(records, old []vectorRecord, scope []string, opts Options) []vectorRecord {
+	if len(old) == 0 {
+		return records
+	}
+	existing := make(map[string]bool, len(records))
+	addRecordVectorKeys(existing, records)
+	for _, record := range old {
+		if pathInScope(record.Path, scope) || !reusableVectorRecord(record, opts) {
+			continue
+		}
+		key := recordVectorKey(record)
+		if existing[key] {
+			continue
+		}
+		existing[key] = true
+		records = append(records, record)
+	}
+	return records
+}
+
+func preserveOutOfScopeFilesystemRecords(records, old []vectorRecord, root string, scope []string, opts Options) []vectorRecord {
+	if len(old) == 0 {
+		return records
+	}
+	existing := make(map[string]bool, len(records))
+	addRecordVectorKeys(existing, records)
+	candidates := make([]vectorRecord, 0, len(old))
+	var paths []string
+	for _, record := range old {
+		if pathInScope(record.Path, scope) || !reusableVectorRecord(record, opts) {
+			continue
+		}
+		candidates = append(candidates, record)
+		paths = append(paths, record.Path)
+	}
+	ignoreMatcher := filesystemIgnoreMatcherForPaths(root, paths)
+	currentKeysByPath := map[string]map[string]bool{}
+	for _, record := range candidates {
+		key := recordVectorKey(record)
+		currentKeys, ok := currentKeysByPath[record.Path]
+		if !ok {
+			currentKeys = currentFilesystemVectorKeys(root, ignoreMatcher, record, opts)
+			currentKeysByPath[record.Path] = currentKeys
+		}
+		if !currentKeys[key] {
+			continue
+		}
+		if existing[key] {
+			continue
+		}
+		existing[key] = true
+		records = append(records, record)
+	}
+	return records
+}
+
+func recordVectorKeySet(records []vectorRecord) map[string]bool {
+	keys := make(map[string]bool, len(records))
+	addRecordVectorKeys(keys, records)
+	return keys
+}
+
+func addRecordVectorKeys(keys map[string]bool, records []vectorRecord) {
+	for _, record := range records {
+		keys[recordVectorKey(record)] = true
+	}
+}
+
+func currentFilesystemVectorKeys(root string, ignoreMatcher gitignore.Matcher, record vectorRecord, opts Options) map[string]bool {
+	path := filepath.ToSlash(record.Path)
+	if shouldSkipPath(path, nil) || revisionPathIgnored(ignoreMatcher, path) {
+		return nil
+	}
+	abs := filepath.Join(root, filepath.FromSlash(path))
+	info, err := os.Lstat(abs)
+	if err != nil {
+		return nil
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > MaxFileBytes {
+		return nil
+	}
+	if info.Size() != record.Size || info.ModTime().UnixNano() != record.MTimeUnixNano {
+		return nil
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil || isBinary(data) || !isIndexableText(path, data) {
+		return nil
+	}
+	return currentVectorKeys([]fileContent{{
+		path:   path,
+		source: "filesystem",
+		text:   string(data),
+		size:   info.Size(),
+		mtime:  info.ModTime(),
+	}}, opts)
 }
 
 func missingChunks(chunks []Chunk, vectors map[string][]float64) []Chunk {
@@ -1925,6 +2053,32 @@ func filesystemIgnoreMatcher(root string, scope []string) gitignore.Matcher {
 	return gitignore.NewMatcher(patterns)
 }
 
+func filesystemIgnoreMatcherForPaths(root string, paths []string) gitignore.Matcher {
+	if len(paths) == 0 {
+		return gitignore.NewMatcher(nil)
+	}
+	dirs := map[string]bool{"": true}
+	for _, path := range paths {
+		dir := filepath.ToSlash(filepath.Dir(filepath.ToSlash(path)))
+		if dir == "." {
+			continue
+		}
+		parts := pathParts(dir)
+		for i := range parts {
+			dirs[strings.Join(parts[:i+1], "/")] = true
+		}
+	}
+	var patterns []gitignore.Pattern
+	for _, dir := range slices.Sorted(maps.Keys(dirs)) {
+		abs := root
+		if dir != "" {
+			abs = filepath.Join(root, filepath.FromSlash(dir))
+		}
+		patterns = appendSearchIgnoreFilesFromDir(patterns, abs, dir)
+	}
+	return gitignore.NewMatcher(patterns)
+}
+
 func appendSearchIgnoreFilesFromDir(patterns []gitignore.Pattern, dir, relDir string) []gitignore.Pattern {
 	var base []string
 	if relDir != "" {
@@ -2033,6 +2187,15 @@ func pathHasSkippedDir(path string) bool {
 	return false
 }
 
+func scopeUsesSkippedPath(scope []string) bool {
+	for _, item := range scope {
+		if pathHasSkippedDir(item) {
+			return true
+		}
+	}
+	return false
+}
+
 func pathParts(path string) []string {
 	path = strings.Trim(filepath.ToSlash(path), "/")
 	if path == "" || path == "." {
@@ -2113,7 +2276,7 @@ func scopeMayContainDir(dir string, scope []string) bool {
 
 func indexDir(base, mode, root, resolvedRev string, filters Filters) string {
 	var filter string
-	if len(filters.Scope) > 0 {
+	if scopeUsesSkippedPath(filters.Scope) {
 		sum := sha256.Sum256([]byte(strings.Join(filters.Scope, "\x00")))
 		filter = "scope-" + hex.EncodeToString(sum[:])[:16]
 	}

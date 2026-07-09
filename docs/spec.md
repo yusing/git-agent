@@ -151,7 +151,11 @@ as `.gitignore`, but only affects `git-agent search` discovery.
 `--scope` accepts comma-separated root-relative file or directory paths and
 limits filesystem or revision discovery to those paths. Ignore files are still
 resolved from the search root or committed tree, so root `.gitagentignore`
-patterns apply normally to scoped paths such as `--scope foo/`.
+patterns apply normally to scoped paths such as `--scope foo/`. Visible scopes
+share the same physical cache as unscoped search for the same source. Scopes
+that include paths normally skipped by default discovery, such as dot/hidden
+paths, use a separate `scope-*` cache because they opt into a different physical
+candidate universe.
 
 Go files with a pre-package heading comment containing `DO NOT EDIT` are indexed
 as path-only chunks. Search embeds the filename/language metadata for those
@@ -226,10 +230,11 @@ revision mode, only matching files from the resolved committed tree are
 included. Generated Go files with a pre-package heading comment containing
 `DO NOT EDIT` are still included by `--code`, but they are indexed as path-only
 chunks; their generated body content is not embedded. `--code` shares the same
-physical vector cache as default search for the same source and scope: default
-searches can reuse code vectors written by `--code`, and `--code` can reuse code
-vectors written by default search. Replay history remains filter-aware, so
-default result history is not replayed as a `--code` result history entry.
+physical vector cache as default search for the same physical source cache:
+default searches can reuse code vectors written by `--code`, and `--code` can
+reuse code vectors written by default search. Replay history remains
+filter-aware, so default result history is not replayed as a `--code` result
+history entry.
 `--code` does not introduce a lexical fallback.
 
 `--no-tests` filters common test files from search results and `--ls-files`
@@ -247,10 +252,12 @@ the local cache after all missing embeddings complete. Cache writes replace the
 stored chunk and vector lists with the current candidate set, dropping entries
 for deleted or newly ignored files. `--code` writes still preserve current
 non-code entries in the shared physical cache so default searches can reuse
-them. `--no-tests` does not alter the indexed candidate set, so cache writes
-retain test-file vectors even when `--no-tests` filters results or `--ls-files`
-output. Empty candidate sets can be persisted so `--reindex` can clear a stale
-index. Parallel searches for the same physical index source use
+them. Visible `--scope` writes similarly preserve current out-of-scope entries
+in the shared physical cache. `--no-tests` does not alter the indexed candidate
+set, so cache writes retain test-file vectors even when `--no-tests` filters
+results or `--ls-files` output. Empty candidate sets can be persisted so
+`--reindex` can clear a stale index. Parallel searches for the same physical
+index source use
 one index writer. Other processes wait for the writer, reload the completed
 cache, and skip embedding chunks that the writer just stored; parallel
 `--reindex` waiters also reuse a cache completed after their command started.
@@ -264,21 +271,23 @@ available, otherwise the absolute current working directory) and walks
 `manifest.json`. Incomplete or incompatible index directories are skipped.
 
 Default `--format text` writes one human-readable entry per index with mode,
-optional short revision, root, path-derived filters (`scope-*` and legacy
-`code`), file count, chunk count, embedding model, dimensions, created time, and
-the absolute index directory path. `--format json` writes a JSON array of the
-same fields. The command does not call embedding providers and does not require
-API keys.
+optional short revision, root, path-derived filters (`scope-*` only for scopes
+that opt into normally skipped paths, plus legacy `code`), file count, chunk
+count, embedding model, dimensions, created time, and the absolute index
+directory path. `--format json` writes a JSON array of the same fields. The
+command does not call embedding providers and does not require API keys.
 
 #### `git-agent search --ls-files [--format tree|json] [--rev <rev>] [--scope <paths>] [--no-tests]`
 
 List unique file paths stored in one selected search index. Filesystem indexes
 use search-root-relative paths; revision indexes use repository-relative paths.
 Index selection uses the same physical cache keying as search for filesystem or
-`--rev` sources with optional `--scope` filters. With `--no-tests`, the command
-uses the same index and filters test paths from the listed output. When no usable
-index is present, the command fails with an error that points at the expected
-index directory and suggests `git-agent search --index`.
+`--rev` sources. Visible `--scope` values use the shared source cache and filter
+listed output to the scoped paths. Scopes that include normally skipped paths use
+their separate `scope-*` cache. With `--no-tests`, the command uses the same
+index and filters test paths from the listed output. When no usable index is
+present, the command fails with an error that points at the expected index
+directory and suggests `git-agent search --index`.
 
 Default `--format tree` writes a rooted tree of indexed files using box-drawing
 characters. `--format json` writes an object with the selected index summary and
