@@ -440,6 +440,49 @@ func TestSearchCodeOnlyFiltersDocs(t *testing.T) {
 	}
 }
 
+func TestSearchFilteringOptionsShareIndexDir(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "README.md", "alpha docs\n")
+	writeFile(t, root, "app.go", "package main\n\nfunc alpha() {}\n")
+	writeFile(t, root, "app_test.go", "package main\n\nfunc TestAlpha() {}\n")
+
+	opts := Options{
+		Root:                root,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+	}
+	base, err := Run(t.Context(), fakeEmbedder{}, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tt := range []struct {
+		name    string
+		code    bool
+		noTests bool
+	}{
+		{name: "code", code: true},
+		{name: "no-tests", noTests: true},
+		{name: "code-no-tests", code: true, noTests: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := opts
+			opts.CodeOnly = tt.code
+			opts.NoTests = tt.noTests
+			out, err := Run(t.Context(), fakeEmbedder{}, opts, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out.Diagnostics.IndexDir != base.Diagnostics.IndexDir {
+				t.Fatalf("index dir = %q, want shared %q", out.Diagnostics.IndexDir, base.Diagnostics.IndexDir)
+			}
+		})
+	}
+}
+
 func TestSearchCodeOnlySharesDefaultIndexAndKeepsReplayFiltered(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "README.md", "release notes live here\n")
@@ -565,6 +608,23 @@ func TestSearchCodeOnlyReindexPreservesSharedNonCodeVectors(t *testing.T) {
 	}
 	if second.Diagnostics.ReusedChunks != 0 || second.Diagnostics.EmbeddedChunks != 1 {
 		t.Fatalf("code reindex diagnostics = %#v, want one rebuilt code chunk", second.Diagnostics)
+	}
+	indexes, err := ListIndexes(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(indexes) != 1 {
+		t.Fatalf("indexes = %#v, want one shared index", indexes)
+	}
+	if indexes[0].Files != 2 || indexes[0].Chunks != 2 {
+		t.Fatalf("index summary = files:%d chunks:%d, want shared persisted counts 2/2", indexes[0].Files, indexes[0].Chunks)
+	}
+	listed, err := ListIndexFiles(t.Context(), ListFilesOptions{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(listed.Files, "README.md") || !slices.Contains(listed.Files, "app.js") {
+		t.Fatalf("listed files = %v, want shared code and non-code paths", listed.Files)
 	}
 	calls := embedder.callCount()
 
@@ -806,8 +866,15 @@ func TestSearchNoTestsFiltersCommonTestPaths(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("result ranges = %#v, want %#v", got, want)
 	}
-	if !strings.Contains(out.Diagnostics.IndexDir, "no-tests") {
-		t.Fatalf("index dir = %q, want no-tests filter", out.Diagnostics.IndexDir)
+	if strings.Contains(out.Diagnostics.IndexDir, "no-tests") {
+		t.Fatalf("index dir = %q, want shared cache without no-tests filter", out.Diagnostics.IndexDir)
+	}
+	records, err := loadVectors(out.Diagnostics.IndexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(records, func(record vectorRecord) bool { return record.Path == "main_test.go" }) {
+		t.Fatalf("shared cache should retain test file vectors")
 	}
 }
 
@@ -1145,7 +1212,7 @@ func TestDiscoverFilesystemFilesClassifiesSkipReasons(t *testing.T) {
 	writeFile(t, root, "manual.pdf", "%PDF-1.7\nrelease notes\n")
 	writeFile(t, root, "binary.dat", "release\x00notes\n")
 
-	files, skipped, skippedFiles, err := discoverFilesystemFiles(root, nil, false, func(string, ...slog.Attr) {})
+	files, skipped, skippedFiles, err := discoverFilesystemFiles(root, nil, func(string, ...slog.Attr) {})
 	if err != nil {
 		t.Fatal(err)
 	}

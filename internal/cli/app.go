@@ -83,6 +83,8 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	var codeOnly bool
 	var noTests bool
 	var agentMode bool
+	var listIndexes bool
+	var listFiles bool
 	var scope string
 	var format string
 	var embeddingModel string
@@ -101,10 +103,12 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	fs.BoolVar(&indexOnly, "index", false, "build embeddings for the selected source without searching")
 	fs.BoolVar(&reindex, "reindex", false, "rebuild embeddings for the selected source")
 	fs.BoolVar(&codeOnly, "code", false, "search code files only")
-	fs.BoolVar(&noTests, "no-tests", false, "exclude common test files and directories")
+	fs.BoolVar(&noTests, "no-tests", false, "exclude common test files and test directories from results and ls-files output")
 	fs.BoolVar(&agentMode, "agent", false, "serve search indexing progress on localhost when embeddings need work")
+	fs.BoolVar(&listIndexes, "ls", false, "list local search indexes")
+	fs.BoolVar(&listFiles, "ls-files", false, "list indexed files from the selected search index")
 	fs.StringVar(&scope, "scope", "", "comma-separated relative paths to search or index")
-	fs.StringVar(&format, "format", "json", "output format: json or brief")
+	fs.StringVar(&format, "format", "json", "output format by search mode")
 	fs.StringVar(&embeddingModel, "embedding-model", "", "embedding model")
 	fs.IntVar(&embeddingDimensions, "embedding-dimensions", embeddingDimensions, "embedding dimensions")
 
@@ -114,19 +118,30 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 		}
 		return err
 	}
-	formatSet := false
+	visitedFlags := map[string]bool{}
 	fs.Visit(func(flag *flag.Flag) {
-		if flag.Name == "format" {
-			formatSet = true
-		}
+		visitedFlags[flag.Name] = true
 	})
-	if agentMode && !formatSet {
+	query := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	if listIndexes || listFiles {
+		return a.runSearchListMode(ctx, searchListModeOptions{
+			listIndexes: listIndexes,
+			listFiles:   listFiles,
+			format:      format,
+			formatSet:   visitedFlags["format"],
+			visited:     visitedFlags,
+			query:       query,
+			rev:         rev,
+			scope:       scope,
+			noTests:     noTests,
+		})
+	}
+	if agentMode && !visitedFlags["format"] {
 		format = "brief"
 	}
 	if format != "json" && format != "brief" {
 		return fmt.Errorf("--format must be json or brief, got %q", format)
 	}
-	query := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if indexOnly && query != "" {
 		return errors.New("search --index does not accept a query")
 	}
@@ -161,12 +176,9 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	if err := a.maybeStartPprof(ctx, opts); err != nil {
 		return err
 	}
-	var scopes []string
-	if strings.TrimSpace(scope) != "" {
-		scopes = strings.FieldsFunc(scope, func(r rune) bool { return r == ',' })
-		if len(scopes) == 0 {
-			return errors.New("--scope requires at least one relative path")
-		}
+	scopes, err := parseScopeFlag(scope)
+	if err != nil {
+		return err
 	}
 	var debugLog func(string, ...slog.Attr)
 	if cfg.Debug {
@@ -247,9 +259,114 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	if format == "brief" {
 		return writeSearchBrief(a.stdout, output)
 	}
-	encoder := sonic.ConfigDefault.NewEncoder(a.stdout)
+	return writeJSONOutput(a.stdout, output)
+}
+
+type searchListModeOptions struct {
+	listIndexes bool
+	listFiles   bool
+	format      string
+	formatSet   bool
+	visited     map[string]bool
+	query       string
+	rev         string
+	scope       string
+	noTests     bool
+}
+
+func (a *App) runSearchListMode(ctx context.Context, opts searchListModeOptions) error {
+	if opts.listIndexes && opts.listFiles {
+		return errors.New("search accepts only one of --ls or --ls-files")
+	}
+	if err := rejectSearchListModeFlags(opts); err != nil {
+		return err
+	}
+	if opts.query != "" {
+		if opts.listIndexes {
+			return errors.New("search --ls does not accept a query")
+		}
+		return errors.New("search --ls-files does not accept a query")
+	}
+	root, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	if opts.listIndexes {
+		format := opts.format
+		if !opts.formatSet {
+			format = "text"
+		}
+		if format != "text" && format != "json" {
+			return fmt.Errorf("--format must be text or json with --ls, got %q", format)
+		}
+		indexes, err := searchtask.ListIndexes(ctx, root)
+		if err != nil {
+			return err
+		}
+		if format == "json" {
+			return writeJSONOutput(a.stdout, indexes)
+		}
+		_, err = io.WriteString(a.stdout, searchtask.FormatIndexes(indexes))
+		return err
+	}
+
+	format := opts.format
+	if !opts.formatSet {
+		format = "tree"
+	}
+	if format != "tree" && format != "json" {
+		return fmt.Errorf("--format must be tree or json with --ls-files, got %q", format)
+	}
+	scopes, err := parseScopeFlag(opts.scope)
+	if err != nil {
+		return err
+	}
+	output, err := searchtask.ListIndexFiles(ctx, searchtask.ListFilesOptions{
+		Root:    root,
+		Rev:     opts.rev,
+		Scope:   scopes,
+		NoTests: opts.noTests,
+	})
+	if err != nil {
+		return err
+	}
+	if format == "json" {
+		return writeJSONOutput(a.stdout, output)
+	}
+	_, err = io.WriteString(a.stdout, searchtask.FormatFileTree(output.Files))
+	return err
+}
+
+func rejectSearchListModeFlags(opts searchListModeOptions) error {
+	allowed := map[string]bool{"ls-files": true, "format": true, "rev": true, "scope": true, "no-tests": true}
+	mode := "--ls-files"
+	if opts.listIndexes {
+		allowed = map[string]bool{"ls": true, "format": true}
+		mode = "--ls"
+	}
+	for name := range opts.visited {
+		if !allowed[name] {
+			return fmt.Errorf("search %s does not accept --%s", mode, name)
+		}
+	}
+	return nil
+}
+
+func parseScopeFlag(scope string) ([]string, error) {
+	if strings.TrimSpace(scope) == "" {
+		return nil, nil
+	}
+	scopes := strings.FieldsFunc(scope, func(r rune) bool { return r == ',' })
+	if len(scopes) == 0 {
+		return nil, errors.New("--scope requires at least one relative path")
+	}
+	return scopes, nil
+}
+
+func writeJSONOutput(w io.Writer, value any) error {
+	encoder := sonic.ConfigDefault.NewEncoder(w)
 	encoder.SetEscapeHTML(false)
-	return encoder.Encode(output)
+	return encoder.Encode(value)
 }
 
 func writeSearchBrief(w io.Writer, output searchtask.Output) error {
@@ -1308,13 +1425,17 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] patch|minor|major\n")
 	b.WriteString("  git-agent search [flags] <query...>\n")
+	b.WriteString("  git-agent search --ls [--format text|json]\n")
+	b.WriteString("  git-agent search --ls-files [--format tree|json] [--rev <rev>] [--scope <paths>] [--no-tests]\n")
 	b.WriteString("\nRun `git-agent search --help` for search flags.\n")
 	return errors.New(b.String())
 }
 
 func searchUsageError(fs *flag.FlagSet) error {
 	var b strings.Builder
-	b.WriteString("Usage: git-agent search [flags] <query...>\n\n")
+	b.WriteString("Usage: git-agent search [flags] <query...>\n")
+	b.WriteString("       git-agent search --ls [--format text|json]\n")
+	b.WriteString("       git-agent search --ls-files [--format tree|json] [--rev <rev>] [--scope <paths>] [--no-tests]\n\n")
 	b.WriteString("Flags:\n")
 	writeSearchFlags(&b, fs)
 	return errors.New(b.String())
@@ -1325,7 +1446,7 @@ func writeSearchFlags(b *strings.Builder, fs *flag.FlagSet) {
 		"base-url":             "<url>",
 		"embedding-dimensions": "<n>",
 		"embedding-model":      "<model>",
-		"format":               "json|brief",
+		"format":               "json|brief; --ls: text|json; --ls-files: tree|json",
 		"limit":                "<n>",
 		"min-relatedness":      "<score>",
 		"pprof":                "<addr>",
@@ -1340,6 +1461,8 @@ func writeSearchFlags(b *strings.Builder, fs *flag.FlagSet) {
 		"code",
 		"no-tests",
 		"agent",
+		"ls",
+		"ls-files",
 		"index",
 		"reindex",
 		"rev",

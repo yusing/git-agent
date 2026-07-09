@@ -29,7 +29,6 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
 	"github.com/yusing/git-agent/internal/gitctx"
-	"github.com/yusing/git-agent/internal/metadata"
 	"github.com/yusing/git-agent/internal/openai"
 	"golang.org/x/sync/errgroup"
 )
@@ -213,6 +212,8 @@ type manifest struct {
 	EmbeddingModel string    `json:"embedding_model"`
 	Dimensions     int       `json:"dimensions"`
 	CreatedAt      time.Time `json:"created_at"`
+	FileCount      int       `json:"file_count,omitempty"`
+	ChunkCount     int       `json:"chunk_count,omitempty"`
 }
 
 type vectorRecord struct {
@@ -317,42 +318,29 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	if opts.EmbeddingConcurrency < 0 {
 		return fail(errors.New("embedding concurrency must be positive"))
 	}
-	root, err := filepath.Abs(cmp.Or(opts.Root, "."))
-	if err != nil {
-		return fail(err)
-	}
 	scope, err := normalizeScopes(opts.Scope)
 	if err != nil {
 		return fail(err)
 	}
 	filters := Filters{Code: opts.CodeOnly, NoTests: opts.NoTests, Scope: scope}
+	selection, err := resolveIndexSelection(opts.Root, opts.Rev, filters)
+	if err != nil {
+		return fail(err)
+	}
+	root := selection.root
+	source := selection.source
+	resolvedRev := selection.resolvedRev
 
-	source := Source{Mode: "filesystem", Root: root}
-	indexRoot := root
-	var resolvedRev string
 	var files []fileContent
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
 	if opts.Rev != "" {
-		repo, err := gitctx.Open(root)
-		if err != nil {
-			return fail(fmt.Errorf("--rev requires a Git repository: %w", err))
-		}
-		resolvedRev, err = repo.ResolveRef(opts.Rev)
-		if err != nil {
-			return fail(fmt.Errorf("resolve --rev %q: %w", opts.Rev, err))
-		}
-		indexRoot = repo.RootPath
-		source = Source{Mode: "revision", Rev: opts.Rev, ResolvedRev: resolvedRev}
-		files, skipped, skippedFiles, err = discoverRevisionFiles(repo, resolvedRev, scope, filters.NoTests, debugLog)
+		files, skipped, skippedFiles, err = discoverRevisionFiles(selection.repo, resolvedRev, scope, debugLog)
 		if err != nil {
 			return fail(err)
 		}
 	} else {
-		if repo, err := gitctx.Open(root); err == nil {
-			indexRoot = repo.RootPath
-		}
-		files, skipped, skippedFiles, err = discoverFilesystemFiles(root, scope, filters.NoTests, debugLog)
+		files, skipped, skippedFiles, err = discoverFilesystemFiles(root, scope, debugLog)
 		if err != nil {
 			return fail(err)
 		}
@@ -360,7 +348,6 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	diag.SkippedFiles = skippedFiles
 	discoveredFiles := files
 	if filters.Code {
-		discoveredFiles = slices.Clone(files)
 		files = filterCodeFiles(files)
 	}
 	diag.Files = len(files)
@@ -370,11 +357,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	diag.Chunks = len(chunks)
 	mark("chunk")
 
-	metadataDir, err := metadata.Dir(indexRoot)
-	if err != nil {
-		return fail(err)
-	}
-	indexDir := indexDir(metadataDir, source.Mode, root, resolvedRev, filters)
+	indexDir := selection.indexDir
 	diag.IndexDir = indexDir
 	indexLock, err := lockIndex(ctx, indexDir)
 	if err != nil {
@@ -638,7 +621,11 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 	mark("embed_query")
 
-	scored := scoreChunks(chunks, vectors, queryVector, query, opts.MinRelatedness)
+	var skipScoreChunk func(Chunk) bool
+	if filters.NoTests {
+		skipScoreChunk = func(chunk Chunk) bool { return isTestPath(chunk.Path) }
+	}
+	scored := scoreChunks(chunks, vectors, queryVector, query, opts.MinRelatedness, skipScoreChunk)
 	sortResults(scored)
 	if len(scored) > opts.Limit {
 		scored = scored[:opts.Limit]
@@ -691,7 +678,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}), nil
 }
 
-func discoverFilesystemFiles(root string, scope []string, noTests bool, debugLog func(string, ...slog.Attr)) ([]fileContent, SkippedCounts, []SkippedFile, error) {
+func discoverFilesystemFiles(root string, scope []string, debugLog func(string, ...slog.Attr)) ([]fileContent, SkippedCounts, []SkippedFile, error) {
 	var files []fileContent
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
@@ -722,9 +709,6 @@ func discoverFilesystemFiles(root string, scope []string, noTests bool, debugLog
 			return nil
 		}
 		if entry.IsDir() {
-			if path != root && noTests && isTestDirPath(rel) {
-				return filepath.SkipDir
-			}
 			if path != root && shouldSkipDir(name) && shouldSkipPath(rel, scope) {
 				skipped.Dirs++
 				skip(rel, "dot_dir")
@@ -746,9 +730,6 @@ func discoverFilesystemFiles(root string, scope []string, noTests bool, debugLog
 			}
 		}
 		if ignoreMatcher.Match(pathParts(rel), false) {
-			return nil
-		}
-		if noTests && isTestPath(rel) {
 			return nil
 		}
 		info, err := entry.Info()
@@ -800,7 +781,7 @@ func discoverFilesystemFiles(root string, scope []string, noTests bool, debugLog
 	return files, skipped, skippedFiles, err
 }
 
-func discoverRevisionFiles(repo *gitctx.Repository, rev string, scope []string, noTests bool, debugLog func(string, ...slog.Attr)) ([]fileContent, SkippedCounts, []SkippedFile, error) {
+func discoverRevisionFiles(repo *gitctx.Repository, rev string, scope []string, debugLog func(string, ...slog.Attr)) ([]fileContent, SkippedCounts, []SkippedFile, error) {
 	var files []fileContent
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
@@ -816,7 +797,7 @@ func discoverRevisionFiles(repo *gitctx.Repository, rev string, scope []string, 
 		return nil, skipped, nil, err
 	}
 	err = repo.WalkCommitTextFiles(rev, MaxFileBytes, func(path string) bool {
-		return pathInScope(path, scope) && (!noTests || !isTestPath(path))
+		return pathInScope(path, scope)
 	}, func(file gitctx.CommitFile) error {
 		if shouldSkipPath(file.Path, scope) {
 			skipped.Dirs++
@@ -843,9 +824,6 @@ func discoverRevisionFiles(repo *gitctx.Repository, rev string, scope []string, 
 		if !pathInScope(file.Path, scope) {
 			return nil
 		}
-		if noTests && isTestPath(file.Path) {
-			return nil
-		}
 		if shouldSkipPath(file.Path, scope) {
 			skipped.Dirs++
 			skip(filepath.ToSlash(file.Path), "dot_path")
@@ -869,7 +847,7 @@ func discoverRevisionFiles(repo *gitctx.Repository, rev string, scope []string, 
 }
 
 func filterCodeFiles(files []fileContent) []fileContent {
-	filtered := files[:0]
+	filtered := make([]fileContent, 0, len(files))
 	for _, file := range files {
 		if isCodePath(file.path) {
 			filtered = append(filtered, file)
@@ -1145,12 +1123,8 @@ func queryLockDir(indexDir, normalized, queryTextHash, model string, dimensions 
 }
 
 func loadBinaryVectors(dir string) ([]vectorRecord, error) {
-	indexData, err := os.ReadFile(filepath.Join(dir, "vectors.index.json"))
+	index, err := loadVectorIndexRecords(dir)
 	if err != nil {
-		return nil, err
-	}
-	var index []vectorIndexRecord
-	if err := sonic.Unmarshal(indexData, &index); err != nil {
 		return nil, err
 	}
 	vectorData, err := os.ReadFile(filepath.Join(dir, "vectors.f32"))
@@ -1234,17 +1208,23 @@ func reusableVectorRecord(record vectorRecord, opts Options) bool {
 }
 
 func preserveCodeFilteredRecords(records, old []vectorRecord, files []fileContent, filters Filters, opts Options) []vectorRecord {
-	if !filters.Code {
+	if !filters.Code || len(old) == 0 {
 		return records
 	}
 	existing := make(map[string]bool, len(records))
 	for _, record := range records {
 		existing[recordVectorKey(record)] = true
 	}
-	currentNonCode := currentNonCodeVectorKeys(files, opts)
+	var currentNonCode map[string]bool
 	for _, record := range old {
+		if isCodePath(record.Path) || !reusableVectorRecord(record, opts) {
+			continue
+		}
 		key := recordVectorKey(record)
-		if isCodePath(record.Path) || !reusableVectorRecord(record, opts) || !currentNonCode[key] {
+		if currentNonCode == nil {
+			currentNonCode = currentNonCodeVectorKeys(files, opts)
+		}
+		if !currentNonCode[key] {
 			continue
 		}
 		if existing[key] {
@@ -1434,14 +1414,14 @@ func embeddingBatchEnd(texts []string, start, maxInputs, maxChars int) int {
 	return end
 }
 
-func saveIndex(dir string, source Source, root, resolvedRev, model string, dimensions int, chunks []Chunk, vectors []vectorRecord) error {
+func saveIndex(dir string, source Source, root, resolvedRev, model string, dimensions int, chunks []Chunk, records []vectorRecord) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	if err := writeJSON(filepath.Join(dir, "chunks.json"), chunks); err != nil {
 		return err
 	}
-	if err := writeBinaryVectors(dir, vectors); err != nil {
+	if err := writeBinaryVectors(dir, records); err != nil {
 		return err
 	}
 	return writeJSON(filepath.Join(dir, "manifest.json"), manifest{
@@ -1452,6 +1432,8 @@ func saveIndex(dir string, source Source, root, resolvedRev, model string, dimen
 		EmbeddingModel: model,
 		Dimensions:     dimensions,
 		CreatedAt:      time.Now().UTC(),
+		FileCount:      uniquePathCountFrom(records, func(record vectorRecord) string { return record.Path }),
+		ChunkCount:     len(records),
 	})
 }
 
@@ -1529,12 +1511,15 @@ type scoreCandidate struct {
 	textLength int
 }
 
-func scoreChunks(chunks []Chunk, vectors map[string][]float64, queryVector []float64, query string, minRelatedness float64) []scoredChunk {
+func scoreChunks(chunks []Chunk, vectors map[string][]float64, queryVector []float64, query string, minRelatedness float64, skipChunk func(Chunk) bool) []scoredChunk {
 	queryTerms := uniqueSearchTerms(searchTerms(query))
 	querySet := searchTermSet(queryTerms)
 	candidates := make([]scoreCandidate, 0, len(chunks))
 	var scored []scoredChunk
 	for _, chunk := range chunks {
+		if skipChunk != nil && skipChunk(chunk) {
+			continue
+		}
 		vector := vectors[chunk.ID]
 		if len(vector) == 0 {
 			continue
@@ -2124,29 +2109,16 @@ func scopeMayContainDir(dir string, scope []string) bool {
 }
 
 func indexDir(base, mode, root, resolvedRev string, filters Filters) string {
-	var filterParts []string
-	if filters.NoTests {
-		filterParts = append(filterParts, "no-tests")
-	}
-	filter := filepath.Join(filterParts...)
+	var filter string
 	if len(filters.Scope) > 0 {
 		sum := sha256.Sum256([]byte(strings.Join(filters.Scope, "\x00")))
-		filter = filepath.Join("scope-"+hex.EncodeToString(sum[:])[:16], filter)
+		filter = "scope-" + hex.EncodeToString(sum[:])[:16]
 	}
 	if mode == "revision" {
 		return filepath.Join(base, "search", "revs", resolvedRev, filter)
 	}
 	sum := sha256.Sum256([]byte(root))
 	return filepath.Join(base, "search", "fs", hex.EncodeToString(sum[:])[:16], filter)
-}
-
-func isTestDirPath(path string) bool {
-	for _, part := range pathParts(strings.ToLower(path)) {
-		if isTestDirName(part) {
-			return true
-		}
-	}
-	return false
 }
 
 func isTestPath(path string) bool {

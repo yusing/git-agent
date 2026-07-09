@@ -46,6 +46,8 @@ directory is on `PATH`.
 | Release body | `git-agent release-note <base> <release>` | Release Markdown on stdout |
 | Version bump release body | `git-agent release-note patch` | Release Markdown for latest tag to `HEAD` |
 | Agent context search | `git-agent search --agent <query...>` | Brief results, plus progress URL when indexing |
+| List search indexes | `git-agent search --ls` | Local index summaries for the current project |
+| List indexed files | `git-agent search --ls-files` | Tree of files stored in the selected index |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -105,6 +107,12 @@ git-agent search --index
 
 # Search a committed tree instead of the working filesystem
 git-agent search --rev HEAD~1 "guidance discovery"
+
+# List local search indexes for this project
+git-agent search --ls
+
+# List indexed files as a tree
+git-agent search --ls-files
 ```
 
 Search reads `OPENAI_EMBEDDING_API_KEY` first, then falls back to
@@ -122,15 +130,31 @@ Useful flags:
 | `--scope <paths>` | Limit search or indexing to comma-separated root-relative paths |
 | `--rev <rev>` | Search a committed Git tree |
 | `--code` | Include source-code files only |
-| `--no-tests` | Exclude common test files and test directories |
+| `--no-tests` | Exclude common test files and test directories from results and `--ls-files` output |
 | `--min-relatedness <n>` | Set vector relatedness candidate threshold |
 | `--limit <n>` | Limit result count |
-| `--format json\|brief` | Choose output format; use `brief` for humans |
+| `--format` | Use `json\|brief` for search, `text\|json` for `--ls`, and `tree\|json` for `--ls-files` |
 | `--index` | Build missing embeddings without searching |
 | `--reindex` | Rebuild existing embeddings |
 | `--agent` | Use agent-friendly brief output and serve indexing progress on localhost when embeddings need work |
+| `--ls` | List local search indexes without embedding or querying |
+| `--ls-files` | List files in the selected search index without embedding or querying; `--no-tests` filters listed paths without changing the selected index |
 
 <!-- markdownlint-enable MD013 -->
+
+Index inspection commands:
+
+```sh
+git-agent search --ls
+git-agent search --ls --format json
+git-agent search --ls-files
+git-agent search --ls-files --format json
+git-agent search --ls-files --no-tests
+git-agent search --ls-files --rev HEAD --scope internal/
+```
+
+Use [docs/spec.md](docs/spec.md) for exact cache layout and index-selection
+contracts.
 
 See `git-agent search --help` and [docs/spec.md](docs/spec.md) for exact
 output, cache, ignore-file, and debug behavior.
@@ -146,6 +170,8 @@ git-agent pr-message [flags]
 git-agent release-note [--out <file>] [flags] <base> <release>
 git-agent release-note [--out <file>] [flags] patch|minor|major
 git-agent search [flags] <query...>
+git-agent search --ls [--format text|json]
+git-agent search --ls-files [--format tree|json] [--rev <rev>] [--scope <paths>] [--no-tests]
 ```
 
 Common message-generation flags:

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/metadata"
+	"github.com/yusing/git-agent/internal/openai"
 	searchtask "github.com/yusing/git-agent/internal/tasks/search"
 )
 
@@ -37,6 +39,156 @@ func TestRunWithoutArgsReturnsUsage(t *testing.T) {
 	}
 }
 
+func TestSearchLsAndLsFiles(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(root)
+	writeFixtureFile(t, filepath.Join(root, "cmd", "main.go"), "package main\n\nfunc main() {}\n")
+	writeFixtureFile(t, filepath.Join(root, "cmd", "main_test.go"), "package main\n\nfunc TestMain() {}\n")
+	writeFixtureFile(t, filepath.Join(root, "README.md"), "# demo\n")
+	if _, err := searchtask.Run(t.Context(), cliListFakeEmbedder{}, searchtask.Options{
+		Root:                root,
+		IndexOnly:           true,
+		MinRelatedness:      searchtask.DefaultMinRelatedness,
+		Limit:               searchtask.DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	var lsOut bytes.Buffer
+	app := &App{stdout: &lsOut, stderr: io.Discard}
+	if err := app.Run(t.Context(), []string{"search", "--ls"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(lsOut.String(), "filesystem") || !strings.Contains(lsOut.String(), "files=") {
+		t.Fatalf("ls output missing summary:\n%s", lsOut.String())
+	}
+
+	var lsJSON bytes.Buffer
+	app = &App{stdout: &lsJSON, stderr: io.Discard}
+	if err := app.Run(t.Context(), []string{"search", "--ls", "--format", "json"}); err != nil {
+		t.Fatal(err)
+	}
+	var indexes []searchtask.IndexInfo
+	if err := json.Unmarshal(lsJSON.Bytes(), &indexes); err != nil {
+		t.Fatalf("ls json: %v\n%s", err, lsJSON.String())
+	}
+	if len(indexes) != 1 || indexes[0].Mode != "filesystem" || indexes[0].Files != 3 {
+		t.Fatalf("indexes = %#v", indexes)
+	}
+
+	var filesOut bytes.Buffer
+	app = &App{stdout: &filesOut, stderr: io.Discard}
+	if err := app.Run(t.Context(), []string{"search", "--ls-files"}); err != nil {
+		t.Fatal(err)
+	}
+	tree := filesOut.String()
+	for _, want := range []string{".\n", "README.md", "cmd/", "main.go"} {
+		if !strings.Contains(tree, want) {
+			t.Fatalf("ls-files tree missing %q:\n%s", want, tree)
+		}
+	}
+
+	var filesJSON bytes.Buffer
+	app = &App{stdout: &filesJSON, stderr: io.Discard}
+	if err := app.Run(t.Context(), []string{"search", "--ls-files", "--format", "json"}); err != nil {
+		t.Fatal(err)
+	}
+	var listed searchtask.IndexFiles
+	if err := json.Unmarshal(filesJSON.Bytes(), &listed); err != nil {
+		t.Fatalf("ls-files json: %v\n%s", err, filesJSON.String())
+	}
+	if !slices.Contains(listed.Files, "README.md") || !slices.Contains(listed.Files, "cmd/main.go") {
+		t.Fatalf("files = %v", listed.Files)
+	}
+
+	var noTestsOut bytes.Buffer
+	app = &App{stdout: &noTestsOut, stderr: io.Discard}
+	if err := app.Run(t.Context(), []string{"search", "--ls-files", "--no-tests"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(noTestsOut.String(), "_test.go") {
+		t.Fatalf("ls-files --no-tests included test file:\n%s", noTestsOut.String())
+	}
+}
+
+func TestSearchLsFilesMissingIndex(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(root)
+	app := &App{stdout: io.Discard, stderr: io.Discard}
+	err := app.Run(t.Context(), []string{"search", "--ls-files"})
+	if err == nil || !strings.Contains(err.Error(), "no search index") {
+		t.Fatalf("err = %v, want missing index", err)
+	}
+}
+
+func TestSearchListModesRejectIgnoredFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "ls rejects revision selector",
+			args: []string{"search", "--ls", "--rev", "HEAD"},
+			want: "search --ls does not accept --rev",
+		},
+		{
+			name: "ls rejects scope selector",
+			args: []string{"search", "--ls", "--scope", "internal"},
+			want: "search --ls does not accept --scope",
+		},
+		{
+			name: "ls-files rejects index action",
+			args: []string{"search", "--ls-files", "--index"},
+			want: "search --ls-files does not accept --index",
+		},
+		{
+			name: "ls-files rejects agent mode",
+			args: []string{"search", "--ls-files", "--agent"},
+			want: "search --ls-files does not accept --agent",
+		},
+		{
+			name: "ls-files rejects provider flag before config resolution",
+			args: []string{"search", "--ls-files", "--base-url", "://bad"},
+			want: "search --ls-files does not accept --base-url",
+		},
+		{
+			name: "ls rejects tree format",
+			args: []string{"search", "--ls", "--format", "tree"},
+			want: `--format must be text or json with --ls, got "tree"`,
+		},
+		{
+			name: "ls-files rejects text format",
+			args: []string{"search", "--ls-files", "--format", "text"},
+			want: `--format must be tree or json with --ls-files, got "text"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := &App{stdout: io.Discard, stderr: io.Discard}
+			err := app.Run(t.Context(), tt.args)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+type cliListFakeEmbedder struct{}
+
+func (cliListFakeEmbedder) CreateEmbeddings(_ context.Context, request openai.EmbeddingRequest) (openai.EmbeddingResponse, error) {
+	vectors := make([][]float64, len(request.Inputs))
+	for i := range request.Inputs {
+		vectors[i] = []float64{0.1, 0.2, 0.3}
+	}
+	return openai.EmbeddingResponse{Model: request.Model, Vectors: vectors, Dimensions: 3}, nil
+}
+
 func TestSearchHelpReturnsUsage(t *testing.T) {
 	t.Setenv(config.EnvEmbeddingDimensions, "invalid")
 
@@ -48,16 +200,24 @@ func TestSearchHelpReturnsUsage(t *testing.T) {
 	if !strings.Contains(help, "Usage: git-agent search [flags] <query...>") {
 		t.Fatalf("help missing usage:\n%s", help)
 	}
+	if !strings.Contains(help, "git-agent search --ls [--format text|json]") {
+		t.Fatalf("help missing ls usage:\n%s", help)
+	}
+	if !strings.Contains(help, "git-agent search --ls-files [--format tree|json]") {
+		t.Fatalf("help missing ls-files usage:\n%s", help)
+	}
 	if !strings.Contains(help, "Flags:") {
 		t.Fatalf("help missing flags header:\n%s", help)
 	}
 	expectedFlags := map[string]string{
-		"--scope <paths>":            "comma-separated relative paths to search or index",
-		"--limit <n>":                "maximum results",
-		"--format json|brief":        "output format: json or brief",
+		"--scope <paths>": "comma-separated relative paths to search or index",
+		"--limit <n>":     "maximum results",
+		"--format json|brief; --ls: text|json; --ls-files: tree|json": "output format by search mode",
 		"--code":                     "search code files only",
-		"--no-tests":                 "exclude common test files and directories",
+		"--no-tests":                 "exclude common test files and test directories from results and ls-files output",
 		"--agent":                    "serve search indexing progress on localhost when embeddings need work",
+		"--ls":                       "list local search indexes",
+		"--ls-files":                 "list indexed files from the selected search index",
 		"--index":                    "build embeddings for the selected source without searching",
 		"--reindex":                  "rebuild embeddings for the selected source",
 		"--rev <rev>":                "search a committed Git tree",

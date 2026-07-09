@@ -26,6 +26,8 @@ Supported workflows:
 - `git-agent release-note [--out <file>] <base> <release>`
 - `git-agent release-note [--out <file>] patch|minor|major`
 - `git-agent search [flags] <query...>`
+- `git-agent search --ls [--format text|json]`
+- `git-agent search --ls-files [--format tree|json] [--rev <rev>] [--scope <paths>] [--no-tests]`
 
 ### Non-goals
 
@@ -224,27 +226,58 @@ revision mode, only matching files from the resolved committed tree are
 included. Generated Go files with a pre-package heading comment containing
 `DO NOT EDIT` are still included by `--code`, but they are indexed as path-only
 chunks; their generated body content is not embedded. `--code` shares the same
-physical vector cache as default search for the same source, scope, and
-`--no-tests` setting: default searches can reuse code vectors written by
-`--code`, and `--code` can reuse code vectors written by default search. Replay
-history remains filter-aware, so default result history is not replayed as a
-`--code` result history entry. `--code` does not introduce a lexical fallback.
+physical vector cache as default search for the same source and scope: default
+searches can reuse code vectors written by `--code`, and `--code` can reuse code
+vectors written by default search. Replay history remains filter-aware, so
+default result history is not replayed as a `--code` result history entry.
+`--code` does not introduce a lexical fallback.
 
-`--no-tests` excludes common test files from the selected source before chunking
-and embedding. It skips path segments named `test`, `tests`, `__tests__`, or
-`spec`, Go files ending in `_test.go`, and basenames matching `*.test.*`,
-`*.spec.*`, `test.*`, or `spec.*`.
+`--no-tests` filters common test files from search results and `--ls-files`
+output without changing the physical vector cache. It filters path segments named
+`test`, `tests`, `__tests__`, or `spec`, Go files ending in `_test.go`, and
+basenames matching `*.test.*`, `*.spec.*`, `test.*`, or `spec.*`.
 
 `--index` builds missing embeddings for the selected filesystem or revision
-source, including any `--scope`, `--code`, and `--no-tests` candidate filters,
-writes the same JSON envelope with an empty result list, and skips query
-embedding, scoring, replay history, and semantic search. `--index --reindex`
-rebuilds embeddings for the selected candidate set even when cache entries
-already exist. Successful indexing writes the local cache after all missing
-embeddings complete. Parallel searches for the same physical index source use
+source, including any `--scope` and `--code` candidate filters, writes the same
+JSON envelope with an empty result list, and skips query embedding, scoring,
+replay history, and semantic search. `--no-tests` does not change the indexed
+candidate set. `--index --reindex` rebuilds embeddings for the selected
+candidate set even when cache entries already exist. Successful indexing writes
+the local cache after all missing embeddings complete. Parallel searches for the
+same physical index source use
 one index writer. Other processes wait for the writer, reload the completed
 cache, and skip embedding chunks that the writer just stored; parallel
 `--reindex` waiters also reuse a cache completed after their command started.
+
+#### `git-agent search --ls [--format text|json]`
+
+List completed local search indexes for the current project. The command resolves
+the project metadata root the same way search does (Git repository root when
+available, otherwise the absolute current working directory) and walks
+`~/.git-agent/<path-sha>/search/` for directories that contain a valid
+`manifest.json`. Incomplete or incompatible index directories are skipped.
+
+Default `--format text` writes one human-readable entry per index with mode,
+optional short revision, root, path-derived filters (`scope-*` and legacy
+`code`), file count, chunk count, embedding model, dimensions, created time, and
+the absolute index directory path. `--format json` writes a JSON array of the
+same fields. The command does not call embedding providers and does not require
+API keys.
+
+#### `git-agent search --ls-files [--format tree|json] [--rev <rev>] [--scope <paths>] [--no-tests]`
+
+List unique file paths stored in one selected search index. Filesystem indexes
+use search-root-relative paths; revision indexes use repository-relative paths.
+Index selection uses the same physical cache keying as search for filesystem or
+`--rev` sources with optional `--scope` filters. With `--no-tests`, the command
+uses the same index and filters test paths from the listed output. When no usable
+index is present, the command fails with an error that points at the expected
+index directory and suggests `git-agent search --index`.
+
+Default `--format tree` writes a rooted tree of indexed files using box-drawing
+characters. `--format json` writes an object with the selected index summary and
+a sorted `files` array. The command reads index metadata and path lists only; it
+does not load embedding vectors or call providers.
 
 With `--debug`, search writes live human console diagnostic events to stderr
 using the same renderer as streamed traces. It writes one `search_skip` event per
@@ -286,15 +319,20 @@ Message-generation subcommands reserve this shared flag surface:
 
 - `--scope <paths>`: comma-separated root-relative paths to search or index
 - `--limit <n>`: default `20`, valid `1..100`
-- `--format json|brief`: default `json`; `brief` writes a header and ranked
-  result lines
+- `--format`: search accepts `json|brief` and defaults to `json`; `--ls`
+  accepts `text|json` and defaults to `text`; `--ls-files` accepts `tree|json`
+  and defaults to `tree`
 - `--code`: search source-code files only
-- `--no-tests`: exclude common test files and test directories
+- `--no-tests`: exclude common test files and test directories from results and
+  `--ls-files` output
 - `--agent`: serve current indexing progress on `127.0.0.1:<port>/progress`
   when embeddings need to be built or rebuilt; defaults output to brief unless
   `--format` is set
 - `--index`: build embeddings for the selected source without searching
 - `--reindex`: rebuild embeddings for the selected source
+- `--ls`: list local search indexes without embedding or querying
+- `--ls-files`: list files in the selected search index without embedding or
+  querying
 - `--rev <rev>`: search a committed Git tree instead of current filesystem files
 - `--min-relatedness <score>`: minimum vector relatedness candidate threshold;
   default `0.70`, valid `0 < score <= 1`
