@@ -207,9 +207,10 @@ before applying the per-input embedding character cap. This bounds minified or
 single-line generated files without changing file discovery, chunk ranges, or
 result excerpts.
 
-`--code` narrows the candidate set to source-code files before chunking and
-embedding. It is intended for implementation-location searches where docs would
-otherwise rank above code. The filter is extension-based and currently includes:
+`--code` narrows the candidate set for the current search or indexing run to
+source-code files before chunking and embedding missing chunks. It is intended
+for implementation-location searches where docs would otherwise rank above code.
+The filter is extension-based and currently includes:
 `.go`, `.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`, `.py`, `.rb`, `.rs`,
 `.java`, `.kt`, `.kts`, `.c`, `.h`, `.cc`, `.hh`, `.cpp`, `.hpp`, `.cs`,
 `.php`, `.swift`, `.scala`, `.sh`, `.bash`, `.zsh`, `.fish`, `.ps1`, `.sql`,
@@ -222,8 +223,12 @@ included when physically under the search root and not skipped or ignored. In
 revision mode, only matching files from the resolved committed tree are
 included. Generated Go files with a pre-package heading comment containing
 `DO NOT EDIT` are still included by `--code`, but they are indexed as path-only
-chunks; their generated body content is not embedded. `--code` does not
-introduce a lexical fallback.
+chunks; their generated body content is not embedded. `--code` shares the same
+physical vector cache as default search for the same source, scope, and
+`--no-tests` setting: default searches can reuse code vectors written by
+`--code`, and `--code` can reuse code vectors written by default search. Replay
+history remains filter-aware, so default result history is not replayed as a
+`--code` result history entry. `--code` does not introduce a lexical fallback.
 
 `--no-tests` excludes common test files from the selected source before chunking
 and embedding. It skips path segments named `test`, `tests`, `__tests__`, or
@@ -231,15 +236,15 @@ and embedding. It skips path segments named `test`, `tests`, `__tests__`, or
 `*.spec.*`, `test.*`, or `spec.*`.
 
 `--index` builds missing embeddings for the selected filesystem or revision
-source, including any `--scope`, `--code`, and `--no-tests` filters, writes the
-same JSON envelope with an empty result list, and skips query embedding,
-scoring, replay history, and semantic search. `--index --reindex` rebuilds
-embeddings even when cache entries already exist. Successful indexing writes the
-local cache after all missing embeddings complete. Parallel searches for the
-same source and filters use one index writer. Other processes wait for the
-writer, reload the completed cache, and skip embedding chunks that the writer
-just stored; parallel `--reindex` waiters also reuse a cache completed after
-their command started.
+source, including any `--scope`, `--code`, and `--no-tests` candidate filters,
+writes the same JSON envelope with an empty result list, and skips query
+embedding, scoring, replay history, and semantic search. `--index --reindex`
+rebuilds embeddings for the selected candidate set even when cache entries
+already exist. Successful indexing writes the local cache after all missing
+embeddings complete. Parallel searches for the same physical index source use
+one index writer. Other processes wait for the writer, reload the completed
+cache, and skip embedding chunks that the writer just stored; parallel
+`--reindex` waiters also reuse a cache completed after their command started.
 
 With `--debug`, search writes live human console diagnostic events to stderr
 using the same renderer as streamed traces. It writes one `search_skip` event per
@@ -1332,10 +1337,12 @@ Mitigation:
 
 Session traces intentionally store prompts, provider responses, tool arguments,
 and tool outputs. They are useful for debugging but may include repository
-content. For `git-agent commit` and `git-agent commit --amend`, the same trace
-data is streamed to stdout instead of being written under
-`~/.git-agent/<path-sha>/sessions/`; large string values are compacted inline
-with preview metadata.
+content. For `git-agent commit` and `git-agent commit --amend`, stdout streams
+summarized console trace events instead of writing an on-disk session under
+`~/.git-agent/<path-sha>/sessions/`. Console request events omit raw request
+fields such as `instructions`, but generated text and repository-derived
+summaries or previews may still appear in stdout; large string values are
+compacted inline with preview metadata.
 
 Mitigation:
 

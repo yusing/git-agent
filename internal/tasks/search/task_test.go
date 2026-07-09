@@ -391,6 +391,240 @@ func TestSearchCodeOnlyFiltersDocs(t *testing.T) {
 	}
 }
 
+func TestSearchCodeOnlySharesDefaultIndexAndKeepsReplayFiltered(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "README.md", "release notes live here\n")
+	writeFile(t, root, "main.go", "package main\n\nfunc releaseNotes() {}\n")
+
+	embedder := &recordingEmbedder{}
+	opts := Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}
+	first, err := Run(t.Context(), embedder, opts, "release notes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstInputCount := len(embedder.inputs)
+	clearHistoryFilters(t, first.Diagnostics.IndexDir)
+
+	opts.CodeOnly = true
+	second, err := Run(t.Context(), embedder, opts, "release notes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Diagnostics.IndexDir != first.Diagnostics.IndexDir {
+		t.Fatalf("code index dir = %q, want shared default dir %q", second.Diagnostics.IndexDir, first.Diagnostics.IndexDir)
+	}
+	if second.Replay.Mode != "none" {
+		t.Fatalf("code replay = %#v, want no replay from default history", second.Replay)
+	}
+	if len(embedder.inputs) != firstInputCount {
+		t.Fatalf("code search embedded again: inputs = %#v", embedder.inputs[firstInputCount:])
+	}
+	if got := resultRanges(second.Results); !slices.Equal(got, []string{"main.go:3-3"}) {
+		t.Fatalf("code result ranges = %#v", got)
+	}
+
+	third, err := Run(t.Context(), embedder, opts, "release notes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Replay.Mode != "hit" {
+		t.Fatalf("second code replay = %#v, want hit", third.Replay)
+	}
+	if len(embedder.inputs) != firstInputCount {
+		t.Fatalf("second code search embedded again: inputs = %#v", embedder.inputs[firstInputCount:])
+	}
+}
+
+func TestSearchCodeOnlySeedsSharedDefaultIndex(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "README.md", "alpha docs\n")
+	writeFile(t, root, "app.js", "function alpha() {}\n")
+
+	embedder := &countingEmbedder{}
+	opts := Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		IndexOnly:           true,
+		CodeOnly:            true,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}
+	first, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Diagnostics.EmbeddedChunks != 1 {
+		t.Fatalf("code embedded chunks = %d, want 1", first.Diagnostics.EmbeddedChunks)
+	}
+
+	opts.CodeOnly = false
+	second, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Diagnostics.IndexDir != first.Diagnostics.IndexDir {
+		t.Fatalf("default index dir = %q, want shared code dir %q", second.Diagnostics.IndexDir, first.Diagnostics.IndexDir)
+	}
+	if second.Diagnostics.ReusedChunks != 1 || second.Diagnostics.EmbeddedChunks != 1 {
+		t.Fatalf("default diagnostics = %#v, want one reused code chunk and one embedded doc chunk", second.Diagnostics)
+	}
+}
+
+func TestSearchCodeOnlyReindexPreservesSharedNonCodeVectors(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "README.md", "alpha docs\n")
+	writeFile(t, root, "app.js", "function alpha() {}\n")
+
+	embedder := &countingEmbedder{}
+	opts := Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		IndexOnly:           true,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}
+	first, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Diagnostics.EmbeddedChunks != 2 {
+		t.Fatalf("default embedded chunks = %d, want 2", first.Diagnostics.EmbeddedChunks)
+	}
+
+	opts.CodeOnly = true
+	opts.Reindex = true
+	second, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Diagnostics.IndexDir != first.Diagnostics.IndexDir {
+		t.Fatalf("code index dir = %q, want shared default dir %q", second.Diagnostics.IndexDir, first.Diagnostics.IndexDir)
+	}
+	if second.Diagnostics.ReusedChunks != 0 || second.Diagnostics.EmbeddedChunks != 1 {
+		t.Fatalf("code reindex diagnostics = %#v, want one rebuilt code chunk", second.Diagnostics)
+	}
+	calls := embedder.callCount()
+
+	opts.CodeOnly = false
+	opts.Reindex = false
+	third, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Diagnostics.ReusedChunks != 2 || third.Diagnostics.EmbeddedChunks != 0 {
+		t.Fatalf("default diagnostics = %#v, want all chunks reused", third.Diagnostics)
+	}
+	if embedder.callCount() != calls {
+		t.Fatalf("default search embedded after code reindex: calls = %d, want %d", embedder.callCount(), calls)
+	}
+}
+
+func TestSearchCodeOnlyDropsStaleSharedNonCodeVectors(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "README.md", "alpha docs\n")
+	writeFile(t, root, "app.js", "function alpha() {}\n")
+
+	embedder := &countingEmbedder{}
+	opts := Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		IndexOnly:           true,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}
+	first, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "README.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	opts.CodeOnly = true
+	opts.Reindex = true
+	second, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Diagnostics.IndexDir != first.Diagnostics.IndexDir {
+		t.Fatalf("code index dir = %q, want shared default dir %q", second.Diagnostics.IndexDir, first.Diagnostics.IndexDir)
+	}
+	records, err := loadVectors(second.Diagnostics.IndexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if record.Path == "README.md" {
+			t.Fatalf("stale non-code record was preserved: %#v", record)
+		}
+	}
+}
+
+func TestSearchReplaysLegacyScopedHistoryWithoutFilters(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "pkg/a.txt", "alpha\n")
+
+	embedder := &recordingEmbedder{}
+	opts := Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		Scope:               []string{"pkg"},
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}
+	first, err := Run(t.Context(), embedder, opts, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearHistoryFilters(t, first.Diagnostics.IndexDir)
+	firstInputCount := len(embedder.inputs)
+
+	second, err := Run(t.Context(), embedder, opts, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Replay.Mode != "hit" {
+		t.Fatalf("legacy scoped replay = %#v, want hit", second.Replay)
+	}
+	if len(embedder.inputs) != firstInputCount {
+		t.Fatalf("legacy scoped search embedded again: inputs = %#v", embedder.inputs[firstInputCount:])
+	}
+}
+
+func clearHistoryFilters(t *testing.T, indexDir string) {
+	t.Helper()
+	entries, err := loadHistory(indexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range entries {
+		entries[i].Filters = nil
+	}
+	if err := writeJSON(filepath.Join(indexDir, "history.json"), entries); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSearchFramesQueryForImplementationRetrieval(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "main.go", "package main\n\nfunc releaseNotes() {}\n")

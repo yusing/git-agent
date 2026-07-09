@@ -256,6 +256,7 @@ type historyEntry struct {
 	SourceMode     string    `json:"source_mode"`
 	Root           string    `json:"root,omitempty"`
 	ResolvedRev    string    `json:"resolved_rev,omitempty"`
+	Filters        *Filters  `json:"filters,omitempty"`
 	ResultChunkIDs []string  `json:"result_chunk_ids"`
 	CreatedAt      time.Time `json:"created_at"`
 }
@@ -357,7 +358,9 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		}
 	}
 	diag.SkippedFiles = skippedFiles
+	discoveredFiles := files
 	if filters.Code {
+		discoveredFiles = slices.Clone(files)
 		files = filterCodeFiles(files)
 	}
 	diag.Files = len(files)
@@ -548,6 +551,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	mark("embed_index")
 
 	if len(chunks) > 0 && (len(missing) > 0 || reuseOpts.Reindex) {
+		records = preserveCodeFilteredRecords(records, oldVectors, discoveredFiles, filters, opts)
 		if err := saveIndex(indexDir, source, root, resolvedRev, opts.EmbeddingModel, dimensions, chunks, records); err != nil {
 			mark("persist")
 			return fail(err)
@@ -643,8 +647,10 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	mark("score")
 
 	replay := Replay{Mode: "none"}
+	historyFilters := filters
+	historyFilters.Scope = slices.Clone(filters.Scope)
 	historyErr := withIndexLock(ctx, indexDir, func() error {
-		replay = replayFor(indexDir, normalizedQuery, queryTextHash, queryVector, opts.EmbeddingModel, opts.EmbeddingDimensions, source, root, resolvedRev)
+		replay = replayFor(indexDir, normalizedQuery, queryTextHash, queryVector, opts.EmbeddingModel, opts.EmbeddingDimensions, source, root, resolvedRev, filters)
 		return appendHistory(indexDir, historyEntry{
 			Query:          query,
 			Normalized:     normalizedQuery,
@@ -655,6 +661,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 			SourceMode:     source.Mode,
 			Root:           root,
 			ResolvedRev:    resolvedRev,
+			Filters:        &historyFilters,
 			ResultChunkIDs: resultIDs(scored),
 			CreatedAt:      time.Now().UTC(),
 		})
@@ -1200,9 +1207,7 @@ func reuseVectors(chunks []Chunk, old []vectorRecord, opts Options) (map[string]
 	}
 	byKey := map[string]vectorRecord{}
 	for _, record := range old {
-		if record.EmbeddingModel != opts.EmbeddingModel ||
-			record.Dimensions != opts.EmbeddingDimensions ||
-			len(record.Vector) != record.Dimensions {
+		if !reusableVectorRecord(record, opts) {
 			continue
 		}
 		byKey[recordVectorKey(record)] = record
@@ -1218,6 +1223,48 @@ func reuseVectors(chunks []Chunk, old []vectorRecord, opts Options) (map[string]
 		records = append(records, record)
 	}
 	return vectors, records, len(records)
+}
+
+func reusableVectorRecord(record vectorRecord, opts Options) bool {
+	return record.EmbeddingModel == opts.EmbeddingModel &&
+		record.Dimensions == opts.EmbeddingDimensions &&
+		len(record.Vector) == record.Dimensions
+}
+
+func preserveCodeFilteredRecords(records, old []vectorRecord, files []fileContent, filters Filters, opts Options) []vectorRecord {
+	if !filters.Code {
+		return records
+	}
+	existing := make(map[string]bool, len(records))
+	for _, record := range records {
+		existing[recordVectorKey(record)] = true
+	}
+	currentNonCode := currentNonCodeVectorKeys(files, opts)
+	for _, record := range old {
+		key := recordVectorKey(record)
+		if isCodePath(record.Path) || !reusableVectorRecord(record, opts) || !currentNonCode[key] {
+			continue
+		}
+		if existing[key] {
+			continue
+		}
+		existing[key] = true
+		records = append(records, record)
+	}
+	return records
+}
+
+func currentNonCodeVectorKeys(files []fileContent, opts Options) map[string]bool {
+	keys := map[string]bool{}
+	for _, file := range files {
+		if isCodePath(file.path) {
+			continue
+		}
+		for _, chunk := range chunksForFile(file) {
+			keys[chunkVectorKey(chunk, opts.EmbeddingModel, opts.EmbeddingDimensions)] = true
+		}
+	}
+	return keys
 }
 
 func missingChunks(chunks []Chunk, vectors map[string][]float64) []Chunk {
@@ -1649,7 +1696,7 @@ func renderResults(scored []scoredChunk) []Result {
 	return results
 }
 
-func replayFor(dir, normalized, queryTextHash string, queryVector []float64, model string, dimensions int, source Source, root, resolvedRev string) Replay {
+func replayFor(dir, normalized, queryTextHash string, queryVector []float64, model string, dimensions int, source Source, root, resolvedRev string, filters Filters) Replay {
 	entries, err := loadHistory(dir)
 	if err != nil {
 		return Replay{Mode: "none"}
@@ -1664,6 +1711,9 @@ func replayFor(dir, normalized, queryTextHash string, queryVector []float64, mod
 			continue
 		}
 		if source.Mode == "revision" && entry.ResolvedRev != resolvedRev {
+			continue
+		}
+		if !sameFilters(entry.Filters, filters) {
 			continue
 		}
 		if entry.EmbeddingOnly {
@@ -1682,6 +1732,13 @@ func replayFor(dir, normalized, queryTextHash string, queryVector []float64, mod
 		return Replay{Mode: "similar", From: &from}
 	}
 	return Replay{Mode: "none"}
+}
+
+func sameFilters(stored *Filters, current Filters) bool {
+	if stored == nil {
+		return !current.Code
+	}
+	return stored.Code == current.Code && stored.NoTests == current.NoTests && slices.Equal(stored.Scope, current.Scope)
 }
 
 func cachedQueryEmbedding(dir, normalized, queryTextHash, model string, dimensions int, source Source, root, resolvedRev string) ([]float64, int, bool) {
@@ -2044,9 +2101,6 @@ func scopeMayContainDir(dir string, scope []string) bool {
 
 func indexDir(base, mode, root, resolvedRev string, filters Filters) string {
 	var filterParts []string
-	if filters.Code {
-		filterParts = append(filterParts, "code")
-	}
 	if filters.NoTests {
 		filterParts = append(filterParts, "no-tests")
 	}
