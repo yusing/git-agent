@@ -686,6 +686,148 @@ func TestSearchCodeOnlyDropsStaleSharedNonCodeVectors(t *testing.T) {
 	}
 }
 
+func TestSearchDropsStaleVectorsWhenFileRemovedWithoutMissingChunks(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.txt", "alpha\n")
+	writeFile(t, root, "b.txt", "beta\n")
+
+	embedder := &countingEmbedder{}
+	opts := Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		IndexOnly:           true,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}
+	first, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Diagnostics.EmbeddedChunks != 2 {
+		t.Fatalf("first embedded chunks = %d, want 2", first.Diagnostics.EmbeddedChunks)
+	}
+	if err := os.Remove(filepath.Join(root, "a.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Diagnostics.ReusedChunks != 1 || second.Diagnostics.EmbeddedChunks != 0 {
+		t.Fatalf("second diagnostics = %#v, want one reused chunk and no embeddings", second.Diagnostics)
+	}
+	records, err := loadVectors(second.Diagnostics.IndexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Path != "b.txt" {
+		t.Fatalf("records = %#v, want only b.txt", records)
+	}
+}
+
+func TestSearchNoTestsStaleCleanupRetainsSharedTestVectors(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "README.md", "alpha docs\n")
+	writeFile(t, root, "app.go", "package main\n\nfunc alpha() {}\n")
+	writeFile(t, root, "app_test.go", "package main\n\nfunc TestAlpha() {}\n")
+
+	embedder := &countingEmbedder{}
+	opts := Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		IndexOnly:           true,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}
+	first, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Diagnostics.EmbeddedChunks == 0 {
+		t.Fatalf("first embedded chunks = %d, want non-zero", first.Diagnostics.EmbeddedChunks)
+	}
+	if err := os.Remove(filepath.Join(root, "README.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	opts.NoTests = true
+	second, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Diagnostics.ReusedChunks == 0 || second.Diagnostics.EmbeddedChunks != 0 {
+		t.Fatalf("second diagnostics = %#v, want reused chunks and no embeddings", second.Diagnostics)
+	}
+	records, err := loadVectors(second.Diagnostics.IndexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(records, func(record vectorRecord) bool { return record.Path == "README.md" }) {
+		t.Fatalf("stale doc record was preserved: %#v", records)
+	}
+	if !slices.ContainsFunc(records, func(record vectorRecord) bool { return record.Path == "app_test.go" }) {
+		t.Fatalf("shared test vector was dropped: %#v", records)
+	}
+}
+
+func TestSearchReindexClearsIndexWhenAllFilesIgnored(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.txt", "alpha\n")
+
+	embedder := &countingEmbedder{}
+	opts := Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               10,
+		IndexOnly:           true,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}
+	first, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Diagnostics.EmbeddedChunks != 1 {
+		t.Fatalf("first embedded chunks = %d, want 1", first.Diagnostics.EmbeddedChunks)
+	}
+
+	writeFile(t, root, ".gitignore", "*.txt\n")
+	opts.Reindex = true
+	second, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Diagnostics.Chunks != 0 || second.Diagnostics.EmbeddedChunks != 0 || second.Diagnostics.ReusedChunks != 0 {
+		t.Fatalf("second diagnostics = %#v, want empty reindex", second.Diagnostics)
+	}
+	records, err := loadVectors(second.Diagnostics.IndexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("records = %#v, want empty index", records)
+	}
+	listed, err := ListIndexFiles(t.Context(), ListFilesOptions{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Files) != 0 || listed.Index.Files != 0 || listed.Index.Chunks != 0 {
+		t.Fatalf("listed = %#v, want empty index", listed)
+	}
+	if listed.Index.Dimensions != opts.EmbeddingDimensions {
+		t.Fatalf("dimensions = %d, want %d", listed.Index.Dimensions, opts.EmbeddingDimensions)
+	}
+}
+
 func TestSearchReplaysLegacyScopedHistoryWithoutFilters(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "pkg/a.txt", "alpha\n")

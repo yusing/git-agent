@@ -533,8 +533,11 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 	mark("embed_index")
 
-	if len(chunks) > 0 && (len(missing) > 0 || reuseOpts.Reindex) {
-		records = preserveCodeFilteredRecords(records, oldVectors, discoveredFiles, filters, opts)
+	records = preserveCodeFilteredRecords(records, oldVectors, discoveredFiles, filters, opts)
+	if dimensions == 0 {
+		dimensions = opts.EmbeddingDimensions
+	}
+	if len(missing) > 0 || reuseOpts.Reindex || len(records) != len(oldVectors) {
 		if err := saveIndex(indexDir, source, root, resolvedRev, opts.EmbeddingModel, dimensions, chunks, records); err != nil {
 			mark("persist")
 			return fail(err)

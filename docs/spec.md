@@ -243,8 +243,14 @@ JSON envelope with an empty result list, and skips query embedding, scoring,
 replay history, and semantic search. `--no-tests` does not change the indexed
 candidate set. `--index --reindex` rebuilds embeddings for the selected
 candidate set even when cache entries already exist. Successful indexing writes
-the local cache after all missing embeddings complete. Parallel searches for the
-same physical index source use
+the local cache after all missing embeddings complete. Cache writes replace the
+stored chunk and vector lists with the current candidate set, dropping entries
+for deleted or newly ignored files. `--code` writes still preserve current
+non-code entries in the shared physical cache so default searches can reuse
+them. `--no-tests` does not alter the indexed candidate set, so cache writes
+retain test-file vectors even when `--no-tests` filters results or `--ls-files`
+output. Empty candidate sets can be persisted so `--reindex` can clear a stale
+index. Parallel searches for the same physical index source use
 one index writer. Other processes wait for the writer, reload the completed
 cache, and skip embedding chunks that the writer just stored; parallel
 `--reindex` waiters also reuse a cache completed after their command started.
@@ -329,7 +335,8 @@ Message-generation subcommands reserve this shared flag surface:
   when embeddings need to be built or rebuilt; defaults output to brief unless
   `--format` is set
 - `--index`: build embeddings for the selected source without searching
-- `--reindex`: rebuild embeddings for the selected source
+- `--reindex`: rebuild embeddings for the selected source and drop stale cache
+  entries
 - `--ls`: list local search indexes without embedding or querying
 - `--ls-files`: list files in the selected search index without embedding or
   querying

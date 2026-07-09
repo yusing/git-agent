@@ -135,7 +135,7 @@ Useful flags:
 | `--limit <n>` | Limit result count |
 | `--format` | Use `json\|brief` for search, `text\|json` for `--ls`, and `tree\|json` for `--ls-files` |
 | `--index` | Build missing embeddings without searching |
-| `--reindex` | Rebuild existing embeddings |
+| `--reindex` | Rebuild existing embeddings and drop stale cache entries |
 | `--agent` | Use agent-friendly brief output and serve indexing progress on localhost when embeddings need work |
 | `--ls` | List local search indexes without embedding or querying |
 | `--ls-files` | List files in the selected search index without embedding or querying; `--no-tests` filters listed paths without changing the selected index |
