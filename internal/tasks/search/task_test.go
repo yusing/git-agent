@@ -349,6 +349,61 @@ func TestFilesystemSearchScopeKeepsRootIgnoreRules(t *testing.T) {
 	}
 }
 
+func TestFilesystemSearchFromNestedGitDirectoryReusesRootIndex(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "foo/bar/keep.txt", "alpha nested\n")
+	writeFile(t, root, "foo/sibling.txt", "alpha sibling\n")
+	writeFile(t, root, "outside.txt", "alpha outside\n")
+	commitSearchRepo(t, root)
+
+	embedder := &countingEmbedder{}
+	opts := Options{
+		Root:                filepath.Join(root, "foo"),
+		MinRelatedness:      0.70,
+		Limit:               10,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}
+	base, err := Run(t.Context(), embedder, opts, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := loadManifest(base.Diagnostics.IndexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Root != root {
+		t.Fatalf("index root = %q, want repository root %q", manifest.Root, root)
+	}
+	if got := base.Retrieval.Filters.Scope; !slices.Equal(got, []string{"foo"}) {
+		t.Fatalf("base scope = %#v, want repository-relative foo", got)
+	}
+	if got := resultRanges(base.Results); !slices.Equal(got, []string{"foo/bar/keep.txt:1-1", "foo/sibling.txt:1-1"}) {
+		t.Fatalf("base results = %#v", got)
+	}
+	indexedCalls := embedder.callCount()
+
+	opts.Root = filepath.Join(root, "foo", "bar")
+	nested, err := Run(t.Context(), embedder, opts, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nested.Diagnostics.IndexDir != base.Diagnostics.IndexDir {
+		t.Fatalf("nested index dir = %q, want root index %q", nested.Diagnostics.IndexDir, base.Diagnostics.IndexDir)
+	}
+	if got := nested.Retrieval.Filters.Scope; !slices.Equal(got, []string{"foo/bar"}) {
+		t.Fatalf("nested scope = %#v, want repository-relative foo/bar", got)
+	}
+	if got := resultRanges(nested.Results); !slices.Equal(got, []string{"foo/bar/keep.txt:1-1"}) {
+		t.Fatalf("nested results = %#v", got)
+	}
+	if embedder.callCount() != indexedCalls {
+		t.Fatalf("nested search embedded again: calls = %d, want cached %d", embedder.callCount(), indexedCalls)
+	}
+}
+
 func TestFilesystemSearchScopeIncludesHiddenDir(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, ".foo/keep.txt", "alpha\n")

@@ -90,7 +90,7 @@ entirely and format a deterministic local message.
 not run the Responses API or create message-generation sessions.
 
 ```sh
-# Search current filesystem files
+# Search current filesystem files; Git repositories share a root index
 git-agent search "where is release note evidence prepared"
 
 # Compact output for humans
@@ -142,7 +142,7 @@ Useful flags:
 
 | Flag | Purpose |
 | --- | --- |
-| `--scope <paths>` | Limit search or indexing to comma-separated root-relative paths |
+| `--scope <paths>` | Limit search or indexing; local paths are current-directory-relative, remote paths are repository-relative |
 | `--rev <rev>` | Search a committed Git tree |
 | `--remote <url>` | Search a cached remote Git repository URL |
 | `--code` | Include source-code files only |

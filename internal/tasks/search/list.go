@@ -186,8 +186,15 @@ func ListIndexFiles(ctx context.Context, opts ListFilesOptions) (IndexFiles, err
 	if err != nil {
 		return IndexFiles{}, err
 	}
+	root := opts.Root
+	if strings.TrimSpace(opts.Remote) == "" {
+		root, scope, err = localSearchRootAndScope(root, scope)
+		if err != nil {
+			return IndexFiles{}, err
+		}
+	}
 	filters := Filters{Scope: scope}
-	selection, err := resolveIndexSelection(ctx, opts.Root, opts.Remote, opts.Rev, filters, false, false)
+	selection, err := resolveIndexSelection(ctx, root, opts.Remote, opts.Rev, filters, false, false)
 	if err != nil {
 		return IndexFiles{}, err
 	}
@@ -206,6 +213,32 @@ func ListIndexFiles(ctx context.Context, opts ListFilesOptions) (IndexFiles, err
 		entries.paths = slices.DeleteFunc(entries.paths, isTestPath)
 	}
 	return IndexFiles{Index: info, Files: entries.paths}, nil
+}
+
+func localSearchRootAndScope(rootOpt string, scope []string) (string, []string, error) {
+	root, err := filepath.Abs(cmp.Or(rootOpt, "."))
+	if err != nil {
+		return "", nil, err
+	}
+	repo, err := gitctx.Open(root)
+	if err != nil {
+		return root, scope, nil
+	}
+	rel, err := filepath.Rel(repo.RootPath, root)
+	if err != nil {
+		return "", nil, err
+	}
+	if rel == "." {
+		return repo.RootPath, scope, nil
+	}
+	rel = filepath.ToSlash(rel)
+	if len(scope) == 0 {
+		return repo.RootPath, []string{rel}, nil
+	}
+	for i := range scope {
+		scope[i] = filepath.ToSlash(filepath.Join(rel, scope[i]))
+	}
+	return repo.RootPath, scope, nil
 }
 
 func loadSelectedIndexFiles(ctx context.Context, selection indexSelection) (IndexInfo, indexEntries, error) {

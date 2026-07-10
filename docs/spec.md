@@ -141,10 +141,13 @@ write a JSON trace session.
 
 Run local embedding-backed context search and print machine-readable JSON by
 default.
-Filesystem mode is the default: it searches current files under the current
-working directory exactly as they exist on disk and does not require a Git
-repository. Staged, unstaged, and untracked files are included when physically
-under the search root unless skipped by dot-path rules, built-in low-signal
+Filesystem mode is the default. Inside a Git repository, it indexes from the
+repository root, shares that index across working directories, and limits
+results to the current working directory and any narrower `--scope`. Outside a
+Git repository, it searches current files under the current working directory.
+Files are read exactly as they exist on disk; Git is not otherwise required.
+Staged, unstaged, and untracked files are included when physically under the
+search root unless skipped by dot-path rules, built-in low-signal
 ignore patterns, `.gitignore`, `.gitagentignore`, non-text MIME type, or binary,
 oversized-file, and symlink safety checks. Built-in search ignores exclude paths
 matching `*.lock`, `*.lockfile`, `bun.lock`, `bun.lockb`,
@@ -157,14 +160,16 @@ matching `*.lock`, `*.lockfile`, `bun.lock`, `bun.lockb`,
 `yarn.lock`, `*.bazel`, `*.sha256`, `LICENSE`, `COPYING`, or `NOTICE`.
 `.gitagentignore` uses the same pattern syntax and per-directory base behavior
 as `.gitignore`, but only affects `git-agent search` discovery.
-`--scope` accepts comma-separated root-relative file or directory paths and
-limits filesystem or revision discovery to those paths. Ignore files are still
-resolved from the search root or committed tree, so root `.gitagentignore`
+`--scope` accepts comma-separated file or directory paths relative to the
+current working directory and limits filesystem or revision discovery to those
+paths. Inside a Git repository, scopes are converted to repository-relative
+paths before discovery. Ignore files are still resolved from the search root or
+committed tree, so root `.gitagentignore`
 patterns apply normally to scoped paths such as `--scope foo/`. Visible scopes
 share the same physical cache as unscoped search for the same source. Scopes
 that include paths normally skipped by default discovery, such as dot/hidden
 paths, use a separate `scope-*` cache because they opt into a different physical
-candidate universe.
+candidate universe. Remote scopes are relative to the remote repository root.
 
 Go files with a pre-package heading comment containing `DO NOT EDIT` are indexed
 as path-only chunks. Search embeds the filename/language metadata for those
@@ -372,8 +377,9 @@ helpers.
 #### `git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]`
 
 List unique file paths stored in one selected search index. Filesystem indexes
-use search-root-relative paths; revision and remote indexes use
-repository-relative paths.
+inside Git repositories and all revision and remote indexes use
+repository-relative paths. Non-Git filesystem indexes use search-root-relative
+paths.
 Index selection uses the same physical cache keying as search for filesystem or
 `--rev`/`--remote` sources. Visible `--scope` values use the shared source cache
 and filter listed output to the scoped paths. Scopes that include normally
@@ -427,7 +433,9 @@ Message-generation subcommands reserve this shared flag surface:
 
 `search` additionally supports:
 
-- `--scope <paths>`: comma-separated root-relative paths to search or index
+- `--scope <paths>`: comma-separated paths to search or index; local paths are
+  relative to the current directory, while remote paths are relative to the
+  remote repository root
 - `--limit <n>`: default `20`, valid `1..100`
 - `--format`: search accepts `json|brief` and defaults to `json`; `--ls`
   accepts `text|json` and defaults to `text`; `--ls-remotes` accepts

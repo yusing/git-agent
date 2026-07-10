@@ -373,8 +373,15 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	if err != nil {
 		return fail(err)
 	}
+	rootOpt := opts.Root
+	if strings.TrimSpace(opts.Remote) == "" {
+		rootOpt, scope, err = localSearchRootAndScope(rootOpt, scope)
+		if err != nil {
+			return fail(err)
+		}
+	}
 	filters := Filters{Code: opts.CodeOnly, NoTests: opts.NoTests, Scope: scope}
-	selection, err := resolveIndexSelection(ctx, opts.Root, opts.Remote, opts.Rev, filters, opts.Reindex, true)
+	selection, err := resolveIndexSelection(ctx, rootOpt, opts.Remote, opts.Rev, filters, opts.Reindex, true)
 	if err != nil {
 		return fail(err)
 	}
