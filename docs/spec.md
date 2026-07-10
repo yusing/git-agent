@@ -1136,6 +1136,9 @@ unknown locators, absolute paths, traversal, symlink escapes, non-`references/`
 resource paths, and binary content, and applies the standard byte/line caps. It
 cannot execute skill scripts or expose arbitrary host files.
 
+When no valid skills are discovered, `skills_read` is not registered and no
+provider tool definition or locator enum is constructed.
+
 ### Commit message tools
 
 Commit message tools:

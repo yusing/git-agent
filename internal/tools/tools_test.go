@@ -243,6 +243,39 @@ func TestSkillsReadToolReadsDiscoveredSkillFiles(t *testing.T) {
 	}
 }
 
+func TestSkillsReadToolIsNotRegisteredWithoutDiscoveredSkills(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	repo, err := gitctx.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := skillctx.Discover(skillctx.Options{
+		RepoRoot:  dir,
+		WorkDir:   dir,
+		Home:      "",
+		CodexHome: "",
+		AdminRoot: "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.Len() != 0 {
+		t.Fatalf("skills = %d, want 0", store.Len())
+	}
+
+	defs := NewRegistryWithSkills(repo, store).Definitions(SkillToolNames())
+	encoded, err := json.Marshal(defs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != "[]" {
+		t.Fatalf("serialized empty skill definitions = %s, want []", encoded)
+	}
+}
+
 func TestSkillsReadToolRejectsUnknownAndEscapingPaths(t *testing.T) {
 	t.Parallel()
 

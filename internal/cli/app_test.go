@@ -1865,6 +1865,7 @@ func TestPRMessageUsesPreparedOriginHeadContextAndPrintsArtifact(t *testing.T) {
 
 func TestPRMessageRejectsToolCallWhenNoSkillsExist(t *testing.T) {
 	repoDir := initRepo(t)
+	t.Setenv("CODEX_HOME", "")
 	runGit(t, repoDir, "commit", "-m", "base")
 	runGit(t, repoDir, "update-ref", "refs/remotes/origin/HEAD", gitHead(t, repoDir))
 	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("branch\n"), 0o644); err != nil {
@@ -1874,7 +1875,13 @@ func TestPRMessageRejectsToolCallWhenNoSkillsExist(t *testing.T) {
 	runGit(t, repoDir, "commit", "-m", "feat: branch change")
 	t.Chdir(repoDir)
 
+	var request []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		request, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintf(w, "data: %s\n\n", streamCompletedEvent(responseWithToolCalls("resp_1", toolCallSpec{
 			ID:        "fc_1",
@@ -1894,6 +1901,18 @@ func TestPRMessageRejectsToolCallWhenNoSkillsExist(t *testing.T) {
 	err := app.Run(t.Context(), []string{"pr-message"})
 	if err == nil || !strings.Contains(err.Error(), "provider requested tools but no registry is configured") {
 		t.Fatalf("expected no-registry tool call error, got %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(request, &payload); err != nil {
+		t.Fatal(err)
+	}
+	providerTools, ok := payload["tools"]
+	if !ok {
+		return
+	}
+	toolList, ok := providerTools.([]any)
+	if !ok || len(toolList) != 0 {
+		t.Fatalf("empty skill discovery sent provider tool definitions: %s", request)
 	}
 }
 

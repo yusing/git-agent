@@ -77,10 +77,11 @@ func NewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Store) *R
 	} {
 		registry.tools[tool.Definition().Name] = tool
 	}
-	if skillStore.Len() > 0 {
-		tool := skillsReadTool{store: skillStore}
-		registry.tools[tool.Definition().Name] = tool
+	if skillStore.Len() == 0 {
+		return registry
 	}
+	tool := skillsReadTool{store: skillStore}
+	registry.tools[tool.Definition().Name] = tool
 	return registry
 }
 
