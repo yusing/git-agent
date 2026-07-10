@@ -127,6 +127,12 @@ Search reads `OPENAI_EMBEDDING_API_KEY` first, then falls back to
 `OPENAI_EMBEDDING_DIMENSIONS` to isolate search embedding config from normal
 message-generation config.
 
+Normal indexing reuses exact matching chunk embeddings from compatible indexes
+for the same project or cached remote. This includes filesystem-to-revision and
+revision-to-revision reuse, so searching a nearby commit usually embeds only its
+changed chunks. `--reindex` skips this cross-index reuse and forces the selected
+source to rebuild.
+
 Useful flags:
 
 <!-- markdownlint-disable MD013 -->

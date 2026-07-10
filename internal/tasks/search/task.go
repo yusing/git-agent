@@ -262,33 +262,35 @@ type manifest struct {
 }
 
 type vectorRecord struct {
-	ChunkID        string    `json:"chunk_id"`
-	Path           string    `json:"path"`
-	Source         string    `json:"source"`
-	Blob           string    `json:"blob,omitempty"`
-	StartLine      int       `json:"start_line"`
-	EndLine        int       `json:"end_line"`
-	ContentHash    string    `json:"content_hash"`
-	EmbeddingModel string    `json:"embedding_model"`
-	Dimensions     int       `json:"dimensions"`
-	Size           int64     `json:"size,omitempty"`
-	MTimeUnixNano  int64     `json:"mtime_unix_nano,omitempty"`
-	Vector         []float64 `json:"vector"`
+	ChunkID            string    `json:"chunk_id"`
+	Path               string    `json:"path"`
+	Source             string    `json:"source"`
+	Blob               string    `json:"blob,omitempty"`
+	StartLine          int       `json:"start_line"`
+	EndLine            int       `json:"end_line"`
+	ContentHash        string    `json:"content_hash"`
+	EmbeddingInputHash string    `json:"embedding_input_hash,omitempty"`
+	EmbeddingModel     string    `json:"embedding_model"`
+	Dimensions         int       `json:"dimensions"`
+	Size               int64     `json:"size,omitempty"`
+	MTimeUnixNano      int64     `json:"mtime_unix_nano,omitempty"`
+	Vector             []float64 `json:"vector"`
 }
 
 type vectorIndexRecord struct {
-	ChunkID        string `json:"chunk_id"`
-	Path           string `json:"path"`
-	Source         string `json:"source"`
-	Blob           string `json:"blob,omitempty"`
-	StartLine      int    `json:"start_line"`
-	EndLine        int    `json:"end_line"`
-	ContentHash    string `json:"content_hash"`
-	EmbeddingModel string `json:"embedding_model"`
-	Dimensions     int    `json:"dimensions"`
-	Size           int64  `json:"size,omitempty"`
-	MTimeUnixNano  int64  `json:"mtime_unix_nano,omitempty"`
-	Offset         int64  `json:"offset"`
+	ChunkID            string `json:"chunk_id"`
+	Path               string `json:"path"`
+	Source             string `json:"source"`
+	Blob               string `json:"blob,omitempty"`
+	StartLine          int    `json:"start_line"`
+	EndLine            int    `json:"end_line"`
+	ContentHash        string `json:"content_hash"`
+	EmbeddingInputHash string `json:"embedding_input_hash,omitempty"`
+	EmbeddingModel     string `json:"embedding_model"`
+	Dimensions         int    `json:"dimensions"`
+	Size               int64  `json:"size,omitempty"`
+	MTimeUnixNano      int64  `json:"mtime_unix_nano,omitempty"`
+	Offset             int64  `json:"offset"`
 }
 
 type historyEntry struct {
@@ -423,12 +425,34 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	defer func() {
 		_ = unlockIndex()
 	}()
+	oldVectors, _ := loadVectors(indexDir)
+	var seedVectors []vectorRecord
+	if !opts.Reindex {
+		missingKeys := missingVectorKeys(chunks, oldVectors, opts)
+		if len(missingKeys) > 0 {
+			if err := unlockIndex(); err != nil {
+				return fail(err)
+			}
+			seedVectors, err = loadBestReuseCandidate(ctx, selection.metadataDir, indexDir, missingKeys, opts)
+			if err != nil {
+				return fail(err)
+			}
+			indexLock, err = lockIndex(ctx, indexDir)
+			if err != nil {
+				return fail(err)
+			}
+			indexLocked = true
+			oldVectors, _ = loadVectors(indexDir)
+		}
+	}
 	reuseOpts := opts
 	if opts.Reindex && indexBuiltSince(indexDir, started) {
 		reuseOpts.Reindex = false
 	}
-	oldVectors, _ := loadVectors(indexDir)
-	vectors, records, reused := reuseVectors(chunks, oldVectors, reuseOpts)
+	reusePool := make([]vectorRecord, 0, len(seedVectors)+len(oldVectors))
+	reusePool = append(reusePool, seedVectors...)
+	reusePool = append(reusePool, oldVectors...)
+	vectors, records, reused := reuseVectors(chunks, reusePool, reuseOpts)
 	diag.ReusedChunks = reused
 	mark("cache")
 
@@ -535,20 +559,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 			for i, chunk := range missing[start:end] {
 				vector := response.Vectors[i]
 				vectors[chunk.ID] = vector
-				records = append(records, vectorRecord{
-					ChunkID:        chunk.ID,
-					Path:           chunk.Path,
-					Source:         chunk.Source,
-					Blob:           chunk.Blob,
-					StartLine:      chunk.StartLine,
-					EndLine:        chunk.EndLine,
-					ContentHash:    chunk.ContentHash,
-					EmbeddingModel: opts.EmbeddingModel,
-					Dimensions:     len(vector),
-					Size:           chunk.Size,
-					MTimeUnixNano:  chunk.MTimeUnixNano,
-					Vector:         vector,
-				})
+				records = append(records, vectorRecordForChunk(chunk, vector, opts))
 				diag.EmbeddedDone++
 			}
 			elapsedRaw := time.Since(embedStarted)
@@ -1219,18 +1230,19 @@ func loadBinaryVectors(dir string) ([]vectorRecord, error) {
 			vector[dim] = float64(math.Float32frombits(bits))
 		}
 		records[i] = vectorRecord{
-			ChunkID:        entry.ChunkID,
-			Path:           entry.Path,
-			Source:         entry.Source,
-			Blob:           entry.Blob,
-			StartLine:      entry.StartLine,
-			EndLine:        entry.EndLine,
-			ContentHash:    entry.ContentHash,
-			EmbeddingModel: entry.EmbeddingModel,
-			Dimensions:     entry.Dimensions,
-			Size:           entry.Size,
-			MTimeUnixNano:  entry.MTimeUnixNano,
-			Vector:         vector,
+			ChunkID:            entry.ChunkID,
+			Path:               entry.Path,
+			Source:             entry.Source,
+			Blob:               entry.Blob,
+			StartLine:          entry.StartLine,
+			EndLine:            entry.EndLine,
+			ContentHash:        entry.ContentHash,
+			EmbeddingInputHash: entry.EmbeddingInputHash,
+			EmbeddingModel:     entry.EmbeddingModel,
+			Dimensions:         entry.Dimensions,
+			Size:               entry.Size,
+			MTimeUnixNano:      entry.MTimeUnixNano,
+			Vector:             vector,
 		}
 	}
 	return records, nil
@@ -1248,6 +1260,132 @@ func loadLegacyVectors(dir string) ([]vectorRecord, error) {
 	return records, nil
 }
 
+type reuseCandidate struct {
+	dir       string
+	matches   int
+	createdAt time.Time
+}
+
+func missingVectorKeys(chunks []Chunk, records []vectorRecord, opts Options) map[string]int {
+	available := make(map[string]bool, len(records))
+	for _, record := range records {
+		if reusableVectorRecord(record, opts) {
+			available[record.EmbeddingInputHash] = true
+		}
+	}
+	missing := map[string]int{}
+	for _, chunk := range chunks {
+		key := embeddingInputHash(chunk.EmbeddingText, opts.EmbeddingMaxInput)
+		if !available[key] {
+			missing[key]++
+		}
+	}
+	return missing
+}
+
+func loadBestReuseCandidate(ctx context.Context, metadataDir, targetDir string, targetKeys map[string]int, opts Options) ([]vectorRecord, error) {
+	if opts.Reindex || len(targetKeys) == 0 {
+		return nil, nil
+	}
+	searchRoot := filepath.Join(metadataDir, "search")
+
+	var candidates []reuseCandidate
+	err := filepath.WalkDir(searchRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if path == searchRoot {
+				return walkErr
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			if entry.Name() == "query-locks" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if entry.Name() != "manifest.json" {
+			return nil
+		}
+		dir := filepath.Dir(path)
+		if dir == targetDir {
+			return nil
+		}
+		var candidate reuseCandidate
+		candidate.dir = dir
+		candidateErr := withIndexLock(ctx, dir, func() error {
+			found, err := loadManifest(dir)
+			if err != nil {
+				return err
+			}
+			if found.EmbeddingModel != opts.EmbeddingModel || found.Dimensions != opts.EmbeddingDimensions {
+				return nil
+			}
+			records, err := loadVectorIndexRecords(dir)
+			if err != nil {
+				return err
+			}
+			matched := map[string]bool{}
+			for _, record := range records {
+				if !reusableVectorIndexRecord(record, opts) {
+					continue
+				}
+				key := record.EmbeddingInputHash
+				if targetKeys[key] > 0 {
+					matched[key] = true
+				}
+			}
+			for key := range matched {
+				candidate.matches += targetKeys[key]
+			}
+			candidate.createdAt = found.CreatedAt
+			return nil
+		})
+		if candidateErr != nil {
+			if errors.Is(candidateErr, context.Canceled) || errors.Is(candidateErr, context.DeadlineExceeded) {
+				return candidateErr
+			}
+			return nil
+		}
+		if candidate.matches > 0 {
+			candidates = append(candidates, candidate)
+		}
+		return nil
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(candidates, func(a, b reuseCandidate) int {
+		if diff := cmp.Compare(b.matches, a.matches); diff != 0 {
+			return diff
+		}
+		return b.createdAt.Compare(a.createdAt)
+	})
+	for _, candidate := range candidates {
+		var records []vectorRecord
+		if err := withIndexLock(ctx, candidate.dir, func() error {
+			var err error
+			records, err = loadVectors(candidate.dir)
+			return err
+		}); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, err
+			}
+			continue
+		}
+		if opts.DebugLog != nil {
+			opts.DebugLog("search_cache_seed",
+				slog.String("index_dir", candidate.dir),
+				slog.Int("matching_chunks", candidate.matches),
+			)
+		}
+		return records, nil
+	}
+	return nil, nil
+}
+
 func reuseVectors(chunks []Chunk, old []vectorRecord, opts Options) (map[string][]float64, []vectorRecord, int) {
 	vectors := map[string][]float64{}
 	if opts.Reindex {
@@ -1258,25 +1396,34 @@ func reuseVectors(chunks []Chunk, old []vectorRecord, opts Options) (map[string]
 		if !reusableVectorRecord(record, opts) {
 			continue
 		}
-		byKey[recordVectorKey(record)] = record
+		byKey[record.EmbeddingInputHash] = record
 	}
 	var records []vectorRecord
 	for _, chunk := range chunks {
-		record, ok := byKey[chunkVectorKey(chunk, opts.EmbeddingModel, opts.EmbeddingDimensions)]
+		record, ok := byKey[embeddingInputHash(chunk.EmbeddingText, opts.EmbeddingMaxInput)]
 		if !ok {
 			continue
 		}
-		record.ChunkID = chunk.ID
 		vectors[chunk.ID] = record.Vector
-		records = append(records, record)
+		records = append(records, vectorRecordForChunk(chunk, record.Vector, opts))
 	}
 	return vectors, records, len(records)
 }
 
 func reusableVectorRecord(record vectorRecord, opts Options) bool {
+	return record.EmbeddingInputHash != "" && preservableVectorRecord(record, opts)
+}
+
+func preservableVectorRecord(record vectorRecord, opts Options) bool {
 	return record.EmbeddingModel == opts.EmbeddingModel &&
 		record.Dimensions == opts.EmbeddingDimensions &&
 		len(record.Vector) == record.Dimensions
+}
+
+func reusableVectorIndexRecord(record vectorIndexRecord, opts Options) bool {
+	return record.EmbeddingInputHash != "" &&
+		record.EmbeddingModel == opts.EmbeddingModel &&
+		record.Dimensions == opts.EmbeddingDimensions
 }
 
 func preserveSharedFilteredRecords(records, old []vectorRecord, files []fileContent, opts Options) []vectorRecord {
@@ -1285,12 +1432,20 @@ func preserveSharedFilteredRecords(records, old []vectorRecord, files []fileCont
 	}
 	existing := make(map[string]bool, len(records))
 	addRecordVectorKeys(existing, records)
+	existingLocations := make(map[string]bool, len(records))
+	for _, record := range records {
+		existingLocations[cacheRecordLocationKey(record)] = true
+	}
 	var current map[string]bool
 	for _, record := range old {
-		if !reusableVectorRecord(record, opts) {
+		if !preservableVectorRecord(record, opts) {
 			continue
 		}
-		key := recordVectorKey(record)
+		location := cacheRecordLocationKey(record)
+		if existingLocations[location] {
+			continue
+		}
+		key := cacheRecordKey(record)
 		if current == nil {
 			current = currentVectorKeys(files, opts)
 		}
@@ -1301,6 +1456,7 @@ func preserveSharedFilteredRecords(records, old []vectorRecord, files []fileCont
 			continue
 		}
 		existing[key] = true
+		existingLocations[location] = true
 		records = append(records, record)
 	}
 	return records
@@ -1308,13 +1464,13 @@ func preserveSharedFilteredRecords(records, old []vectorRecord, files []fileCont
 
 func scopedRecordsChanged(records, old []vectorRecord, scope []string, opts Options) bool {
 	oldScoped := 0
-	current := recordVectorKeySet(records)
+	current := cacheRecordKeySet(records)
 	for _, record := range old {
-		if !pathInScope(record.Path, scope) || !reusableVectorRecord(record, opts) {
+		if !pathInScope(record.Path, scope) || !preservableVectorRecord(record, opts) {
 			continue
 		}
 		oldScoped++
-		if !current[recordVectorKey(record)] {
+		if !current[cacheRecordKey(record)] {
 			return true
 		}
 	}
@@ -1325,7 +1481,8 @@ func currentVectorKeys(files []fileContent, opts Options) map[string]bool {
 	keys := map[string]bool{}
 	for _, file := range files {
 		for _, chunk := range chunksForFile(file) {
-			keys[chunkVectorKey(chunk, opts.EmbeddingModel, opts.EmbeddingDimensions)] = true
+			keys[chunkCacheRecordKey(chunk, opts)] = true
+			keys[legacyChunkCacheRecordKey(chunk, opts)] = true
 		}
 	}
 	return keys
@@ -1338,10 +1495,10 @@ func preserveOutOfScopeRevisionRecords(records, old []vectorRecord, scope []stri
 	existing := make(map[string]bool, len(records))
 	addRecordVectorKeys(existing, records)
 	for _, record := range old {
-		if pathInScope(record.Path, scope) || !reusableVectorRecord(record, opts) {
+		if pathInScope(record.Path, scope) || !preservableVectorRecord(record, opts) {
 			continue
 		}
-		key := recordVectorKey(record)
+		key := cacheRecordKey(record)
 		if existing[key] {
 			continue
 		}
@@ -1360,7 +1517,7 @@ func preserveOutOfScopeFilesystemRecords(records, old []vectorRecord, root strin
 	candidates := make([]vectorRecord, 0, len(old))
 	var paths []string
 	for _, record := range old {
-		if pathInScope(record.Path, scope) || !reusableVectorRecord(record, opts) {
+		if pathInScope(record.Path, scope) || !preservableVectorRecord(record, opts) {
 			continue
 		}
 		candidates = append(candidates, record)
@@ -1369,7 +1526,7 @@ func preserveOutOfScopeFilesystemRecords(records, old []vectorRecord, root strin
 	ignoreMatcher := filesystemIgnoreMatcherForPaths(root, paths)
 	currentKeysByPath := map[string]map[string]bool{}
 	for _, record := range candidates {
-		key := recordVectorKey(record)
+		key := cacheRecordKey(record)
 		currentKeys, ok := currentKeysByPath[record.Path]
 		if !ok {
 			currentKeys = currentFilesystemVectorKeys(root, ignoreMatcher, record, opts)
@@ -1387,7 +1544,7 @@ func preserveOutOfScopeFilesystemRecords(records, old []vectorRecord, root strin
 	return records
 }
 
-func recordVectorKeySet(records []vectorRecord) map[string]bool {
+func cacheRecordKeySet(records []vectorRecord) map[string]bool {
 	keys := make(map[string]bool, len(records))
 	addRecordVectorKeys(keys, records)
 	return keys
@@ -1395,7 +1552,7 @@ func recordVectorKeySet(records []vectorRecord) map[string]bool {
 
 func addRecordVectorKeys(keys map[string]bool, records []vectorRecord) {
 	for _, record := range records {
-		keys[recordVectorKey(record)] = true
+		keys[cacheRecordKey(record)] = true
 	}
 }
 
@@ -1632,18 +1789,19 @@ func writeBinaryVectors(dir string, records []vectorRecord) error {
 			return fmt.Errorf("vector record %s dimensions mismatch", record.ChunkID)
 		}
 		index[i] = vectorIndexRecord{
-			ChunkID:        record.ChunkID,
-			Path:           record.Path,
-			Source:         record.Source,
-			Blob:           record.Blob,
-			StartLine:      record.StartLine,
-			EndLine:        record.EndLine,
-			ContentHash:    record.ContentHash,
-			EmbeddingModel: record.EmbeddingModel,
-			Dimensions:     record.Dimensions,
-			Size:           record.Size,
-			MTimeUnixNano:  record.MTimeUnixNano,
-			Offset:         offset,
+			ChunkID:            record.ChunkID,
+			Path:               record.Path,
+			Source:             record.Source,
+			Blob:               record.Blob,
+			StartLine:          record.StartLine,
+			EndLine:            record.EndLine,
+			ContentHash:        record.ContentHash,
+			EmbeddingInputHash: record.EmbeddingInputHash,
+			EmbeddingModel:     record.EmbeddingModel,
+			Dimensions:         record.Dimensions,
+			Size:               record.Size,
+			MTimeUnixNano:      record.MTimeUnixNano,
+			Offset:             offset,
 		}
 		var buf [4]byte
 		for _, value := range record.Vector {
@@ -2392,8 +2550,39 @@ func isClassStyleTestName(name, stem string) bool {
 	return unicode.IsUpper(next) || unicode.IsDigit(next)
 }
 
-func chunkVectorKey(chunk Chunk, model string, dimensions int) string {
-	return fmt.Sprintf("%s:%s:%s:%d:%d:%d:%d:%s:%s:%d",
+func vectorRecordForChunk(chunk Chunk, vector []float64, opts Options) vectorRecord {
+	return vectorRecord{
+		ChunkID:            chunk.ID,
+		Path:               chunk.Path,
+		Source:             chunk.Source,
+		Blob:               chunk.Blob,
+		StartLine:          chunk.StartLine,
+		EndLine:            chunk.EndLine,
+		ContentHash:        chunk.ContentHash,
+		EmbeddingInputHash: embeddingInputHash(chunk.EmbeddingText, opts.EmbeddingMaxInput),
+		EmbeddingModel:     opts.EmbeddingModel,
+		Dimensions:         len(vector),
+		Size:               chunk.Size,
+		MTimeUnixNano:      chunk.MTimeUnixNano,
+		Vector:             vector,
+	}
+}
+
+func embeddingInputHash(text string, maxChars int) string {
+	sum := sha256.Sum256([]byte(cappedEmbeddingInput(text, maxChars)))
+	return hex.EncodeToString(sum[:])
+}
+
+func chunkCacheRecordKey(chunk Chunk, opts Options) string {
+	return chunkCacheRecordKeyWithHash(chunk, opts, embeddingInputHash(chunk.EmbeddingText, opts.EmbeddingMaxInput))
+}
+
+func legacyChunkCacheRecordKey(chunk Chunk, opts Options) string {
+	return chunkCacheRecordKeyWithHash(chunk, opts, "")
+}
+
+func chunkCacheRecordKeyWithHash(chunk Chunk, opts Options, inputHash string) string {
+	return fmt.Sprintf("%s:%s:%s:%d:%d:%d:%d:%s:%s:%s:%d",
 		chunk.Source,
 		chunk.Path,
 		chunk.Blob,
@@ -2402,12 +2591,13 @@ func chunkVectorKey(chunk Chunk, model string, dimensions int) string {
 		chunk.Size,
 		chunk.MTimeUnixNano,
 		chunk.ContentHash,
-		model,
-		dimensions,
+		inputHash,
+		opts.EmbeddingModel,
+		opts.EmbeddingDimensions,
 	)
 }
 
-func recordVectorKey(record vectorRecord) string {
+func cacheRecordLocationKey(record vectorRecord) string {
 	return fmt.Sprintf("%s:%s:%s:%d:%d:%d:%d:%s:%s:%d",
 		record.Source,
 		record.Path,
@@ -2417,6 +2607,22 @@ func recordVectorKey(record vectorRecord) string {
 		record.Size,
 		record.MTimeUnixNano,
 		record.ContentHash,
+		record.EmbeddingModel,
+		record.Dimensions,
+	)
+}
+
+func cacheRecordKey(record vectorRecord) string {
+	return fmt.Sprintf("%s:%s:%s:%d:%d:%d:%d:%s:%s:%s:%d",
+		record.Source,
+		record.Path,
+		record.Blob,
+		record.StartLine,
+		record.EndLine,
+		record.Size,
+		record.MTimeUnixNano,
+		record.ContentHash,
+		record.EmbeddingInputHash,
 		record.EmbeddingModel,
 		record.Dimensions,
 	)

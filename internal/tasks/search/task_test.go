@@ -1023,6 +1023,20 @@ func clearHistoryFilters(t *testing.T, indexDir string) {
 	}
 }
 
+func clearEmbeddingInputHashes(t *testing.T, indexDir string) {
+	t.Helper()
+	index, err := loadVectorIndexRecords(indexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range index {
+		index[i].EmbeddingInputHash = ""
+	}
+	if err := writeJSON(filepath.Join(indexDir, "vectors.index.json"), index); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSearchFramesQueryForImplementationRetrieval(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "main.go", "package main\n\nfunc releaseNotes() {}\n")
@@ -1257,6 +1271,357 @@ func TestRevisionSearchNoTestsFiltersCommittedTestPaths(t *testing.T) {
 	want := []string{"main.go:1-1"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("result ranges = %#v, want %#v", got, want)
+	}
+}
+
+func TestRevisionSearchReusesFilesystemEmbeddings(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.txt", "alpha\n")
+	writeFile(t, root, "b.txt", "beta\n")
+	rev := commitSearchRepo(t, root)
+
+	embedder := &countingEmbedder{}
+	opts := Options{
+		Root:                root,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+	}
+	filesystem, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filesystem.Diagnostics.EmbeddedChunks != 2 {
+		t.Fatalf("filesystem diagnostics = %#v, want two embedded chunks", filesystem.Diagnostics)
+	}
+
+	opts.Rev = rev
+	revision, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revision.Diagnostics.IndexDir == filesystem.Diagnostics.IndexDir {
+		t.Fatalf("revision index dir = filesystem index dir %q", revision.Diagnostics.IndexDir)
+	}
+	if revision.Diagnostics.ReusedChunks != 2 || revision.Diagnostics.EmbeddedChunks != 0 {
+		t.Fatalf("revision diagnostics = %#v, want two reused chunks and no embeddings", revision.Diagnostics)
+	}
+	records, err := loadVectors(revision.Diagnostics.IndexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if record.Source != "revision" || record.Blob == "" {
+			t.Fatalf("reused record kept stale filesystem metadata: %#v", record)
+		}
+	}
+}
+
+func TestRevisionSearchReusesUnchangedChunksFromAnotherRevision(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.txt", "alpha\n")
+	writeFile(t, root, "b.txt", "beta\n")
+	firstRev := commitSearchRepo(t, root)
+
+	embedder := &countingEmbedder{}
+	opts := Options{
+		Root:                root,
+		Rev:                 firstRev,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+	}
+	first, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Diagnostics.EmbeddedChunks != 2 {
+		t.Fatalf("first diagnostics = %#v, want two embedded chunks", first.Diagnostics)
+	}
+
+	writeFile(t, root, "b.txt", "changed beta\n")
+	opts.Rev = commitSearchRepoChange(t, root, "change b")
+	second, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Diagnostics.ReusedChunks != 1 || second.Diagnostics.EmbeddedChunks != 1 {
+		t.Fatalf("second diagnostics = %#v, want one reused and one embedded chunk", second.Diagnostics)
+	}
+}
+
+func TestParallelRevisionSearchesReuseSharedFilesystemIndex(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.txt", "alpha\n")
+	writeFile(t, root, "b.txt", "beta\n")
+	firstRev := commitSearchRepo(t, root)
+
+	embedder := &countingEmbedder{}
+	base := Options{
+		Root:                root,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+	}
+	if _, err := Run(t.Context(), embedder, base, ""); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, root, "b.txt", "changed beta\n")
+	secondRev := commitSearchRepoChange(t, root, "change b")
+
+	type result struct {
+		out Output
+		err error
+	}
+	results := make(chan result, 2)
+	var group sync.WaitGroup
+	for _, rev := range []string{firstRev, secondRev} {
+		group.Go(func() {
+			opts := base
+			opts.Rev = rev
+			out, err := Run(t.Context(), embedder, opts, "")
+			results <- result{out: out, err: err}
+		})
+	}
+	group.Wait()
+	close(results)
+
+	for result := range results {
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		switch result.out.Source.ResolvedRev {
+		case firstRev:
+			if result.out.Diagnostics.ReusedChunks != 2 || result.out.Diagnostics.EmbeddedChunks != 0 {
+				t.Fatalf("first revision diagnostics = %#v", result.out.Diagnostics)
+			}
+		case secondRev:
+			if result.out.Diagnostics.ReusedChunks != 1 || result.out.Diagnostics.EmbeddedChunks != 1 {
+				t.Fatalf("second revision diagnostics = %#v", result.out.Diagnostics)
+			}
+		default:
+			t.Fatalf("unexpected revision %q", result.out.Source.ResolvedRev)
+		}
+	}
+}
+
+func TestSearchDoesNotReuseChunkEmbeddingAfterInputCapChanges(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.txt", "alpha beta gamma delta epsilon\n")
+
+	embedder := &countingEmbedder{}
+	opts := Options{
+		Root:                root,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingMaxInput:   200,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+	}
+	if _, err := Run(t.Context(), embedder, opts, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	opts.EmbeddingMaxInput = 16
+	second, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Diagnostics.ReusedChunks != 0 || second.Diagnostics.EmbeddedChunks != 1 {
+		t.Fatalf("second diagnostics = %#v, want changed capped input re-embedded", second.Diagnostics)
+	}
+}
+
+func TestReuseVectorsKeepsDistinctTargetChunkMetadata(t *testing.T) {
+	opts := Options{
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+	}
+	first := Chunk{
+		ID:            "c000001",
+		Path:          "repeat.txt",
+		Source:        "revision",
+		Blob:          "first-blob",
+		StartLine:     1,
+		EndLine:       1,
+		ContentHash:   "same-content",
+		EmbeddingText: "path: repeat.txt\n\nrepeated text",
+	}
+	second := first
+	second.ID = "c000002"
+	second.Blob = "second-blob"
+	second.StartLine = 101
+	second.EndLine = 101
+	vector := []float64{1, 0, 0}
+
+	_, records, reused := reuseVectors(
+		[]Chunk{first, second},
+		[]vectorRecord{vectorRecordForChunk(first, vector, opts)},
+		opts,
+	)
+	if reused != 2 || len(records) != 2 {
+		t.Fatalf("reused = %d records = %d, want two", reused, len(records))
+	}
+	if records[0].StartLine != 1 || records[0].Blob != "first-blob" ||
+		records[1].StartLine != 101 || records[1].Blob != "second-blob" {
+		t.Fatalf("records kept stale metadata: %#v", records)
+	}
+	if cacheRecordKey(records[0]) == cacheRecordKey(records[1]) {
+		t.Fatalf("distinct target records share cache record key: %#v", records)
+	}
+}
+
+func TestSearchRebuildsLegacyVectorWithoutEmbeddingInputHash(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.txt", "alpha\n")
+
+	opts := Options{
+		Root:                root,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+	}
+	first, err := Run(t.Context(), fakeEmbedder{}, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearEmbeddingInputHashes(t, first.Diagnostics.IndexDir)
+
+	second, err := Run(t.Context(), fakeEmbedder{}, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Diagnostics.ReusedChunks != 0 || second.Diagnostics.EmbeddedChunks != 1 {
+		t.Fatalf("second diagnostics = %#v, want legacy vector rebuilt", second.Diagnostics)
+	}
+}
+
+func TestFilteredSearchPreservesLegacySharedRecords(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		files         map[string]string
+		configure     func(*Options)
+		rebuiltPath   string
+		preservedPath string
+	}{
+		{
+			name: "code",
+			files: map[string]string{
+				"app.go":    "package app\n",
+				"README.md": "alpha docs\n",
+			},
+			configure:     func(opts *Options) { opts.CodeOnly = true },
+			rebuiltPath:   "app.go",
+			preservedPath: "README.md",
+		},
+		{
+			name: "scope",
+			files: map[string]string{
+				"a.txt": "alpha\n",
+				"b.txt": "beta\n",
+			},
+			configure:     func(opts *Options) { opts.Scope = []string{"a.txt"} },
+			rebuiltPath:   "a.txt",
+			preservedPath: "b.txt",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			for path, content := range tt.files {
+				writeFile(t, root, path, content)
+			}
+			opts := Options{
+				Root:                root,
+				IndexOnly:           true,
+				MinRelatedness:      DefaultMinRelatedness,
+				Limit:               DefaultLimit,
+				EmbeddingModel:      "text-embedding-3-small",
+				EmbeddingDimensions: 3,
+			}
+			first, err := Run(t.Context(), fakeEmbedder{}, opts, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			clearEmbeddingInputHashes(t, first.Diagnostics.IndexDir)
+
+			tt.configure(&opts)
+			if _, err := Run(t.Context(), fakeEmbedder{}, opts, ""); err != nil {
+				t.Fatal(err)
+			}
+			records, err := loadVectors(first.Diagnostics.IndexDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(records) != 2 {
+				t.Fatalf("records = %#v, want rebuilt and preserved records", records)
+			}
+			for _, record := range records {
+				switch record.Path {
+				case tt.rebuiltPath:
+					if record.EmbeddingInputHash == "" {
+						t.Fatalf("rebuilt record has no input hash: %#v", record)
+					}
+				case tt.preservedPath:
+					if record.EmbeddingInputHash != "" {
+						t.Fatalf("legacy record unexpectedly rebuilt: %#v", record)
+					}
+				default:
+					t.Fatalf("unexpected record: %#v", record)
+				}
+			}
+		})
+	}
+}
+
+func TestMissingVectorKeysCountsDuplicateInputs(t *testing.T) {
+	opts := Options{EmbeddingModel: "text-embedding-3-small", EmbeddingDimensions: 3}
+	chunk := Chunk{EmbeddingText: "path: repeated.txt\n\nrepeated text"}
+	keys := missingVectorKeys([]Chunk{chunk, chunk, chunk}, nil, opts)
+	if len(keys) != 1 {
+		t.Fatalf("missing keys = %#v, want one unique input", keys)
+	}
+	for _, count := range keys {
+		if count != 3 {
+			t.Fatalf("missing input count = %d, want 3", count)
+		}
+	}
+}
+
+func TestRevisionReindexDoesNotReuseFilesystemEmbeddings(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.txt", "alpha\n")
+	rev := commitSearchRepo(t, root)
+
+	embedder := &countingEmbedder{}
+	opts := Options{
+		Root:                root,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+	}
+	if _, err := Run(t.Context(), embedder, opts, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	opts.Rev = rev
+	opts.Reindex = true
+	revision, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revision.Diagnostics.ReusedChunks != 0 || revision.Diagnostics.EmbeddedChunks != 1 {
+		t.Fatalf("revision diagnostics = %#v, want forced embedding rebuild", revision.Diagnostics)
 	}
 }
 

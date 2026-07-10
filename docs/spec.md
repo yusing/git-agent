@@ -237,6 +237,17 @@ are stored under that remote metadata root and are keyed by resolved commit SHA,
 so moving branches create new revision indexes while old commit indexes remain
 reusable.
 
+Normal indexing may seed a missing or changed physical index from another
+completed index under the same project or remote metadata root. Reuse crosses
+filesystem and revision indexes and crosses revision commit SHAs. A chunk vector
+is reusable only when its embedding model, dimensions, and exact final capped
+embedding input match. Reused vectors are written with the target chunk's source,
+blob, path, and line metadata. Search prefers the compatible index with the most
+matching chunk inputs and embeds every unmatched target chunk normally. Invalid,
+incomplete, or incompatible candidate indexes are ignored. `--reindex` does not
+seed from other physical indexes; the existing same-target parallel-writer reuse
+still applies. Query replay history remains scoped to its physical index.
+
 Chunk embedding text clamps each physical source line to `4000` characters
 before applying the per-input embedding character cap. This bounds minified or
 single-line generated files without changing file discovery, chunk ranges, or
