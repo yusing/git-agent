@@ -268,8 +268,16 @@ history entry.
 
 `--no-tests` filters common test files from search results and `--ls-files`
 output without changing the physical vector cache. It filters path segments named
-`test`, `tests`, `__tests__`, or `spec`, Go files ending in `_test.go`, and
-basenames matching `*.test.*`, `*.spec.*`, `test.*`, or `spec.*`.
+`test`, `tests`, `__tests__`, `spec`, `specs`, `__specs__`, `integration_test`,
+`integration_tests`, `integration-test`, or `integration-tests`. It also filters
+basenames whose extensionless name contains a `.`, `-`, or `_` delimited `test`,
+`tests`, `spec`, `specs`, `unittest`, or `unittests` segment. This includes common
+forms such as `test_*.py`, `*_test.rs`, `*_tests.rs`, `*_spec.rb`,
+`*.test.ts`, and `*-unittest.cc`. For common class-based source languages, it
+also recognizes names such as `TestWidget.java`, `WidgetTest.java`,
+`WidgetTests.cs`, and `WidgetTestCase.kt`. Similar non-test words such as
+`contest`, `latest`, and `testimonial` do not match. `testdata` remains available
+because fixtures can be useful implementation context.
 
 `--index` builds missing embeddings for the selected filesystem or revision
 source, including any `--scope` and `--code` candidate filters, writes the same

@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/bytedance/sonic"
 	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
@@ -2342,30 +2343,53 @@ func indexDir(base, mode, root, resolvedRev string, filters Filters) string {
 }
 
 func isTestPath(path string) bool {
-	parts := pathParts(strings.ToLower(path))
+	parts := pathParts(path)
 	if len(parts) == 0 {
 		return false
 	}
 	for _, part := range parts[:len(parts)-1] {
-		if isTestDirName(part) {
+		if isTestDirName(strings.ToLower(part)) {
 			return true
 		}
 	}
 	name := parts[len(parts)-1]
-	return strings.HasSuffix(name, "_test.go") ||
-		strings.Contains(name, ".test.") ||
-		strings.Contains(name, ".spec.") ||
-		strings.HasPrefix(name, "test.") ||
-		strings.HasPrefix(name, "spec.")
+	stem := strings.TrimSuffix(name, filepath.Ext(name))
+	for part := range strings.FieldsFuncSeq(strings.ToLower(stem), func(r rune) bool {
+		return r == '.' || r == '-' || r == '_'
+	}) {
+		switch part {
+		case "test", "tests", "spec", "specs", "unittest", "unittests":
+			return true
+		}
+	}
+	return isClassStyleTestName(name, stem)
 }
 
 func isTestDirName(name string) bool {
 	switch name {
-	case "test", "tests", "__tests__", "spec":
+	case "test", "tests", "__tests__", "spec", "specs", "__specs__",
+		"integration_test", "integration_tests", "integration-test", "integration-tests":
 		return true
 	default:
 		return false
 	}
+}
+
+func isClassStyleTestName(name, stem string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".cs", ".fs", ".fsx", ".groovy", ".java", ".kt", ".kts", ".m", ".mm", ".php", ".scala", ".swift", ".vb":
+	default:
+		return false
+	}
+	if strings.HasSuffix(stem, "Test") || strings.HasSuffix(stem, "Tests") ||
+		strings.HasSuffix(stem, "TestCase") {
+		return true
+	}
+	if !strings.HasPrefix(stem, "Test") {
+		return false
+	}
+	next, _ := utf8.DecodeRuneInString(stem[len("Test"):])
+	return unicode.IsUpper(next) || unicode.IsDigit(next)
 }
 
 func chunkVectorKey(chunk Chunk, model string, dimensions int) string {

@@ -1167,6 +1167,71 @@ func TestSearchNoTestsFiltersCommonTestPaths(t *testing.T) {
 	}
 }
 
+func TestIsTestPath(t *testing.T) {
+	tests := []string{
+		"widget_test.rs",
+		"widget_tests.rs",
+		"test_widget.py",
+		"widget_test.py",
+		"widget_spec.rb",
+		"widget-test.cpp",
+		"widget-unittest.cc",
+		"WidgetTest.java",
+		"WidgetTests.cs",
+		"WidgetTestCase.kt",
+		"TestWidget.java",
+		"integration_test/widget.dart",
+		"specs/widget.rb",
+	}
+	for _, path := range tests {
+		if !isTestPath(path) {
+			t.Errorf("isTestPath(%q) = false, want true", path)
+		}
+	}
+
+	nonTests := []string{
+		"contest.rs",
+		"latest.py",
+		"testimonial.ts",
+		"testament.java",
+		"testing/widget.go",
+		"testdata/sample.json",
+	}
+	for _, path := range nonTests {
+		if isTestPath(path) {
+			t.Errorf("isTestPath(%q) = true, want false", path)
+		}
+	}
+}
+
+func TestSearchNoTestsWithCodeAndScope(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "codex-rs/core/src/session/orchestrated.rs", "alpha\n")
+	writeFile(t, root, "codex-rs/core/src/tools/spec_plan_tests.rs", "alpha\n")
+	writeFile(t, root, "outside.rs", "alpha\n")
+
+	out, err := Run(t.Context(), fakeEmbedder{}, Options{
+		Root:                root,
+		MinRelatedness:      0.70,
+		Limit:               20,
+		CodeOnly:            true,
+		NoTests:             true,
+		Scope:               []string{"codex-rs/core/src"},
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+		APIKey:              "test-key",
+		BaseURL:             "http://example.test",
+	}, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resultRanges(out.Results)
+	want := []string{"codex-rs/core/src/session/orchestrated.rs:1-1"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("result ranges = %#v, want %#v", got, want)
+	}
+}
+
 func TestRevisionSearchNoTestsFiltersCommittedTestPaths(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "main.go", "alpha\n")
