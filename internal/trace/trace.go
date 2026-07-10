@@ -866,21 +866,96 @@ func (r *Recorder) applyRequestLocked(value map[string]any) error {
 }
 
 func (r *Recorder) appendRequestItemsLocked(input []any) error {
-	existing := r.snapshot.Items
-	if len(existing) > len(input) {
-		return fmt.Errorf("trace request input shrank from %d to %d items", len(existing), len(input))
+	type insertion struct {
+		at    int
+		items []map[string]any
 	}
-	for idx := range existing {
-		if !reflect.DeepEqual(stripItemIndex(existing[idx]), input[idx]) {
-			return fmt.Errorf("trace request input diverged at item %d: have=%s want=%s", idx, mustJSON(stripItemIndex(existing[idx])), mustJSON(input[idx]))
+
+	requestInputEnd := r.currentRequestInputEnd()
+	insertions := make([]insertion, 0, 1)
+	inputIdx := 0
+	for itemIdx, existing := range r.snapshot.Items {
+		have := stripItemIndex(existing)
+		if inputIdx < len(input) && reflect.DeepEqual(have, input[inputIdx]) {
+			inputIdx++
+			continue
 		}
+		if itemIdx < requestInputEnd || inputIdx >= len(input) {
+			return requestInputDivergenceError(inputIdx, have, input)
+		}
+
+		start := inputIdx
+		for inputIdx < len(input) && isReasoningItem(input[inputIdx]) {
+			inputIdx++
+		}
+		if start == inputIdx || inputIdx >= len(input) || !reflect.DeepEqual(have, input[inputIdx]) {
+			return requestInputDivergenceError(inputIdx, have, input)
+		}
+
+		items := make([]map[string]any, inputIdx-start)
+		for idx, value := range input[start:inputIdx] {
+			items[idx] = maps.Clone(value.(map[string]any))
+		}
+		insertions = append(insertions, insertion{at: itemIdx, items: items})
+		inputIdx++
 	}
-	for _, item := range input[len(existing):] {
+
+	offset := 0
+	for _, insertion := range insertions {
+		r.insertRequestItemsLocked(insertion.at+offset, insertion.items)
+		offset += len(insertion.items)
+	}
+	for _, item := range input[inputIdx:] {
 		if _, err := r.appendItemLocked(item); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (r *Recorder) currentRequestInputEnd() int {
+	current := r.currentStepPtr()
+	if current == nil || current.Request == nil {
+		return 0
+	}
+	return current.Request.InputEnd
+}
+
+func isReasoningItem(item any) bool {
+	mapped, ok := item.(map[string]any)
+	return ok && mapped["type"] == "reasoning"
+}
+
+func requestInputDivergenceError(idx int, have map[string]any, input []any) error {
+	if idx >= len(input) {
+		return fmt.Errorf("trace request input ended before item %d: have=%s", idx, mustJSON(have))
+	}
+	return fmt.Errorf("trace request input diverged at item %d: have=%s want=%s", idx, mustJSON(have), mustJSON(input[idx]))
+}
+
+func (r *Recorder) insertRequestItemsLocked(at int, items []map[string]any) {
+	r.snapshot.Items = slices.Insert(r.snapshot.Items, at, items...)
+	for idx := at; idx < len(r.snapshot.Items); idx++ {
+		r.snapshot.Items[idx]["idx"] = idx
+	}
+	for stepIdx := range r.snapshot.Steps {
+		step := &r.snapshot.Steps[stepIdx]
+		if step.Response != nil {
+			for idx, item := range step.Response.ToolCalls {
+				if item >= at {
+					step.Response.ToolCalls[idx] += len(items)
+				}
+			}
+		}
+		for idx := range step.Tools {
+			if step.Tools[idx].CallItem >= at {
+				step.Tools[idx].CallItem += len(items)
+			}
+			if step.Tools[idx].OutputItem >= at {
+				step.Tools[idx].OutputItem += len(items)
+			}
+		}
+	}
 }
 
 func (r *Recorder) applyResponseLocked(value map[string]any) {

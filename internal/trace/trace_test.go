@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -333,6 +334,126 @@ func TestRecorderWritesEventLogAndCompactSession(t *testing.T) {
 	}
 	if count != 5 {
 		t.Fatalf("event count = %d", count)
+	}
+}
+
+func newRecorderWithToolExchange(t *testing.T) (*Recorder, map[string]any, map[string]any, map[string]any) {
+	t.Helper()
+	recorder := newMemory("commit")
+	initial := map[string]any{"type": "message", "role": "user", "content": "hello"}
+	if err := recorder.Write("request", map[string]any{
+		"model": "test-model",
+		"input": []map[string]any{initial},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.Write("response", map[string]any{
+		"id":          "resp_1",
+		"finish_kind": "completed",
+		"tool_calls": []map[string]any{
+			{"id": "fc_1", "call_id": "call_1", "name": "read", "arguments": map[string]any{}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	call := map[string]any{
+		"type":      "function_call",
+		"id":        "fc_1",
+		"call_id":   "call_1",
+		"name":      "read",
+		"arguments": map[string]any{},
+	}
+	if err := recorder.Write("tool-call", call); err != nil {
+		t.Fatal(err)
+	}
+	output := map[string]any{
+		"type":    "function_call_output",
+		"call_id": "call_1",
+		"output":  map[string]any{"ok": true},
+	}
+	if err := recorder.Write("tool-output", map[string]any{
+		"call_id": "call_1",
+		"content": map[string]any{"ok": true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return recorder, initial, call, output
+}
+
+func TestRecorderMergesResponseItemsAddedBeforeToolCall(t *testing.T) {
+	t.Parallel()
+
+	recorder, initial, call, output := newRecorderWithToolExchange(t)
+	reasoning := map[string]any{"type": "reasoning"}
+	if err := recorder.Write("request", map[string]any{
+		"model": "test-model",
+		"input": []map[string]any{initial, reasoning, call, output},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(recorder.snapshot.Items) != 4 {
+		t.Fatalf("items = %#v", recorder.snapshot.Items)
+	}
+	for idx, wantType := range []string{"message", "reasoning", "function_call", "function_call_output"} {
+		if got := recorder.snapshot.Items[idx]["type"]; got != wantType {
+			t.Fatalf("items[%d].type = %#v, want %q", idx, got, wantType)
+		}
+	}
+	firstStep := recorder.snapshot.Steps[0]
+	if firstStep.Request.InputEnd != 1 {
+		t.Fatalf("first request input_end = %d, want 1", firstStep.Request.InputEnd)
+	}
+	if got := firstStep.Tools[0].CallItem; got != 2 {
+		t.Fatalf("call item = %d, want 2", got)
+	}
+	if got := firstStep.Tools[0].OutputItem; got != 3 {
+		t.Fatalf("output item = %d, want 3", got)
+	}
+	if got := firstStep.Response.ToolCalls[0]; got != 2 {
+		t.Fatalf("response tool call = %d, want 2", got)
+	}
+	if got := recorder.snapshot.Steps[1].Request.InputEnd; got != 4 {
+		t.Fatalf("second request input_end = %d, want 4", got)
+	}
+}
+
+func TestRecorderRejectsInvalidDeferredMergeWithoutMutation(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]func(initial, call, output map[string]any) []map[string]any{
+		"missing output": func(initial, call, _ map[string]any) []map[string]any {
+			return []map[string]any{initial, {"type": "reasoning"}, call}
+		},
+		"changed output": func(initial, call, output map[string]any) []map[string]any {
+			changed := maps.Clone(output)
+			changed["output"] = map[string]any{"ok": false}
+			return []map[string]any{initial, {"type": "reasoning"}, call, changed}
+		},
+	}
+	for name, requestInput := range tests {
+		t.Run(name, func(t *testing.T) {
+			recorder, initial, call, output := newRecorderWithToolExchange(t)
+			before, err := json.Marshal(recorder.snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			err = recorder.Write("request", map[string]any{
+				"model": "test-model",
+				"input": requestInput(initial, call, output),
+			})
+			if err == nil {
+				t.Fatal("request succeeded, want divergence error")
+			}
+			after, marshalErr := json.Marshal(recorder.snapshot)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatalf("snapshot mutated after rejected request:\nbefore: %s\nafter:  %s", before, after)
+			}
+		})
 	}
 }
 
