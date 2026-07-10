@@ -1319,6 +1319,317 @@ func TestRevisionSearchReusesFilesystemEmbeddings(t *testing.T) {
 	}
 }
 
+func TestFilesystemAndRevisionIndexesShareVectorPayload(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.txt", "alpha\n")
+	writeFile(t, root, "b.txt", "beta\n")
+	rev := commitSearchRepo(t, root)
+
+	opts := Options{
+		Root:                root,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+	}
+	filesystem, err := Run(t.Context(), fakeEmbedder{}, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts.Rev = rev
+	revision, err := Run(t.Context(), fakeEmbedder{}, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFileSize(t, sharedVectorPayloadPath(selection.metadataDir), 2*3*4)
+	assertFileSize(t, filepath.Join(filesystem.Diagnostics.IndexDir, "vectors.f32"), 0)
+	assertFileSize(t, filepath.Join(revision.Diagnostics.IndexDir, "vectors.f32"), 0)
+}
+
+func TestChangedRevisionAppendsOnlyNewSharedVectorPayload(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.txt", "alpha\n")
+	writeFile(t, root, "b.txt", "beta\n")
+	firstRev := commitSearchRepo(t, root)
+
+	opts := Options{
+		Root:                root,
+		Rev:                 firstRev,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+	}
+	if _, err := Run(t.Context(), fakeEmbedder{}, opts, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	writeFile(t, root, "b.txt", "changed beta\n")
+	opts.Rev = commitSearchRepoChange(t, root, "change b")
+	if _, err := Run(t.Context(), fakeEmbedder{}, opts, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFileSize(t, sharedVectorPayloadPath(selection.metadataDir), 3*3*4)
+}
+
+func TestLegacyLocalVectorIndexMigratesWithoutEmbedding(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.txt", "alpha\n")
+	embedder := &countingEmbedder{}
+	opts := Options{
+		Root:                root,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+	}
+	first, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := loadVectors(first.Diagnostics.IndexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(newVectorStore(selection.metadataDir).dir); err != nil {
+		t.Fatal(err)
+	}
+	writeLegacyBinaryVectors(t, first.Diagnostics.IndexDir, records)
+	found, err := loadManifest(first.Diagnostics.IndexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found.VectorStore = ""
+	found.Version = legacyIndexVersion
+	if err := writeJSON(filepath.Join(first.Diagnostics.IndexDir, "manifest.json"), found); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Diagnostics.EmbeddedChunks != 0 || embedder.callCount() != 1 {
+		t.Fatalf("second diagnostics = %#v calls = %d, want migration without embedding", second.Diagnostics, embedder.callCount())
+	}
+	if !indexUsesSharedVectors(second.Diagnostics.IndexDir) {
+		t.Fatal("migrated index does not use shared vectors")
+	}
+	assertFileSize(t, sharedVectorPayloadPath(selection.metadataDir), 3*4)
+	assertFileSize(t, filepath.Join(second.Diagnostics.IndexDir, "vectors.f32"), 0)
+}
+
+func TestLegacyVectorLoaderRejectsSharedReferences(t *testing.T) {
+	dir := t.TempDir()
+	index := []vectorIndexRecord{{
+		EmbeddingInputHash: "input-hash",
+		EmbeddingModel:     "text-embedding-3-small",
+		Dimensions:         3,
+		Offset:             0,
+		VectorKey:          "shared-key",
+		VectorChecksum:     1,
+	}}
+	if err := writeJSON(filepath.Join(dir, "vectors.index.json"), index); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "vectors.f32"), encodeVector([]float64{1, 0, 0}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadBinaryVectors(dir); err == nil {
+		t.Fatal("legacy loader accepted shared vector reference")
+	}
+}
+
+func TestCorruptSharedVectorIsRebuilt(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.txt", "alpha\n")
+	embedder := &countingEmbedder{}
+	opts := Options{
+		Root:                root,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+	}
+	first, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := loadVectorIndexRecords(first.Diagnostics.IndexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadPath := sharedVectorPayloadPath(selection.metadataDir)
+	payload, err := os.OpenFile(payloadPath, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := payload.WriteAt([]byte{0xff}, index[0].Offset); err != nil {
+		payload.Close()
+		t.Fatal(err)
+	}
+	if err := payload.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Diagnostics.EmbeddedChunks != 1 || embedder.callCount() != 2 {
+		t.Fatalf("second diagnostics = %#v calls = %d, want corrupt vector rebuilt", second.Diagnostics, embedder.callCount())
+	}
+	assertFileSize(t, payloadPath, 2*3*4)
+	if _, err := loadVectors(second.Diagnostics.IndexDir); err != nil {
+		t.Fatalf("load rebuilt vectors: %v", err)
+	}
+}
+
+func TestReindexAppendsSharedVectorWithoutChangingOtherSnapshot(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.txt", "alpha\n")
+	rev := commitSearchRepo(t, root)
+	opts := Options{
+		Root:                root,
+		Rev:                 rev,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+	}
+	revision, err := Run(t.Context(), fakeEmbedder{}, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	revisionIndex, err := loadVectorIndexRecords(revision.Diagnostics.IndexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts.Rev = ""
+	filesystem, err := Run(t.Context(), fakeEmbedder{}, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts.Reindex = true
+	filesystem, err = Run(t.Context(), fakeEmbedder{}, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	filesystemIndex, err := loadVectorIndexRecords(filesystem.Diagnostics.IndexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filesystemIndex[0].Offset == revisionIndex[0].Offset {
+		t.Fatalf("reindexed offset = %d, want new generation after %d", filesystemIndex[0].Offset, revisionIndex[0].Offset)
+	}
+	if _, err := loadVectors(revision.Diagnostics.IndexDir); err != nil {
+		t.Fatalf("load original revision snapshot: %v", err)
+	}
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFileSize(t, sharedVectorPayloadPath(selection.metadataDir), 2*3*4)
+}
+
+func TestConcurrentVectorStoreWritesDeduplicatePayload(t *testing.T) {
+	metadataDir := t.TempDir()
+	store := newVectorStore(metadataDir)
+	record := vectorRecord{
+		ChunkID:            "c000001",
+		EmbeddingInputHash: "input-hash",
+		EmbeddingModel:     "text-embedding-3-small",
+		Dimensions:         3,
+		Vector:             []float64{1, 0, 0},
+	}
+	var group sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		group.Go(func() {
+			_, err := store.put(t.Context(), []vectorRecord{record}, nil)
+			errs <- err
+		})
+	}
+	group.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertFileSize(t, sharedVectorPayloadPath(metadataDir), 3*4)
+}
+
+func TestVectorStoreSeparatesInputModelAndDimensions(t *testing.T) {
+	metadataDir := t.TempDir()
+	store := newVectorStore(metadataDir)
+	records := []vectorRecord{
+		{EmbeddingInputHash: "input-a", EmbeddingModel: "model-a", Dimensions: 3, Vector: []float64{1, 0, 0}},
+		{EmbeddingInputHash: "input-b", EmbeddingModel: "model-a", Dimensions: 3, Vector: []float64{0, 1, 0}},
+		{EmbeddingInputHash: "input-a", EmbeddingModel: "model-b", Dimensions: 3, Vector: []float64{0, 0, 1}},
+		{EmbeddingInputHash: "input-a", EmbeddingModel: "model-a", Dimensions: 4, Vector: []float64{1, 0, 0, 0}},
+	}
+	if _, err := store.put(t.Context(), records, nil); err != nil {
+		t.Fatal(err)
+	}
+	assertFileSize(t, sharedVectorPayloadPath(metadataDir), (3+3+3+4)*4)
+}
+
+func TestVectorStoreCatalogRecoveryKeepsLastValidGeneration(t *testing.T) {
+	metadataDir := t.TempDir()
+	store := newVectorStore(metadataDir)
+	record := func(inputHash string) vectorRecord {
+		return vectorRecord{
+			EmbeddingInputHash: inputHash,
+			EmbeddingModel:     "text-embedding-3-small",
+			Dimensions:         3,
+			Vector:             []float64{1, 0, 0},
+		}
+	}
+	if _, err := store.put(t.Context(), []vectorRecord{record("input-a")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.put(t.Context(), []vectorRecord{record("input-b")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.dir, vectorStoreCatalogName(2)), []byte("corrupt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.put(t.Context(), []vectorRecord{record("input-c")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.dir, vectorStoreCatalogName(3)), []byte("corrupt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.put(t.Context(), []vectorRecord{record("input-a")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	assertFileSize(t, sharedVectorPayloadPath(metadataDir), 3*3*4)
+}
+
 func TestRevisionSearchReusesUnchangedChunksFromAnotherRevision(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "a.txt", "alpha\n")
@@ -2705,6 +3016,34 @@ func writeFile(t *testing.T, root, name, content string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertFileSize(t *testing.T, path string, want int64) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != want {
+		t.Fatalf("%s size = %d, want %d", path, info.Size(), want)
+	}
+}
+
+func writeLegacyBinaryVectors(t *testing.T, dir string, records []vectorRecord) {
+	t.Helper()
+	var payload []byte
+	index := make([]vectorIndexRecord, len(records))
+	for i, record := range records {
+		index[i] = vectorIndexRecordFor(record)
+		index[i].Offset = int64(len(payload))
+		payload = append(payload, encodeVector(record.Vector)...)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "vectors.f32"), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(dir, "vectors.index.json"), index); err != nil {
 		t.Fatal(err)
 	}
 }

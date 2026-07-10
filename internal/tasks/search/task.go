@@ -1,7 +1,6 @@
 package search
 
 import (
-	"bufio"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -44,7 +43,8 @@ const (
 	chunkOverlap                  = 20
 	maxExcerptLines               = 40
 	maxExcerptBytes               = 12 << 10
-	indexVersion                  = 2
+	indexVersion                  = 3
+	legacyIndexVersion            = 2
 	DefaultEmbeddingBatchInputs   = 32
 	DefaultEmbeddingBatchMaxChars = 700_000
 	DefaultEmbeddingMaxInputChars = 32_000
@@ -259,6 +259,7 @@ type manifest struct {
 	CreatedAt      time.Time `json:"created_at"`
 	FileCount      int       `json:"file_count,omitempty"`
 	ChunkCount     int       `json:"chunk_count,omitempty"`
+	VectorStore    string    `json:"vector_store,omitempty"`
 }
 
 type vectorRecord struct {
@@ -291,6 +292,8 @@ type vectorIndexRecord struct {
 	Size               int64  `json:"size,omitempty"`
 	MTimeUnixNano      int64  `json:"mtime_unix_nano,omitempty"`
 	Offset             int64  `json:"offset"`
+	VectorKey          string `json:"vector_key,omitempty"`
+	VectorChecksum     uint32 `json:"vector_checksum,omitempty"`
 }
 
 type historyEntry struct {
@@ -593,6 +596,14 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 	mark("embed_index")
 
+	var forceVectorKeys map[string]bool
+	if reuseOpts.Reindex {
+		forceVectorKeys = make(map[string]bool, len(records))
+		for _, record := range records {
+			key := vectorStoreKey(record.EmbeddingInputHash, record.EmbeddingModel, record.Dimensions)
+			forceVectorKeys[key] = true
+		}
+	}
 	if filters.Code {
 		records = preserveSharedFilteredRecords(records, oldVectors, discoveredFiles, opts)
 	}
@@ -603,6 +614,9 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		} else {
 			shouldSave = len(records) != len(oldVectors)
 		}
+	}
+	if !shouldSave && !indexUsesSharedVectors(indexDir) {
+		shouldSave = true
 	}
 	if shouldSave && sharedScope {
 		if opts.Rev != "" {
@@ -615,7 +629,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		dimensions = opts.EmbeddingDimensions
 	}
 	if shouldSave {
-		if err := saveIndex(indexDir, source, root, resolvedRev, opts.EmbeddingModel, dimensions, chunks, records); err != nil {
+		if err := saveIndex(ctx, selection.metadataDir, indexDir, source, root, resolvedRev, opts.EmbeddingModel, dimensions, chunks, records, forceVectorKeys); err != nil {
 			mark("persist")
 			return fail(err)
 		}
@@ -1152,13 +1166,37 @@ func clampEmbeddingLine(line string) string {
 }
 
 func loadVectors(dir string) ([]vectorRecord, error) {
-	if _, err := loadManifest(dir); err != nil {
+	found, err := loadManifest(dir)
+	if err != nil {
 		return nil, err
+	}
+	if found.VectorStore != "" {
+		if found.VectorStore != sharedVectorStoreVersion {
+			return nil, fmt.Errorf("unsupported vector store %q", found.VectorStore)
+		}
+		return loadSharedVectors(metadataDirForIndex(dir), dir)
 	}
 	if records, err := loadBinaryVectors(dir); err == nil {
 		return records, nil
 	}
 	return loadLegacyVectors(dir)
+}
+
+func indexUsesSharedVectors(dir string) bool {
+	found, err := loadManifest(dir)
+	return err == nil && found.VectorStore == sharedVectorStoreVersion
+}
+
+func metadataDirForIndex(dir string) string {
+	for current := filepath.Clean(dir); ; current = filepath.Dir(current) {
+		if filepath.Base(current) == "search" {
+			return filepath.Dir(current)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return ""
+		}
+	}
 }
 
 func loadManifest(dir string) (manifest, error) {
@@ -1170,8 +1208,17 @@ func loadManifest(dir string) (manifest, error) {
 	if err := sonic.Unmarshal(data, &found); err != nil {
 		return manifest{}, err
 	}
-	if found.Version != indexVersion {
-		return manifest{}, fmt.Errorf("index version = %d, want %d", found.Version, indexVersion)
+	switch found.Version {
+	case legacyIndexVersion:
+		if found.VectorStore != "" {
+			return manifest{}, fmt.Errorf("index version %d cannot use vector store %q", found.Version, found.VectorStore)
+		}
+	case indexVersion:
+		if found.VectorStore != sharedVectorStoreVersion {
+			return manifest{}, fmt.Errorf("index version %d vector store = %q, want %q", found.Version, found.VectorStore, sharedVectorStoreVersion)
+		}
+	default:
+		return manifest{}, fmt.Errorf("index version = %d, want %d or %d", found.Version, legacyIndexVersion, indexVersion)
 	}
 	return found, nil
 }
@@ -1216,6 +1263,9 @@ func loadBinaryVectors(dir string) ([]vectorRecord, error) {
 	}
 	records := make([]vectorRecord, len(index))
 	for i, entry := range index {
+		if entry.VectorKey != "" || entry.VectorChecksum != 0 {
+			return nil, fmt.Errorf("vectors.index.json entry %d contains a shared vector reference", i)
+		}
 		if entry.Dimensions < 1 {
 			return nil, fmt.Errorf("vectors.index.json entry %d has invalid dimensions %d", i, entry.Dimensions)
 		}
@@ -1229,21 +1279,7 @@ func loadBinaryVectors(dir string) ([]vectorRecord, error) {
 			bits := binary.LittleEndian.Uint32(vectorData[start+dim*4 : start+dim*4+4])
 			vector[dim] = float64(math.Float32frombits(bits))
 		}
-		records[i] = vectorRecord{
-			ChunkID:            entry.ChunkID,
-			Path:               entry.Path,
-			Source:             entry.Source,
-			Blob:               entry.Blob,
-			StartLine:          entry.StartLine,
-			EndLine:            entry.EndLine,
-			ContentHash:        entry.ContentHash,
-			EmbeddingInputHash: entry.EmbeddingInputHash,
-			EmbeddingModel:     entry.EmbeddingModel,
-			Dimensions:         entry.Dimensions,
-			Size:               entry.Size,
-			MTimeUnixNano:      entry.MTimeUnixNano,
-			Vector:             vector,
-		}
+		records[i] = vectorRecordFromIndex(entry, vector)
 	}
 	return records, nil
 }
@@ -1750,14 +1786,14 @@ func embeddingBatchEnd(texts []string, start, maxInputs, maxChars int) int {
 	return end
 }
 
-func saveIndex(dir string, source Source, root, resolvedRev, model string, dimensions int, chunks []Chunk, records []vectorRecord) error {
+func saveIndex(ctx context.Context, metadataDir, dir string, source Source, root, resolvedRev, model string, dimensions int, chunks []Chunk, records []vectorRecord, forceVectorKeys map[string]bool) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	if err := writeJSON(filepath.Join(dir, "chunks.json"), chunks); err != nil {
 		return err
 	}
-	if err := writeBinaryVectors(dir, records); err != nil {
+	if err := writeSharedVectorIndex(ctx, metadataDir, dir, records, forceVectorKeys); err != nil {
 		return err
 	}
 	return writeJSON(filepath.Join(dir, "manifest.json"), manifest{
@@ -1771,56 +1807,8 @@ func saveIndex(dir string, source Source, root, resolvedRev, model string, dimen
 		CreatedAt:      time.Now().UTC(),
 		FileCount:      uniquePathCountFrom(records, func(record vectorRecord) string { return record.Path }),
 		ChunkCount:     len(records),
+		VectorStore:    sharedVectorStoreVersion,
 	})
-}
-
-func writeBinaryVectors(dir string, records []vectorRecord) error {
-	index := make([]vectorIndexRecord, len(records))
-	vectorPath := filepath.Join(dir, "vectors.f32")
-	file, err := os.OpenFile(vectorPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		return err
-	}
-	writer := bufio.NewWriterSize(file, 1<<20)
-	var offset int64
-	for i, record := range records {
-		if record.Dimensions < 1 || len(record.Vector) != record.Dimensions {
-			file.Close()
-			return fmt.Errorf("vector record %s dimensions mismatch", record.ChunkID)
-		}
-		index[i] = vectorIndexRecord{
-			ChunkID:            record.ChunkID,
-			Path:               record.Path,
-			Source:             record.Source,
-			Blob:               record.Blob,
-			StartLine:          record.StartLine,
-			EndLine:            record.EndLine,
-			ContentHash:        record.ContentHash,
-			EmbeddingInputHash: record.EmbeddingInputHash,
-			EmbeddingModel:     record.EmbeddingModel,
-			Dimensions:         record.Dimensions,
-			Size:               record.Size,
-			MTimeUnixNano:      record.MTimeUnixNano,
-			Offset:             offset,
-		}
-		var buf [4]byte
-		for _, value := range record.Vector {
-			binary.LittleEndian.PutUint32(buf[:], math.Float32bits(float32(value)))
-			if _, err := writer.Write(buf[:]); err != nil {
-				file.Close()
-				return err
-			}
-		}
-		offset += int64(record.Dimensions * 4)
-	}
-	if err := writer.Flush(); err != nil {
-		file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	return writeJSON(filepath.Join(dir, "vectors.index.json"), index)
 }
 
 func writeJSON(path string, value any) error {

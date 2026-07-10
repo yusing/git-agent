@@ -196,7 +196,8 @@ explanations, and does not use lexical fallback. It frames and embeds the query
 as an implementation-location search when the configured embedding input cap can
 include the framing; otherwise it embeds the raw query so user query text is not
 truncated away. Search embeds local chunks, performs an exact cosine scan over
-the local binary vector cache, filters candidates by vector relatedness, then
+the shared vector payload, with a legacy per-index payload fallback, filters
+candidates by vector relatedness, then
 ranks surviving candidates with a hybrid score that combines vector relatedness,
 normalized BM25-style body text overlap, path token overlap, and indexed symbol
 token overlap. Output and replay history keep the original query string, not the
@@ -247,6 +248,39 @@ matching chunk inputs and embeds every unmatched target chunk normally. Invalid,
 incomplete, or incompatible candidate indexes are ignored. `--reindex` does not
 seed from other physical indexes; the existing same-target parallel-writer reuse
 still applies. Query replay history remains scoped to its physical index.
+
+Compatible chunk vectors are stored once per project or remote metadata root in
+an append-only shared payload under `search/vector-store/`. Each physical
+filesystem or revision index keeps its own chunk metadata and immutable shared
+payload references, so snapshots retain their source, blob, path, and line
+identity without copying unchanged float payloads. Shared identity combines the
+embedding model, dimensions, and SHA-256 of the exact final capped provider
+input. Query embeddings and query history are not stored in the shared vector
+store.
+
+Shared-store writes use one metadata-root lock. A writer appends new float
+payloads, syncs them, publishes an immutable catalog generation, and only then
+publishes the snapshot index manifest. Concurrent snapshot writers can perform
+provider work independently, but catalog publication keeps one physical payload
+for each compatible identity. A checksum and identity key on every shared
+snapshot reference prevent corrupt or mismatched payloads from being used.
+Missing or corrupt shared records are treated as cache misses and rebuilt; an
+interrupted append can leave unreachable bytes but cannot publish a partial
+snapshot reference.
+
+Existing per-index binary payloads remain readable and migrate to shared
+references on the next successful cache write without another embedding call.
+Shared-reference indexes use format version 3 so older version 2 readers reject
+them instead of interpreting shared offsets as local payload offsets. Version 2
+indexes remain readable by the current binary for migration.
+Records from older formats that lack a provable final-input hash remain in the
+physical index's local payload until that chunk is re-embedded. The shared
+payload is append-only: automatic garbage collection and compaction are not
+performed. `--reindex` embeds the selected candidate set and appends a new shared
+record generation for those rebuilt identities. Other snapshots continue to
+reference their prior immutable records; a reindex never replaces vectors under
+them. Parallel `--reindex` waiters for the same physical index still reuse the
+first completed writer instead of appending another generation.
 
 Chunk embedding text clamps each physical source line to `4000` characters
 before applying the per-input embedding character cap. This bounds minified or

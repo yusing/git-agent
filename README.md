@@ -130,8 +130,11 @@ message-generation config.
 Normal indexing reuses exact matching chunk embeddings from compatible indexes
 for the same project or cached remote. This includes filesystem-to-revision and
 revision-to-revision reuse, so searching a nearby commit usually embeds only its
-changed chunks. `--reindex` skips this cross-index reuse and forces the selected
-source to rebuild.
+changed chunks. Compatible indexes also reference one shared on-disk vector
+payload per project or remote cache instead of copying unchanged vectors into
+every snapshot. Existing local vector payloads migrate on a later cache write.
+`--reindex` skips cross-index reuse, rebuilds the selected source, and appends a
+new shared vector generation without changing older snapshots.
 
 Useful flags:
 
