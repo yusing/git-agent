@@ -334,7 +334,11 @@ type skillsReadTool struct {
 }
 
 func (t skillsReadTool) Definition() Definition {
-	return Definition{Name: SkillReadToolName, Description: "Read SKILL.md or a text file under references/ for a discovered skill root.", Schema: skillsReadSchema(), Strict: true}
+	locators := make([]string, 0, t.store.Len())
+	for _, skill := range t.store.Skills() {
+		locators = append(locators, skill.Locator)
+	}
+	return Definition{Name: SkillReadToolName, Description: "Read SKILL.md or a text file under references/ for a discovered skill root.", Schema: skillsReadSchema(locators), Strict: true}
 }
 
 func (t skillsReadTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
@@ -398,12 +402,16 @@ func openSkillReadFile(skill skills.Skill, rel string) (*os.File, error) {
 	return file, nil
 }
 
-func skillsReadSchema() map[string]any {
+func skillsReadSchema(locators []string) map[string]any {
 	return schema(map[string]any{
-		"source_locator": stringProp("Exact source locator from the initial Skills section."),
-		"path":           stringProp(`Relative path under the selected skill root. Use "SKILL.md" for the skill body; only files under references/ are readable otherwise.`),
-		"max_bytes":      intProp("Maximum bytes to return.", 1, 65536),
-		"max_lines":      intProp("Maximum lines to return.", 1, 2000),
+		"source_locator": map[string]any{
+			"type":        "string",
+			"description": "Exact source locator from the initial Skills section.",
+			"enum":        locators,
+		},
+		"path":      stringProp(`Relative path under the selected skill root. Use "SKILL.md" for the skill body; only files under references/ are readable otherwise.`),
+		"max_bytes": intProp("Maximum bytes to return.", 1, 65536),
+		"max_lines": intProp("Maximum lines to return.", 1, 2000),
 	}, "source_locator", "path", "max_bytes", "max_lines")
 }
 

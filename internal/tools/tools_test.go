@@ -214,6 +214,18 @@ func TestSkillsReadToolReadsDiscoveredSkillFiles(t *testing.T) {
 	if !ok || strings.Join(required, ",") != "max_bytes,max_lines,path,source_locator" {
 		t.Fatalf("skills_read required fields = %#v", defs[0].Schema["required"])
 	}
+	properties, ok := defs[0].Schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("skills_read properties = %#v", defs[0].Schema["properties"])
+	}
+	sourceLocator, ok := properties["source_locator"].(map[string]any)
+	if !ok {
+		t.Fatalf("skills_read source_locator = %#v", properties["source_locator"])
+	}
+	locators, ok := sourceLocator["enum"].([]string)
+	if !ok || len(locators) != 1 || locators[0] != locator {
+		t.Fatalf("skills_read source_locator enum = %#v, want [%q]", sourceLocator["enum"], locator)
+	}
 
 	result, err := registry.Execute(t.Context(), Invocation{Name: "skills_read", Arguments: `{"source_locator":"` + locator + `","path":"SKILL.md","max_bytes":4096,"max_lines":200}`})
 	if err != nil {

@@ -1130,10 +1130,11 @@ one valid skill is discovered, the model receives:
 
 `skills_read` reads `SKILL.md` or a text file under the selected skill's
 `references/` directory. It requires the exact source locator from the initial
-Skills section, rejects unknown locators, absolute paths, traversal, symlink
-escapes, non-`references/` resource paths, and binary content, and applies the
-standard byte/line caps. It cannot execute skill scripts or expose arbitrary
-host files.
+Skills section. Its strict tool schema enumerates the discovered locators so the
+provider cannot emit a different locator. Runtime validation also rejects
+unknown locators, absolute paths, traversal, symlink escapes, non-`references/`
+resource paths, and binary content, and applies the standard byte/line caps. It
+cannot execute skill scripts or expose arbitrary host files.
 
 ### Commit message tools
 
