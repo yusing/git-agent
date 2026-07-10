@@ -321,7 +321,7 @@ func TestResolveUsesRaisedDefaultMaxSteps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Model != "gpt-5.3-codex-spark" {
+	if cfg.Model != "gpt-5.6-luna" {
 		t.Fatalf("default Model = %q", cfg.Model)
 	}
 	if cfg.MaxSteps != DefaultMaxSteps {

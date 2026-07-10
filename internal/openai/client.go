@@ -100,6 +100,9 @@ type SDKClient struct {
 
 const DefaultDialTimeout = 5 * time.Second
 
+// Source: codex-rs/login/src/auth/default_client.rs:42:352 default_headers
+const codexClientIdentity = "codex_cli_rs"
+
 func NewHTTPClient(client *http.Client) *SDKClient {
 	return &SDKClient{HTTPClient: withDefaultDialTimeout(client)}
 }
@@ -110,7 +113,14 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 		option.WithBaseURL(request.BaseURL),
 	}
 	if request.AuthAccountID != "" {
-		opts = append(opts, option.WithHeader("ChatGPT-Account-ID", request.AuthAccountID))
+		opts = append(opts,
+			option.WithHeader("ChatGPT-Account-ID", request.AuthAccountID),
+			option.WithHeader("originator", codexClientIdentity),
+			option.WithHeader("User-Agent", codexClientIdentity),
+		)
+		if request.Model == "gpt-5.6" {
+			request.Model = "gpt-5.6-sol"
+		}
 	}
 	if c.HTTPClient != nil {
 		opts = append(opts, option.WithHTTPClient(c.HTTPClient))

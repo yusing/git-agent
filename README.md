@@ -231,7 +231,8 @@ The file must include ChatGPT auth:
 
 ChatGPT auth sends requests to `https://chatgpt.com/backend-api/codex` with
 `Authorization: Bearer <access_token>` and
-`ChatGPT-Account-ID: <account_id>`.
+`ChatGPT-Account-ID: <account_id>`. Requests also identify the Codex client by
+sending `originator: codex_cli_rs` and `User-Agent: codex_cli_rs`.
 
 When `~/.codex/auth.json` is absent, `OPENAI_API_KEY` is used as a legacy
 OpenAI-compatible fallback. `OPENAI_BASE_URL` only applies to that fallback path
@@ -245,7 +246,7 @@ Supported environment variables:
 | --- | --- |
 | `OPENAI_API_KEY` | Message-generation fallback auth and search fallback auth |
 | `OPENAI_BASE_URL` | Message-generation fallback base URL and search fallback base URL |
-| `OPENAI_MODEL` | Message-generation model; defaults to `gpt-5.3-codex-spark` |
+| `OPENAI_MODEL` | Message-generation model; defaults to `gpt-5.6-luna` |
 | `OPENAI_EMBEDDING_API_KEY` | Search embedding auth |
 | `OPENAI_EMBEDDING_BASE_URL` | Search embedding base URL |
 | `OPENAI_EMBEDDING_MODEL` | Search embedding model |
@@ -258,6 +259,10 @@ Supported environment variables:
 <!-- markdownlint-enable MD013 -->
 
 CLI flags override environment values.
+
+With ChatGPT auth, the `gpt-5.6` alias resolves to `gpt-5.6-sol`. The canonical
+`gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` identifiers pass through
+unchanged.
 
 Behavior defaults:
 

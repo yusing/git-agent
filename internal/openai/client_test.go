@@ -116,7 +116,7 @@ func TestRequestSupportsLowThinkingMode(t *testing.T) {
 	}
 }
 
-func TestCreateResponseAddsChatGPTAccountIDHeader(t *testing.T) {
+func TestCreateResponseUsesChatGPTRequestContract(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -125,6 +125,21 @@ func TestCreateResponseAddsChatGPTAccountIDHeader(t *testing.T) {
 		}
 		if got := r.Header.Get("ChatGPT-Account-ID"); got != "workspace-123" {
 			t.Fatalf("ChatGPT-Account-ID = %q", got)
+		}
+		if got := r.Header.Get("originator"); got != codexClientIdentity {
+			t.Fatalf("originator = %q", got)
+		}
+		if got := r.Header.Get("User-Agent"); got != codexClientIdentity {
+			t.Fatalf("User-Agent = %q", got)
+		}
+		var payload struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Model != "gpt-5.6-sol" {
+			t.Fatalf("model = %q", payload.Model)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: ")
@@ -135,7 +150,7 @@ func TestCreateResponseAddsChatGPTAccountIDHeader(t *testing.T) {
 	defer server.Close()
 
 	resp, err := NewHTTPClient(server.Client()).CreateResponse(context.Background(), Request{
-		Model:         "test-model",
+		Model:         "gpt-5.6",
 		BaseURL:       server.URL,
 		APIKey:        "access-token",
 		AuthAccountID: "workspace-123",

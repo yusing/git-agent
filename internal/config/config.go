@@ -16,7 +16,7 @@ const (
 	AuthModeChatGPT       = "chatgpt"
 	DefaultBaseURL        = "https://api.openai.com/v1"
 	DefaultChatGPTBaseURL = "https://chatgpt.com/backend-api/codex"
-	DefaultModel          = "gpt-5.3-codex-spark"
+	DefaultModel          = "gpt-5.6-luna"
 	DefaultTimeout        = 2 * time.Minute
 	DefaultMaxSteps       = 30
 	DefaultMaxTools       = 24

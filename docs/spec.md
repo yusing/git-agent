@@ -432,7 +432,9 @@ The file must set `"auth_mode": "chatgpt"` and include
 `tokens.access_token` plus `tokens.account_id`. ChatGPT auth defaults the
 provider base URL to `https://chatgpt.com/backend-api/codex` and sends
 `Authorization: Bearer <access_token>` plus
-`ChatGPT-Account-ID: <account_id>`.
+`ChatGPT-Account-ID: <account_id>`. ChatGPT requests also send
+`originator: codex_cli_rs` and `User-Agent: codex_cli_rs`; both client identity
+headers are required for current model routing.
 
 `OPENAI_API_KEY` is a legacy fallback for OpenAI-compatible providers when
 `~/.codex/auth.json` is absent.
@@ -460,7 +462,7 @@ Supported environment variables:
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL` (overrides the default message-generation model,
-  `gpt-5.3-codex-spark`)
+  `gpt-5.6-luna`)
 - `OPENAI_EMBEDDING_API_KEY`
 - `OPENAI_EMBEDDING_BASE_URL`
 - `OPENAI_EMBEDDING_MODEL`
@@ -476,6 +478,11 @@ Resolution order:
 2. `~/.codex/auth.json` ChatGPT auth
 3. environment variable fallback, including `OPENAI_API_KEY` auth
 4. internal default when defined by that subsystem
+
+For ChatGPT auth, message generation canonicalizes the public `gpt-5.6` alias
+to `gpt-5.6-sol` because the ChatGPT Codex endpoint accepts the canonical model
+identifier. `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` pass through
+unchanged. API-key providers retain the requested model identifier.
 
 ### stdout / stderr contract
 
