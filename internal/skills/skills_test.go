@@ -3,6 +3,7 @@ package skills
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -38,14 +39,17 @@ description: missing name
 	if err != nil {
 		t.Fatal(err)
 	}
-	if store.Len() != 2 {
-		t.Fatalf("skills = %d, want 2: %#v", store.Len(), store.Skills())
+	if store.Len() != 1 {
+		t.Fatalf("skills = %d, want 1: %#v", store.Len(), store.Skills())
 	}
 	rendered := store.Render()
-	for _, want := range []string{"## Skills", "release-writer", "commit-writer", "skills_read"} {
+	for _, want := range []string{"## Skills", "release-writer", "skills_read"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("rendered missing %q:\n%s", want, rendered)
 		}
+	}
+	if strings.Contains(rendered, "commit-writer") {
+		t.Fatalf("rendered should not include commit-message skill:\n%s", rendered)
 	}
 	if strings.Contains(rendered, "AGENTS.md") {
 		t.Fatalf("rendered should not include AGENTS.md:\n%s", rendered)
@@ -61,6 +65,31 @@ description: missing name
 	}
 	if _, ok := store.Lookup(store.Skills()[0].Path); ok && store.Skills()[0].Path != store.Skills()[0].Locator {
 		t.Fatal("lookup should not accept unrendered path aliases")
+	}
+}
+
+func TestDiscoverSkipsSkillsWithCommitNameSegment(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	for _, name := range []string{"git-commit-message", "caveman_commit", "Commit.writer", "writer:COMMIT"} {
+		mustWriteSkill(t, filepath.Join(root, ".agents", "skills", name), name)
+	}
+	for _, name := range []string{"commitment-writer", "precommit", "committed"} {
+		mustWriteSkill(t, filepath.Join(root, ".agents", "skills", name), name)
+	}
+
+	store, err := Discover(Options{RepoRoot: root, WorkDir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, store.Len())
+	for _, skill := range store.Skills() {
+		got = append(got, skill.Name)
+	}
+	want := []string{"commitment-writer", "committed", "precommit"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("skills = %q, want %q", got, want)
 	}
 }
 

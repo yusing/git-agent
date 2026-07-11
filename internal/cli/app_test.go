@@ -1335,7 +1335,7 @@ func TestCommitMsgAppendPromptAddsUserHint(t *testing.T) {
 func TestCommitMsgIncludesSkillInstructionsAndReadTool(t *testing.T) {
 	repoDir := initRepo(t)
 	t.Chdir(repoDir)
-	writeFixtureFile(t, filepath.Join(repoDir, ".agents", "skills", "commit-writer", "SKILL.md"), "---\nname: commit-writer\ndescription: Draft commit messages from staged diffs.\n---\n")
+	writeFixtureFile(t, filepath.Join(repoDir, ".agents", "skills", "change-writer", "SKILL.md"), "---\nname: change-writer\ndescription: Draft change summaries from staged diffs.\n---\n")
 
 	var requests []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1363,7 +1363,7 @@ func TestCommitMsgIncludesSkillInstructionsAndReadTool(t *testing.T) {
 	if len(requests) != 1 {
 		t.Fatalf("request count = %d", len(requests))
 	}
-	for _, want := range []string{"## Skills", "commit-writer", "skills_read", "SKILL.md", "Available tools"} {
+	for _, want := range []string{"## Skills", "change-writer", "skills_read", "SKILL.md", "Available tools"} {
 		if !strings.Contains(requests[0], want) {
 			t.Fatalf("commit-msg request missing %q:\n%s", want, requests[0])
 		}
@@ -1921,7 +1921,7 @@ func TestPRMessageExposesOnlySkillToolsWhenSkillsExist(t *testing.T) {
 	t.Chdir(repoDir)
 	runGit(t, repoDir, "commit", "-m", "base")
 	runGit(t, repoDir, "update-ref", "refs/remotes/origin/HEAD", gitHead(t, repoDir))
-	writeFixtureFile(t, filepath.Join(repoDir, ".agents", "skills", "commit-writer", "SKILL.md"), "---\nname: commit-writer\ndescription: Draft squash merge commit messages.\n---\n")
+	writeFixtureFile(t, filepath.Join(repoDir, ".agents", "skills", "pr-writer", "SKILL.md"), "---\nname: pr-writer\ndescription: Draft pull request messages.\n---\n")
 	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("branch\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

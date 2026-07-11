@@ -58,7 +58,7 @@ func vectorStoreKey(inputHash, model string, dimensions int) string {
 
 func (store vectorStore) put(ctx context.Context, records []vectorRecord, forceKeys map[string]bool) (keys map[string]vectorStoreEntry, err error) {
 	keys = make(map[string]vectorStoreEntry, len(records))
-	if err := os.MkdirAll(store.dir, 0o755); err != nil {
+	if err := os.MkdirAll(store.dir, 0o700); err != nil {
 		return nil, err
 	}
 	lock, err := lockIndex(ctx, store.dir)
@@ -72,7 +72,7 @@ func (store vectorStore) put(ctx context.Context, records []vectorRecord, forceK
 		return nil, err
 	}
 	payloadPath := filepath.Join(store.dir, vectorStorePayloadName)
-	payload, err := os.OpenFile(payloadPath, os.O_CREATE|os.O_RDWR, 0o644)
+	payload, err := os.OpenFile(payloadPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +278,7 @@ func writeSharedVectorIndex(ctx context.Context, metadataDir, indexDir string, r
 	}
 	index := make([]vectorIndexRecord, len(records))
 	localPath := filepath.Join(indexDir, "vectors.f32")
-	local, err := os.OpenFile(localPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	local, err := os.OpenFile(localPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}

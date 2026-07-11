@@ -108,6 +108,49 @@ func TestRepositoryWalkToolsSkipInternalState(t *testing.T) {
 	}
 }
 
+func TestRepositoryToolsDoNotFollowSymlinks(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	mustWriteFile(t, outside, "outside-secret\n")
+	if err := os.Symlink(outside, filepath.Join(dir, "leak.txt")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, ".gitmodules")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	repo, err := gitctx.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistryWithSkills(repo, nil)
+	if _, err := registry.Execute(t.Context(), Invocation{Name: "read_file", Arguments: `{"path":"leak.txt"}`}); err == nil {
+		t.Fatal("read_file followed symlink outside repository")
+	}
+
+	listResult, err := registry.Execute(t.Context(), Invocation{Name: "list_files", Arguments: "{}"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(listResult.Content, "leak.txt") {
+		t.Fatalf("list_files exposed symlink: %s", listResult.Content)
+	}
+
+	searchResult, err := registry.Execute(t.Context(), Invocation{Name: "search_files", Arguments: `{"pattern":"outside-secret"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(searchResult.Content, "outside-secret") {
+		t.Fatalf("search_files followed symlink: %s", searchResult.Content)
+	}
+	if _, err := registry.Execute(t.Context(), Invocation{Name: "gitmodules_table", Arguments: "{}"}); err == nil {
+		t.Fatal("gitmodules_table followed symlink outside repository")
+	}
+}
+
 func TestParseArgsAllowsBOMAndOuterWhitespace(t *testing.T) {
 	t.Parallel()
 
@@ -190,8 +233,8 @@ func TestSkillsReadToolReadsDiscoveredSkillFiles(t *testing.T) {
 
 	dir := t.TempDir()
 	runGit(t, dir, "init")
-	skillDir := filepath.Join(dir, ".agents", "skills", "commit-writer")
-	mustWriteFile(t, filepath.Join(skillDir, "SKILL.md"), "---\nname: commit-writer\ndescription: Draft commit messages.\n---\n\nUse evidence.\n")
+	skillDir := filepath.Join(dir, ".agents", "skills", "change-writer")
+	mustWriteFile(t, filepath.Join(skillDir, "SKILL.md"), "---\nname: change-writer\ndescription: Draft change summaries.\n---\n\nUse evidence.\n")
 	mustWriteFile(t, filepath.Join(skillDir, "references", "style.md"), "Prefer concise subjects.\n")
 	repo, err := gitctx.Open(dir)
 	if err != nil {
@@ -281,8 +324,8 @@ func TestSkillsReadToolRejectsUnknownAndEscapingPaths(t *testing.T) {
 
 	dir := t.TempDir()
 	runGit(t, dir, "init")
-	skillDir := filepath.Join(dir, ".agents", "skills", "commit-writer")
-	mustWriteFile(t, filepath.Join(skillDir, "SKILL.md"), "---\nname: commit-writer\ndescription: Draft commit messages.\n---\n")
+	skillDir := filepath.Join(dir, ".agents", "skills", "change-writer")
+	mustWriteFile(t, filepath.Join(skillDir, "SKILL.md"), "---\nname: change-writer\ndescription: Draft change summaries.\n---\n")
 	mustWriteFile(t, filepath.Join(skillDir, "scripts", "helper.sh"), "#!/bin/sh\n")
 	mustWriteFile(t, filepath.Join(skillDir, "references", "binary.bin"), "ok\x00no\n")
 	mustWriteFile(t, filepath.Join(dir, "secret.txt"), "secret\n")

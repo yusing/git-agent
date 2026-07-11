@@ -14,7 +14,10 @@ import (
 	"time"
 )
 
-const dirName = ".git-agent"
+const (
+	dirName               = ".git-agent"
+	permissionsMarkerName = ".permissions-v1"
+)
 
 // Dir returns the per-project metadata directory, migrating the legacy
 // repository-local directory when it exists.
@@ -32,6 +35,9 @@ func Dir(projectRoot string) (string, error) {
 	if err := migrate(filepath.Join(root, dirName), dir); err != nil {
 		return "", err
 	}
+	if err := secureDir(dir); err != nil {
+		return "", err
+	}
 	return dir, nil
 }
 
@@ -41,7 +47,45 @@ func RemoteDir(remoteURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(root, PathSHA(remoteURL)), nil
+	dir := filepath.Join(root, PathSHA(remoteURL))
+	if err := secureDir(dir); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+func secureDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+	marker := filepath.Join(dir, permissionsMarkerName)
+	if info, err := os.Lstat(marker); err == nil && info.Mode().IsRegular() {
+		return os.Chmod(marker, 0o600)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	} else if err == nil {
+		if err := os.Remove(marker); err != nil {
+			return err
+		}
+	}
+	if err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if entry.IsDir() {
+			return os.Chmod(path, 0o700)
+		}
+		return os.Chmod(path, 0o600)
+	}); err != nil {
+		return err
+	}
+	return os.WriteFile(marker, nil, 0o600)
 }
 
 // RemoteRoot returns the directory containing cached remote repository metadata.
@@ -74,7 +118,7 @@ func migrate(legacyDir, dir string) error {
 		return nil
 	}
 	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
-		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
 			return err
 		}
 		if err := os.Rename(legacyDir, dir); err == nil {
@@ -83,7 +127,7 @@ func migrate(legacyDir, dir string) error {
 	} else if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	if err := copyDir(legacyDir, dir); err != nil {
@@ -111,16 +155,16 @@ func copyDir(src, dst string) error {
 		}
 		switch {
 		case entry.IsDir():
-			return os.MkdirAll(target, info.Mode().Perm())
+			return os.MkdirAll(target, 0o700)
 		case info.Mode().IsRegular():
-			return copyFile(path, target, info.Mode().Perm())
+			return copyFile(path, target)
 		default:
 			return fmt.Errorf("legacy metadata path %s has unsupported file mode %s", path, info.Mode())
 		}
 	})
 }
 
-func copyFile(src, dst string, mode fs.FileMode) error {
+func copyFile(src, dst string) error {
 	if _, err := os.Stat(dst); err == nil {
 		next, err := conflictPath(dst)
 		if err != nil {
@@ -130,7 +174,7 @@ func copyFile(src, dst string, mode fs.FileMode) error {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return err
 	}
 	in, err := os.Open(src)
@@ -138,7 +182,7 @@ func copyFile(src, dst string, mode fs.FileMode) error {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}

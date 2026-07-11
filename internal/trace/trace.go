@@ -95,7 +95,7 @@ func New(root, command string) (*Recorder, error) {
 		return nil, err
 	}
 	dir := filepath.Join(metadataDir, "sessions", sessionID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	recorder := &Recorder{
@@ -264,7 +264,7 @@ func (r *Recorder) appendEventLocked(kind string, value map[string]any) error {
 	}
 	now := time.Now().UTC()
 	if r.eventsPath != "" {
-		file, err := os.OpenFile(r.eventsPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		file, err := os.OpenFile(r.eventsPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
 			return err
 		}
@@ -1078,7 +1078,7 @@ func (r *Recorder) writeSnapshotLocked() error {
 	}
 	tmpPath := r.sessionPath + ".tmp"
 	data := bytes.TrimSuffix(buf.Bytes(), []byte{'\n'})
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmpPath, r.sessionPath)
@@ -1164,11 +1164,11 @@ func (r *Recorder) writeStringArtifactLocked(value string) (map[string]any, erro
 	hash := hex.EncodeToString(sum[:])
 	relativePath := filepath.ToSlash(filepath.Join("artifacts", hash+".txt"))
 	path := filepath.Join(r.dir, relativePath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
 			return nil, err
 		}
 	} else if err != nil {

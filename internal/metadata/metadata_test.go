@@ -33,6 +33,48 @@ func TestDirUsesHomePathSHAAndMigratesLegacyDirectory(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, dirName)); !os.IsNotExist(err) {
 		t.Fatalf("legacy dir stat err = %v, want not exist", err)
 	}
+	assertPrivateTree(t, dir)
+}
+
+func TestDirTightensExistingMetadataPermissions(t *testing.T) {
+	home := t.TempDir()
+	root := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, dirName, PathSHA(root))
+	if err := os.MkdirAll(filepath.Join(dir, "sessions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sessions", "trace.json"), []byte("secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Dir(root); err != nil {
+		t.Fatal(err)
+	}
+	assertPrivateTree(t, dir)
+}
+
+func assertPrivateTree(t *testing.T, root string) {
+	t.Helper()
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		want := os.FileMode(0o600)
+		if entry.IsDir() {
+			want = 0o700
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s mode = %04o, want %04o", path, got, want)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestDirPreservesConflictingNewFilesDuringMigration(t *testing.T) {

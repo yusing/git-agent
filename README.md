@@ -346,6 +346,9 @@ Fish completion install defaults:
   provider.
 - Search sends indexed chunks and queries to the configured embedding provider.
 - API keys and bearer tokens are redacted from traces, debug output, and errors.
+- Repository tools do not follow symlinks outside the repository.
+- Metadata, indexes, and trace artifacts under `~/.git-agent/` are restricted to
+  the current user on platforms with Unix-style permission bits.
 
 ## Specification
 

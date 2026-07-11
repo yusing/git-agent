@@ -1794,7 +1794,7 @@ func embeddingBatchEnd(texts []string, start, maxInputs, maxChars int) int {
 }
 
 func saveIndex(ctx context.Context, metadataDir, dir string, source Source, root, resolvedRev, model string, dimensions int, chunks []Chunk, records []vectorRecord, forceVectorKeys map[string]bool) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	if err := writeJSON(filepath.Join(dir, "chunks.json"), chunks); err != nil {
@@ -1824,7 +1824,7 @@ func writeJSON(path string, value any) error {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o644)
+	return os.WriteFile(path, data, 0o600)
 }
 
 type scoredChunk struct {
@@ -2106,7 +2106,7 @@ func appendHistory(dir string, entry historyEntry) error {
 	if len(entries) > 100 {
 		entries = entries[len(entries)-100:]
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	return writeJSON(filepath.Join(dir, "history.json"), entries)

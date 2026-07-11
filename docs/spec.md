@@ -1092,6 +1092,9 @@ Message-generation commands discover reusable Codex-style skills from local
 `SKILL.md` files before request assembly. A valid skill has YAML frontmatter
 with nonempty `name` and `description`, parsed with `github.com/goccy/go-yaml`.
 Invalid or incomplete skill files are skipped.
+Skills whose names contain a `commit` segment, delimited by `.`, `_`, `-`, or
+`:`, are also skipped so Git agent commit-message rules remain authoritative.
+Segment matching is case-insensitive.
 
 Discovery roots:
 
@@ -1116,6 +1119,8 @@ Git/release evidence.
 - typed tool contracts
 - no arbitrary shell access
 - no generic “run any git command” escape hatch
+- repository paths are root-confined; walk tools skip symlinks and repository
+  readers cannot follow symlinks outside the repository
 - bounded output with explicit truncation markers
 
 ### Shared repository tools
@@ -1522,6 +1527,8 @@ Mitigation:
 
 - redact API keys from request traces
 - store generation-only traces under `~/.git-agent/<path-sha>/`
+- create metadata directories and files with owner-only permissions, and tighten
+  permissions on existing metadata when it is opened
 - keep legacy `.git-agent/` ignored in Git until migration removes it
 - print trace directory only when `--debug` is enabled
 - document that commit-command stdout may contain repository context and should

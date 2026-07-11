@@ -147,14 +147,14 @@ func loadRemoteCache(path string) remoteCache {
 }
 
 func saveRemoteCache(path string, cache remoteCache) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	data, err := sonic.MarshalIndent(cache, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
+	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
 
 func openRemoteRepo(path string) (*git.Repository, bool, error) {

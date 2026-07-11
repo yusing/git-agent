@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -261,14 +262,22 @@ func (t listFilesTool) Execute(_ context.Context, invocation Invocation) (Result
 	if maxEntries <= 0 {
 		maxEntries = 200
 	}
-	root, err := safePath(t.repo.RootPath, args.Path)
+	root, err := os.OpenRoot(t.repo.RootPath)
+	if err != nil {
+		return Result{}, err
+	}
+	defer root.Close()
+	walkRoot, err := cleanRepoPath(args.Path)
 	if err != nil {
 		return Result{}, err
 	}
 	var files []string
-	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err = fs.WalkDir(root.FS(), walkRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
 		}
 		if d.IsDir() && skippedDirs[d.Name()] {
 			return filepath.SkipDir
@@ -276,11 +285,7 @@ func (t listFilesTool) Execute(_ context.Context, invocation Invocation) (Result
 		if d.IsDir() {
 			return nil
 		}
-		rel, err := filepath.Rel(t.repo.RootPath, path)
-		if err != nil {
-			return err
-		}
-		files = append(files, filepath.ToSlash(rel))
+		files = append(files, filepath.ToSlash(path))
 		return nil
 	})
 	if err != nil {
@@ -317,11 +322,16 @@ func (t readFileTool) Execute(_ context.Context, invocation Invocation) (Result,
 	if args.Path == "" {
 		return Result{}, fmt.Errorf("path is required")
 	}
-	path, err := safePath(t.repo.RootPath, args.Path)
+	path, err := cleanRepoPath(args.Path)
 	if err != nil {
 		return Result{}, err
 	}
-	content, err := os.ReadFile(path)
+	root, err := os.OpenRoot(t.repo.RootPath)
+	if err != nil {
+		return Result{}, err
+	}
+	defer root.Close()
+	content, err := root.ReadFile(path)
 	if err != nil {
 		return Result{}, err
 	}
@@ -458,14 +468,22 @@ func (t searchFilesTool) Execute(_ context.Context, invocation Invocation) (Resu
 	if maxMatches <= 0 {
 		maxMatches = 100
 	}
-	root, err := safePath(t.repo.RootPath, args.Path)
+	root, err := os.OpenRoot(t.repo.RootPath)
+	if err != nil {
+		return Result{}, err
+	}
+	defer root.Close()
+	walkRoot, err := cleanRepoPath(args.Path)
 	if err != nil {
 		return Result{}, err
 	}
 	var matches []map[string]any
-	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err = fs.WalkDir(root.FS(), walkRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
 		}
 		if d.IsDir() && skippedDirs[d.Name()] {
 			return filepath.SkipDir
@@ -473,16 +491,15 @@ func (t searchFilesTool) Execute(_ context.Context, invocation Invocation) (Resu
 		if d.IsDir() || len(matches) >= maxMatches {
 			return nil
 		}
-		content, err := os.ReadFile(path)
+		content, err := root.ReadFile(path)
 		if err != nil {
 			return nil
 		}
-		rel, _ := filepath.Rel(t.repo.RootPath, path)
 		lineNo := 0
 		for line := range strings.SplitSeq(string(content), "\n") {
 			lineNo++
 			if strings.Contains(line, args.Pattern) {
-				matches = append(matches, map[string]any{"path": filepath.ToSlash(rel), "line": lineNo, "text": line})
+				matches = append(matches, map[string]any{"path": filepath.ToSlash(path), "line": lineNo, "text": line})
 				if len(matches) >= maxMatches {
 					break
 				}
@@ -861,7 +878,12 @@ func (t gitmodulesTableTool) Definition() Definition {
 }
 
 func (t gitmodulesTableTool) Execute(context.Context, Invocation) (Result, error) {
-	content, err := os.ReadFile(filepath.Join(t.repo.RootPath, ".gitmodules"))
+	root, err := os.OpenRoot(t.repo.RootPath)
+	if err != nil {
+		return Result{}, err
+	}
+	defer root.Close()
+	content, err := root.ReadFile(".gitmodules")
 	if os.IsNotExist(err) {
 		return jsonResult("gitmodules_table", map[string]any{"present": false}, false)
 	}
@@ -917,11 +939,21 @@ func (t submoduleLogRangeTool) Execute(_ context.Context, invocation Invocation)
 	if err != nil {
 		return Result{}, err
 	}
-	path, err := safePath(t.repo.RootPath, args.Path)
+	rel, err := cleanRepoPath(args.Path)
 	if err != nil {
 		return Result{}, err
 	}
-	sub, err := gitctx.Open(path)
+	root, err := os.OpenRoot(t.repo.RootPath)
+	if err != nil {
+		return Result{}, err
+	}
+	defer root.Close()
+	subRoot, err := root.OpenRoot(rel)
+	if err != nil {
+		return jsonResult("submodule_log_range", map[string]any{"available": false, "error": err.Error()}, false)
+	}
+	defer subRoot.Close()
+	sub, err := gitctx.Open(subRoot.Name())
 	if err != nil {
 		return jsonResult("submodule_log_range", map[string]any{"available": false, "error": err.Error()}, false)
 	}
@@ -960,30 +992,16 @@ func normalizeCaps(maxBytes, maxLines int) (int, int) {
 	return maxBytes, maxLines
 }
 
-func safePath(root, rel string) (string, error) {
+func cleanRepoPath(rel string) (string, error) {
 	if rel == "" {
-		return root, nil
+		return ".", nil
 	}
 	cleaned := filepath.Clean(rel)
 	if filepath.IsAbs(cleaned) {
 		return "", fmt.Errorf("absolute paths are not allowed: %s", rel)
 	}
-	path := filepath.Join(root, cleaned)
-	resolvedRoot, err := filepath.Abs(root)
-	if err != nil {
-		return "", err
-	}
-	resolvedPath, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	if !pathInsideRoot(resolvedRoot, resolvedPath) {
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("path escapes repository: %s", rel)
 	}
-	return resolvedPath, nil
-}
-
-func pathInsideRoot(root, path string) bool {
-	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
-	return err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))))
+	return filepath.ToSlash(cleaned), nil
 }

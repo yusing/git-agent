@@ -19,10 +19,10 @@ type indexLock struct {
 
 func lockIndex(ctx context.Context, indexDir string) (*indexLock, error) {
 	lockPath := indexDir + ".lock"
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o644)
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if err == nil {
 		return &indexLock{file: file, path: lockPath}, nil
 	}
@@ -32,7 +32,7 @@ func lockIndex(ctx context.Context, indexDir string) (*indexLock, error) {
 	ticker := time.NewTicker(indexLockPollInterval)
 	defer ticker.Stop()
 	for {
-		file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o644)
+		file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 		if err == nil {
 			return &indexLock{file: file, path: lockPath}, nil
 		}

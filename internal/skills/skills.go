@@ -364,7 +364,7 @@ func parseSkill(root sourceRoot, path string) (Skill, bool, error) {
 	}
 	meta.Name = strings.Join(strings.Fields(meta.Name), " ")
 	meta.Description = truncateMetadata(strings.Join(strings.Fields(meta.Description), " "), maxSkillDescLen)
-	if !validSkillName(meta.Name) || !validSkillDescription(meta.Description) {
+	if !validSkillName(meta.Name) || hasCommitNameSegment(meta.Name) || !validSkillDescription(meta.Description) {
 		return Skill{}, false, nil
 	}
 	return Skill{
@@ -389,6 +389,17 @@ func readFrontmatterCandidate(path string) (string, error) {
 		return "", nil
 	}
 	return string(content), nil
+}
+
+func hasCommitNameSegment(name string) bool {
+	for part := range strings.FieldsFuncSeq(name, func(r rune) bool {
+		return r == '.' || r == '_' || r == '-' || r == ':'
+	}) {
+		if strings.EqualFold(part, "commit") {
+			return true
+		}
+	}
+	return false
 }
 
 func validSkillName(name string) bool {
