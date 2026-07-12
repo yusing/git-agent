@@ -636,7 +636,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		dimensions = opts.EmbeddingDimensions
 	}
 	if shouldSave {
-		if err := saveIndex(ctx, selection.metadataDir, indexDir, source, root, resolvedRev, opts.EmbeddingModel, dimensions, chunks, records, forceVectorKeys); err != nil {
+		if err := saveIndex(ctx, selection.metadataDir, indexDir, source, root, resolvedRev, opts.EmbeddingModel, dimensions, records, forceVectorKeys); err != nil {
 			mark("persist")
 			return fail(err)
 		}
@@ -1793,7 +1793,7 @@ func embeddingBatchEnd(texts []string, start, maxInputs, maxChars int) int {
 	return end
 }
 
-func saveIndex(ctx context.Context, metadataDir, dir string, source Source, root, resolvedRev, model string, dimensions int, chunks []Chunk, records []vectorRecord, forceVectorKeys map[string]bool) error {
+func saveIndex(ctx context.Context, metadataDir, dir string, source Source, root, resolvedRev, model string, dimensions int, records []vectorRecord, forceVectorKeys map[string]bool) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -1804,9 +1804,6 @@ func saveIndex(ctx context.Context, metadataDir, dir string, source Source, root
 		if err := syncDirectory(dir); err != nil {
 			return fmt.Errorf("sync invalidated search index: %w", err)
 		}
-	}
-	if err := writeJSONSync(filepath.Join(dir, "chunks.json"), chunks); err != nil {
-		return err
 	}
 	if err := writeSharedVectorIndex(ctx, metadataDir, dir, records, forceVectorKeys); err != nil {
 		return err

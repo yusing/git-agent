@@ -256,8 +256,8 @@ still applies. Query replay history remains scoped to its physical index.
 
 Compatible chunk vectors are stored once per project or remote metadata root in
 an append-only shared payload under `search/vector-store/`. Each physical
-filesystem or revision index keeps its own chunk metadata and immutable shared
-payload references, so snapshots retain their source, blob, path, and line
+filesystem or revision vector index keeps its own chunk metadata and immutable
+shared payload references, so snapshots retain their source, blob, path, and line
 identity without copying unchanged float payloads. Shared identity combines the
 embedding model, dimensions, and SHA-256 of the exact final capped provider
 input. Query embeddings and query history are not stored in the shared vector
@@ -336,10 +336,10 @@ replay history, and semantic search. `--no-tests` does not change the indexed
 candidate set. `--index --reindex` rebuilds embeddings for the selected
 candidate set even when cache entries already exist. Successful indexing writes
 the local cache after all missing embeddings complete. Cache writes replace the
-stored chunk and vector lists with the current candidate set, dropping entries
-for deleted or newly ignored files. Before replacing snapshot files, a writer
-removes and syncs the prior manifest; it durably writes the chunk and vector
-files, then publishes and syncs a new manifest. Interrupted or failed writes
+stored vector index with the current candidate set, dropping entries for deleted
+or newly ignored files. Before replacing snapshot files, a writer removes and
+syncs the prior manifest; it durably writes the vector files, then publishes and
+syncs a new manifest. Interrupted or failed writes
 therefore remain incomplete and are rebuilt instead of being queried as a
 completed mixed snapshot. `--code` writes still preserve current
 non-code entries in the shared physical cache so default searches can reuse

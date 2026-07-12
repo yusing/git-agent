@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -1597,7 +1598,6 @@ func TestFailedIndexWriteInvalidatesSnapshot(t *testing.T) {
 		"",
 		opts.EmbeddingModel,
 		opts.EmbeddingDimensions,
-		[]Chunk{{ID: "incomplete", Path: "incomplete.txt"}},
 		records,
 		nil,
 	)
@@ -2948,6 +2948,9 @@ func TestSearchBatchesIndexEmbeddingsAndCachesExactQueryEmbedding(t *testing.T) 
 		if _, err := os.Stat(filepath.Join(first.Diagnostics.IndexDir, name)); err != nil {
 			t.Fatalf("missing binary vector cache %s: %v", name, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(first.Diagnostics.IndexDir, "chunks.json")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("obsolete chunks cache exists: %v", err)
 	}
 	firstCalls := embedder.callCount()
 	if firstCalls <= 2 {

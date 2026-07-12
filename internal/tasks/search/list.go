@@ -502,26 +502,13 @@ type indexEntries struct {
 
 func loadIndexEntries(dir string) (indexEntries, error) {
 	records, err := loadVectorIndexRecords(dir)
-	if err == nil {
-		return indexEntries{
-			paths:  uniqueSortedPathsFrom(records, func(record vectorIndexRecord) string { return record.Path }),
-			chunks: len(records),
-		}, nil
-	}
-	if !errors.Is(err, fs.ErrNotExist) {
+	if err != nil {
 		return indexEntries{}, err
 	}
-	chunks, err := loadChunks(dir)
-	if err == nil {
-		return indexEntries{
-			paths:  uniqueSortedPathsFrom(chunks, func(chunk Chunk) string { return chunk.Path }),
-			chunks: len(chunks),
-		}, nil
-	}
-	if !errors.Is(err, fs.ErrNotExist) {
-		return indexEntries{}, err
-	}
-	return indexEntries{}, errors.New("search index has no path list")
+	return indexEntries{
+		paths:  uniqueSortedPathsFrom(records, func(record vectorIndexRecord) string { return record.Path }),
+		chunks: len(records),
+	}, nil
 }
 
 func loadVectorIndexRecords(dir string) ([]vectorIndexRecord, error) {
@@ -534,18 +521,6 @@ func loadVectorIndexRecords(dir string) ([]vectorIndexRecord, error) {
 		return nil, err
 	}
 	return records, nil
-}
-
-func loadChunks(dir string) ([]Chunk, error) {
-	data, err := os.ReadFile(filepath.Join(dir, "chunks.json"))
-	if err != nil {
-		return nil, err
-	}
-	var chunks []Chunk
-	if err := sonic.Unmarshal(data, &chunks); err != nil {
-		return nil, err
-	}
-	return chunks, nil
 }
 
 func uniqueSortedPathsFrom[T any](items []T, pathOf func(T) string) []string {
