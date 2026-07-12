@@ -21,6 +21,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/yusing/git-agent/internal/metadata"
 	"github.com/yusing/git-agent/internal/openai"
 )
 
@@ -761,10 +762,11 @@ func TestSearchCodeOnlyReindexPreservesSharedNonCodeVectors(t *testing.T) {
 	if second.Diagnostics.ReusedChunks != 0 || second.Diagnostics.EmbeddedChunks != 1 {
 		t.Fatalf("code reindex diagnostics = %#v, want one rebuilt code chunk", second.Diagnostics)
 	}
-	indexes, err := ListIndexes(t.Context(), root, "")
+	listing, err := ListIndexes(t.Context(), root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	indexes := listing.Indexes
 	if len(indexes) != 1 {
 		t.Fatalf("indexes = %#v, want one shared index", indexes)
 	}
@@ -2093,12 +2095,24 @@ func TestRemoteSearchUsesCachedCommittedTree(t *testing.T) {
 		t.Fatalf("completions = %q, missing %q", completions.String(), remote)
 	}
 
-	indexes, err := ListIndexes(t.Context(), root, remote)
+	listing, err := ListIndexes(t.Context(), root, remote)
 	if err != nil {
 		t.Fatal(err)
 	}
+	indexes := listing.Indexes
 	if len(indexes) != 1 || indexes[0].Mode != "remote" || indexes[0].Remote != remote || indexes[0].ResolvedRev != rev {
 		t.Fatalf("indexes = %#v, want remote index", indexes)
+	}
+	metadataDir, err := metadata.RemoteDir(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoDir := filepath.Join(metadataDir, "repo.git")
+	if listing.RepoDir != repoDir {
+		t.Fatalf("repo dir = %q, want %q", listing.RepoDir, repoDir)
+	}
+	if text := FormatIndexes(listing); !strings.Contains(text, "repo="+repoDir+"\n") {
+		t.Fatalf("formatted indexes missing remote repo dir:\n%s", text)
 	}
 	listed, err := ListIndexFiles(t.Context(), ListFilesOptions{Root: root, Remote: remote})
 	if err != nil {

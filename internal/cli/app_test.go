@@ -153,6 +153,29 @@ func TestSearchListRemotesEmpty(t *testing.T) {
 	}
 }
 
+func TestSearchRemoteLsShowsRepoWithoutIndexes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	remote := "https://example.test/repo.git"
+	metadataDir, err := metadata.RemoteDir(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(metadataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, metadataDir, "init", "--bare", "repo.git")
+
+	var stdout bytes.Buffer
+	app := &App{stdout: &stdout, stderr: io.Discard}
+	if err := app.Run(t.Context(), []string{"search", "--remote", remote, "--ls"}); err != nil {
+		t.Fatal(err)
+	}
+	want := "remote repo=" + filepath.Join(metadataDir, "repo.git") + "\nno search indexes\n"
+	if got := stdout.String(); got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
 func TestSearchListModesRejectIgnoredFlags(t *testing.T) {
 	tests := []struct {
 		name string

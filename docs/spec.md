@@ -370,8 +370,11 @@ Default `--format text` writes one human-readable entry per index with mode,
 optional short revision, root, path-derived filters (`scope-*` only for scopes
 that opt into normally skipped paths, plus legacy `code`), file count, chunk
 count, embedding model, dimensions, created time, and the absolute index
-directory path. `--format json` writes a JSON array of the same fields. The
-command does not call embedding providers and does not require API keys.
+directory path. With `--remote`, text output first writes the absolute cached
+bare-repository path as `remote repo=<path>`, including when no completed indexes
+exist. `--format json` preserves the index-array contract; cached repository
+inventory remains available through `--ls-remotes --format json`. The command
+does not call embedding providers and does not require API keys.
 
 #### `git-agent search --ls-remotes [--format text|json|completion]`
 

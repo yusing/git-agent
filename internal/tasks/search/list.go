@@ -34,6 +34,12 @@ type IndexInfo struct {
 	Dir            string    `json:"dir"`
 }
 
+// IndexListing describes cached repository context and its completed indexes.
+type IndexListing struct {
+	RepoDir string
+	Indexes []IndexInfo
+}
+
 // RemoteInfo describes one cached remote repository.
 type RemoteInfo struct {
 	Remote          string    `json:"remote"`
@@ -58,31 +64,38 @@ type IndexFiles struct {
 }
 
 // ListIndexes lists completed search indexes for the project containing root.
-func ListIndexes(ctx context.Context, root, remote string) ([]IndexInfo, error) {
+func ListIndexes(ctx context.Context, root, remote string) (IndexListing, error) {
+	var listing IndexListing
 	var metadataDir string
 	if strings.TrimSpace(remote) != "" {
 		var err error
 		metadataDir, err = metadata.RemoteDir(sanitizeRemoteURL(remote))
 		if err != nil {
-			return nil, err
+			return IndexListing{}, err
+		}
+		repoDir := filepath.Join(metadataDir, "repo.git")
+		if _, ok, err := openRemoteRepo(repoDir); err != nil {
+			return IndexListing{}, err
+		} else if ok {
+			listing.RepoDir = repoDir
 		}
 	} else {
 		selection, err := resolveIndexSelection(ctx, root, "", "", Filters{}, false, false, nil)
 		if err != nil {
-			return nil, err
+			return IndexListing{}, err
 		}
 		metadataDir = selection.metadataDir
 	}
 	searchRoot := filepath.Join(metadataDir, "search")
 	info, err := os.Stat(searchRoot)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return listing, nil
 	}
 	if err != nil {
-		return nil, err
+		return IndexListing{}, err
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("search metadata path %s is not a directory", searchRoot)
+		return IndexListing{}, fmt.Errorf("search metadata path %s is not a directory", searchRoot)
 	}
 
 	var indexes []IndexInfo
@@ -115,7 +128,7 @@ func ListIndexes(ctx context.Context, root, remote string) ([]IndexInfo, error) 
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return IndexListing{}, err
 	}
 	slices.SortFunc(indexes, func(a, b IndexInfo) int {
 		if c := cmp.Compare(a.Mode, b.Mode); c != 0 {
@@ -129,7 +142,8 @@ func ListIndexes(ctx context.Context, root, remote string) ([]IndexInfo, error) 
 		}
 		return cmp.Compare(a.Dir, b.Dir)
 	})
-	return indexes, nil
+	listing.Indexes = indexes
+	return listing, nil
 }
 
 // ListRemotes lists cached remote repositories.
@@ -287,12 +301,16 @@ func FormatFileTree(paths []string) string {
 }
 
 // FormatIndexes renders index summaries for human stdout.
-func FormatIndexes(indexes []IndexInfo) string {
-	if len(indexes) == 0 {
-		return "no search indexes\n"
-	}
+func FormatIndexes(listing IndexListing) string {
 	var b strings.Builder
-	for i, index := range indexes {
+	if listing.RepoDir != "" {
+		fmt.Fprintf(&b, "remote repo=%s\n", listing.RepoDir)
+	}
+	if len(listing.Indexes) == 0 {
+		b.WriteString("no search indexes\n")
+		return b.String()
+	}
+	for i, index := range listing.Indexes {
 		if i > 0 {
 			b.WriteByte('\n')
 		}

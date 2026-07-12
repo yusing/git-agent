@@ -29,10 +29,11 @@ func TestListIndexesAndFiles(t *testing.T) {
 		t.Fatal("expected index dir")
 	}
 
-	indexes, err := ListIndexes(t.Context(), root, "")
+	listing, err := ListIndexes(t.Context(), root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	indexes := listing.Indexes
 	if len(indexes) != 1 {
 		t.Fatalf("indexes = %d, want 1: %#v", len(indexes), indexes)
 	}
@@ -59,7 +60,7 @@ func TestListIndexesAndFiles(t *testing.T) {
 		t.Fatalf("created_at = %v", index.CreatedAt)
 	}
 
-	text := FormatIndexes(indexes)
+	text := FormatIndexes(listing)
 	if !strings.Contains(text, "filesystem") || !strings.Contains(text, "files=") {
 		t.Fatalf("format indexes missing summary:\n%s", text)
 	}
@@ -99,14 +100,14 @@ func TestListIndexesAndFiles(t *testing.T) {
 
 func TestListIndexesEmpty(t *testing.T) {
 	root := t.TempDir()
-	indexes, err := ListIndexes(t.Context(), root, "")
+	listing, err := ListIndexes(t.Context(), root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(indexes) != 0 {
-		t.Fatalf("indexes = %#v, want empty", indexes)
+	if len(listing.Indexes) != 0 {
+		t.Fatalf("indexes = %#v, want empty", listing.Indexes)
 	}
-	if got := FormatIndexes(indexes); got != "no search indexes\n" {
+	if got := FormatIndexes(listing); got != "no search indexes\n" {
 		t.Fatalf("format = %q", got)
 	}
 }
@@ -137,10 +138,11 @@ func TestListIndexFilesNoTestsSharesIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	indexes, err := ListIndexes(t.Context(), root, "")
+	listing, err := ListIndexes(t.Context(), root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	indexes := listing.Indexes
 	if len(indexes) != 1 {
 		t.Fatalf("indexes = %#v, want 1", indexes)
 	}

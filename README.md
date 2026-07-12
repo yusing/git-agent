@@ -176,6 +176,9 @@ git-agent search --ls-files --rev HEAD --scope internal/
 git-agent search --ls-files --remote https://github.com/yusing/git-agent.git
 ```
 
+Remote `--ls` output shows the cached bare-repository path even when no completed
+search indexes exist, followed by each available index path.
+
 Use [docs/spec.md](docs/spec.md) for exact cache layout and index-selection
 contracts.
 

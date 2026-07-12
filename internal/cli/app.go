@@ -322,14 +322,14 @@ func (a *App) runSearchListMode(ctx context.Context, opts searchListModeOptions)
 		if format != "text" && format != "json" {
 			return fmt.Errorf("--format must be text or json with --ls, got %q", format)
 		}
-		indexes, err := searchtask.ListIndexes(ctx, root, opts.remote)
+		listing, err := searchtask.ListIndexes(ctx, root, opts.remote)
 		if err != nil {
 			return err
 		}
 		if format == "json" {
-			return writeJSONOutput(a.stdout, indexes)
+			return writeJSONOutput(a.stdout, listing.Indexes)
 		}
-		_, err = io.WriteString(a.stdout, searchtask.FormatIndexes(indexes))
+		_, err = io.WriteString(a.stdout, searchtask.FormatIndexes(listing))
 		return err
 	}
 	if opts.listRemotes {
