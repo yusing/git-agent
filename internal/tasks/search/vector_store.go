@@ -317,7 +317,7 @@ func writeSharedVectorIndex(ctx context.Context, metadataDir, indexDir string, r
 	if err := local.Close(); err != nil {
 		return err
 	}
-	return writeJSON(filepath.Join(indexDir, "vectors.index.json"), index)
+	return writeJSONSync(filepath.Join(indexDir, "vectors.index.json"), index)
 }
 
 func loadSharedVectors(metadataDir, indexDir string) ([]vectorRecord, error) {

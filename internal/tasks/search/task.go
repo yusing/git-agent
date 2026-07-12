@@ -1797,13 +1797,24 @@ func saveIndex(ctx context.Context, metadataDir, dir string, source Source, root
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	if err := writeJSON(filepath.Join(dir, "chunks.json"), chunks); err != nil {
+	manifestPath := filepath.Join(dir, "manifest.json")
+	if err := os.Remove(manifestPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("invalidate search index manifest: %w", err)
+	} else if err == nil {
+		if err := syncDirectory(dir); err != nil {
+			return fmt.Errorf("sync invalidated search index: %w", err)
+		}
+	}
+	if err := writeJSONSync(filepath.Join(dir, "chunks.json"), chunks); err != nil {
 		return err
 	}
 	if err := writeSharedVectorIndex(ctx, metadataDir, dir, records, forceVectorKeys); err != nil {
 		return err
 	}
-	return writeJSON(filepath.Join(dir, "manifest.json"), manifest{
+	if err := syncDirectory(dir); err != nil {
+		return fmt.Errorf("sync search index payloads: %w", err)
+	}
+	if err := writeJSONSync(manifestPath, manifest{
 		Version:        indexVersion,
 		Mode:           source.Mode,
 		Root:           root,
@@ -1815,7 +1826,17 @@ func saveIndex(ctx context.Context, metadataDir, dir string, source Source, root
 		FileCount:      uniquePathCountFrom(records, func(record vectorRecord) string { return record.Path }),
 		ChunkCount:     len(records),
 		VectorStore:    sharedVectorStoreVersion,
-	})
+	}); err != nil {
+		return err
+	}
+	if err := syncDirectory(dir); err != nil {
+		removeErr := os.Remove(manifestPath)
+		if removeErr == nil {
+			removeErr = syncDirectory(dir)
+		}
+		return errors.Join(fmt.Errorf("publish search index manifest: %w", err), removeErr)
+	}
+	return nil
 }
 
 func writeJSON(path string, value any) error {
@@ -1825,6 +1846,23 @@ func writeJSON(path string, value any) error {
 	}
 	data = append(data, '\n')
 	return os.WriteFile(path, data, 0o600)
+}
+
+func writeJSONSync(path string, value any) (err error) {
+	data, err := sonic.Marshal(value)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, file.Close()) }()
+	if _, err := file.Write(data); err != nil {
+		return err
+	}
+	return file.Sync()
 }
 
 type scoredChunk struct {

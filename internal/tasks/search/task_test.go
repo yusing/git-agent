@@ -1562,6 +1562,61 @@ func TestCorruptSharedVectorIsRebuilt(t *testing.T) {
 	}
 }
 
+func TestFailedIndexWriteInvalidatesSnapshot(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.txt", "alpha\n")
+	embedder := &countingEmbedder{}
+	opts := Options{
+		Root:                root,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "text-embedding-3-small",
+		EmbeddingDimensions: 3,
+	}
+	first, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := loadVectors(first.Diagnostics.IndexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	records[0].Dimensions = 0
+	err = saveIndex(
+		t.Context(),
+		selection.metadataDir,
+		first.Diagnostics.IndexDir,
+		Source{Mode: "filesystem"},
+		root,
+		"",
+		opts.EmbeddingModel,
+		opts.EmbeddingDimensions,
+		[]Chunk{{ID: "incomplete", Path: "incomplete.txt"}},
+		records,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("saveIndex accepted invalid vector record")
+	}
+	if _, err := loadVectors(first.Diagnostics.IndexDir); err == nil {
+		t.Fatal("failed write left prior snapshot queryable")
+	}
+
+	second, err := Run(t.Context(), embedder, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Diagnostics.EmbeddedChunks != 1 || embedder.callCount() != 2 {
+		t.Fatalf("second diagnostics = %#v calls = %d, want incomplete snapshot rebuilt", second.Diagnostics, embedder.callCount())
+	}
+}
+
 func TestReindexAppendsSharedVectorWithoutChangingOtherSnapshot(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "a.txt", "alpha\n")

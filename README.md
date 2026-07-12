@@ -134,7 +134,9 @@ changed chunks. Compatible indexes also reference one shared on-disk vector
 payload per project or remote cache instead of copying unchanged vectors into
 every snapshot. Existing local vector payloads migrate on a later cache write.
 `--reindex` skips cross-index reuse, rebuilds the selected source, and appends a
-new shared vector generation without changing older snapshots.
+new shared vector generation without changing older snapshots. Interrupted
+cache writes remain incomplete and rebuild on the next search instead of being
+used as completed indexes.
 
 Useful flags:
 

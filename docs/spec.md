@@ -337,7 +337,11 @@ candidate set. `--index --reindex` rebuilds embeddings for the selected
 candidate set even when cache entries already exist. Successful indexing writes
 the local cache after all missing embeddings complete. Cache writes replace the
 stored chunk and vector lists with the current candidate set, dropping entries
-for deleted or newly ignored files. `--code` writes still preserve current
+for deleted or newly ignored files. Before replacing snapshot files, a writer
+removes and syncs the prior manifest; it durably writes the chunk and vector
+files, then publishes and syncs a new manifest. Interrupted or failed writes
+therefore remain incomplete and are rebuilt instead of being queried as a
+completed mixed snapshot. `--code` writes still preserve current
 non-code entries in the shared physical cache so default searches can reuse
 them. Visible `--scope` writes similarly preserve current out-of-scope entries
 in the shared physical cache. `--no-tests` does not alter the indexed candidate
