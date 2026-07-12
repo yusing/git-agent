@@ -208,10 +208,12 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 		}
 	} else if !cfg.Debug && isInteractiveFile(a.stderr) {
 		progressLog = func(progress searchtask.Progress) error {
-			if progress.Done < progress.Total {
-				progressStarted = true
-			}
 			a.writeSearchProgress(progress)
+			if progress.Status != "" || progress.Done < progress.Total {
+				progressStarted = true
+			} else if progress.Total > 0 {
+				progressStarted = false
+			}
 			return nil
 		}
 	}
@@ -259,6 +261,9 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	}
 	if progressAgent != nil {
 		progressAgent.Complete()
+	}
+	if progressStarted {
+		a.clearSearchProgress()
 	}
 	if cfg.Debug {
 		a.writeSearchDebug(output)
@@ -503,6 +508,13 @@ func (a *App) writeSearchDebug(output searchtask.Output) {
 }
 
 func (a *App) writeSearchProgress(progress searchtask.Progress) {
+	if progress.Status == searchtask.ProgressStatusFetching {
+		fmt.Fprint(a.stderr, "\r\x1b[2Ksearch: fetching remote")
+		if progress.Detail != "" {
+			fmt.Fprintf(a.stderr, ": %s", progress.Detail)
+		}
+		return
+	}
 	done, total, reused := progress.Done, progress.Total, progress.Reused
 	if total <= 0 {
 		return
@@ -1437,7 +1449,9 @@ func (a *App) budgetHandler() agent.BudgetHandler {
 }
 
 func isInteractiveFile(value any) bool {
-	file, ok := value.(*os.File)
+	file, ok := value.(interface {
+		Stat() (os.FileInfo, error)
+	})
 	if !ok {
 		return false
 	}

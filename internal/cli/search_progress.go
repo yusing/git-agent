@@ -22,6 +22,7 @@ type searchProgressAgent struct {
 
 type searchProgressSnapshot struct {
 	Status    string    `json:"status"`
+	Detail    string    `json:"detail,omitempty"`
 	Done      int       `json:"done"`
 	Total     int       `json:"total"`
 	Reused    int       `json:"reused"`
@@ -66,17 +67,21 @@ func (a *searchProgressAgent) Update(progress searchtask.Progress) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	status := "indexing"
+	status := progress.Status
+	if status == "" {
+		status = "indexing"
+	}
 	percent := 0.0
 	if progress.Total > 0 {
 		percent = float64(progress.Done) / float64(progress.Total) * 100
 	}
-	if progress.Total > 0 && progress.Done >= progress.Total {
+	if status == "indexing" && progress.Total > 0 && progress.Done >= progress.Total {
 		status = "done"
 		percent = 100
 	}
 	a.snapshot = searchProgressSnapshot{
 		Status:    status,
+		Detail:    progress.Detail,
 		Done:      progress.Done,
 		Total:     progress.Total,
 		Reused:    progress.Reused,

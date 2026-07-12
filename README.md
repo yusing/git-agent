@@ -154,7 +154,7 @@ Useful flags:
 | `--format` | Use `json\|brief` for search, `text\|json` for `--ls`, `text\|json\|completion` for `--ls-remotes`, and `tree\|json` for `--ls-files` |
 | `--index` | Build missing embeddings without searching |
 | `--reindex` | Rebuild existing embeddings and drop stale cache entries |
-| `--agent` | Use agent-friendly brief output and serve indexing progress on localhost when embeddings need work |
+| `--agent` | Use agent-friendly brief output and serve remote-fetch details and indexing progress on localhost when work is needed |
 | `--ls` | List search indexes for the current project or `--remote` cache without embedding or querying |
 | `--ls-remotes` | List cached remote repositories without embedding, fetching, or querying |
 | `--ls-files` | List files in the selected search index without embedding or querying; `--no-tests` filters listed paths without changing the selected index |

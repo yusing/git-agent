@@ -223,14 +223,19 @@ When stderr is an interactive terminal and `--debug` is not enabled, search
 shows transient indexing progress while missing embeddings are built or updated.
 The progress line is rewritten and cleared with ANSI control sequences before
 stdout is written. Non-interactive stderr receives no progress output.
-`--agent` starts a local progress probe server instead of terminal progress, but
-only when embeddings need to be built or rebuilt. The server listens on
+`--agent` starts a local progress probe server instead of terminal progress when
+a remote needs fetching or embeddings need to be built or rebuilt. The server
+listens on
 `127.0.0.1:0`, prints its actual `http://127.0.0.1:<port>/progress` URL to stderr,
-and returns JSON for `GET /progress` with status, completed chunk count, total
-chunk count, reused chunk count, percent, elapsed milliseconds, and last update
-time. When `--format` is omitted, `--agent` changes the output format default
+and returns JSON for `GET /progress` with status, including `fetching` before a
+remote network operation and sanitized server-side fetch detail when available,
+completed chunk count, total chunk count, reused chunk count, percent, elapsed
+milliseconds, and last update time. Interactive terminal mode rewrites the same
+remote-fetch detail in place and clears it before stdout. When `--format` is
+omitted, `--agent` changes the output format default
 from JSON to brief. The server shuts down when the search command exits. Cache-hit
-searches do not start the server and do not print a progress URL.
+searches that need neither a remote fetch nor embeddings do not start the server
+and do not print a progress URL.
 
 Persistent metadata is stored under `~/.git-agent/<path-sha>/`, where
 `<path-sha>` is the SHA-256 of the cleaned absolute project root. Search writes

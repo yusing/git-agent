@@ -1399,7 +1399,7 @@ func TestFilesystemAndRevisionIndexesShareVectorPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1433,7 +1433,7 @@ func TestChangedRevisionAppendsOnlyNewSharedVectorPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1460,7 +1460,7 @@ func TestLegacyLocalVectorIndexMigratesWithoutEmbedding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1533,7 +1533,7 @@ func TestCorruptSharedVectorIsRebuilt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1583,7 +1583,7 @@ func TestFailedIndexWriteInvalidatesSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1658,7 +1658,7 @@ func TestReindexAppendsSharedVectorWithoutChangingOtherSnapshot(t *testing.T) {
 	if _, err := loadVectors(revision.Diagnostics.IndexDir); err != nil {
 		t.Fatalf("load original revision snapshot: %v", err)
 	}
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2052,6 +2052,7 @@ func TestRemoteSearchUsesCachedCommittedTree(t *testing.T) {
 	rev := commitSearchRepo(t, remote)
 	root := t.TempDir()
 
+	var progress []Progress
 	out, err := Run(t.Context(), fakeEmbedder{}, Options{
 		Root:                root,
 		Remote:              remote,
@@ -2059,6 +2060,10 @@ func TestRemoteSearchUsesCachedCommittedTree(t *testing.T) {
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "test-model",
 		EmbeddingDimensions: 3,
+		ProgressLog: func(update Progress) error {
+			progress = append(progress, update)
+			return nil
+		},
 	}, "remote alpha")
 	if err != nil {
 		t.Fatal(err)
@@ -2068,6 +2073,9 @@ func TestRemoteSearchUsesCachedCommittedTree(t *testing.T) {
 	}
 	if len(out.Results) == 0 || !strings.Contains(out.Results[0].Range, "remote.txt") {
 		t.Fatalf("results = %#v, want remote.txt", out.Results)
+	}
+	if len(progress) == 0 || progress[0].Status != ProgressStatusFetching {
+		t.Fatalf("first progress = %#v, want remote fetch status", progress)
 	}
 
 	remotes, err := ListRemotes()
@@ -2098,6 +2106,40 @@ func TestRemoteSearchUsesCachedCommittedTree(t *testing.T) {
 	}
 	if !slices.Contains(listed.Files, "remote.txt") {
 		t.Fatalf("files = %#v, missing remote.txt", listed.Files)
+	}
+}
+
+func TestRemoteProgressWriterReportsCompleteUpdates(t *testing.T) {
+	var updates []Progress
+	rawRemote := "https://user:secret@example.test/repo.git?token=abc#fragment"
+	writer := remoteProgressWriter{
+		rawRemote: rawRemote,
+		remote:    sanitizeRemoteURL(rawRemote),
+		progressLog: func(update Progress) error {
+			updates = append(updates, update)
+			return nil
+		},
+	}
+	if _, err := writer.Write([]byte("Enumerating objects: 25%\rCounting obj")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("ects: 50%\r")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("Fetching " + rawRemote + "\r")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("Credentials user secret abc fragment\r")); err != nil {
+		t.Fatal(err)
+	}
+	want := []Progress{
+		{Status: ProgressStatusFetching, Detail: "Enumerating objects: 25%"},
+		{Status: ProgressStatusFetching, Detail: "Counting objects: 50%"},
+		{Status: ProgressStatusFetching, Detail: "Fetching https://example.test/repo.git"},
+		{Status: ProgressStatusFetching, Detail: "Credentials [REDACTED] [REDACTED] [REDACTED] [REDACTED]"},
+	}
+	if !slices.Equal(updates, want) {
+		t.Fatalf("updates = %#v, want %#v", updates, want)
 	}
 }
 

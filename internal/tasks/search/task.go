@@ -49,6 +49,7 @@ const (
 	DefaultEmbeddingBatchMaxChars = 700_000
 	DefaultEmbeddingMaxInputChars = 32_000
 	maxEmbeddingLineChars         = 4_000
+	ProgressStatusFetching        = "fetching"
 )
 
 var searchIgnoreFileNames = map[string]bool{
@@ -123,6 +124,8 @@ type Options struct {
 }
 
 type Progress struct {
+	Status  string
+	Detail  string
 	Done    int
 	Total   int
 	Reused  int
@@ -381,7 +384,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		}
 	}
 	filters := Filters{Code: opts.CodeOnly, NoTests: opts.NoTests, Scope: scope}
-	selection, err := resolveIndexSelection(ctx, rootOpt, opts.Remote, opts.Rev, filters, opts.Reindex, true)
+	selection, err := resolveIndexSelection(ctx, rootOpt, opts.Remote, opts.Rev, filters, opts.Reindex, true, opts.ProgressLog)
 	if err != nil {
 		return fail(err)
 	}

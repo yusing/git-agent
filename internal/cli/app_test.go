@@ -26,6 +26,15 @@ import (
 	searchtask "github.com/yusing/git-agent/internal/tasks/search"
 )
 
+type interactiveBuffer struct {
+	bytes.Buffer
+	info os.FileInfo
+}
+
+func (b *interactiveBuffer) Stat() (os.FileInfo, error) {
+	return b.info, nil
+}
+
 func TestRunWithoutArgsReturnsUsage(t *testing.T) {
 	err := New().Run(t.Context(), nil)
 	if err == nil {
@@ -550,15 +559,58 @@ func TestSearchProgressRewritesAndClearsLine(t *testing.T) {
 	var stderr bytes.Buffer
 	app := &App{stderr: &stderr}
 
+	app.writeSearchProgress(searchtask.Progress{Status: searchtask.ProgressStatusFetching})
+	app.writeSearchProgress(searchtask.Progress{Status: searchtask.ProgressStatusFetching, Detail: "Counting objects: 50%"})
 	app.writeSearchProgress(searchtask.Progress{Total: 5})
 	app.writeSearchProgress(searchtask.Progress{Done: 2, Total: 5, Elapsed: 1500 * time.Millisecond})
 	app.writeSearchProgress(searchtask.Progress{Done: 5, Total: 5, Elapsed: 2 * time.Second})
 
-	want := "\r\x1b[2Ksearch: building embeddings 0/5 chunks" +
+	want := "\r\x1b[2Ksearch: fetching remote" +
+		"\r\x1b[2Ksearch: fetching remote: Counting objects: 50%" +
+		"\r\x1b[2Ksearch: building embeddings 0/5 chunks" +
 		"\r\x1b[2Ksearch: building embeddings 2/5 chunks (40.0%, 1.5s)" +
 		"\r\x1b[2K"
 	if got := stderr.String(); got != want {
 		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+}
+
+func TestSearchClearsRemoteFetchProgressBeforeEmptyOutput(t *testing.T) {
+	remote := t.TempDir()
+	runGit(t, remote, "init")
+	runGit(t, remote, "config", "user.email", "test@example.com")
+	runGit(t, remote, "config", "user.name", "Test User")
+	writeFixtureFile(t, filepath.Join(remote, "README.md"), "# fixture\n")
+	runGit(t, remote, "add", "README.md")
+	runGit(t, remote, "commit", "-m", "fixture")
+
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("HOME", t.TempDir())
+	useGeneralEmbeddingProvider(t)
+	server, _ := newSearchEmbeddingsServer(t)
+	defer server.Close()
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+
+	info, err := os.Stat("/dev/null")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	stderr := &interactiveBuffer{info: info}
+	app := &App{stdout: &stdout, stderr: stderr}
+	if err := app.Run(t.Context(), []string{
+		"search", "--format", "brief", "--remote", remote,
+		"--code", "--no-tests", "--scope", "src", "find", "nothing",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stderr.String(); !strings.HasSuffix(got, "\r\x1b[2K") {
+		t.Fatalf("stderr = %q, want cleared progress line", got)
+	}
+	if got := stdout.String(); got != "# mode=remote index=empty\n" {
+		t.Fatalf("stdout = %q, want empty remote result", got)
 	}
 }
 
@@ -572,38 +624,40 @@ func TestSearchProgressAgentServesCurrentProgress(t *testing.T) {
 	if !strings.HasPrefix(agent.URL(), "http://127.0.0.1:") || !strings.HasSuffix(agent.URL(), "/progress") {
 		t.Fatalf("agent URL = %q", agent.URL())
 	}
+	readSnapshot := func() searchProgressSnapshot {
+		resp, err := http.Get(agent.URL())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d", resp.StatusCode)
+		}
+		var snapshot searchProgressSnapshot
+		if err := json.NewDecoder(resp.Body).Decode(&snapshot); err != nil {
+			t.Fatal(err)
+		}
+		return snapshot
+	}
+	agent.Update(searchtask.Progress{Status: searchtask.ProgressStatusFetching, Detail: "Counting objects: 50%"})
+	snapshot := readSnapshot()
+	if snapshot.Status != searchtask.ProgressStatusFetching || snapshot.Detail != "Counting objects: 50%" {
+		t.Fatalf("snapshot = %#v, want fetching status", snapshot)
+	}
 	agent.Update(searchtask.Progress{Done: 2, Total: 5, Reused: 1, Elapsed: 1500 * time.Millisecond})
 
-	resp, err := http.Get(agent.URL())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d", resp.StatusCode)
-	}
-	var snapshot searchProgressSnapshot
-	if err := json.NewDecoder(resp.Body).Decode(&snapshot); err != nil {
-		t.Fatal(err)
-	}
+	snapshot = readSnapshot()
 	if snapshot.Status != "indexing" || snapshot.Done != 2 || snapshot.Total != 5 || snapshot.Reused != 1 || snapshot.Percent != 40 || snapshot.ElapsedMS != 1500 {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
 
 	agent.Update(searchtask.Progress{Done: 5, Total: 5, Reused: 1, Elapsed: 2 * time.Second})
-	resp, err = http.Get(agent.URL())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if err := json.NewDecoder(resp.Body).Decode(&snapshot); err != nil {
-		t.Fatal(err)
-	}
+	snapshot = readSnapshot()
 	if snapshot.Status != "done" || snapshot.Percent != 100 {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
 
-	resp, err = http.Get(strings.TrimSuffix(agent.URL(), "/progress") + "/not-progress")
+	resp, err := http.Get(strings.TrimSuffix(agent.URL(), "/progress") + "/not-progress")
 	if err != nil {
 		t.Fatal(err)
 	}

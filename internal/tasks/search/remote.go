@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+	"unicode"
 
 	"github.com/bytedance/sonic"
 	git "github.com/go-git/go-git/v6"
@@ -20,13 +22,62 @@ import (
 
 const remoteRefreshTTL = 15 * time.Minute
 
+const maxRemoteProgressDetailBytes = 4 << 10
+
+type remoteProgressWriter struct {
+	mu          sync.Mutex
+	pending     strings.Builder
+	progressLog func(Progress) error
+	rawRemote   string
+	remote      string
+}
+
+func (w *remoteProgressWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	for i, b := range p {
+		if b == '\r' || b == '\n' {
+			if err := w.emit(); err != nil {
+				return i + 1, err
+			}
+			continue
+		}
+		if w.pending.Len() < maxRemoteProgressDetailBytes {
+			w.pending.WriteByte(b)
+		}
+	}
+	return len(p), nil
+}
+
+func (w *remoteProgressWriter) Flush() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.emit()
+}
+
+func (w *remoteProgressWriter) emit() error {
+	detail := strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, strings.ToValidUTF8(w.pending.String(), "�")))
+	w.pending.Reset()
+	detail = sanitizeRemoteText(detail, w.rawRemote, w.remote)
+	if detail == "" {
+		return nil
+	}
+	return w.progressLog(Progress{Status: ProgressStatusFetching, Detail: detail})
+}
+
 type remoteCache struct {
 	URL             string    `json:"url"`
 	LastFetchedAt   time.Time `json:"last_fetched_at,omitempty"`
 	LastResolvedRev string    `json:"last_resolved_rev,omitempty"`
 }
 
-func resolveRemoteIndexSelection(ctx context.Context, remoteURL, rev string, filters Filters, reindex, fetchAllowed bool) (indexSelection, error) {
+func resolveRemoteIndexSelection(ctx context.Context, remoteURL, rev string, filters Filters, reindex, fetchAllowed bool, progressLog func(Progress) error) (indexSelection, error) {
 	remote := sanitizeRemoteURL(remoteURL)
 	metadataDir, err := metadata.RemoteDir(remote)
 	if err != nil {
@@ -57,8 +108,17 @@ func resolveRemoteIndexSelection(ctx context.Context, remoteURL, rev string, fil
 			return indexSelection{}, err
 		}
 	}
+	reportFetch := func() error {
+		if progressLog != nil {
+			return progressLog(Progress{Status: ProgressStatusFetching})
+		}
+		return nil
+	}
 	if needFetch {
-		if err := fetchRemote(ctx, repo, remoteURL, shallowFetch); err != nil {
+		if err := reportFetch(); err != nil {
+			return indexSelection{}, err
+		}
+		if err := fetchRemote(ctx, repo, remoteURL, shallowFetch, progressLog); err != nil {
 			return indexSelection{}, fmt.Errorf("fetch remote %s: %s", remote, sanitizeRemoteError(err, remoteURL, remote))
 		}
 		cache.LastFetchedAt = time.Now().UTC()
@@ -74,7 +134,10 @@ func resolveRemoteIndexSelection(ctx context.Context, remoteURL, rev string, fil
 	}
 	resolvedRev, err := resolveRemoteRef(wrapped, sourceRev)
 	fetchAndResolve := func(shallow bool) (string, error) {
-		if err := fetchRemote(ctx, repo, remoteURL, shallow); err != nil {
+		if err := reportFetch(); err != nil {
+			return "", err
+		}
+		if err := fetchRemote(ctx, repo, remoteURL, shallow, progressLog); err != nil {
 			return "", fmt.Errorf("fetch remote %s: %s", remote, sanitizeRemoteError(err, remoteURL, remote))
 		}
 		cache.LastFetchedAt = time.Now().UTC()
@@ -129,10 +192,36 @@ func sanitizeRemoteError(err error, raw, sanitized string) string {
 	if err == nil {
 		return ""
 	}
-	message := err.Error()
+	return sanitizeRemoteText(err.Error(), raw, sanitized)
+}
+
+func sanitizeRemoteText(message, raw, sanitized string) string {
 	if raw != "" && raw != sanitized {
 		message = strings.ReplaceAll(message, raw, sanitized)
 	}
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return message
+	}
+	redact := func(secret string) {
+		if secret == "" {
+			return
+		}
+		for _, value := range []string{secret, url.QueryEscape(secret), url.PathEscape(secret)} {
+			message = strings.ReplaceAll(message, value, "[REDACTED]")
+		}
+	}
+	if parsed.User != nil {
+		redact(parsed.User.Username())
+		password, _ := parsed.User.Password()
+		redact(password)
+	}
+	for _, values := range parsed.Query() {
+		for _, value := range values {
+			redact(value)
+		}
+	}
+	redact(parsed.Fragment)
 	return message
 }
 
@@ -184,10 +273,18 @@ func initRemoteRepo(path, remote string) (*git.Repository, error) {
 	return repo, nil
 }
 
-func fetchRemote(ctx context.Context, repo *git.Repository, remoteURL string, shallow bool) error {
+func fetchRemote(ctx context.Context, repo *git.Repository, remoteURL string, shallow bool, progressLog func(Progress) error) error {
 	depth := 0
 	if shallow {
 		depth = 1
+	}
+	var progress *remoteProgressWriter
+	if progressLog != nil {
+		progress = &remoteProgressWriter{
+			progressLog: progressLog,
+			rawRemote:   remoteURL,
+			remote:      sanitizeRemoteURL(remoteURL),
+		}
 	}
 	err := repo.FetchContext(ctx, &git.FetchOptions{
 		RemoteName: "origin",
@@ -197,11 +294,16 @@ func fetchRemote(ctx context.Context, repo *git.Repository, remoteURL string, sh
 		Tags:       plumbing.NoTags,
 		Force:      true,
 		Prune:      true,
+		Progress:   progress,
 	})
-	if errors.Is(err, git.NoErrAlreadyUpToDate) {
-		return nil
+	var progressErr error
+	if progress != nil {
+		progressErr = progress.Flush()
 	}
-	return err
+	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+		return err
+	}
+	return progressErr
 }
 
 func remoteFetchRefSpecs() []gitconfig.RefSpec {
