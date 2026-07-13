@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bytedance/sonic"
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -40,14 +41,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestIndexSyncSharesOnlyCurrentHEADRecords(t *testing.T) {
-	syncRemote := filepath.Join(t.TempDir(), "indexes.git")
-	remoteRepo, err := git.PlainInit(syncRemote, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := remoteRepo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("main"))); err != nil {
-		t.Fatal(err)
-	}
+	syncRemote := newEmptySyncRemote(t)
 	origin := "https://example.test/acme/widget.git"
 	firstRoot := t.TempDir()
 	writeFile(t, firstRoot, "app.go", "package app\n\nfunc Stable() {}\n")
@@ -71,11 +65,16 @@ func TestIndexSyncSharesOnlyCurrentHEADRecords(t *testing.T) {
 		t.Fatal("first machine did not build HEAD index")
 	}
 
-	sync, err := openIndexSync(t.Context(), syncRemote, giturl.Identity(origin), head, "test-model", 3)
+	sync, err := openIndexSync(t.Context(), syncRemote)
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(sync.snapshotPath())
+	target := indexSyncTarget{origin: giturl.Identity(origin), revision: head, model: "test-model", dimensions: 3}
+	snapshotPath, err := sync.snapshotPath(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(snapshotPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +90,7 @@ func TestIndexSyncSharesOnlyCurrentHEADRecords(t *testing.T) {
 	if dirtyEmbedder.calls.Load() == 0 {
 		t.Fatal("dirty working tree did not re-index locally")
 	}
-	after, err := os.ReadFile(sync.snapshotPath())
+	after, err := os.ReadFile(snapshotPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,6 +113,175 @@ func TestIndexSyncSharesOnlyCurrentHEADRecords(t *testing.T) {
 	}
 }
 
+func TestRemoteSearchPullsSelectedRevisionFromIndexSync(t *testing.T) {
+	sourceRemote := t.TempDir()
+	writeFile(t, sourceRemote, "remote.txt", "shared remote revision\n")
+	revision := commitSearchRepo(t, sourceRemote)
+	syncRemote := newEmptySyncRemote(t)
+
+	firstHome := t.TempDir()
+	t.Setenv("HOME", firstHome)
+	first := &countingEmbedder{}
+	opts := Options{
+		Root:                t.TempDir(),
+		Remote:              sourceRemote,
+		Rev:                 revision,
+		IndexRemote:         syncRemote,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+	}
+	if _, err := Run(t.Context(), first, opts, ""); err != nil {
+		t.Fatal(err)
+	}
+	if first.calls.Load() == 0 {
+		t.Fatal("first remote search did not embed selected revision")
+	}
+
+	t.Setenv("HOME", t.TempDir())
+	second := &countingEmbedder{}
+	if _, err := Run(t.Context(), second, opts, ""); err != nil {
+		t.Fatal(err)
+	}
+	if calls := second.calls.Load(); calls != 0 {
+		t.Fatalf("second remote search embedding calls = %d, want 0", calls)
+	}
+}
+
+func TestLocalRevisionSearchPullsSelectedRevisionFromIndexSync(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "app.go", "package app\n\nfunc First() {}\n")
+	firstRevision := commitSearchRepo(t, root)
+	writeFile(t, root, "app.go", "package app\n\nfunc Second() {}\n")
+	commitSearchRepoChange(t, root, "second")
+	setTestOrigin(t, root, "https://example.test/acme/local-revision.git")
+	syncRemote := newEmptySyncRemote(t)
+	opts := Options{
+		Root:                root,
+		Rev:                 firstRevision,
+		IndexRemote:         syncRemote,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+	}
+	t.Setenv("HOME", t.TempDir())
+	first := &countingEmbedder{}
+	if _, err := Run(t.Context(), first, opts, ""); err != nil {
+		t.Fatal(err)
+	}
+	if first.calls.Load() == 0 {
+		t.Fatal("first revision search did not embed")
+	}
+	t.Setenv("HOME", t.TempDir())
+	second := &countingEmbedder{}
+	if _, err := Run(t.Context(), second, opts, ""); err != nil {
+		t.Fatal(err)
+	}
+	if calls := second.calls.Load(); calls != 0 {
+		t.Fatalf("second revision search embedding calls = %d, want 0", calls)
+	}
+}
+
+func TestSyncAllPublishesEveryCompletedRevisionOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := t.TempDir()
+	writeFile(t, root, "app.go", "package app\n\nfunc First() {}\n")
+	firstRevision := commitSearchRepo(t, root)
+	writeFile(t, root, "app.go", "package app\n\nfunc Second() {}\n")
+	secondRevision := commitSearchRepoChange(t, root, "second")
+	origin := "https://example.test/acme/full-sync.git"
+	setTestOrigin(t, root, origin)
+	opts := Options{
+		Root:                root,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+	}
+	for _, revision := range []string{firstRevision, secondRevision} {
+		opts.Rev = revision
+		if _, err := Run(t.Context(), fakeEmbedder{}, opts, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	opts.Rev = ""
+	if _, err := Run(t.Context(), fakeEmbedder{}, opts, ""); err != nil {
+		t.Fatal(err)
+	}
+	remoteSource := t.TempDir()
+	writeFile(t, remoteSource, "remote.txt", "cached remote revision\n")
+	remoteRevision := commitSearchRepo(t, remoteSource)
+	if _, err := Run(t.Context(), fakeEmbedder{}, Options{
+		Root:                t.TempDir(),
+		Remote:              remoteSource,
+		Rev:                 remoteRevision,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(home, ".git-agent"), "corrupt/search/revs/bad/manifest.json", "{\"version\":999}\n")
+
+	syncRemote := newEmptySyncRemote(t)
+	summary, err := SyncAll(t.Context(), syncRemote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Indexes != 3 || summary.Records == 0 || summary.Skipped != 1 {
+		t.Fatalf("summary = %#v", summary)
+	}
+	sync, err := openIndexSync(t.Context(), syncRemote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sync.close()
+	for _, revision := range []string{firstRevision, secondRevision} {
+		target := indexSyncTarget{origin: giturl.Identity(origin), revision: revision, model: "test-model", dimensions: 3}
+		path, err := sync.snapshotPath(target)
+		if err != nil {
+			t.Fatalf("resolve synced revision %s: %v", revision, err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read synced revision %s: %v", revision, err)
+		}
+		var snapshot syncedIndex
+		if err := sonic.Unmarshal(data, &snapshot); err != nil || len(snapshot.Records) == 0 {
+			t.Fatalf("snapshot %s = %#v, %v", revision, snapshot, err)
+		}
+	}
+	remoteTarget := indexSyncTarget{origin: giturl.Identity(remoteSource), revision: remoteRevision, model: "test-model", dimensions: 3}
+	remotePath, err := sync.snapshotPath(remoteTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(remotePath); err != nil {
+		t.Fatalf("remote revision was not synced: %v", err)
+	}
+}
+
+func newEmptySyncRemote(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "indexes.git")
+	repo, err := git.PlainInit(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("main"))); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestIndexSyncFailsWhenRemoteIsUnreachable(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "app.go", "package app\n")
@@ -134,22 +302,15 @@ func TestIndexSyncFailsWhenRemoteIsUnreachable(t *testing.T) {
 }
 
 func TestIndexSyncSerializesSharedWorkingTree(t *testing.T) {
-	syncRemote := filepath.Join(t.TempDir(), "indexes.git")
-	remoteRepo, err := git.PlainInit(syncRemote, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := remoteRepo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("main"))); err != nil {
-		t.Fatal(err)
-	}
-	first, err := openIndexSync(t.Context(), syncRemote, "example.test/acme/repo", strings.Repeat("a", 40), "model", 3)
+	syncRemote := newEmptySyncRemote(t)
+	first, err := openIndexSync(t.Context(), syncRemote)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer first.close()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, err = openIndexSync(ctx, syncRemote, "example.test/acme/repo", strings.Repeat("a", 40), "model", 3)
+	_, err = openIndexSync(ctx, syncRemote)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("second sync error = %v, want canceled lock wait", err)
 	}
@@ -166,6 +327,44 @@ func TestValidateSyncTreeRejectsSymlink(t *testing.T) {
 	}
 	if err := validateSyncTree(root); err == nil || !strings.Contains(err.Error(), "contains symlink") {
 		t.Fatalf("validation error = %v", err)
+	}
+}
+
+func TestValidateSyncTreeRejectsUnexpectedFile(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "README.md", "not index data\n")
+	if err := validateSyncTree(root); err == nil || !strings.Contains(err.Error(), "contains unsafe path") {
+		t.Fatalf("validation error = %v", err)
+	}
+}
+
+func TestSnapshotPathRejectsUnsafeRevision(t *testing.T) {
+	sync := &indexSync{dir: t.TempDir()}
+	_, err := sync.snapshotPath(indexSyncTarget{
+		origin:     "https://example.test/acme/widget",
+		revision:   "../../.git/config",
+		model:      "test-model",
+		dimensions: 3,
+	})
+	if err == nil || !strings.Contains(err.Error(), "target is invalid") {
+		t.Fatalf("snapshot path error = %v", err)
+	}
+}
+
+func TestSyncTargetFromLegacyManifestDoesNotGuessCurrentOrigin(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "app.go", "package app\n")
+	revision := commitSearchRepo(t, root)
+	setTestOrigin(t, root, "https://example.test/acme/reused.git")
+	_, ok := syncTargetFromManifest(filepath.Join(root, "search", "revs", revision), manifest{
+		Mode:           "revision",
+		Root:           root,
+		ResolvedRev:    revision,
+		EmbeddingModel: "test-model",
+		Dimensions:     3,
+	})
+	if ok {
+		t.Fatal("legacy manifest without persisted origin identity was accepted")
 	}
 }
 

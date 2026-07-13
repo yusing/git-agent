@@ -46,7 +46,8 @@ directory is on `PATH`.
 | Release body | `git-agent release-note <base> <release>` | Release Markdown on stdout |
 | Version bump release body | `git-agent release-note patch` | Release Markdown for latest tag to `HEAD` |
 | Agent context search | `git-agent search --agent <query...>` | Brief results, plus progress URL when indexing |
-| Configure index sync | `git-agent config index.remote <git-url>` | Save a dedicated Git remote for shared HEAD indexes |
+| Configure index sync | `git-agent config index.remote <git-url>` | Save a dedicated Git remote for shared revision indexes |
+| Push local indexes | `git-agent index sync` | Additively publish all completed local revision indexes |
 | List search indexes | `git-agent search --ls` | Local index summaries for the current project |
 | List indexed files | `git-agent search --ls-files` | Tree of files stored in the selected index |
 
@@ -133,13 +134,16 @@ Search indexes can be synchronized through a dedicated Git repository:
 ```sh
 git-agent config index.remote git@example.com:team/git-agent-indexes.git
 git-agent config index.remote
+git-agent index sync
 git-agent config --unset index.remote
 ```
 
-Configured sync publishes only current committed `HEAD`; working-tree-only
-vectors remain local. Index repository must be dedicated to `git-agent`, and
-unreachable remote fails search explicitly. See [docs/spec.md](docs/spec.md)
-for pull/rebase, conflict merge, branch, migration, and failure contracts.
+Normal search syncs selected revision: committed `HEAD` for filesystem search,
+resolved `--rev`, or selected `--remote` revision. Working-tree-only vectors
+remain local. `git-agent index sync` additively publishes every completed local
+revision index without embedding new content. Index repository must be
+dedicated to `git-agent`; unreachable remote fails explicitly. See
+[docs/spec.md](docs/spec.md) for exact sync contracts.
 
 Normal indexing reuses exact matching chunk embeddings from compatible indexes
 for the same project or cached remote. This includes filesystem-to-revision and
@@ -215,6 +219,7 @@ git-agent search --ls-remotes [--format text|json|completion]
 git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]
 git-agent config index.remote [<git-url>]
 git-agent config --unset index.remote
+git-agent index sync
 ```
 
 Common message-generation flags:

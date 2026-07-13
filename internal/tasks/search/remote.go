@@ -164,7 +164,7 @@ func resolveRemoteIndexSelection(ctx context.Context, remoteURL, rev string, fil
 			return indexSelection{}, err
 		}
 	}
-	source := Source{Mode: "remote", Remote: remote, Rev: sourceRev, ResolvedRev: resolvedRev}
+	source := Source{Mode: "remote", Remote: remote, Rev: sourceRev, ResolvedRev: resolvedRev, OriginIdentity: giturl.Identity(remoteURL)}
 	return indexSelection{
 		root:        "",
 		metadataDir: metadataDir,

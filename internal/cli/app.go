@@ -56,6 +56,8 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "config":
 		return a.runConfig(args[1:])
+	case "index":
+		return a.runIndex(ctx, args[1:])
 	case "commit":
 		return a.runCommit(ctx, args[1:])
 	case "commit-msg":
@@ -71,6 +73,25 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	default:
 		return usageError(fmt.Sprintf("unknown command %q", args[0]))
 	}
+}
+
+func (a *App) runIndex(ctx context.Context, args []string) error {
+	if len(args) != 1 || args[0] != "sync" {
+		return errors.New("usage: git-agent index sync")
+	}
+	cfg, err := config.LoadFile()
+	if err != nil {
+		return err
+	}
+	if cfg.Index.Remote == "" {
+		return errors.New("index.remote is not configured; configure it with git-agent config index.remote <git-url>")
+	}
+	summary, err := searchtask.SyncAll(ctx, cfg.Index.Remote)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(a.stdout, "synced indexes=%d records=%d skipped=%d\n", summary.Indexes, summary.Records, summary.Skipped)
+	return err
 }
 
 func (a *App) runConfig(args []string) error {
@@ -1519,6 +1540,7 @@ func usageError(prefix string) error {
 	b.WriteString("usage:\n")
 	b.WriteString("  git-agent commit [--amend] [flags]\n")
 	b.WriteString("  git-agent config [--unset] index.remote [<git-url>]\n")
+	b.WriteString("  git-agent index sync\n")
 	b.WriteString("  git-agent commit-msg [--amend] [flags]\n")
 	b.WriteString("  git-agent pr-message [flags]\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")

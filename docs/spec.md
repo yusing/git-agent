@@ -31,6 +31,7 @@ Supported workflows:
 - `git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]`
 - `git-agent config index.remote [<git-url>]`
 - `git-agent config --unset index.remote`
+- `git-agent index sync`
 
 ### Non-goals
 
@@ -210,12 +211,13 @@ normalized BM25-style body text overlap, path token overlap, and indexed symbol
 token overlap. Output and replay history keep the original query string, not the
 framed embedding input.
 
-When global `index.remote` is configured and local Git repository has an
-`origin`, search synchronizes committed `HEAD` index records through that
-dedicated Git remote before checking local index freshness. Remote must be
-reachable; list, fetch, or push transport failures fail command explicitly
-instead of falling back to independent local rebuild. Non-Git directories and
-repositories without `origin` remain local-only.
+When global `index.remote` is configured, search synchronizes selected revision
+records through that dedicated Git remote before checking local index freshness.
+Filesystem mode selects local repository's committed `HEAD`; local revision mode
+selects resolved `--rev`; remote mode selects resolved `--remote` revision.
+Remote must be reachable; list, fetch, or push transport failures fail command
+explicitly instead of falling back to independent local rebuild. Non-Git
+directories and local repositories without `origin` remain local-only.
 
 Sync implements `pull --rebase` behavior without invoking Git executable. It
 commits pending local index-store changes, fetches remote default branch, and
@@ -227,13 +229,13 @@ rejection fetches, merges compatible records, and retries. Empty remote is
 initialized on `main`; otherwise default branch is preserved. Remote repository
 is wholly owned by `git-agent` and must not contain unrelated files.
 
-Only repository's resolved current `HEAD` revision manifest and compatible
-vector records are exported. Search imports those records before ensuring local
-HEAD revision index is complete, publishes missing HEAD records, then builds or
-queries requested filesystem or revision source. Filesystem discovery continues
-to include staged, unstaged, and untracked files, but dirty-worktree-only
-vectors, query history, absolute roots, locks, temporary files, sessions, auth
-data, and cached bare repositories are never exported.
+Search imports selected revision records before ensuring selected local index is
+complete, then publishes compatible records after persistence. Filesystem mode
+first ensures and publishes committed HEAD revision index, then builds or
+queries actual working tree. Filesystem discovery continues to include staged,
+unstaged, and untracked files, but dirty-worktree-only vectors, query history,
+absolute roots, locks, temporary files, sessions, auth data, and cached bare
+repositories are never exported.
 
 `--format json` is the default stdout contract. `--format brief` first writes a
 header line as `# mode=<filesystem|revision|remote> index=<fresh|refreshed|built|empty>`,
@@ -448,6 +450,24 @@ permissions. `git-agent config --unset index.remote` removes setting. Unknown
 keys, empty values, extra arguments, and reading unset key fail. Sync uses same
 pure-Go transport and authentication behavior as search `--remote`; it never
 invokes Git executable or interactive prompt.
+
+#### `git-agent index sync`
+
+Perform explicit full-machine index sync. Command requires configured
+`index.remote`, pulls/rebases dedicated index repository once, inventories local
+metadata, and additively exports every completed revision or cached remote
+revision index that has identifiable source origin. Filesystem indexes are not
+exported. Command does not discover source files, create embeddings, query a
+provider, or require embedding credentials.
+
+Compatible local records merge with remote snapshots. Remote snapshots absent
+locally remain unchanged; command never prunes another machine's revisions.
+Corrupt, incomplete, incompatible, or no-longer-identifiable local revision
+indexes are skipped. After inventory, command creates at most one merged index
+commit and performs one final push; pull/rebase may first push replayed pending
+local sync commits as required by sync ordering. Stdout is exactly
+`synced indexes=<n> records=<n> skipped=<n>` followed by newline. Transport,
+configuration, locking, and unsafe-tree failures fail command explicitly.
 
 With `--debug`, search writes live human console diagnostic events to stderr
 using the same renderer as streamed traces. It writes one `search_skip` event per

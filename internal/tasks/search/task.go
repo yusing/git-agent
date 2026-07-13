@@ -167,11 +167,12 @@ type Timing struct {
 }
 
 type Source struct {
-	Mode        string `json:"mode"`
-	Root        string `json:"root,omitempty"`
-	Remote      string `json:"remote,omitempty"`
-	Rev         string `json:"rev,omitempty"`
-	ResolvedRev string `json:"resolved_rev,omitempty"`
+	Mode           string `json:"mode"`
+	Root           string `json:"root,omitempty"`
+	Remote         string `json:"remote,omitempty"`
+	Rev            string `json:"rev,omitempty"`
+	ResolvedRev    string `json:"resolved_rev,omitempty"`
+	OriginIdentity string `json:"-"`
 }
 
 type Retrieval struct {
@@ -259,6 +260,7 @@ type manifest struct {
 	Root           string    `json:"root,omitempty"`
 	Remote         string    `json:"remote,omitempty"`
 	ResolvedRev    string    `json:"resolved_rev,omitempty"`
+	OriginIdentity string    `json:"origin_identity,omitempty"`
 	EmbeddingModel string    `json:"embedding_model"`
 	Dimensions     int       `json:"dimensions"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -394,20 +396,21 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	source := selection.source
 	resolvedRev := selection.resolvedRev
 	sharedScope := len(scope) > 0 && !scopeUsesSkippedPath(scope)
-	var headSync *indexSync
-	if !opts.skipIndexSync && strings.TrimSpace(opts.IndexRemote) != "" && strings.TrimSpace(opts.Remote) == "" && selection.repo != nil && selection.repo.HeadSHA != "" {
-		origin := repositoryOrigin(selection.repo)
-		if origin != "" {
-			headSync, err = prepareIndexSync(ctx, opts.IndexRemote, origin, selection.repo.HeadSHA, opts.EmbeddingModel, opts.EmbeddingDimensions, selection.metadataDir, selection.repo.RootPath)
+	var activeSync *indexSync
+	var syncTarget indexSyncTarget
+	if !opts.skipIndexSync && strings.TrimSpace(opts.IndexRemote) != "" {
+		if target, ok := selectedSyncTarget(opts, selection); ok {
+			syncTarget = target
+			activeSync, err = prepareIndexSync(ctx, opts.IndexRemote, syncTarget)
 			if err != nil {
 				return fail(err)
 			}
-			syncSession := headSync
+			syncSession := activeSync
 			defer syncSession.close()
-			if source.Mode != "revision" || resolvedRev != selection.repo.HeadSHA {
+			if source.Mode == "filesystem" {
 				headOpts := opts
 				headOpts.Root = selection.repo.RootPath
-				headOpts.Rev = selection.repo.HeadSHA
+				headOpts.Rev = syncTarget.revision
 				headOpts.Remote = ""
 				headOpts.Scope = nil
 				headOpts.IndexOnly = true
@@ -418,13 +421,13 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 				if _, err := Run(ctx, client, headOpts, ""); err != nil {
 					return fail(fmt.Errorf("index current HEAD for sync: %w", err))
 				}
-				if err := headSync.exportAndPush(ctx, selection.metadataDir, selection.repo.RootPath); err != nil {
+				if err := activeSync.exportAndPush(ctx, syncTarget); err != nil {
 					return fail(err)
 				}
-				if err := headSync.close(); err != nil {
+				if err := activeSync.close(); err != nil {
 					return fail(err)
 				}
-				headSync = nil
+				activeSync = nil
 			}
 		}
 	}
@@ -684,11 +687,11 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	if err := unlockIndex(); err != nil {
 		return fail(err)
 	}
-	if headSync != nil {
-		if err := headSync.exportAndPush(ctx, selection.metadataDir, selection.repo.RootPath); err != nil {
+	if activeSync != nil {
+		if err := activeSync.exportAndPush(ctx, syncTarget); err != nil {
 			return fail(err)
 		}
-		if err := headSync.close(); err != nil {
+		if err := activeSync.close(); err != nil {
 			return fail(err)
 		}
 	}
@@ -826,6 +829,36 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		Results: results,
 		Replay:  replay,
 	}), nil
+}
+
+func selectedSyncTarget(opts Options, selection indexSelection) (indexSyncTarget, bool) {
+	originIdentity := selection.source.OriginIdentity
+	if originIdentity == "" {
+		return indexSyncTarget{}, false
+	}
+	target := indexSyncTarget{
+		origin:      originIdentity,
+		revision:    selection.resolvedRev,
+		model:       opts.EmbeddingModel,
+		dimensions:  opts.EmbeddingDimensions,
+		metadataDir: selection.metadataDir,
+		indexDir:    selection.indexDir,
+		root:        selection.root,
+		source:      selection.source,
+	}
+	if selection.source.Mode == "filesystem" {
+		if selection.repo == nil {
+			return indexSyncTarget{}, false
+		}
+		target.revision = selection.repo.HeadSHA
+		target.root = selection.repo.RootPath
+		target.source = Source{Mode: "revision", Rev: "HEAD", ResolvedRev: target.revision, OriginIdentity: originIdentity}
+		target.indexDir = indexDir(selection.metadataDir, "revision", selection.repo.RootPath, target.revision, Filters{})
+	}
+	if target.revision == "" {
+		return indexSyncTarget{}, false
+	}
+	return target, true
 }
 
 func discoverFilesystemFiles(root string, scope []string, debugLog func(string, ...slog.Attr)) ([]fileContent, SkippedCounts, []SkippedFile, error) {
@@ -1281,7 +1314,7 @@ func migrateSearchMetadata(ctx context.Context, legacyMetadataDir, targetMetadat
 		if err := withIndexLock(ctx, targetDir, func() error {
 			targetRecords, _ := loadVectors(targetDir)
 			records := mergeCompatibleRecords(targetRecords, sourceRecords, found.EmbeddingModel, found.Dimensions)
-			source := Source{Mode: found.Mode, Root: found.Root, Remote: found.Remote, ResolvedRev: found.ResolvedRev}
+			source := Source{Mode: found.Mode, Root: found.Root, Remote: found.Remote, ResolvedRev: found.ResolvedRev, OriginIdentity: found.OriginIdentity}
 			return saveIndex(ctx, targetMetadataDir, targetDir, source, found.Root, found.ResolvedRev, found.EmbeddingModel, found.Dimensions, records, nil)
 		}); err != nil {
 			return fmt.Errorf("migrate legacy search index %s: %w", sourceDir, err)
@@ -1926,6 +1959,7 @@ func saveIndex(ctx context.Context, metadataDir, dir string, source Source, root
 		Root:           root,
 		Remote:         source.Remote,
 		ResolvedRev:    resolvedRev,
+		OriginIdentity: source.OriginIdentity,
 		EmbeddingModel: model,
 		Dimensions:     dimensions,
 		CreatedAt:      time.Now().UTC(),

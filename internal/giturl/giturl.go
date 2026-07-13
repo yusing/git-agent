@@ -28,14 +28,19 @@ func Sanitize(value string) string {
 // spellings. Local paths remain path-based and are made absolute when possible.
 func Identity(value string) string {
 	value = strings.TrimSpace(value)
-	if scpHost, scpPath, ok := strings.Cut(value, ":"); ok && !strings.Contains(scpHost, "/") && strings.Contains(scpHost, "@") {
-		host := scpHost[strings.LastIndexByte(scpHost, '@')+1:]
+	if host, scpPath, ok := splitSCP(value); ok {
 		return networkIdentity(host, scpPath)
 	}
 	parsed, err := url.Parse(value)
 	if err == nil && parsed.Scheme != "" {
 		if parsed.Scheme == "file" {
-			return "file:" + filepath.Clean(parsed.Path)
+			filePath := parsed.Path
+			if !filepath.IsAbs(filePath) {
+				if absolute, absErr := filepath.Abs(filePath); absErr == nil {
+					filePath = absolute
+				}
+			}
+			return "file:" + filepath.Clean(filePath)
 		}
 		if parsed.Host != "" {
 			host := parsed.Hostname()
@@ -51,6 +56,45 @@ func Identity(value string) string {
 		return "file:" + filepath.Clean(absolute)
 	}
 	return "file:" + filepath.Clean(value)
+}
+
+// Stable reports whether value has a working-directory-independent identity.
+func Stable(value string) bool {
+	value = strings.TrimSpace(value)
+	if filepath.IsAbs(value) {
+		return true
+	}
+	if _, _, ok := splitSCP(value); ok {
+		return true
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" {
+		return false
+	}
+	if parsed.Scheme == "file" {
+		return parsed.Host == "" && filepath.IsAbs(parsed.Path)
+	}
+	return parsed.Host != ""
+}
+
+func splitSCP(value string) (host, repoPath string, ok bool) {
+	host, repoPath, ok = strings.Cut(value, ":")
+	if !ok || host == "" || repoPath == "" || strings.ContainsAny(host, "/\\") || strings.HasPrefix(repoPath, "/") || strings.HasPrefix(repoPath, "\\") {
+		return "", "", false
+	}
+	if !strings.Contains(host, "@") {
+		switch strings.ToLower(host) {
+		case "file", "git", "git+ssh", "http", "https", "ssh":
+			return "", "", false
+		}
+		if len(host) == 1 {
+			return "", "", false
+		}
+	}
+	if at := strings.LastIndexByte(host, '@'); at >= 0 {
+		host = host[at+1:]
+	}
+	return host, repoPath, host != ""
 }
 
 func defaultPort(scheme string) string {

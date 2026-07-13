@@ -46,6 +46,9 @@ func TestRunWithoutArgsReturnsUsage(t *testing.T) {
 	if !strings.Contains(err.Error(), "git-agent search --help") {
 		t.Fatalf("usage missing search help hint:\n%s", err)
 	}
+	if !strings.Contains(err.Error(), "git-agent index sync") {
+		t.Fatalf("usage missing index sync synopsis:\n%s", err)
+	}
 }
 
 func TestSearchLsAndLsFiles(t *testing.T) {
@@ -340,6 +343,18 @@ func TestConfigIndexRemoteLifecycle(t *testing.T) {
 	}
 	if err := app.Run(t.Context(), []string{"config", "index.remote"}); err == nil || err.Error() != "index.remote is not configured" {
 		t.Fatalf("get after unset error = %v", err)
+	}
+}
+
+func TestIndexSyncRequiresConfiguredRemote(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	err := New().Run(t.Context(), []string{"index", "sync"})
+	if err == nil || !strings.Contains(err.Error(), "index.remote is not configured") {
+		t.Fatalf("error = %v", err)
+	}
+	err = New().Run(t.Context(), []string{"index", "unknown"})
+	if err == nil || err.Error() != "usage: git-agent index sync" {
+		t.Fatalf("usage error = %v", err)
 	}
 }
 

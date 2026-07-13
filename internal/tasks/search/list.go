@@ -437,6 +437,7 @@ func resolveIndexSelection(ctx context.Context, rootOpt, remote, rev string, fil
 	if origin != "" {
 		originIdentity = giturl.Identity(origin)
 	}
+	source.OriginIdentity = originIdentity
 	legacyMetadataDir, err := metadata.Dir(indexRoot)
 	if err != nil {
 		return indexSelection{}, err

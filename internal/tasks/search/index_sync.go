@@ -34,12 +34,19 @@ type syncedIndex struct {
 	Records    []vectorRecord `json:"records"`
 }
 
+type indexSyncTarget struct {
+	origin      string
+	revision    string
+	model       string
+	dimensions  int
+	metadataDir string
+	indexDir    string
+	root        string
+	source      Source
+}
+
 type indexSync struct {
 	remoteURL string
-	origin    string
-	revision  string
-	model     string
-	dims      int
 	dir       string
 	branch    plumbing.ReferenceName
 	repo      *git.Repository
@@ -47,18 +54,19 @@ type indexSync struct {
 	lock      *indexLock
 }
 
-func prepareIndexSync(ctx context.Context, remoteURL, origin, revision, model string, dims int, metadataDir, root string) (*indexSync, error) {
-	sync, err := openIndexSync(ctx, remoteURL, giturl.Identity(origin), revision, model, dims)
+func prepareIndexSync(ctx context.Context, remoteURL string, target indexSyncTarget) (*indexSync, error) {
+	sync, err := openIndexSync(ctx, remoteURL)
 	if err != nil {
 		return nil, err
 	}
-	if err := sync.importIndex(ctx, metadataDir, root); err != nil {
+	if err := sync.importIndex(ctx, target); err != nil {
+		_ = sync.close()
 		return nil, err
 	}
 	return sync, nil
 }
 
-func openIndexSync(ctx context.Context, remoteURL, origin, revision, model string, dims int) (result *indexSync, err error) {
+func openIndexSync(ctx context.Context, remoteURL string) (result *indexSync, err error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -95,10 +103,6 @@ func openIndexSync(ctx context.Context, remoteURL, origin, revision, model strin
 	}
 	sync := &indexSync{
 		remoteURL: remoteURL,
-		origin:    origin,
-		revision:  revision,
-		model:     model,
-		dims:      dims,
 		dir:       dir,
 		repo:      repo,
 		worktree:  worktree,
@@ -146,7 +150,7 @@ func (sync *indexSync) reconcile(ctx context.Context) error {
 		if err := sync.commitPending("Initialize git-agent index store"); err != nil {
 			return err
 		}
-		return sync.push(ctx)
+		return nil
 	}
 	sync.branch = branch
 	refspec := gitconfig.RefSpec("+" + branch.String() + ":" + remoteTrackingRef(branch).String())
@@ -279,13 +283,20 @@ func (sync *indexSync) ensureSchema() error {
 	return os.WriteFile(path, []byte("{\"version\":1}\n"), 0o600)
 }
 
-func (sync *indexSync) snapshotPath() string {
-	modelKey := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d", sync.model, sync.dims)))
-	return filepath.Join(sync.dir, "indexes", metadata.IdentitySHA(sync.origin), sync.revision, hex.EncodeToString(modelKey[:])[:16]+".json")
+func (sync *indexSync) snapshotPath(target indexSyncTarget) (string, error) {
+	if err := validateSyncTarget(target); err != nil {
+		return "", err
+	}
+	modelKey := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d", target.model, target.dimensions)))
+	return filepath.Join(sync.dir, "indexes", metadata.IdentitySHA(target.origin), target.revision, hex.EncodeToString(modelKey[:])[:16]+".json"), nil
 }
 
-func (sync *indexSync) importIndex(ctx context.Context, metadataDir, root string) error {
-	data, err := os.ReadFile(sync.snapshotPath())
+func (sync *indexSync) importIndex(ctx context.Context, target indexSyncTarget) error {
+	path, err := sync.snapshotPath(target)
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -296,85 +307,148 @@ func (sync *indexSync) importIndex(ctx context.Context, metadataDir, root string
 	if err := sonic.Unmarshal(data, &snapshot); err != nil {
 		return fmt.Errorf("parse synced index: %w", err)
 	}
-	if err := sync.validateSnapshot(snapshot); err != nil {
+	if err := validateSnapshot(snapshot, target); err != nil {
 		return err
 	}
-	dir := indexDir(metadataDir, "revision", root, sync.revision, Filters{})
-	return withIndexLock(ctx, dir, func() error {
-		local, _ := loadVectors(dir)
-		records := mergeCompatibleRecords(local, snapshot.Records, sync.model, sync.dims)
+	return withIndexLock(ctx, target.indexDir, func() error {
+		local, _ := loadVectors(target.indexDir)
+		records := mergeCompatibleRecords(local, snapshot.Records, target.model, target.dimensions)
 		if len(records) == len(local) {
 			return nil
 		}
-		return saveIndex(ctx, metadataDir, dir, Source{Mode: "revision", Rev: "HEAD", ResolvedRev: sync.revision}, root, sync.revision, sync.model, sync.dims, records, nil)
+		return saveIndex(ctx, target.metadataDir, target.indexDir, target.source, target.root, target.revision, target.model, target.dimensions, records, nil)
 	})
 }
 
-func (sync *indexSync) exportAndPush(ctx context.Context, metadataDir, root string) error {
-	if err := validateSyncTree(sync.dir); err != nil {
+func (sync *indexSync) exportAndPush(ctx context.Context, target indexSyncTarget) error {
+	if _, err := sync.exportIndex(ctx, target); err != nil {
 		return err
 	}
-	dir := indexDir(metadataDir, "revision", root, sync.revision, Filters{})
-	records, err := loadVectors(dir)
-	if err != nil {
-		return fmt.Errorf("load current HEAD index for sync: %w", err)
-	}
-	compatible := mergeCompatibleRecords(nil, records, sync.model, sync.dims)
-	snapshot := syncedIndex{
-		Version:    indexSyncVersion,
-		Origin:     sync.origin,
-		Revision:   sync.revision,
-		Model:      sync.model,
-		Dimensions: sync.dims,
-		Records:    compatible,
-	}
-	path := sync.snapshotPath()
-	if existing, err := os.ReadFile(path); err == nil {
-		var remote syncedIndex
-		if sonic.Unmarshal(existing, &remote) == nil && sync.validateSnapshot(remote) == nil {
-			snapshot.Records = mergeCompatibleRecords(remote.Records, snapshot.Records, sync.model, sync.dims)
-		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	data, err := sonic.Marshal(snapshot)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
-		return err
-	}
-	if err := sync.commitPending("Update HEAD index " + sync.revision[:min(12, len(sync.revision))]); err != nil {
+	if err := sync.commitPending("Update index " + target.revision[:min(12, len(target.revision))]); err != nil {
 		return err
 	}
 	return sync.pushWithRetry(ctx)
 }
 
-func (sync *indexSync) validateSnapshot(snapshot syncedIndex) error {
-	if snapshot.Version != indexSyncVersion || snapshot.Origin != sync.origin || snapshot.Revision != sync.revision || snapshot.Model != sync.model || snapshot.Dimensions != sync.dims {
-		return errors.New("synced index metadata is incompatible with current repository HEAD")
+func (sync *indexSync) exportIndex(ctx context.Context, target indexSyncTarget) (records int, err error) {
+	err = withIndexLock(ctx, target.indexDir, func() error {
+		var exportErr error
+		records, exportErr = sync.exportIndexLocked(target)
+		return exportErr
+	})
+	return records, err
+}
+
+func (sync *indexSync) exportIndexLocked(target indexSyncTarget) (int, error) {
+	records, err := loadVectors(target.indexDir)
+	if err != nil {
+		return 0, fmt.Errorf("load revision index for sync: %w", err)
+	}
+	compatible, ok := compatibleIndexRecords(records, target.model, target.dimensions)
+	if !ok {
+		return 0, errors.New("revision index contains incompatible records")
+	}
+	return sync.writeSnapshot(target, compatible)
+}
+
+func (sync *indexSync) writeSnapshot(target indexSyncTarget, compatible []vectorRecord) (int, error) {
+	if err := validateSyncTree(sync.dir); err != nil {
+		return 0, err
+	}
+	path, err := sync.snapshotPath(target)
+	if err != nil {
+		return 0, err
+	}
+	snapshot := syncedIndex{
+		Version:    indexSyncVersion,
+		Origin:     target.origin,
+		Revision:   target.revision,
+		Model:      target.model,
+		Dimensions: target.dimensions,
+		Records:    compatible,
+	}
+	if existing, err := os.ReadFile(path); err == nil {
+		var remote syncedIndex
+		if sonic.Unmarshal(existing, &remote) == nil && validateSnapshot(remote, target) == nil {
+			snapshot.Records = mergeCompatibleRecords(remote.Records, snapshot.Records, target.model, target.dimensions)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return 0, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return 0, err
+	}
+	data, err := sonic.Marshal(snapshot)
+	if err != nil {
+		return 0, err
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		return 0, err
+	}
+	return len(compatible), nil
+}
+
+func compatibleIndexRecords(records []vectorRecord, model string, dimensions int) ([]vectorRecord, bool) {
+	byKey := make(map[string]vectorRecord, len(records))
+	if !collectCompatibleRecords(byKey, records, model, dimensions, false) {
+		return nil, false
+	}
+	return sortedRecordValues(byKey), true
+}
+
+func validateSnapshot(snapshot syncedIndex, target indexSyncTarget) error {
+	if snapshot.Version != indexSyncVersion || snapshot.Origin != target.origin || snapshot.Revision != target.revision || snapshot.Model != target.model || snapshot.Dimensions != target.dimensions {
+		return errors.New("synced index metadata is incompatible with selected revision")
 	}
 	return nil
 }
 
-func mergeCompatibleRecords(base, incoming []vectorRecord, model string, dims int) []vectorRecord {
-	byKey := make(map[string]vectorRecord, len(base)+len(incoming))
-	add := func(records []vectorRecord, replace bool) {
-		for _, record := range records {
-			if record.EmbeddingModel != model || record.Dimensions != dims || len(record.Vector) != dims || record.EmbeddingInputHash == "" {
-				continue
-			}
-			key := cacheRecordKey(record)
-			if _, exists := byKey[key]; !exists || replace {
-				byKey[key] = record
-			}
+func validateSyncTarget(target indexSyncTarget) error {
+	if target.origin == "" || target.model == "" || target.dimensions <= 0 || !canonicalObjectID(target.revision) {
+		return errors.New("index sync target is invalid")
+	}
+	return nil
+}
+
+func canonicalObjectID(value string) bool {
+	return canonicalLowerHex(value, 40)
+}
+
+func canonicalLowerHex(value string, size int) bool {
+	if len(value) != size {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
 		}
 	}
-	add(incoming, false)
-	add(base, true)
+	return true
+}
+
+func mergeCompatibleRecords(base, incoming []vectorRecord, model string, dims int) []vectorRecord {
+	byKey := make(map[string]vectorRecord, len(base)+len(incoming))
+	collectCompatibleRecords(byKey, incoming, model, dims, false)
+	collectCompatibleRecords(byKey, base, model, dims, true)
+	return sortedRecordValues(byKey)
+}
+
+func collectCompatibleRecords(byKey map[string]vectorRecord, records []vectorRecord, model string, dims int, replace bool) bool {
+	allCompatible := true
+	for _, record := range records {
+		if record.EmbeddingModel != model || record.Dimensions != dims || len(record.Vector) != dims || record.EmbeddingInputHash == "" {
+			allCompatible = false
+			continue
+		}
+		key := cacheRecordKey(record)
+		if _, exists := byKey[key]; !exists || replace {
+			byKey[key] = record
+		}
+	}
+	return allCompatible
+}
+
+func sortedRecordValues(byKey map[string]vectorRecord) []vectorRecord {
 	keys := make([]string, 0, len(byKey))
 	for key := range byKey {
 		keys = append(keys, key)
@@ -530,6 +604,38 @@ func validateSyncTree(root string) error {
 		if !entry.IsDir() && !entry.Type().IsRegular() {
 			return fmt.Errorf("index sync repository contains non-regular file %s", path)
 		}
-		return nil
+		if validSyncTreeEntry(rel, entry.IsDir()) {
+			return nil
+		}
+		return fmt.Errorf("index sync repository contains unsafe path %s", path)
 	})
+}
+
+func validSyncTreeEntry(rel string, directory bool) bool {
+	if rel == "." {
+		return directory
+	}
+	if rel == "schema.json" {
+		return !directory
+	}
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if parts[0] != "indexes" {
+		return false
+	}
+	if len(parts) == 1 {
+		return directory
+	}
+	if !canonicalLowerHex(parts[1], 64) {
+		return false
+	}
+	if len(parts) == 2 {
+		return directory
+	}
+	if !canonicalObjectID(parts[2]) {
+		return false
+	}
+	if len(parts) == 3 {
+		return directory
+	}
+	return len(parts) == 4 && !directory && strings.HasSuffix(parts[3], ".json") && canonicalLowerHex(strings.TrimSuffix(parts[3], ".json"), 16)
 }
