@@ -16,6 +16,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/yusing/git-agent/internal/gitctx"
+	"github.com/yusing/git-agent/internal/giturl"
 	"github.com/yusing/git-agent/internal/metadata"
 )
 
@@ -69,7 +70,7 @@ func ListIndexes(ctx context.Context, root, remote string) (IndexListing, error)
 	var metadataDir string
 	if strings.TrimSpace(remote) != "" {
 		var err error
-		metadataDir, err = metadata.RemoteDir(sanitizeRemoteURL(remote))
+		metadataDir, err = metadata.RemoteDir(giturl.Sanitize(remote))
 		if err != nil {
 			return IndexListing{}, err
 		}
@@ -431,9 +432,23 @@ func resolveIndexSelection(ctx context.Context, rootOpt, remote, rev string, fil
 		indexRoot = found.RootPath
 		repo = found
 	}
-	metadataDir, err := metadata.Dir(indexRoot)
+	origin := repositoryOrigin(repo)
+	originIdentity := ""
+	if origin != "" {
+		originIdentity = giturl.Identity(origin)
+	}
+	legacyMetadataDir, err := metadata.Dir(indexRoot)
 	if err != nil {
 		return indexSelection{}, err
+	}
+	metadataDir, err := metadata.SearchDir(indexRoot, originIdentity)
+	if err != nil {
+		return indexSelection{}, err
+	}
+	if legacyMetadataDir != metadataDir {
+		if err := migrateSearchMetadata(ctx, legacyMetadataDir, metadataDir); err != nil {
+			return indexSelection{}, err
+		}
 	}
 	return indexSelection{
 		root:        root,
@@ -443,6 +458,21 @@ func resolveIndexSelection(ctx context.Context, rootOpt, remote, rev string, fil
 		resolvedRev: resolvedRev,
 		repo:        repo,
 	}, nil
+}
+
+func repositoryOrigin(repo *gitctx.Repository) string {
+	if repo == nil {
+		return ""
+	}
+	cfg, err := repo.Repo.Config()
+	if err != nil {
+		return ""
+	}
+	remote := cfg.Remotes["origin"]
+	if remote == nil || len(remote.URLs) == 0 {
+		return ""
+	}
+	return remote.URLs[0]
 }
 
 func inspectIndex(dir, searchRoot string) (IndexInfo, error) {

@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,6 +53,39 @@ func TestDirTightensExistingMetadataPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertPrivateTree(t, dir)
+}
+
+func TestSearchDirMigratesOnlySearchToOriginKey(t *testing.T) {
+	home := t.TempDir()
+	root := t.TempDir()
+	t.Setenv("HOME", home)
+	legacy := filepath.Join(home, dirName, PathSHA(root))
+	if err := os.MkdirAll(filepath.Join(legacy, "search", "fs", "index"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(legacy, "sessions", "session"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "search", "fs", "index", "manifest.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dir, err := SearchDir(root, "github.com/acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir != filepath.Join(home, dirName, IdentitySHA("github.com/acme/repo")) {
+		t.Fatalf("dir = %q", dir)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "search", "fs", "index", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(legacy, "search")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy search still exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(legacy, "sessions", "session")); err != nil {
+		t.Fatalf("legacy sessions removed: %v", err)
+	}
 }
 
 func assertPrivateTree(t *testing.T, root string) {

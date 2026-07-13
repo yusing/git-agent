@@ -29,6 +29,8 @@ Supported workflows:
 - `git-agent search --ls [--remote <url>] [--format text|json]`
 - `git-agent search --ls-remotes [--format text|json|completion]`
 - `git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]`
+- `git-agent config index.remote [<git-url>]`
+- `git-agent config --unset index.remote`
 
 ### Non-goals
 
@@ -208,6 +210,31 @@ normalized BM25-style body text overlap, path token overlap, and indexed symbol
 token overlap. Output and replay history keep the original query string, not the
 framed embedding input.
 
+When global `index.remote` is configured and local Git repository has an
+`origin`, search synchronizes committed `HEAD` index records through that
+dedicated Git remote before checking local index freshness. Remote must be
+reachable; list, fetch, or push transport failures fail command explicitly
+instead of falling back to independent local rebuild. Non-Git directories and
+repositories without `origin` remain local-only.
+
+Sync implements `pull --rebase` behavior without invoking Git executable. It
+commits pending local index-store changes, fetches remote default branch, and
+places local changes on fetched head. Diverged index histories merge records
+whose embedding model, dimensions, and exact final-input identity are
+compatible, then commit resolved state. When local commits were replayed or
+merged, search pushes them before inspecting or building current source. Push
+rejection fetches, merges compatible records, and retries. Empty remote is
+initialized on `main`; otherwise default branch is preserved. Remote repository
+is wholly owned by `git-agent` and must not contain unrelated files.
+
+Only repository's resolved current `HEAD` revision manifest and compatible
+vector records are exported. Search imports those records before ensuring local
+HEAD revision index is complete, publishes missing HEAD records, then builds or
+queries requested filesystem or revision source. Filesystem discovery continues
+to include staged, unstaged, and untracked files, but dirty-worktree-only
+vectors, query history, absolute roots, locks, temporary files, sessions, auth
+data, and cached bare repositories are never exported.
+
 `--format json` is the default stdout contract. `--format brief` first writes a
 header line as `# mode=<filesystem|revision|remote> index=<fresh|refreshed|built|empty>`,
 then writes one result per line as `<score> <path>:<start-line> <summary>`, with
@@ -242,6 +269,12 @@ Persistent metadata is stored under `~/.git-agent/<path-sha>/`, where
 indexes under `~/.git-agent/<path-sha>/search/`. When a legacy
 `<project>/.git-agent/` directory exists, the next project run migrates its
 contents into the home metadata directory before writing new data.
+For local Git repository with `origin`, search metadata instead uses SHA-256 of
+normalized origin identity. Common SSH and HTTPS spellings for same host and
+repository path share one identity. On first use, completed legacy search data
+under absolute-path key is merged into origin-keyed search store and obsolete
+legacy search tree is removed; non-search metadata remains under existing key.
+Identity migration applies even when index sync is not configured.
 Remote metadata is stored under `~/.git-agent/remotes/<remote-sha>/`, where
 `<remote-sha>` is the SHA-256 of the sanitized remote URL. Remote search indexes
 are stored under that remote metadata root and are keyed by resolved commit SHA,
@@ -405,6 +438,16 @@ Default `--format tree` writes a rooted tree of indexed files using box-drawing
 characters. `--format json` writes an object with the selected index summary and
 a sorted `files` array. The command reads index metadata and path lists only; it
 does not load embedding vectors or call providers.
+
+#### `git-agent config index.remote [<git-url>]`
+
+With `<git-url>`, set global dedicated index Git remote. Without value, print
+sanitized URL. Configuration is stored at
+`${XDG_CONFIG_HOME:-~/.config}/git-agent/config.json` with private file
+permissions. `git-agent config --unset index.remote` removes setting. Unknown
+keys, empty values, extra arguments, and reading unset key fail. Sync uses same
+pure-Go transport and authentication behavior as search `--remote`; it never
+invokes Git executable or interactive prompt.
 
 With `--debug`, search writes live human console diagnostic events to stderr
 using the same renderer as streamed traces. It writes one `search_skip` event per

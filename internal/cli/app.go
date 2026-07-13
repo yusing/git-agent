@@ -21,6 +21,7 @@ import (
 	"github.com/yusing/git-agent/internal/agent"
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/gitctx"
+	"github.com/yusing/git-agent/internal/giturl"
 	"github.com/yusing/git-agent/internal/guidance"
 	"github.com/yusing/git-agent/internal/metadata"
 	"github.com/yusing/git-agent/internal/openai"
@@ -53,6 +54,8 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	}
 
 	switch args[0] {
+	case "config":
+		return a.runConfig(args[1:])
 	case "commit":
 		return a.runCommit(ctx, args[1:])
 	case "commit-msg":
@@ -68,6 +71,38 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	default:
 		return usageError(fmt.Sprintf("unknown command %q", args[0]))
 	}
+}
+
+func (a *App) runConfig(args []string) error {
+	unset := false
+	if len(args) > 0 && args[0] == "--unset" {
+		unset = true
+		args = args[1:]
+	}
+	if len(args) == 0 || args[0] != config.IndexRemoteKey || len(args) > 2 || (unset && len(args) != 1) {
+		return errors.New("usage: git-agent config [--unset] index.remote [<git-url>]")
+	}
+	cfg, err := config.LoadFile()
+	if err != nil {
+		return err
+	}
+	if unset {
+		cfg.Index.Remote = ""
+		return config.SaveFile(cfg)
+	}
+	if len(args) == 1 {
+		if cfg.Index.Remote == "" {
+			return errors.New("index.remote is not configured")
+		}
+		_, err := fmt.Fprintln(a.stdout, giturl.Sanitize(cfg.Index.Remote))
+		return err
+	}
+	remote := strings.TrimSpace(args[1])
+	if remote == "" {
+		return errors.New("index.remote must not be empty")
+	}
+	cfg.Index.Remote = remote
+	return config.SaveFile(cfg)
 }
 
 func (a *App) runSearch(ctx context.Context, args []string) error {
@@ -179,6 +214,10 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	fileCfg, err := config.LoadFile()
+	if err != nil {
+		return err
+	}
 	if err := a.maybeStartPprof(ctx, opts); err != nil {
 		return err
 	}
@@ -225,6 +264,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 		Root:                   root,
 		Rev:                    rev,
 		Remote:                 remote,
+		IndexRemote:            fileCfg.Index.Remote,
 		MinRelatedness:         minRelatedness,
 		Limit:                  limit,
 		IndexOnly:              indexOnly,
@@ -1478,6 +1518,7 @@ func usageError(prefix string) error {
 	}
 	b.WriteString("usage:\n")
 	b.WriteString("  git-agent commit [--amend] [flags]\n")
+	b.WriteString("  git-agent config [--unset] index.remote [<git-url>]\n")
 	b.WriteString("  git-agent commit-msg [--amend] [flags]\n")
 	b.WriteString("  git-agent pr-message [flags]\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")

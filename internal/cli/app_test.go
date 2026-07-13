@@ -321,6 +321,28 @@ func TestSearchHelpReturnsUsage(t *testing.T) {
 	}
 }
 
+func TestConfigIndexRemoteLifecycle(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	var stdout bytes.Buffer
+	app := &App{stdout: &stdout, stderr: io.Discard}
+	remote := "https://user:secret@example.test/indexes.git"
+	if err := app.Run(t.Context(), []string{"config", "index.remote", remote}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run(t.Context(), []string{"config", "index.remote"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != "https://example.test/indexes.git\n" {
+		t.Fatalf("printed remote = %q", got)
+	}
+	if err := app.Run(t.Context(), []string{"config", "--unset", "index.remote"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run(t.Context(), []string{"config", "index.remote"}); err == nil || err.Error() != "index.remote is not configured" {
+		t.Fatalf("get after unset error = %v", err)
+	}
+}
+
 func TestSearchUsageErrorsPrecedeEmbeddingEnvValidation(t *testing.T) {
 	t.Setenv(config.EnvEmbeddingDimensions, "invalid")
 

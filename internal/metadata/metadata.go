@@ -41,6 +41,56 @@ func Dir(projectRoot string) (string, error) {
 	return dir, nil
 }
 
+// SearchDir returns origin-keyed project metadata for search. It moves a
+// legacy absolute-path-keyed search tree on first use while leaving sessions
+// and other project metadata at their existing path-keyed location.
+func SearchDir(projectRoot, originIdentity string) (string, error) {
+	if strings.TrimSpace(originIdentity) == "" {
+		return Dir(projectRoot)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	legacy, err := Dir(projectRoot)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, dirName, IdentitySHA(originIdentity))
+	if legacy == dir {
+		return dir, nil
+	}
+	legacySearch := filepath.Join(legacy, "search")
+	targetSearch := filepath.Join(dir, "search")
+	if _, err := os.Stat(legacySearch); err == nil {
+		if _, targetErr := os.Stat(targetSearch); targetErr == nil {
+			if err := secureDir(dir); err != nil {
+				return "", err
+			}
+			return dir, nil
+		} else if !errors.Is(targetErr, fs.ErrNotExist) {
+			return "", targetErr
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", err
+		}
+		if err := os.Rename(legacySearch, targetSearch); err != nil {
+			if err := copyDir(legacySearch, targetSearch); err != nil {
+				return "", err
+			}
+			if err := os.RemoveAll(legacySearch); err != nil {
+				return "", err
+			}
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	if err := secureDir(dir); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
 // RemoteDir returns the metadata directory for a cached remote repository URL.
 func RemoteDir(remoteURL string) (string, error) {
 	root, err := RemoteRoot()
@@ -100,6 +150,13 @@ func RemoteRoot() (string, error) {
 // PathSHA returns the SHA-256 hex digest for a cleaned project path.
 func PathSHA(path string) string {
 	sum := sha256.Sum256([]byte(filepath.Clean(path)))
+	return hex.EncodeToString(sum[:])
+}
+
+// IdentitySHA hashes a platform-independent identity without applying local
+// filesystem path rules.
+func IdentitySHA(identity string) string {
+	sum := sha256.Sum256([]byte(identity))
 	return hex.EncodeToString(sum[:])
 }
 

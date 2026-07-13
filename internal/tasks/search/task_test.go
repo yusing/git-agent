@@ -21,6 +21,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/yusing/git-agent/internal/giturl"
 	"github.com/yusing/git-agent/internal/metadata"
 	"github.com/yusing/git-agent/internal/openai"
 )
@@ -36,6 +37,175 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	_ = os.RemoveAll(home)
 	os.Exit(code)
+}
+
+func TestIndexSyncSharesOnlyCurrentHEADRecords(t *testing.T) {
+	syncRemote := filepath.Join(t.TempDir(), "indexes.git")
+	remoteRepo, err := git.PlainInit(syncRemote, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remoteRepo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("main"))); err != nil {
+		t.Fatal(err)
+	}
+	origin := "https://example.test/acme/widget.git"
+	firstRoot := t.TempDir()
+	writeFile(t, firstRoot, "app.go", "package app\n\nfunc Stable() {}\n")
+	head := commitSearchRepo(t, firstRoot)
+	setTestOrigin(t, firstRoot, origin)
+
+	firstEmbedder := &countingEmbedder{}
+	opts := Options{
+		Root:                firstRoot,
+		IndexRemote:         syncRemote,
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+	}
+	if _, err := Run(t.Context(), firstEmbedder, opts, ""); err != nil {
+		t.Fatal(err)
+	}
+	if firstEmbedder.calls.Load() == 0 {
+		t.Fatal("first machine did not build HEAD index")
+	}
+
+	sync, err := openIndexSync(t.Context(), syncRemote, giturl.Identity(origin), head, "test-model", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(sync.snapshotPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sync.close(); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, firstRoot, "app.go", "package app\n\nfunc Dirty() {}\n")
+	writeFile(t, firstRoot, "secret.txt", "untracked local content\n")
+	dirtyEmbedder := &countingEmbedder{}
+	if _, err := Run(t.Context(), dirtyEmbedder, opts, ""); err != nil {
+		t.Fatal(err)
+	}
+	if dirtyEmbedder.calls.Load() == 0 {
+		t.Fatal("dirty working tree did not re-index locally")
+	}
+	after, err := os.ReadFile(sync.snapshotPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("dirty working-tree records changed synced HEAD snapshot")
+	}
+
+	secondRoot := filepath.Join(t.TempDir(), "clone")
+	if _, err := git.PlainClone(secondRoot, &git.CloneOptions{URL: firstRoot}); err != nil {
+		t.Fatal(err)
+	}
+	setTestOrigin(t, secondRoot, origin)
+	secondEmbedder := &countingEmbedder{}
+	opts.Root = secondRoot
+	if _, err := Run(t.Context(), secondEmbedder, opts, ""); err != nil {
+		t.Fatal(err)
+	}
+	if calls := secondEmbedder.calls.Load(); calls != 0 {
+		t.Fatalf("second machine embedding calls = %d, want 0", calls)
+	}
+}
+
+func TestIndexSyncFailsWhenRemoteIsUnreachable(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "app.go", "package app\n")
+	commitSearchRepo(t, root)
+	setTestOrigin(t, root, "https://example.test/acme/unreachable.git")
+	_, err := Run(t.Context(), fakeEmbedder{}, Options{
+		Root:                root,
+		IndexRemote:         filepath.Join(t.TempDir(), "missing.git"),
+		IndexOnly:           true,
+		MinRelatedness:      DefaultMinRelatedness,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+	}, "")
+	if err == nil || !strings.Contains(err.Error(), "index remote reach failed") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestIndexSyncSerializesSharedWorkingTree(t *testing.T) {
+	syncRemote := filepath.Join(t.TempDir(), "indexes.git")
+	remoteRepo, err := git.PlainInit(syncRemote, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remoteRepo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("main"))); err != nil {
+		t.Fatal(err)
+	}
+	first, err := openIndexSync(t.Context(), syncRemote, "example.test/acme/repo", strings.Repeat("a", 40), "model", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.close()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = openIndexSync(ctx, syncRemote, "example.test/acme/repo", strings.Repeat("a", 40), "model", 3)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("second sync error = %v, want canceled lock wait", err)
+	}
+}
+
+func TestValidateSyncTreeRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, []byte("safe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, "snapshot.json")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := validateSyncTree(root); err == nil || !strings.Contains(err.Error(), "contains symlink") {
+		t.Fatalf("validation error = %v", err)
+	}
+}
+
+func TestMergeCompatibleRecordsKeepsRemoteAndLocalIdentities(t *testing.T) {
+	record := func(input string, vector []float64) vectorRecord {
+		return vectorRecord{EmbeddingInputHash: input, EmbeddingModel: "model", Dimensions: 3, Vector: vector}
+	}
+	remote := []vectorRecord{record("shared", []float64{1, 0, 0}), record("remote", []float64{0, 1, 0})}
+	remote[0].Path = "first.go"
+	remote = append(remote, remote[0])
+	remote[2].Path = "second.go"
+	local := []vectorRecord{record("shared", []float64{0.9, 0.1, 0}), record("local", []float64{0, 0, 1}), record("wrong-model", []float64{1, 1, 1})}
+	local[0].Path = "first.go"
+	local[2].EmbeddingModel = "other"
+
+	merged := mergeCompatibleRecords(remote, local, "model", 3)
+	if len(merged) != 4 {
+		t.Fatalf("merged records = %#v", merged)
+	}
+	for _, got := range merged {
+		if got.EmbeddingInputHash == "shared" && got.Vector[0] != 1 {
+			t.Fatalf("shared record did not preserve remote value: %#v", got.Vector)
+		}
+	}
+}
+
+func setTestOrigin(t *testing.T, root, remoteURL string) {
+	t.Helper()
+	repo, err := git.PlainOpen(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := repo.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Remotes["origin"] = &config.RemoteConfig{Name: "origin", URLs: []string{remoteURL}}
+	if err := repo.SetConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
 }
 
 type fakeEmbedder struct{}
@@ -2128,7 +2298,7 @@ func TestRemoteProgressWriterReportsCompleteUpdates(t *testing.T) {
 	rawRemote := "https://user:secret@example.test/repo.git?token=abc#fragment"
 	writer := remoteProgressWriter{
 		rawRemote: rawRemote,
-		remote:    sanitizeRemoteURL(rawRemote),
+		remote:    giturl.Sanitize(rawRemote),
 		progressLog: func(update Progress) error {
 			updates = append(updates, update)
 			return nil
@@ -2249,9 +2419,9 @@ func TestRemoteSearchCanResolveParentAfterShallowHeadCache(t *testing.T) {
 	}
 }
 
-func TestSanitizeRemoteURLDropsCredentialsQueryAndFragment(t *testing.T) {
+func TestSanitizeRemoteErrorDropsCredentialsQueryAndFragment(t *testing.T) {
 	raw := "https://user:secret@example.test/repo.git?token=abc&x=1#access_token=def"
-	got := sanitizeRemoteURL(raw)
+	got := giturl.Sanitize(raw)
 	if got != "https://example.test/repo.git" {
 		t.Fatalf("sanitized remote = %q", got)
 	}

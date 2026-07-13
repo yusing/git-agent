@@ -103,6 +103,7 @@ type Options struct {
 	Root                   string
 	Rev                    string
 	Remote                 string
+	IndexRemote            string
 	MinRelatedness         float64
 	Limit                  int
 	IndexOnly              bool
@@ -121,6 +122,7 @@ type Options struct {
 	Debug                  bool
 	DebugLog               func(string, ...slog.Attr)
 	ProgressLog            func(Progress) error
+	skipIndexSync          bool
 }
 
 type Progress struct {
@@ -392,6 +394,40 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	source := selection.source
 	resolvedRev := selection.resolvedRev
 	sharedScope := len(scope) > 0 && !scopeUsesSkippedPath(scope)
+	var headSync *indexSync
+	if !opts.skipIndexSync && strings.TrimSpace(opts.IndexRemote) != "" && strings.TrimSpace(opts.Remote) == "" && selection.repo != nil && selection.repo.HeadSHA != "" {
+		origin := repositoryOrigin(selection.repo)
+		if origin != "" {
+			headSync, err = prepareIndexSync(ctx, opts.IndexRemote, origin, selection.repo.HeadSHA, opts.EmbeddingModel, opts.EmbeddingDimensions, selection.metadataDir, selection.repo.RootPath)
+			if err != nil {
+				return fail(err)
+			}
+			syncSession := headSync
+			defer syncSession.close()
+			if source.Mode != "revision" || resolvedRev != selection.repo.HeadSHA {
+				headOpts := opts
+				headOpts.Root = selection.repo.RootPath
+				headOpts.Rev = selection.repo.HeadSHA
+				headOpts.Remote = ""
+				headOpts.Scope = nil
+				headOpts.IndexOnly = true
+				headOpts.Reindex = false
+				headOpts.CodeOnly = false
+				headOpts.NoTests = false
+				headOpts.skipIndexSync = true
+				if _, err := Run(ctx, client, headOpts, ""); err != nil {
+					return fail(fmt.Errorf("index current HEAD for sync: %w", err))
+				}
+				if err := headSync.exportAndPush(ctx, selection.metadataDir, selection.repo.RootPath); err != nil {
+					return fail(err)
+				}
+				if err := headSync.close(); err != nil {
+					return fail(err)
+				}
+				headSync = nil
+			}
+		}
+	}
 
 	var files []fileContent
 	var discoveredFiles []fileContent
@@ -647,6 +683,14 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	mark("persist")
 	if err := unlockIndex(); err != nil {
 		return fail(err)
+	}
+	if headSync != nil {
+		if err := headSync.exportAndPush(ctx, selection.metadataDir, selection.repo.RootPath); err != nil {
+			return fail(err)
+		}
+		if err := headSync.close(); err != nil {
+			return fail(err)
+		}
 	}
 
 	indexStatus := "miss"
@@ -1190,6 +1234,68 @@ func loadVectors(dir string) ([]vectorRecord, error) {
 		return records, nil
 	}
 	return loadLegacyVectors(dir)
+}
+
+func migrateSearchMetadata(ctx context.Context, legacyMetadataDir, targetMetadataDir string) error {
+	legacySearch := filepath.Join(legacyMetadataDir, "search")
+	if _, err := os.Stat(legacySearch); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	var manifests []string
+	if err := filepath.WalkDir(legacySearch, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && entry.Name() == "manifest.json" {
+			manifests = append(manifests, path)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, manifestPath := range manifests {
+		sourceDir := filepath.Dir(manifestPath)
+		var found manifest
+		var sourceRecords []vectorRecord
+		if err := withIndexLock(ctx, sourceDir, func() error {
+			var err error
+			found, err = loadManifest(sourceDir)
+			if err != nil {
+				return err
+			}
+			sourceRecords, err = loadVectors(sourceDir)
+			return err
+		}); err != nil {
+			return fmt.Errorf("load legacy search index %s: %w", sourceDir, err)
+		}
+		rel, err := filepath.Rel(legacyMetadataDir, sourceDir)
+		if err != nil {
+			return err
+		}
+		targetDir := filepath.Join(targetMetadataDir, rel)
+		if existing, err := loadManifest(targetDir); err == nil && (existing.EmbeddingModel != found.EmbeddingModel || existing.Dimensions != found.Dimensions) {
+			targetDir = filepath.Join(targetMetadataDir, "search", "migrated-"+pathHash(legacyMetadataDir), strings.TrimPrefix(rel, "search"+string(filepath.Separator)))
+		}
+		if err := withIndexLock(ctx, targetDir, func() error {
+			targetRecords, _ := loadVectors(targetDir)
+			records := mergeCompatibleRecords(targetRecords, sourceRecords, found.EmbeddingModel, found.Dimensions)
+			source := Source{Mode: found.Mode, Root: found.Root, Remote: found.Remote, ResolvedRev: found.ResolvedRev}
+			return saveIndex(ctx, targetMetadataDir, targetDir, source, found.Root, found.ResolvedRev, found.EmbeddingModel, found.Dimensions, records, nil)
+		}); err != nil {
+			return fmt.Errorf("migrate legacy search index %s: %w", sourceDir, err)
+		}
+	}
+	if err := os.RemoveAll(legacySearch); err != nil {
+		return fmt.Errorf("remove legacy search metadata: %w", err)
+	}
+	return nil
+}
+
+func pathHash(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])[:16]
 }
 
 func indexUsesSharedVectors(dir string) bool {

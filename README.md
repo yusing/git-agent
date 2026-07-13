@@ -46,6 +46,7 @@ directory is on `PATH`.
 | Release body | `git-agent release-note <base> <release>` | Release Markdown on stdout |
 | Version bump release body | `git-agent release-note patch` | Release Markdown for latest tag to `HEAD` |
 | Agent context search | `git-agent search --agent <query...>` | Brief results, plus progress URL when indexing |
+| Configure index sync | `git-agent config index.remote <git-url>` | Save a dedicated Git remote for shared HEAD indexes |
 | List search indexes | `git-agent search --ls` | Local index summaries for the current project |
 | List indexed files | `git-agent search --ls-files` | Tree of files stored in the selected index |
 
@@ -127,6 +128,19 @@ Search reads `OPENAI_EMBEDDING_API_KEY` first, then falls back to
 `OPENAI_EMBEDDING_DIMENSIONS` to isolate search embedding config from normal
 message-generation config.
 
+Search indexes can be synchronized through a dedicated Git repository:
+
+```sh
+git-agent config index.remote git@example.com:team/git-agent-indexes.git
+git-agent config index.remote
+git-agent config --unset index.remote
+```
+
+Configured sync publishes only current committed `HEAD`; working-tree-only
+vectors remain local. Index repository must be dedicated to `git-agent`, and
+unreachable remote fails search explicitly. See [docs/spec.md](docs/spec.md)
+for pull/rebase, conflict merge, branch, migration, and failure contracts.
+
 Normal indexing reuses exact matching chunk embeddings from compatible indexes
 for the same project or cached remote. This includes filesystem-to-revision and
 revision-to-revision reuse, so searching a nearby commit usually embeds only its
@@ -199,6 +213,8 @@ git-agent search [flags] <query...>
 git-agent search --ls [--remote <url>] [--format text|json]
 git-agent search --ls-remotes [--format text|json|completion]
 git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]
+git-agent config index.remote [<git-url>]
+git-agent config --unset index.remote
 ```
 
 Common message-generation flags:
@@ -224,6 +240,12 @@ Common message-generation flags:
 human console trace to stdout, and skips the on-disk JSON trace session.
 
 ## Configuration
+
+Persistent settings are stored in
+`${XDG_CONFIG_HOME:-~/.config}/git-agent/config.json`. `index.remote` is
+global. Displayed URLs redact URL credentials; sync uses same Git transport
+and authentication behavior as search `--remote`, without invoking `git`
+executable or interactive credential prompts.
 
 Default auth comes from:
 

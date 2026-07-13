@@ -17,6 +17,7 @@ import (
 	gitconfig "github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/yusing/git-agent/internal/gitctx"
+	"github.com/yusing/git-agent/internal/giturl"
 	"github.com/yusing/git-agent/internal/metadata"
 )
 
@@ -78,7 +79,7 @@ type remoteCache struct {
 }
 
 func resolveRemoteIndexSelection(ctx context.Context, remoteURL, rev string, filters Filters, reindex, fetchAllowed bool, progressLog func(Progress) error) (indexSelection, error) {
-	remote := sanitizeRemoteURL(remoteURL)
+	remote := giturl.Sanitize(remoteURL)
 	metadataDir, err := metadata.RemoteDir(remote)
 	if err != nil {
 		return indexSelection{}, err
@@ -172,20 +173,6 @@ func resolveRemoteIndexSelection(ctx context.Context, remoteURL, rev string, fil
 		resolvedRev: resolvedRev,
 		repo:        wrapped,
 	}, nil
-}
-
-func sanitizeRemoteURL(value string) string {
-	trimmed := strings.TrimSpace(value)
-	parsed, err := url.Parse(trimmed)
-	if err == nil {
-		parsed.User = nil
-		parsed.RawQuery = ""
-		parsed.ForceQuery = false
-		parsed.Fragment = ""
-		parsed.RawFragment = ""
-		return parsed.String()
-	}
-	return trimmed
 }
 
 func sanitizeRemoteError(err error, raw, sanitized string) string {
@@ -283,7 +270,7 @@ func fetchRemote(ctx context.Context, repo *git.Repository, remoteURL string, sh
 		progress = &remoteProgressWriter{
 			progressLog: progressLog,
 			rawRemote:   remoteURL,
-			remote:      sanitizeRemoteURL(remoteURL),
+			remote:      giturl.Sanitize(remoteURL),
 		}
 	}
 	err := repo.FetchContext(ctx, &git.FetchOptions{

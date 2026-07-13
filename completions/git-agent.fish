@@ -33,11 +33,15 @@ end
 complete -c git-agent -f
 
 complete -c git-agent -n '__git_agent_no_subcommand' -a commit -d 'Generate a message and commit staged changes'
+complete -c git-agent -n '__git_agent_no_subcommand' -a config -d 'Read or update persistent configuration'
 complete -c git-agent -n '__git_agent_no_subcommand' -a commit-msg -d 'Generate a commit message from staged changes'
 complete -c git-agent -n '__git_agent_no_subcommand' -a pr-message -d 'Generate a pull request message from branch changes'
 complete -c git-agent -n '__git_agent_no_subcommand' -a release-note -d 'Generate a release note for a range or version bump'
 complete -c git-agent -n '__git_agent_no_subcommand' -a search -d 'Search repository context with embeddings'
 complete -c git-agent -n '__git_agent_no_subcommand' -a help -d 'Show usage'
+
+complete -c git-agent -n '__git_agent_using_command config' -a index.remote -d 'Dedicated Git remote for synchronized HEAD indexes'
+complete -c git-agent -n '__git_agent_using_command config' -l unset -d 'Remove a configuration value'
 
 complete -c git-agent -n '__git_agent_using_command commit' -l amend -d 'Generate an amended commit message and amend HEAD'
 complete -c git-agent -n '__git_agent_using_command commit-msg' -l amend -d 'Generate an amended commit message'

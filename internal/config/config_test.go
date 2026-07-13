@@ -58,6 +58,29 @@ func TestResolveFlagEnvDefaultOrder(t *testing.T) {
 	}
 }
 
+func TestFileRoundTripUsesXDGConfigHome(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	want := File{Index: IndexConfig{Remote: "git@example.test:indexes.git"}}
+	if err := SaveFile(want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("config = %#v, want %#v", got, want)
+	}
+	info, err := os.Stat(filepath.Join(root, "git-agent", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("config mode = %04o", info.Mode().Perm())
+	}
+}
+
 func TestResolveRequiresAuth(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("HOME", t.TempDir())
