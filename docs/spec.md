@@ -475,10 +475,14 @@ indexes are skipped. After inventory, command creates at most one merged index
 commit and performs one final push; pull/rebase may first push replayed pending
 local sync commits as required by sync ordering. Progress is written to stderr
 while fetching remote state, scanning local indexes, syncing each eligible
-index, and pushing merged state. Interactive stderr rewrites one transient line
-with ANSI control sequences and clears it before stdout. Non-interactive stderr
-writes each update as a newline-delimited log line without ANSI control
-sequences. Index sync does not start a progress probe server. Stdout is exactly
+index, and pushing merged state. Fetch and push object-transfer updates reuse
+sanitized go-git transport progress and append it as a bracketed suffix, such as
+`index sync: fetching remote [Receiving objects: 42%]`; phase-only progress
+remains visible while transport totals are unavailable. Interactive stderr
+rewrites one transient line with ANSI control sequences and clears it before
+stdout. Non-interactive stderr writes each update as a newline-delimited log
+line without ANSI control sequences. Index sync does not start a progress probe
+server. Stdout is exactly
 `synced indexes=<n> records=<n> skipped=<n>` followed by newline. Transport,
 configuration, locking, and unsafe-tree failures fail command explicitly.
 Generated index-store commits are unsigned: each dedicated local sync

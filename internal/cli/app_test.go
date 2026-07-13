@@ -421,6 +421,24 @@ func TestIndexSyncReportsProgress(t *testing.T) {
 	}
 }
 
+func TestIndexSyncTransportProgressUsesBracketSuffix(t *testing.T) {
+	var stderr bytes.Buffer
+	app := &App{stderr: &stderr}
+	for _, progress := range []searchtask.Progress{
+		{Status: searchtask.ProgressStatusFetching, Detail: "Receiving objects: 42%"},
+		{Status: searchtask.ProgressStatusPushing, Detail: "Writing objects: 75%"},
+	} {
+		if err := app.writeIndexSyncProgress(progress, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := "index sync: fetching remote [Receiving objects: 42%]\n" +
+		"index sync: pushing remote [Writing objects: 75%]\n"
+	if got := stderr.String(); got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+}
+
 func TestSearchUsageErrorsPrecedeEmbeddingEnvValidation(t *testing.T) {
 	t.Setenv(config.EnvEmbeddingDimensions, "invalid")
 

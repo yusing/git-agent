@@ -615,6 +615,9 @@ func (a *App) writeIndexSyncProgress(progress searchtask.Progress, interactive b
 	switch progress.Status {
 	case searchtask.ProgressStatusFetching:
 		message = "index sync: fetching remote"
+		if progress.Detail != "" {
+			message += " [" + progress.Detail + "]"
+		}
 	case searchtask.ProgressStatusScanning:
 		message = "index sync: scanning local indexes"
 	case searchtask.ProgressStatusSyncing:
@@ -625,6 +628,9 @@ func (a *App) writeIndexSyncProgress(progress searchtask.Progress, interactive b
 		}
 	case searchtask.ProgressStatusPushing:
 		message = "index sync: pushing remote"
+		if progress.Detail != "" {
+			message += " [" + progress.Detail + "]"
+		}
 	default:
 		return nil
 	}

@@ -31,6 +31,19 @@ type remoteProgressWriter struct {
 	progressLog func(Progress) error
 	rawRemote   string
 	remote      string
+	status      string
+}
+
+func newRemoteProgressWriter(progressLog func(Progress) error, rawRemote, status string) *remoteProgressWriter {
+	if progressLog == nil {
+		return nil
+	}
+	return &remoteProgressWriter{
+		progressLog: progressLog,
+		rawRemote:   rawRemote,
+		remote:      giturl.Sanitize(rawRemote),
+		status:      status,
+	}
 }
 
 func (w *remoteProgressWriter) Write(p []byte) (int, error) {
@@ -69,7 +82,7 @@ func (w *remoteProgressWriter) emit() error {
 	if detail == "" {
 		return nil
 	}
-	return w.progressLog(Progress{Status: ProgressStatusFetching, Detail: detail})
+	return w.progressLog(Progress{Status: w.status, Detail: detail})
 }
 
 type remoteCache struct {
@@ -265,14 +278,7 @@ func fetchRemote(ctx context.Context, repo *git.Repository, remoteURL string, sh
 	if shallow {
 		depth = 1
 	}
-	var progress *remoteProgressWriter
-	if progressLog != nil {
-		progress = &remoteProgressWriter{
-			progressLog: progressLog,
-			rawRemote:   remoteURL,
-			remote:      giturl.Sanitize(remoteURL),
-		}
-	}
+	progress := newRemoteProgressWriter(progressLog, remoteURL, ProgressStatusFetching)
 	err := repo.FetchContext(ctx, &git.FetchOptions{
 		RemoteName:    "origin",
 		RemoteURL:     remoteURL,

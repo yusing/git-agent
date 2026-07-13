@@ -69,7 +69,7 @@ func TestIndexSyncSharesOnlyCurrentHEADRecords(t *testing.T) {
 		t.Fatal("first machine did not build HEAD index")
 	}
 
-	sync, err := openIndexSync(t.Context(), syncRemote)
+	sync, err := openIndexSync(t.Context(), syncRemote, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +270,7 @@ func TestSyncAllPublishesEveryCompletedRevisionOnly(t *testing.T) {
 			t.Fatalf("progress[%d] = %#v, want done=%d total=3", i+2, update, i)
 		}
 	}
-	sync, err := openIndexSync(t.Context(), syncRemote)
+	sync, err := openIndexSync(t.Context(), syncRemote, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,16 +398,77 @@ func TestFetchRemoteUsesDefaultSSHKeyWithoutAgent(t *testing.T) {
 
 func TestIndexSyncSerializesSharedWorkingTree(t *testing.T) {
 	syncRemote := newEmptySyncRemote(t)
-	first, err := openIndexSync(t.Context(), syncRemote)
+	first, err := openIndexSync(t.Context(), syncRemote, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer first.close()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, err = openIndexSync(ctx, syncRemote)
+	_, err = openIndexSync(ctx, syncRemote, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("second sync error = %v, want canceled lock wait", err)
+	}
+}
+
+func TestIndexSyncRetryReportsActualOperationPhases(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	remote := newEmptySyncRemote(t)
+	var progress []Progress
+	sync, err := openIndexSync(t.Context(), remote, func(update Progress) error {
+		progress = append(progress, update)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sync.close()
+	if err := sync.push(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	cloneDir := filepath.Join(t.TempDir(), "clone")
+	clone, err := git.PlainClone(cloneDir, &git.CloneOptions{URL: remote})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := clone.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemaPath := filepath.Join(cloneDir, "schema.json")
+	schema, err := os.ReadFile(schemaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(schemaPath, append(schema, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worktree.Add("schema.json"); err != nil {
+		t.Fatal(err)
+	}
+	signature := &object.Signature{Name: "Search Test", Email: "search@example.test", When: time.Unix(1, 0)}
+	if _, err := worktree.Commit("advance remote", &git.CommitOptions{Author: signature, Committer: signature}); err != nil {
+		t.Fatal(err)
+	}
+	if err := clone.Push(&git.PushOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	progress = nil
+	if err := sync.pushWithRetry(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	var phases []string
+	for _, update := range progress {
+		if update.Detail == "" {
+			phases = append(phases, update.Status)
+		}
+	}
+	want := []string{ProgressStatusPushing, ProgressStatusFetching, ProgressStatusPushing}
+	if !slices.Equal(phases, want) {
+		t.Fatalf("operation phases = %#v, want %#v", phases, want)
 	}
 }
 
@@ -2590,14 +2651,10 @@ func TestRemoteSearchUsesCachedCommittedTree(t *testing.T) {
 func TestRemoteProgressWriterReportsCompleteUpdates(t *testing.T) {
 	var updates []Progress
 	rawRemote := "https://user:secret@example.test/repo.git?token=abc#fragment"
-	writer := remoteProgressWriter{
-		rawRemote: rawRemote,
-		remote:    giturl.Sanitize(rawRemote),
-		progressLog: func(update Progress) error {
-			updates = append(updates, update)
-			return nil
-		},
-	}
+	writer := newRemoteProgressWriter(func(update Progress) error {
+		updates = append(updates, update)
+		return nil
+	}, rawRemote, ProgressStatusFetching)
 	if _, err := writer.Write([]byte("Enumerating objects: 25%\rCounting obj")); err != nil {
 		t.Fatal(err)
 	}
@@ -2618,6 +2675,21 @@ func TestRemoteProgressWriterReportsCompleteUpdates(t *testing.T) {
 	}
 	if !slices.Equal(updates, want) {
 		t.Fatalf("updates = %#v, want %#v", updates, want)
+	}
+}
+
+func TestRemoteProgressWriterReportsConfiguredStatus(t *testing.T) {
+	var got Progress
+	writer := newRemoteProgressWriter(func(update Progress) error {
+		got = update
+		return nil
+	}, "https://example.test/indexes.git", ProgressStatusPushing)
+	if _, err := writer.Write([]byte("Writing objects: 75%\r")); err != nil {
+		t.Fatal(err)
+	}
+	want := Progress{Status: ProgressStatusPushing, Detail: "Writing objects: 75%"}
+	if got != want {
+		t.Fatalf("update = %#v, want %#v", got, want)
 	}
 }
 

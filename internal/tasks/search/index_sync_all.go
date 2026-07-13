@@ -33,10 +33,7 @@ func SyncAll(ctx context.Context, remoteURL string, opts SyncAllOptions) (summar
 	if strings.TrimSpace(remoteURL) == "" {
 		return summary, errors.New("index.remote is not configured")
 	}
-	if err := reportSyncProgress(opts, Progress{Status: ProgressStatusFetching}); err != nil {
-		return summary, err
-	}
-	sync, err := openIndexSync(ctx, remoteURL)
+	sync, err := openIndexSync(ctx, remoteURL, opts.ProgressLog)
 	if err != nil {
 		return summary, err
 	}
@@ -48,7 +45,7 @@ func SyncAll(ctx context.Context, remoteURL string, opts SyncAllOptions) (summar
 	}
 	metadataRoot := filepath.Join(home, ".git-agent")
 	indexSyncRoot := filepath.Join(metadataRoot, "index-sync")
-	if err := reportSyncProgress(opts, Progress{Status: ProgressStatusScanning}); err != nil {
+	if err := reportProgress(opts.ProgressLog, Progress{Status: ProgressStatusScanning}); err != nil {
 		return summary, err
 	}
 	targets, skipped, err := inventorySyncTargets(metadataRoot, indexSyncRoot)
@@ -57,7 +54,7 @@ func SyncAll(ctx context.Context, remoteURL string, opts SyncAllOptions) (summar
 		return summary, err
 	}
 	started := time.Now()
-	if err := reportSyncProgress(opts, Progress{Status: ProgressStatusSyncing, Total: len(targets)}); err != nil {
+	if err := reportProgress(opts.ProgressLog, Progress{Status: ProgressStatusSyncing, Total: len(targets)}); err != nil {
 		return summary, err
 	}
 	for i, target := range targets {
@@ -71,7 +68,7 @@ func SyncAll(ctx context.Context, remoteURL string, opts SyncAllOptions) (summar
 		} else {
 			summary.Skipped++
 		}
-		if err := reportSyncProgress(opts, Progress{
+		if err := reportProgress(opts.ProgressLog, Progress{
 			Status:  ProgressStatusSyncing,
 			Done:    i + 1,
 			Total:   len(targets),
@@ -79,9 +76,6 @@ func SyncAll(ctx context.Context, remoteURL string, opts SyncAllOptions) (summar
 		}); err != nil {
 			return summary, err
 		}
-	}
-	if err := reportSyncProgress(opts, Progress{Status: ProgressStatusPushing}); err != nil {
-		return summary, err
 	}
 	if err := sync.commitPending(fmt.Sprintf("Sync %d revision indexes", summary.Indexes)); err != nil {
 		return summary, err
@@ -152,11 +146,11 @@ func syncLocalTarget(ctx context.Context, sync *indexSync, target indexSyncTarge
 	return records, err == nil, err
 }
 
-func reportSyncProgress(opts SyncAllOptions, progress Progress) error {
-	if opts.ProgressLog == nil {
+func reportProgress(progressLog func(Progress) error, progress Progress) error {
+	if progressLog == nil {
 		return nil
 	}
-	return opts.ProgressLog(progress)
+	return progressLog(progress)
 }
 
 func syncTargetFromManifest(dir string, found manifest) (indexSyncTarget, bool) {

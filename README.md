@@ -143,8 +143,8 @@ resolved `--rev`, or selected `--remote` revision. Working-tree-only vectors
 remain local. `git-agent index sync` additively publishes every completed local
 revision index without embedding new content. Index repository must be
 dedicated to `git-agent`; unreachable remote fails explicitly. Sync progress is
-reported on stderr in terminals and redirected output, while final summary
-remains on stdout. See
+reported on stderr in terminals and redirected output, including bracketed
+fetch/push object-transfer progress, while final summary remains on stdout. See
 [docs/spec.md](docs/spec.md) for exact sync contracts.
 
 Generated index-store commits are always unsigned. This is enforced only in

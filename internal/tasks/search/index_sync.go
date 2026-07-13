@@ -46,16 +46,17 @@ type indexSyncTarget struct {
 }
 
 type indexSync struct {
-	remoteURL string
-	dir       string
-	branch    plumbing.ReferenceName
-	repo      *git.Repository
-	worktree  *git.Worktree
-	lock      *indexLock
+	remoteURL   string
+	dir         string
+	branch      plumbing.ReferenceName
+	repo        *git.Repository
+	worktree    *git.Worktree
+	lock        *indexLock
+	progressLog func(Progress) error
 }
 
 func prepareIndexSync(ctx context.Context, remoteURL string, target indexSyncTarget) (*indexSync, error) {
-	sync, err := openIndexSync(ctx, remoteURL)
+	sync, err := openIndexSync(ctx, remoteURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +67,7 @@ func prepareIndexSync(ctx context.Context, remoteURL string, target indexSyncTar
 	return sync, nil
 }
 
-func openIndexSync(ctx context.Context, remoteURL string) (result *indexSync, err error) {
+func openIndexSync(ctx context.Context, remoteURL string, progressLog func(Progress) error) (result *indexSync, err error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -102,11 +103,12 @@ func openIndexSync(ctx context.Context, remoteURL string) (result *indexSync, er
 		return nil, err
 	}
 	sync := &indexSync{
-		remoteURL: remoteURL,
-		dir:       dir,
-		repo:      repo,
-		worktree:  worktree,
-		lock:      lock,
+		remoteURL:   remoteURL,
+		dir:         dir,
+		repo:        repo,
+		worktree:    worktree,
+		lock:        lock,
+		progressLog: progressLog,
 	}
 	if err := sync.reconcile(ctx); err != nil {
 		return nil, err
@@ -132,6 +134,9 @@ func (sync *indexSync) reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := reportProgress(sync.progressLog, Progress{Status: ProgressStatusFetching}); err != nil {
+		return err
+	}
 	refs, err := remote.ListContext(ctx, &git.ListOptions{ClientOptions: remoteClientOptions()})
 	if errors.Is(err, transport.ErrEmptyRemoteRepository) {
 		refs, err = nil, nil
@@ -155,6 +160,7 @@ func (sync *indexSync) reconcile(ctx context.Context) error {
 	}
 	sync.branch = branch
 	refspec := gitconfig.RefSpec("+" + branch.String() + ":" + remoteTrackingRef(branch).String())
+	progress := newRemoteProgressWriter(sync.progressLog, sync.remoteURL, ProgressStatusFetching)
 	err = sync.repo.FetchContext(ctx, &git.FetchOptions{
 		RemoteName:    "origin",
 		ClientOptions: remoteClientOptions(),
@@ -162,9 +168,17 @@ func (sync *indexSync) reconcile(ctx context.Context) error {
 		Tags:          plumbing.NoTags,
 		Force:         true,
 		Prune:         true,
+		Progress:      progress,
 	})
+	var progressErr error
+	if progress != nil {
+		progressErr = progress.Flush()
+	}
 	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return sync.remoteError("fetch", err)
+	}
+	if progressErr != nil {
+		return progressErr
 	}
 	return sync.rebaseOnto(ctx, remoteHash)
 }
@@ -561,17 +575,26 @@ func (sync *indexSync) pushWithRetry(ctx context.Context) error {
 }
 
 func (sync *indexSync) push(ctx context.Context) error {
+	if err := reportProgress(sync.progressLog, Progress{Status: ProgressStatusPushing}); err != nil {
+		return err
+	}
+	progress := newRemoteProgressWriter(sync.progressLog, sync.remoteURL, ProgressStatusPushing)
 	err := sync.repo.PushContext(ctx, &git.PushOptions{
 		RemoteName:    "origin",
 		ClientOptions: remoteClientOptions(),
 		RefSpecs: []gitconfig.RefSpec{
 			gitconfig.RefSpec(sync.branch.String() + ":" + sync.branch.String()),
 		},
+		Progress: progress,
 	})
+	var progressErr error
+	if progress != nil {
+		progressErr = progress.Flush()
+	}
 	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return sync.remoteError("push", err)
 	}
-	return nil
+	return progressErr
 }
 
 func (sync *indexSync) remoteError(action string, err error) error {
