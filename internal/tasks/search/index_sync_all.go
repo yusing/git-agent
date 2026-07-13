@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/yusing/git-agent/internal/giturl"
 )
@@ -18,9 +19,22 @@ type SyncSummary struct {
 	Skipped int
 }
 
-func SyncAll(ctx context.Context, remoteURL string) (summary SyncSummary, err error) {
+type SyncAllOptions struct {
+	ProgressLog func(Progress) error
+}
+
+const (
+	ProgressStatusScanning = "scanning"
+	ProgressStatusSyncing  = "syncing"
+	ProgressStatusPushing  = "pushing"
+)
+
+func SyncAll(ctx context.Context, remoteURL string, opts SyncAllOptions) (summary SyncSummary, err error) {
 	if strings.TrimSpace(remoteURL) == "" {
 		return summary, errors.New("index.remote is not configured")
+	}
+	if err := reportSyncProgress(opts, Progress{Status: ProgressStatusFetching}); err != nil {
+		return summary, err
 	}
 	sync, err := openIndexSync(ctx, remoteURL)
 	if err != nil {
@@ -34,9 +48,54 @@ func SyncAll(ctx context.Context, remoteURL string) (summary SyncSummary, err er
 	}
 	metadataRoot := filepath.Join(home, ".git-agent")
 	indexSyncRoot := filepath.Join(metadataRoot, "index-sync")
+	if err := reportSyncProgress(opts, Progress{Status: ProgressStatusScanning}); err != nil {
+		return summary, err
+	}
+	targets, skipped, err := inventorySyncTargets(metadataRoot, indexSyncRoot)
+	summary.Skipped += skipped
+	if err != nil {
+		return summary, err
+	}
+	started := time.Now()
+	if err := reportSyncProgress(opts, Progress{Status: ProgressStatusSyncing, Total: len(targets)}); err != nil {
+		return summary, err
+	}
+	for i, target := range targets {
+		records, synced, err := syncLocalTarget(ctx, sync, target)
+		if err != nil {
+			return summary, err
+		}
+		if synced {
+			summary.Indexes++
+			summary.Records += records
+		} else {
+			summary.Skipped++
+		}
+		if err := reportSyncProgress(opts, Progress{
+			Status:  ProgressStatusSyncing,
+			Done:    i + 1,
+			Total:   len(targets),
+			Elapsed: time.Since(started),
+		}); err != nil {
+			return summary, err
+		}
+	}
+	if err := reportSyncProgress(opts, Progress{Status: ProgressStatusPushing}); err != nil {
+		return summary, err
+	}
+	if err := sync.commitPending(fmt.Sprintf("Sync %d revision indexes", summary.Indexes)); err != nil {
+		return summary, err
+	}
+	if err := sync.pushWithRetry(ctx); err != nil {
+		return summary, err
+	}
+	return summary, nil
+}
+
+func inventorySyncTargets(metadataRoot, indexSyncRoot string) (targets []indexSyncTarget, skipped int, err error) {
 	err = filepath.WalkDir(metadataRoot, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			summary.Skipped++
+			skipped++
 			return nil
 		}
 		if path == indexSyncRoot {
@@ -49,13 +108,13 @@ func SyncAll(ctx context.Context, remoteURL string) (summary SyncSummary, err er
 			return nil
 		}
 		if !entry.Type().IsRegular() {
-			summary.Skipped++
+			skipped++
 			return nil
 		}
 		dir := filepath.Dir(path)
 		found, err := loadManifest(dir)
 		if err != nil {
-			summary.Skipped++
+			skipped++
 			return nil
 		}
 		if found.Mode != "revision" && found.Mode != "remote" {
@@ -63,45 +122,41 @@ func SyncAll(ctx context.Context, remoteURL string) (summary SyncSummary, err er
 		}
 		target, ok := syncTargetFromManifest(dir, found)
 		if !ok {
-			summary.Skipped++
+			skipped++
 			return nil
 		}
-		var localRecords []vectorRecord
-		err = withIndexLock(ctx, target.indexDir, func() error {
-			var loadErr error
-			localRecords, loadErr = loadVectors(target.indexDir)
-			return loadErr
-		})
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
-		if err != nil {
-			summary.Skipped++
-			return nil
-		}
-		compatible, ok := compatibleIndexRecords(localRecords, target.model, target.dimensions)
-		if !ok {
-			summary.Skipped++
-			return nil
-		}
-		records, err := sync.writeSnapshot(target, compatible)
-		if err != nil {
-			return err
-		}
-		summary.Indexes++
-		summary.Records += records
+		targets = append(targets, target)
 		return nil
 	})
+	return targets, skipped, err
+}
+
+func syncLocalTarget(ctx context.Context, sync *indexSync, target indexSyncTarget) (records int, synced bool, err error) {
+	var localRecords []vectorRecord
+	err = withIndexLock(ctx, target.indexDir, func() error {
+		var loadErr error
+		localRecords, loadErr = loadVectors(target.indexDir)
+		return loadErr
+	})
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return 0, false, err
+	}
 	if err != nil {
-		return summary, err
+		return 0, false, nil
 	}
-	if err := sync.commitPending(fmt.Sprintf("Sync %d revision indexes", summary.Indexes)); err != nil {
-		return summary, err
+	compatible, ok := compatibleIndexRecords(localRecords, target.model, target.dimensions)
+	if !ok {
+		return 0, false, nil
 	}
-	if err := sync.pushWithRetry(ctx); err != nil {
-		return summary, err
+	records, err = sync.writeSnapshot(target, compatible)
+	return records, err == nil, err
+}
+
+func reportSyncProgress(opts SyncAllOptions, progress Progress) error {
+	if opts.ProgressLog == nil {
+		return nil
 	}
-	return summary, nil
+	return opts.ProgressLog(progress)
 }
 
 func syncTargetFromManifest(dir string, found manifest) (indexSyncTarget, bool) {

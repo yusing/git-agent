@@ -86,7 +86,17 @@ func (a *App) runIndex(ctx context.Context, args []string) error {
 	if cfg.Index.Remote == "" {
 		return errors.New("index.remote is not configured; configure it with git-agent config index.remote <git-url>")
 	}
-	summary, err := searchtask.SyncAll(ctx, cfg.Index.Remote)
+	interactive := isInteractiveFile(a.stderr)
+	progressStarted := false
+	summary, err := searchtask.SyncAll(ctx, cfg.Index.Remote, searchtask.SyncAllOptions{
+		ProgressLog: func(progress searchtask.Progress) error {
+			progressStarted = true
+			return a.writeIndexSyncProgress(progress, interactive)
+		},
+	})
+	if interactive && progressStarted {
+		a.clearProgressLine()
+	}
 	if err != nil {
 		return err
 	}
@@ -310,7 +320,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	}
 	if err != nil {
 		if progressStarted {
-			a.clearSearchProgress()
+			a.clearProgressLine()
 		}
 		if progressAgent != nil {
 			progressAgent.Fail(err)
@@ -324,7 +334,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 		progressAgent.Complete()
 	}
 	if progressStarted {
-		a.clearSearchProgress()
+		a.clearProgressLine()
 	}
 	if cfg.Debug {
 		a.writeSearchDebug(output)
@@ -581,7 +591,7 @@ func (a *App) writeSearchProgress(progress searchtask.Progress) {
 		return
 	}
 	if done >= total {
-		a.clearSearchProgress()
+		a.clearProgressLine()
 		return
 	}
 	action := "building"
@@ -600,7 +610,33 @@ func (a *App) writeSearchProgress(progress searchtask.Progress) {
 	fmt.Fprintf(a.stderr, "\r\x1b[2Ksearch: %s embeddings %d/%d chunks (%.1f%%, %s)", action, done, total, percent, progress.Elapsed.Round(time.Millisecond))
 }
 
-func (a *App) clearSearchProgress() {
+func (a *App) writeIndexSyncProgress(progress searchtask.Progress, interactive bool) error {
+	var message string
+	switch progress.Status {
+	case searchtask.ProgressStatusFetching:
+		message = "index sync: fetching remote"
+	case searchtask.ProgressStatusScanning:
+		message = "index sync: scanning local indexes"
+	case searchtask.ProgressStatusSyncing:
+		message = fmt.Sprintf("index sync: syncing indexes %d/%d", progress.Done, progress.Total)
+		if progress.Done > 0 && progress.Total > 0 {
+			percent := float64(progress.Done) / float64(progress.Total) * 100
+			message += fmt.Sprintf(" (%.1f%%, %s)", percent, progress.Elapsed.Round(time.Millisecond))
+		}
+	case searchtask.ProgressStatusPushing:
+		message = "index sync: pushing remote"
+	default:
+		return nil
+	}
+	if interactive {
+		_, err := fmt.Fprintf(a.stderr, "\r\x1b[2K%s", message)
+		return err
+	}
+	_, err := fmt.Fprintln(a.stderr, message)
+	return err
+}
+
+func (a *App) clearProgressLine() {
 	fmt.Fprint(a.stderr, "\r\x1b[2K")
 }
 

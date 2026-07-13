@@ -198,6 +198,14 @@ touch the network. If a requested revision cannot be resolved from the cached
 repository, the command fetches and retries before failing. Fetch failures fail
 the command clearly rather than silently using stale data.
 
+SSH transport tries identities from an available SSH agent first, including
+Pageant or the native agent on Windows, then unencrypted default private keys at
+`~/.ssh/id_ed25519`, `~/.ssh/id_ecdsa`, `~/.ssh/id_rsa`, and
+`~/.ssh/id_dsa`. If agent discovery or signing fails, usable default keys remain
+fallbacks. Encrypted private keys require an agent because the command never
+prompts for a passphrase. Server host keys are verified against OpenSSH
+`known_hosts`; verification is never disabled.
+
 Search does not run the Responses API, does not call model tools, does not
 create `~/.git-agent/<path-sha>/sessions/` traces, does not generate
 explanations, and does not use lexical fallback. It frames and embeds the query
@@ -465,9 +473,17 @@ locally remain unchanged; command never prunes another machine's revisions.
 Corrupt, incomplete, incompatible, or no-longer-identifiable local revision
 indexes are skipped. After inventory, command creates at most one merged index
 commit and performs one final push; pull/rebase may first push replayed pending
-local sync commits as required by sync ordering. Stdout is exactly
+local sync commits as required by sync ordering. Progress is written to stderr
+while fetching remote state, scanning local indexes, syncing each eligible
+index, and pushing merged state. Interactive stderr rewrites one transient line
+with ANSI control sequences and clears it before stdout. Non-interactive stderr
+writes each update as a newline-delimited log line without ANSI control
+sequences. Index sync does not start a progress probe server. Stdout is exactly
 `synced indexes=<n> records=<n> skipped=<n>` followed by newline. Transport,
 configuration, locking, and unsafe-tree failures fail command explicitly.
+Generated index-store commits are unsigned: each dedicated local sync
+repository persists `commit.gpgSign=false` before committing, overriding wider
+Git configuration without changing source repositories or remote-search caches.
 
 With `--debug`, search writes live human console diagnostic events to stderr
 using the same renderer as streamed traces. It writes one `search_skip` event per
@@ -631,7 +647,7 @@ unchanged. API-key providers retain the requested model identifier.
 - stdout for `commit` / `commit --amend`: streaming human console trace lines
   while generating the message, followed by Git's raw commit summary after
   success
-- stderr: diagnostics, console-formatted debug output, transient search
+- stderr: diagnostics, console-formatted debug output, search and index-sync
   progress, `--agent` progress probe URLs, validation failures, provider/tool
   loop summaries when `--debug` is enabled, and stderr emitted by a successful
   delegated `git commit`

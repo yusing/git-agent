@@ -274,14 +274,15 @@ func fetchRemote(ctx context.Context, repo *git.Repository, remoteURL string, sh
 		}
 	}
 	err := repo.FetchContext(ctx, &git.FetchOptions{
-		RemoteName: "origin",
-		RemoteURL:  remoteURL,
-		RefSpecs:   remoteFetchRefSpecs(),
-		Depth:      depth,
-		Tags:       plumbing.NoTags,
-		Force:      true,
-		Prune:      true,
-		Progress:   progress,
+		RemoteName:    "origin",
+		RemoteURL:     remoteURL,
+		ClientOptions: remoteClientOptions(),
+		RefSpecs:      remoteFetchRefSpecs(),
+		Depth:         depth,
+		Tags:          plumbing.NoTags,
+		Force:         true,
+		Prune:         true,
+		Progress:      progress,
 	})
 	var progressErr error
 	if progress != nil {

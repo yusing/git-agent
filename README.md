@@ -142,8 +142,19 @@ Normal search syncs selected revision: committed `HEAD` for filesystem search,
 resolved `--rev`, or selected `--remote` revision. Working-tree-only vectors
 remain local. `git-agent index sync` additively publishes every completed local
 revision index without embedding new content. Index repository must be
-dedicated to `git-agent`; unreachable remote fails explicitly. See
+dedicated to `git-agent`; unreachable remote fails explicitly. Sync progress is
+reported on stderr in terminals and redirected output, while final summary
+remains on stdout. See
 [docs/spec.md](docs/spec.md) for exact sync contracts.
+
+Generated index-store commits are always unsigned. This is enforced only in
+the dedicated local index-sync repository and does not change signing settings
+for source repositories or `search --remote` caches.
+
+SSH remotes try available agent identities first, then unencrypted default
+keys in `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`, and `id_dsa`. Encrypted keys
+require an agent because git-agent never prompts. Hosts must exist in
+`~/.ssh/known_hosts`.
 
 Normal indexing reuses exact matching chunk embeddings from compatible indexes
 for the same project or cached remote. This includes filesystem-to-revision and

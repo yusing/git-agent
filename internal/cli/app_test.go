@@ -358,6 +358,69 @@ func TestIndexSyncRequiresConfiguredRemote(t *testing.T) {
 	}
 }
 
+func TestIndexSyncReportsProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		interactive bool
+		wantStderr  string
+	}{
+		{
+			name: "non-interactive",
+			wantStderr: "index sync: fetching remote\n" +
+				"index sync: scanning local indexes\n" +
+				"index sync: syncing indexes 0/0\n" +
+				"index sync: pushing remote\n",
+		},
+		{
+			name:        "interactive",
+			interactive: true,
+			wantStderr: "\r\x1b[2Kindex sync: fetching remote" +
+				"\r\x1b[2Kindex sync: scanning local indexes" +
+				"\r\x1b[2Kindex sync: syncing indexes 0/0" +
+				"\r\x1b[2Kindex sync: pushing remote" +
+				"\r\x1b[2K",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			remote := filepath.Join(t.TempDir(), "indexes.git")
+			if err := os.Mkdir(remote, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			runGit(t, remote, "init", "--bare")
+			if err := config.SaveFile(config.File{Index: config.IndexConfig{Remote: remote}}); err != nil {
+				t.Fatal(err)
+			}
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			var stderrWriter io.Writer = &stderr
+			if tc.interactive {
+				info, err := os.Stat("/dev/null")
+				if err != nil {
+					t.Fatal(err)
+				}
+				stderrWriter = &interactiveBuffer{Buffer: stderr, info: info}
+			}
+			app := &App{stdout: &stdout, stderr: stderrWriter}
+			if err := app.Run(t.Context(), []string{"index", "sync"}); err != nil {
+				t.Fatal(err)
+			}
+			if got := stdout.String(); got != "synced indexes=0 records=0 skipped=0\n" {
+				t.Fatalf("stdout = %q", got)
+			}
+			if interactive, ok := stderrWriter.(*interactiveBuffer); ok {
+				stderr = interactive.Buffer
+			}
+			if got := stderr.String(); got != tc.wantStderr {
+				t.Fatalf("stderr = %q, want %q", got, tc.wantStderr)
+			}
+		})
+	}
+}
+
 func TestSearchUsageErrorsPrecedeEmbeddingEnvValidation(t *testing.T) {
 	t.Setenv(config.EnvEmbeddingDimensions, "invalid")
 

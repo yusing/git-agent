@@ -120,6 +120,7 @@ func setSyncRemote(repo *git.Repository, remoteURL string) error {
 		return err
 	}
 	cfg.Remotes["origin"] = &gitconfig.RemoteConfig{Name: "origin", URLs: []string{remoteURL}}
+	cfg.Commit.GpgSign = gitconfig.OptBoolFalse
 	return repo.SetConfig(cfg)
 }
 
@@ -131,7 +132,7 @@ func (sync *indexSync) reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	refs, err := remote.ListContext(ctx, &git.ListOptions{})
+	refs, err := remote.ListContext(ctx, &git.ListOptions{ClientOptions: remoteClientOptions()})
 	if errors.Is(err, transport.ErrEmptyRemoteRepository) {
 		refs, err = nil, nil
 	}
@@ -155,11 +156,12 @@ func (sync *indexSync) reconcile(ctx context.Context) error {
 	sync.branch = branch
 	refspec := gitconfig.RefSpec("+" + branch.String() + ":" + remoteTrackingRef(branch).String())
 	err = sync.repo.FetchContext(ctx, &git.FetchOptions{
-		RemoteName: "origin",
-		RefSpecs:   []gitconfig.RefSpec{refspec},
-		Tags:       plumbing.NoTags,
-		Force:      true,
-		Prune:      true,
+		RemoteName:    "origin",
+		ClientOptions: remoteClientOptions(),
+		RefSpecs:      []gitconfig.RefSpec{refspec},
+		Tags:          plumbing.NoTags,
+		Force:         true,
+		Prune:         true,
 	})
 	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return sync.remoteError("fetch", err)
@@ -560,7 +562,8 @@ func (sync *indexSync) pushWithRetry(ctx context.Context) error {
 
 func (sync *indexSync) push(ctx context.Context) error {
 	err := sync.repo.PushContext(ctx, &git.PushOptions{
-		RemoteName: "origin",
+		RemoteName:    "origin",
+		ClientOptions: remoteClientOptions(),
 		RefSpecs: []gitconfig.RefSpec{
 			gitconfig.RefSpec(sync.branch.String() + ":" + sync.branch.String()),
 		},

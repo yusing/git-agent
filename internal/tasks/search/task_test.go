@@ -2,6 +2,9 @@ package search
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -25,6 +28,7 @@ import (
 	"github.com/yusing/git-agent/internal/giturl"
 	"github.com/yusing/git-agent/internal/metadata"
 	"github.com/yusing/git-agent/internal/openai"
+	gossh "golang.org/x/crypto/ssh"
 )
 
 func TestMain(m *testing.M) {
@@ -232,12 +236,39 @@ func TestSyncAllPublishesEveryCompletedRevisionOnly(t *testing.T) {
 	writeFile(t, filepath.Join(home, ".git-agent"), "corrupt/search/revs/bad/manifest.json", "{\"version\":999}\n")
 
 	syncRemote := newEmptySyncRemote(t)
-	summary, err := SyncAll(t.Context(), syncRemote)
+	var progress []Progress
+	summary, err := SyncAll(t.Context(), syncRemote, SyncAllOptions{
+		ProgressLog: func(update Progress) error {
+			progress = append(progress, update)
+			return nil
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if summary.Indexes != 3 || summary.Records == 0 || summary.Skipped != 1 {
 		t.Fatalf("summary = %#v", summary)
+	}
+	if len(progress) != 7 {
+		t.Fatalf("progress = %#v, want 7 updates", progress)
+	}
+	for i, wantStatus := range []string{
+		ProgressStatusFetching,
+		ProgressStatusScanning,
+		ProgressStatusSyncing,
+		ProgressStatusSyncing,
+		ProgressStatusSyncing,
+		ProgressStatusSyncing,
+		ProgressStatusPushing,
+	} {
+		if progress[i].Status != wantStatus {
+			t.Fatalf("progress[%d].Status = %q, want %q", i, progress[i].Status, wantStatus)
+		}
+	}
+	for i, update := range progress[2:6] {
+		if update.Done != i || update.Total != 3 {
+			t.Fatalf("progress[%d] = %#v, want done=%d total=3", i+2, update, i)
+		}
 	}
 	sync, err := openIndexSync(t.Context(), syncRemote)
 	if err != nil {
@@ -298,6 +329,70 @@ func TestIndexSyncFailsWhenRemoteIsUnreachable(t *testing.T) {
 	}, "")
 	if err == nil || !strings.Contains(err.Error(), "index remote reach failed") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestIndexSyncDisablesCommitSigning(t *testing.T) {
+	root := t.TempDir()
+	repo, err := git.PlainInit(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := repo.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Commit.GpgSign = config.OptBoolTrue
+	if err := repo.SetConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := setSyncRemote(repo, filepath.Join(t.TempDir(), "remote.git")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, root, "schema.json", "{\"version\":1}\n")
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sync := &indexSync{repo: repo, worktree: worktree}
+	if err := sync.commitPending("unsigned index commit"); err != nil {
+		t.Fatalf("index commit inherited commit.gpgSign: %v", err)
+	}
+}
+
+func TestFetchRemoteUsesDefaultSSHKeyWithoutAgent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SSH_AUTH_SOCK", "")
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := gossh.MarshalPrivateKey(privateKey, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sshDir, "id_ed25519"), pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sshDir, "known_hosts"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const remoteURL = "ssh://git@127.0.0.1:1/repo.git"
+	repo, err := initRemoteRepo(filepath.Join(t.TempDir(), "repo.git"), remoteURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = fetchRemote(t.Context(), repo, remoteURL, false, nil)
+	if err == nil {
+		t.Fatal("SSH fetch unexpectedly succeeded")
+	}
+	if strings.Contains(err.Error(), "SSH agent requested but SSH_AUTH_SOCK not-specified") {
+		t.Fatalf("SSH fetch did not fall back to default key: %v", err)
 	}
 }
 
