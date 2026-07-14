@@ -144,6 +144,23 @@ available in the SSE `final` event.
 
 See [docs/spec.md](docs/spec.md) for exact mode, schema, tool, and SSE contracts.
 
+## codex-herdr integration
+
+[`git-agent`](https://github.com/yusing/git-agent) works with
+[`codex-herdr`](https://github.com/yusing/codex-herdr) to show live review and
+simplification progress in a Herdr activity pane. From a managed root Codex
+session, run:
+
+```sh
+git-agent review --background --uncommitted
+```
+
+`--background` lets the Codex tool call return while `codex-herdr` follows the
+review. Git Agent prints the exact command for stopping the detached process.
+
+Git Agent does not require `codex-herdr`; both commands still work normally on
+their own.
+
 ## Search
 
 `git-agent search` is embedding-backed implementation-location search. It does
