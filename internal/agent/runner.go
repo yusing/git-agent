@@ -2,10 +2,14 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/openai"
@@ -46,6 +50,8 @@ type BudgetKind string
 const (
 	BudgetKindModelSteps BudgetKind = "model_steps"
 	BudgetKindToolCalls  BudgetKind = "tool_calls"
+	BudgetKindNoProgress BudgetKind = "no_progress"
+	BudgetKindContext    BudgetKind = "context"
 )
 
 type BudgetStatus struct {
@@ -148,6 +154,9 @@ func (r *OpenAIRunner) normalizeResult(result *Result) {
 func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, messages []openai.Item, toolSpecs []openai.ToolSpec, allowedToolNames []string, textFormat *openai.TextFormat, maxSteps int) (Result, error) {
 	var result Result
 	maxToolCalls := r.Config.MaxToolCalls
+	started := time.Now()
+	seenCalls := map[string]struct{}{}
+	seenOutputs := map[string]struct{}{}
 	for step := 0; step < maxSteps; step++ {
 		req := r.providerRequest(
 			requestInstructions(instructions, toolSpecs, step+1, maxSteps, result.ToolCalls, maxToolCalls),
@@ -155,6 +164,10 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 			toolSpecs,
 			textFormat,
 		)
+		estimatedTokens := estimateRequestTokens(req)
+		if err := r.writeRuntimeStatus("requesting", step+1, maxSteps, result.ToolCalls, maxToolCalls, estimatedTokens, 0, started); err != nil {
+			return Result{}, err
+		}
 		// Do not ever add outbound max_tool_calls again.
 		// OpenAI-compatible providers in our target path reject it on /responses.
 		// The local runner already enforces the tool-call ceiling.
@@ -168,6 +181,16 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 		if err := r.Trace.Write("response", response); err != nil {
 			return Result{}, err
 		}
+		inputTokens := responseInputTokens(response)
+		if err := r.writeRuntimeStatus("response_received", step+1, maxSteps, result.ToolCalls, maxToolCalls, estimatedTokens, inputTokens, started); err != nil {
+			return Result{}, err
+		}
+		if r.Config.ContextTokens > 0 && inputTokens >= r.Config.ContextTokens && len(response.ToolCalls) > 0 {
+			return r.finalizeForGuard(ctx, instructions, messages, result, textFormat, BudgetStatus{
+				Kind: BudgetKindContext, Used: inputTokens, Step: step + 1,
+				Limit: r.Config.ContextTokens, MaxSteps: maxSteps, MaxToolCalls: maxToolCalls,
+			}, "context_budget_exhausted")
+		}
 		if len(response.ToolCalls) == 0 {
 			if response.Text == "" {
 				return Result{}, errors.New("provider returned no text and no tool calls")
@@ -180,6 +203,14 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 			return Result{}, errors.New("provider requested tools but no registry is configured")
 		}
 		for _, call := range response.ToolCalls {
+			callSignature := toolCallSignature(call)
+			if _, duplicate := seenCalls[callSignature]; duplicate {
+				return r.finalizeForGuard(ctx, instructions, messages, result, textFormat, BudgetStatus{
+					Kind: BudgetKindNoProgress, Used: result.ToolCalls, Step: step + 1,
+					MaxSteps: maxSteps, MaxToolCalls: maxToolCalls, RequestedTool: call.Name,
+				}, "repeated_tool_call")
+			}
+			seenCalls[callSignature] = struct{}{}
 			if maxToolCalls > 0 && result.ToolCalls >= maxToolCalls {
 				recovered, updatedSteps, updatedTools, err := r.resolveBudgetExhaustion(ctx, instructions, messages, result, textFormat, BudgetStatus{
 					Kind:          BudgetKindToolCalls,
@@ -218,6 +249,14 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 				return Result{}, err
 			}
 			result.ToolCalls++
+			outputSignature := contentSignature(toolResult.Content)
+			if _, duplicate := seenOutputs[outputSignature]; duplicate {
+				return r.finalizeForGuard(ctx, instructions, messages, result, textFormat, BudgetStatus{
+					Kind: BudgetKindNoProgress, Used: result.ToolCalls, Step: step + 1,
+					MaxSteps: maxSteps, MaxToolCalls: maxToolCalls, RequestedTool: call.Name,
+				}, "repeated_tool_output")
+			}
+			seenOutputs[outputSignature] = struct{}{}
 			callID := call.CallID
 			if callID == "" {
 				callID = call.ID
@@ -225,6 +264,14 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 			call.CallID = callID
 			messages = append(messages, openai.NewFunctionCall(call))
 			messages = append(messages, openai.NewFunctionCallOutput(callID, toolResult.Content))
+			nextRequest := r.providerRequest(instructions, messages, toolSpecs, textFormat)
+			nextTokens := estimateRequestTokens(nextRequest)
+			if r.Config.ContextTokens > 0 && nextTokens >= r.Config.ContextTokens {
+				return r.finalizeForGuard(ctx, instructions, messages, result, textFormat, BudgetStatus{
+					Kind: BudgetKindContext, Used: nextTokens, Step: step + 1,
+					Limit: r.Config.ContextTokens, MaxSteps: maxSteps, MaxToolCalls: maxToolCalls,
+				}, "context_budget_exhausted")
+			}
 		}
 		if step == maxSteps-1 {
 			recovered, updatedSteps, updatedTools, err := r.resolveBudgetExhaustion(ctx, instructions, messages, result, textFormat, BudgetStatus{
@@ -246,6 +293,77 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 		}
 	}
 	return Result{}, fmt.Errorf("agent exceeded maximum model steps (%d)", maxSteps)
+}
+
+func (r *OpenAIRunner) finalizeForGuard(ctx context.Context, instructions string, messages []openai.Item, current Result, textFormat *openai.TextFormat, status BudgetStatus, reason string) (Result, error) {
+	finalized, err := r.finalizeWithoutTools(ctx, instructions, messages, textFormat, status)
+	if err != nil {
+		return Result{}, err
+	}
+	finalized.ToolCalls = current.ToolCalls
+	finalized.RepairCalls = current.RepairCalls
+	if err := r.Trace.Write("budget", map[string]any{
+		"kind": status.Kind, "decision": "finalize", "reason": reason,
+		"step": status.Step, "used": status.Used, "limit": status.Limit,
+		"tool": status.RequestedTool,
+	}); err != nil {
+		return Result{}, err
+	}
+	return finalized, nil
+}
+
+func (r *OpenAIRunner) writeRuntimeStatus(phase string, step, maxSteps, toolCalls, maxToolCalls, estimatedTokens, inputTokens int, started time.Time) error {
+	if r.Trace == nil {
+		return nil
+	}
+	return r.Trace.Write("runtime.status", map[string]any{
+		"phase": phase, "step": step, "max_steps": maxSteps,
+		"tool_calls": toolCalls, "max_tool_calls": maxToolCalls,
+		"elapsed_ms":               time.Since(started).Milliseconds(),
+		"estimated_context_tokens": estimatedTokens, "input_tokens": inputTokens,
+		"context_budget_tokens": r.Config.ContextTokens,
+	})
+}
+
+func estimateRequestTokens(request openai.Request) int {
+	data, _ := json.Marshal(struct {
+		Instructions string             `json:"instructions"`
+		Input        []openai.Item      `json:"input"`
+		Tools        []openai.ToolSpec  `json:"tools"`
+		TextFormat   *openai.TextFormat `json:"text_format"`
+	}{request.Instructions, request.Input, request.Tools, request.TextFormat})
+	return (len(data) + 3) / 4
+}
+
+func responseInputTokens(response openai.Response) int {
+	if response.RawJSON == "" {
+		return 0
+	}
+	var payload struct {
+		Usage struct {
+			InputTokens int `json:"input_tokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal([]byte(response.RawJSON), &payload) != nil {
+		return 0
+	}
+	return payload.Usage.InputTokens
+}
+
+func toolCallSignature(call openai.ToolCall) string {
+	arguments := strings.TrimSpace(call.Arguments)
+	var value any
+	if json.Unmarshal([]byte(arguments), &value) == nil {
+		if canonical, err := json.Marshal(value); err == nil {
+			arguments = string(canonical)
+		}
+	}
+	return call.Name + "\x00" + arguments
+}
+
+func contentSignature(content string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(content)))
+	return hex.EncodeToString(sum[:])
 }
 
 func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions string, messages []openai.Item, current Result, textFormat *openai.TextFormat, status BudgetStatus) (Result, int, int, error) {
@@ -341,8 +459,13 @@ func (r *OpenAIRunner) providerRequest(instructions string, input []openai.Item,
 
 func finalizationNotice(status BudgetStatus) string {
 	reason := fmt.Sprintf("model-step budget reached at %d/%d", status.Used, status.Limit)
-	if status.Kind == BudgetKindToolCalls {
+	switch status.Kind {
+	case BudgetKindToolCalls:
 		reason = fmt.Sprintf("tool-call budget reached at %d/%d before %q", status.Used, status.Limit, status.RequestedTool)
+	case BudgetKindContext:
+		reason = fmt.Sprintf("context budget reached at %d/%d tokens", status.Used, status.Limit)
+	case BudgetKindNoProgress:
+		reason = fmt.Sprintf("no semantic progress before repeated %q tool call", status.RequestedTool)
 	}
 	return fmt.Sprintf(`<budget_exhausted>
 reason: %s

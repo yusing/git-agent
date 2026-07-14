@@ -361,6 +361,18 @@ func TestResolveUsesRaisedDefaultMaxSteps(t *testing.T) {
 	}
 }
 
+func TestResolveUsesEightyPercentContextBudget(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "key")
+	cfg, err := Resolve(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ContextTokens != 217600 {
+		t.Fatalf("ContextTokens = %d, want 217600", cfg.ContextTokens)
+	}
+}
+
 func TestResolveRejectsConflictingThinkingFlags(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("OPENAI_API_KEY", "env-key")

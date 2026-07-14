@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
@@ -61,14 +62,11 @@ func TestRunnerPublishesReasoningSummaryEvents(t *testing.T) {
 	if _, err := runner.Run(t.Context(), Request{SystemPrompt: "system", UserPrompt: "user"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 5 {
-		t.Fatalf("trace events = %#v", events)
+	if !hasEvent(events, "reasoning_summary.delta", "delta", "Inspecting ") {
+		t.Fatalf("trace missing reasoning delta: %#v", events)
 	}
-	if events[2].Kind != "reasoning_summary.delta" || events[2].Value["delta"] != "Inspecting " {
-		t.Fatalf("delta trace event = %#v", events[2])
-	}
-	if events[3].Kind != "reasoning_summary.done" || events[3].Value["text"] != "Inspecting changed files" {
-		t.Fatalf("done trace event = %#v", events[3])
+	if !hasEvent(events, "reasoning_summary.done", "text", "Inspecting changed files") {
+		t.Fatalf("trace missing reasoning done: %#v", events)
 	}
 }
 
@@ -216,6 +214,130 @@ func TestRunnerExecutesToolCallRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRunnerFinalizesOnRepeatedCanonicalToolCall(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	repo, err := gitctx.Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeClient{responses: []openai.Response{
+		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: `{}`}}},
+		{ToolCalls: []openai.ToolCall{{ID: "fc_2", CallID: "call_2", Name: "repo_summary", Arguments: `{ }`}}},
+		{Text: "done"},
+	}}
+	registry := tools.NewRegistryWithSkills(repo, nil)
+	var events []trace.Event
+	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := OpenAIRunner{
+		Config: config.Config{Model: "test", MaxSteps: 10, MaxToolCalls: 10},
+		Client: client, Tools: registry,
+		ToolSpecs: registry.Definitions([]string{"repo_summary"}), Trace: recorder,
+	}
+
+	result, err := runner.Run(t.Context(), Request{UserPrompt: "review", MaxSteps: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "done" || result.ToolCalls != 1 || len(client.requests) != 3 {
+		t.Fatalf("result = %#v, requests = %d", result, len(client.requests))
+	}
+	foundGuard := false
+	for _, event := range events {
+		if event.Kind == "budget" && event.Value["reason"] == "repeated_tool_call" {
+			foundGuard = true
+		}
+	}
+	if !foundGuard {
+		t.Fatalf("events missing repeated-tool guard: %#v", events)
+	}
+}
+
+func TestRunnerPublishesRuntimeContextAndEnforcesBudget(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	repo, err := gitctx.Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeClient{responses: []openai.Response{
+		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: `{}`}}},
+		{Text: "done"},
+	}}
+	registry := tools.NewRegistryWithSkills(repo, nil)
+	var events []trace.Event
+	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := OpenAIRunner{
+		Config: config.Config{Model: "test", MaxSteps: 10, MaxToolCalls: 10, ContextTokens: 1},
+		Client: client, Tools: registry,
+		ToolSpecs: registry.Definitions([]string{"repo_summary"}), Trace: recorder,
+	}
+
+	if _, err := runner.Run(t.Context(), Request{UserPrompt: "review", MaxSteps: 10}); err != nil {
+		t.Fatal(err)
+	}
+	foundStatus, foundBudget := false, false
+	for _, event := range events {
+		if event.Kind == "runtime.status" && event.Value["estimated_context_tokens"] != nil && fmt.Sprint(event.Value["step"]) == "1" {
+			foundStatus = true
+		}
+		if event.Kind == "budget" && event.Value["reason"] == "context_budget_exhausted" {
+			foundBudget = true
+		}
+	}
+	if !foundStatus || !foundBudget {
+		t.Fatalf("runtime status/budget missing: %#v", events)
+	}
+}
+
+func TestRunnerFinalizesImmediatelyAtReportedContextThreshold(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	repo, err := gitctx.Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeClient{responses: []openai.Response{
+		{
+			ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: `{}`}},
+			RawJSON:   `{"usage":{"input_tokens":217600}}`,
+		},
+		{Text: "all findings"},
+	}}
+	registry := tools.NewRegistryWithSkills(repo, nil)
+	runner := OpenAIRunner{
+		Config: config.Config{Model: "test", MaxSteps: 10, MaxToolCalls: 10, ContextTokens: 217600},
+		Client: client, Tools: registry,
+		ToolSpecs: registry.Definitions([]string{"repo_summary"}),
+	}
+
+	result, err := runner.Run(t.Context(), Request{UserPrompt: "review", MaxSteps: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "all findings" || result.ToolCalls != 0 {
+		t.Fatalf("result = %#v, want immediate finalization before tool execution", result)
+	}
+}
+
 func TestRunnerRejectsToolCallsOutsideAllowedSet(t *testing.T) {
 	t.Parallel()
 
@@ -358,4 +480,13 @@ func containsAll(text string, needles ...string) bool {
 		}
 	}
 	return true
+}
+
+func hasEvent(events []trace.Event, kind, key, value string) bool {
+	for _, event := range events {
+		if event.Kind == kind && event.Value[key] == value {
+			return true
+		}
+	}
+	return false
 }

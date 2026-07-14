@@ -205,7 +205,10 @@ request. Requests without that per-run token are rejected. SSE uses
 `id`, `event`, and JSON `data` fields, buffers events for late clients, and
 honors `Last-Event-ID`. Stream includes `session.started`, `session`, `request`,
 `reasoning_summary.delta`, `reasoning_summary.done`, `response`, `tool-call`,
-`tool-output`, `budget`, and terminal `final` or `error` events as applicable.
+`tool-output`, `runtime.status`, `budget`, and terminal `final` or `error`
+events as applicable. `runtime.status` reports phase, model step, tool-call
+usage, elapsed runtime, latest provider input-token usage, estimated request
+tokens, and context-token budget.
 Reasoning delta values contain `item_id`, `output_index`, `summary_index`,
 provider `sequence_number`, and `delta`; done values contain the same identity
 fields and complete `text`. Terminal event closes streams, then server shuts
@@ -217,9 +220,9 @@ and the complete agent loop.
 
 Model precedence is `--model`, then `OPENAI_MODEL`, then the command default.
 Both commands request `reasoning.summary=auto` so summaries can stream as live
-agent progress. `review` defaults to `gpt-5.6-sol` and high reasoning; an
-explicit reasoning flag overrides high. `simplify` defaults to
-`gpt-5.6-terra` and omits reasoning effort so the provider default applies.
+agent progress. `review` defaults to `gpt-5.6-sol`; `simplify` defaults to
+`gpt-5.6-terra`. Both omit reasoning effort so provider default applies; an
+explicit reasoning flag overrides that default.
 
 Review defaults to 60 model steps and 48 tool calls. Simplify defaults to 45
 model steps and 36 tool calls. `--max-steps` overrides the command's model-step
@@ -229,6 +232,14 @@ command. At a ceiling, the runner records a JSON `budget` SSE event and makes a
 tool-free forced-finalization request using evidence already collected. On
 success, stderr contains only the event URL line and stdout contains only the
 final report JSON.
+
+All agent loops use a 217,600-token context budget, 80% of the common
+272,000-token model context window. Provider-reported input tokens take
+precedence over a serialized-request estimate. At threshold, runner immediately
+makes one tool-free forced-finalization request so model reports all findings
+gathered so far. Exact repeated tool calls and already-seen tool outputs also
+force finalization because they add no evidence. These progress guards do not
+reduce configured model-step or tool-call ceilings.
 
 #### `git-agent search [flags] <query...>`
 
@@ -1283,6 +1294,8 @@ Message-generation commands discover reusable Codex-style skills from local
 `SKILL.md` files before request assembly. A valid skill has YAML frontmatter
 with nonempty `name` and `description`, parsed with `github.com/goccy/go-yaml`.
 Invalid or incomplete skill files are skipped.
+Duplicate names resolve once by source precedence: repository, user, Codex,
+admin, then plugin cache. Lower-precedence duplicates are omitted globally.
 Skills whose names contain a `commit` segment, delimited by `.`, `_`, `-`, or
 `:`, are also skipped so Git agent commit-message rules remain authoritative.
 Segment matching is case-insensitive.
@@ -1296,8 +1309,9 @@ Discovery roots:
 - `/etc/codex/skills`
 - plugin cache skills under `$CODEX_HOME/plugins/cache/**/skills/*/SKILL.md`
 
-The injected `## Skills` developer message lists only metadata and source
-locators. The model must call `skills_read` before applying a listed skill.
+The injected `## Skills` developer message lists only metadata and stable,
+opaque `skill:<hash>` source locators; absolute host paths stay out of initial
+context. The model must call `skills_read` before applying a listed skill.
 Skill instructions are lower priority than task instructions, tool policy,
 output contracts, validators, project guidance priority, and authoritative
 Git/release evidence.

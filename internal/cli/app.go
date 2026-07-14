@@ -247,9 +247,6 @@ func applyCodeReviewDefaults(kind reviewtask.Kind, opts config.Options, cfg *con
 	if opts.Model == "" && os.Getenv("OPENAI_MODEL") == "" {
 		cfg.Model = codeReviewDefaultModel(kind)
 	}
-	if kind == reviewtask.KindReview && cfg.ThinkingEffort == "" {
-		cfg.ThinkingEffort = "high"
-	}
 	if opts.MaxSteps == 0 {
 		if kind == reviewtask.KindReview {
 			cfg.MaxSteps = reviewDefaultMaxSteps

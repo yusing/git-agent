@@ -57,6 +57,9 @@ description: missing name
 	if strings.Contains(rendered, "injected") {
 		t.Fatalf("rendered should not include unsafe metadata:\n%s", rendered)
 	}
+	if strings.Contains(rendered, root) || !strings.Contains(rendered, "skill:") {
+		t.Fatalf("rendered should use opaque skill locators:\n%s", rendered)
+	}
 	if _, ok := store.Lookup(store.Skills()[0].Locator); !ok {
 		t.Fatal("lookup should accept exact locator")
 	}
@@ -162,6 +165,24 @@ func TestDiscoverDedupesResolvedSkillPath(t *testing.T) {
 	}
 	if store.Len() != 1 {
 		t.Fatalf("skills = %d, want 1: %#v", store.Len(), store.Skills())
+	}
+}
+
+func TestDiscoverDedupesSkillNamesBySourcePrecedence(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	codexHome := filepath.Join(root, "codex")
+	mustWriteSkill(t, filepath.Join(home, ".agents", "skills", "preferred"), "same-name")
+	mustWriteSkill(t, filepath.Join(codexHome, "skills", "duplicate"), "same-name")
+
+	store, err := Discover(Options{Home: home, CodexHome: codexHome})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.Len() != 1 || store.Skills()[0].Scope != "user" {
+		t.Fatalf("skills = %#v, want user skill only", store.Skills())
 	}
 }
 

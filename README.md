@@ -118,8 +118,8 @@ Exactly one mode may be selected: `--codebase`, `--uncommitted`, or `--staged`.
 No mode means `--uncommitted`. Both commands write strict, evidence-located JSON
 reports to stdout. They have no request deadline by default; `--timeout
 <duration>` adds one explicitly. Without `--model` or `OPENAI_MODEL`, `review`
-uses `gpt-5.6-sol` with high reasoning and `simplify` uses `gpt-5.6-terra`
-with provider-default reasoning effort.
+uses `gpt-5.6-sol` and `simplify` uses `gpt-5.6-terra`; both use
+provider-default reasoning effort unless an effort flag is supplied.
 
 Before the first provider request, each command prints an ephemeral event URL
 to stderr. Its replayable stream includes live reasoning-summary progress:

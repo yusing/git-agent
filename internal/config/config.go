@@ -20,6 +20,7 @@ const (
 	DefaultTimeout        = 2 * time.Minute
 	DefaultMaxSteps       = 30
 	DefaultMaxTools       = 24
+	DefaultContextTokens  = 272_000 * 80 / 100
 	defaultCodexAuthPath  = ".codex/auth.json"
 )
 
@@ -50,6 +51,7 @@ type Config struct {
 	Timeout        time.Duration
 	MaxSteps       int
 	MaxToolCalls   int
+	ContextTokens  int
 	GuidanceFamily string
 	AppendPrompt   string
 	Debug          bool
@@ -162,6 +164,7 @@ func ResolveLocal(opts Options) (Config, error) {
 		Timeout:        timeout,
 		MaxSteps:       maxSteps,
 		MaxToolCalls:   DefaultMaxTools,
+		ContextTokens:  DefaultContextTokens,
 		GuidanceFamily: firstNonEmpty(opts.GuidanceFamily, stringDefaultGuidanceFamily()),
 		AppendPrompt:   opts.AppendPrompt,
 		Debug:          opts.Debug,

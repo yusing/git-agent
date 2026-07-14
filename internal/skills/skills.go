@@ -1,6 +1,8 @@
 package skills
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -88,13 +90,14 @@ func Discover(options Options) (*Store, error) {
 		byLocator: map[string]Skill{},
 	}
 	seenPaths := map[string]struct{}{}
+	seenNames := map[string]struct{}{}
 	for _, root := range roots {
-		if err := discoverRoot(store, seenPaths, root); err != nil {
+		if err := discoverRoot(store, seenPaths, seenNames, root); err != nil {
 			return nil, err
 		}
 	}
 	if options.CodexHome != "" {
-		if err := discoverPluginCache(store, seenPaths, filepath.Join(options.CodexHome, "plugins", "cache")); err != nil {
+		if err := discoverPluginCache(store, seenPaths, seenNames, filepath.Join(options.CodexHome, "plugins", "cache")); err != nil {
 			return nil, err
 		}
 	}
@@ -217,7 +220,7 @@ func repoSkillRoots(repoRoot, workDir string) ([]sourceRoot, error) {
 	return roots, nil
 }
 
-func discoverRoot(store *Store, seenPaths map[string]struct{}, root sourceRoot) error {
+func discoverRoot(store *Store, seenPaths, seenNames map[string]struct{}, root sourceRoot) error {
 	info, err := os.Stat(root.path)
 	if err != nil {
 		if os.IsNotExist(err) || os.IsPermission(err) {
@@ -228,10 +231,10 @@ func discoverRoot(store *Store, seenPaths map[string]struct{}, root sourceRoot) 
 	if !info.IsDir() {
 		return nil
 	}
-	return scanDirectSkillRoot(store, seenPaths, root, root.includeSystem)
+	return scanDirectSkillRoot(store, seenPaths, seenNames, root, root.includeSystem)
 }
 
-func scanDirectSkillRoot(store *Store, seenPaths map[string]struct{}, root sourceRoot, includeSystem bool) error {
+func scanDirectSkillRoot(store *Store, seenPaths, seenNames map[string]struct{}, root sourceRoot, includeSystem bool) error {
 	entries, err := os.ReadDir(root.path)
 	if err != nil {
 		if os.IsNotExist(err) || os.IsPermission(err) {
@@ -242,7 +245,7 @@ func scanDirectSkillRoot(store *Store, seenPaths map[string]struct{}, root sourc
 	for _, entry := range entries {
 		path := filepath.Join(root.path, entry.Name())
 		if entry.Name() == ".system" && includeSystem {
-			if err := scanSystemSkillRoot(store, seenPaths, root, path); err != nil {
+			if err := scanSystemSkillRoot(store, seenPaths, seenNames, root, path); err != nil {
 				return err
 			}
 			continue
@@ -250,14 +253,14 @@ func scanDirectSkillRoot(store *Store, seenPaths map[string]struct{}, root sourc
 		if !entryIsDir(entry, path) {
 			continue
 		}
-		if err := addSkill(store, seenPaths, root, filepath.Join(path, "SKILL.md")); err != nil {
+		if err := addSkill(store, seenPaths, seenNames, root, filepath.Join(path, "SKILL.md")); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func scanSystemSkillRoot(store *Store, seenPaths map[string]struct{}, root sourceRoot, systemRoot string) error {
+func scanSystemSkillRoot(store *Store, seenPaths, seenNames map[string]struct{}, root sourceRoot, systemRoot string) error {
 	entries, err := os.ReadDir(systemRoot)
 	if err != nil {
 		if os.IsNotExist(err) || os.IsPermission(err) {
@@ -270,14 +273,14 @@ func scanSystemSkillRoot(store *Store, seenPaths map[string]struct{}, root sourc
 		if !entryIsDir(entry, path) {
 			continue
 		}
-		if err := addSkill(store, seenPaths, root, filepath.Join(path, "SKILL.md")); err != nil {
+		if err := addSkill(store, seenPaths, seenNames, root, filepath.Join(path, "SKILL.md")); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func discoverPluginCache(store *Store, seenPaths map[string]struct{}, root string) error {
+func discoverPluginCache(store *Store, seenPaths, seenNames map[string]struct{}, root string) error {
 	info, err := os.Stat(root)
 	if err != nil {
 		if os.IsNotExist(err) || os.IsPermission(err) {
@@ -308,7 +311,7 @@ func discoverPluginCache(store *Store, seenPaths map[string]struct{}, root strin
 		if d.Name() != "skills" {
 			return nil
 		}
-		if err := scanDirectSkillRoot(store, seenPaths, sourceRoot{path: path, scope: "plugin"}, false); err != nil {
+		if err := scanDirectSkillRoot(store, seenPaths, seenNames, sourceRoot{path: path, scope: "plugin"}, false); err != nil {
 			return err
 		}
 		return filepath.SkipDir
@@ -326,7 +329,7 @@ func entryIsDir(entry os.DirEntry, path string) bool {
 	return err == nil && info.IsDir()
 }
 
-func addSkill(store *Store, seenPaths map[string]struct{}, root sourceRoot, path string) error {
+func addSkill(store *Store, seenPaths, seenNames map[string]struct{}, root sourceRoot, path string) error {
 	skill, ok, err := parseSkill(root, path)
 	if err != nil || !ok {
 		return err
@@ -338,12 +341,21 @@ func addSkill(store *Store, seenPaths map[string]struct{}, root sourceRoot, path
 	if _, exists := seenPaths[resolved]; exists {
 		return nil
 	}
+	if _, exists := seenNames[skill.Name]; exists {
+		return nil
+	}
 	skill.Path = resolved
 	skill.Root = filepath.Dir(resolved)
-	skill.Locator = filepath.ToSlash(resolved)
+	skill.Locator = opaqueLocator(resolved)
 	seenPaths[resolved] = struct{}{}
+	seenNames[skill.Name] = struct{}{}
 	store.skills = append(store.skills, skill)
 	return nil
+}
+
+func opaqueLocator(path string) string {
+	sum := sha256.Sum256([]byte(filepath.ToSlash(path)))
+	return "skill:" + hex.EncodeToString(sum[:8])
 }
 
 func parseSkill(root sourceRoot, path string) (Skill, bool, error) {

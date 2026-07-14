@@ -25,11 +25,10 @@ func TestReviewAndSimplifyEmitStrictJSONAndAgentEventURL(t *testing.T) {
 		reasoning string
 	}{
 		{
-			command:   "review",
-			output:    `{"summary":"No defects found","recommendation":"APPROVE","findings":[]}`,
-			key:       "findings",
-			model:     reviewDefaultModel,
-			reasoning: "high",
+			command: "review",
+			output:  `{"summary":"No defects found","recommendation":"APPROVE","findings":[]}`,
+			key:     "findings",
+			model:   reviewDefaultModel,
 		},
 		{
 			command: "simplify",
@@ -200,7 +199,7 @@ func TestCodeReviewDefaultsPreserveExplicitOverrides(t *testing.T) {
 	t.Setenv("OPENAI_MODEL", "env-model")
 	cfg := config.Config{Model: "env-model"}
 	applyCodeReviewDefaults(reviewtask.KindReview, config.Options{}, &cfg)
-	if cfg.Model != "env-model" || cfg.ThinkingEffort != "high" {
+	if cfg.Model != "env-model" || cfg.ThinkingEffort != "" {
 		t.Fatalf("environment override config = %#v", cfg)
 	}
 
