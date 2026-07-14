@@ -1,0 +1,45 @@
+profile = "go"
+shell = "bash"
+
+[recipes.install]
+help = "Build and install git-agent and optional fish completion"
+sandboxed = false
+cmd = '''
+set -euo pipefail
+
+prefix="{prefix}"
+if [[ -z "$prefix" ]]; then
+	prefix="$HOME/.local"
+fi
+
+fish_config_dir="{fish_config_dir}"
+if [[ -z "$fish_config_dir" ]]; then
+	fish_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish"
+fi
+
+bindir="{destdir}${prefix}/bin"
+install -d "$bindir"
+go build -o "$bindir/git-agent" -ldflags='-s -w' ./cmd/git-agent
+chmod 0755 "$bindir/git-agent"
+
+if [[ -d "{destdir}${fish_config_dir}" ]]; then
+	completions_dir="{destdir}${fish_config_dir}/completions"
+	install -d "$completions_dir"
+	install -m 0644 completions/git-agent.fish "$completions_dir/git-agent.fish"
+fi
+'''
+
+[recipes.install.arguments.prefix]
+help = "Installation prefix; empty uses $HOME/.local"
+type = "path"
+default = ""
+
+[recipes.install.arguments.destdir]
+help = "Staging root prepended to installation paths"
+type = "path"
+default = ""
+
+[recipes.install.arguments.fish_config_dir]
+help = "Fish config directory; empty uses $XDG_CONFIG_HOME/fish"
+type = "path"
+default = ""

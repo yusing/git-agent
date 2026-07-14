@@ -872,20 +872,21 @@ Nonzero exit codes are returned for:
 
 ### Build and install
 
-The repository provides a `Makefile` with:
+The repository provides Shadowtree recipes with:
 
-- `make build`: build `bin/git-agent`
-- `make test`: run `go test ./...`
-- `make install`: install the built binary to `$(DESTDIR)$(BINDIR)/git-agent`
+- `shadowtree build`: run the Go profile's package-aware build
+- `shadowtree test`: run `go test ./...`
+- `shadowtree install`: build and install the binary to
+  `<destdir><prefix>/bin/git-agent`
   and, if the fish config dir exists, install fish completions
 
 Defaults:
 
-- `PREFIX ?= ~/.local`
-- `BINDIR ?= $(PREFIX)/bin`
-- `XDG_CONFIG_HOME ?= $(HOME)/.config`
-- `FISH_CONFIG_DIR ?= $(XDG_CONFIG_HOME)/fish`
-- `FISH_COMPLETIONS_DIR ?= $(FISH_CONFIG_DIR)/completions`
+- `prefix`: `$HOME/.local`
+- `destdir`: empty
+- `fish_config_dir`: `$XDG_CONFIG_HOME/fish`, falling back to
+  `$HOME/.config/fish`
+- fish completions directory: `<fish_config_dir>/completions`
 
 ## 3. Architecture
 
@@ -1879,9 +1880,10 @@ Mitigation:
 
 The in-repository implementation is complete when:
 
-- `make build` succeeds and writes `bin/git-agent`
-- `make test` / `go test ./...` pass
-- `make install DESTDIR=<tmp> PREFIX=/usr/local` installs an executable binary
+- `shadowtree build` succeeds without writing a repository artifact
+- `shadowtree test` passes
+- `shadowtree install destdir=<tmp> prefix=/usr/local` installs an executable
+  binary
 - `git-agent commit-msg` and `git-agent commit-msg --amend` route through the
   bounded SDK-backed agent loop except for normal submodule-only staged changes,
   which are formatted locally without provider auth

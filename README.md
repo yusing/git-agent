@@ -466,21 +466,24 @@ automatically.
 ## Local Development
 
 ```sh
-make build
-make test
-make install PREFIX=/usr/local
+shadowtree build
+shadowtree test
+shadowtree install prefix=/usr/local
 ```
 
-`make install` installs the locally built binary and honors `DESTDIR` for
-package-style installs.
+`shadowtree install` builds and installs the binary without writing a build
+artifact into the repository. It accepts `destdir` for package-style installs.
 
-Fish completion install defaults:
+Install arguments and environment defaults:
 
-| Variable | Default |
+| Input | Default |
 | --- | --- |
-| `XDG_CONFIG_HOME` | `$(HOME)/.config` |
-| `FISH_CONFIG_DIR` | `$(XDG_CONFIG_HOME)/fish` |
-| `FISH_COMPLETIONS_DIR` | `$(FISH_CONFIG_DIR)/completions` |
+| `prefix` | `$HOME/.local` |
+| `destdir` | empty |
+| `fish_config_dir` | `$XDG_CONFIG_HOME/fish`, or `$HOME/.config/fish` |
+
+Fish completions install under `<fish_config_dir>/completions` when the fish
+config directory already exists.
 
 ## Security and Privacy
 

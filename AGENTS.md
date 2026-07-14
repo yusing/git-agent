@@ -19,7 +19,7 @@
 - `README.md`: user-facing command, configuration, build, and debug
   documentation. DO NOT REPEAT CONTRACT FROM SPEC TO README.
 - `completions/git-agent.*`: shell completions; current support is fish.
-- `Makefile`: build, test, and install targets.
+- `.shadowtree.toml`: Go profile and installation recipe.
 - `bin/`: local build output; do not treat generated binaries as source.
 
 ## Constraints
