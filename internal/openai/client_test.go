@@ -16,10 +16,11 @@ func TestRequestConvertsToSDKStructuredInputAndTools(t *testing.T) {
 	t.Parallel()
 
 	params, err := Request{
-		Model:        "test-model",
-		ServiceTier:  "priority",
-		ThinkingMode: "xhigh",
-		Instructions: "follow spec",
+		Model:            "test-model",
+		ServiceTier:      "priority",
+		ThinkingMode:     "xhigh",
+		ReasoningSummary: ReasoningSummaryAuto,
+		Instructions:     "follow spec",
 		Input: []Item{
 			NewMessage("developer", "guidance"),
 			NewMessage("user", "task"),
@@ -47,7 +48,8 @@ func TestRequestConvertsToSDKStructuredInputAndTools(t *testing.T) {
 		`"instructions":"follow spec"`,
 		`"role":"developer"`,
 		`"service_tier":"priority"`,
-		`"reasoning":{"effort":"xhigh"}`,
+		`"effort":"xhigh"`,
+		`"summary":"auto"`,
 		`"type":"input_text"`,
 		`"type":"output_text"`,
 		`"type":"function_call"`,
@@ -592,6 +594,85 @@ func TestCreateResponseCollectsStreamedToolCallsWithoutCompletedPayload(t *testi
 	call := resp.ToolCalls[0]
 	if call.ID != "fc_1" || call.CallID != "call_1" || call.Name != "list_files" || call.Arguments != `{"path":"docs","max_entries":5}` {
 		t.Fatalf("tool call = %#v", call)
+	}
+}
+
+func TestCreateResponseStreamsReasoningSummaries(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, event := range []map[string]any{
+			{
+				"type":            "response.reasoning_summary_text.delta",
+				"sequence_number": 1,
+				"output_index":    0,
+				"item_id":         "rs_1",
+				"summary_index":   0,
+				"delta":           "Inspecting ",
+			},
+			{
+				"type":            "response.reasoning_summary_text.done",
+				"sequence_number": 2,
+				"output_index":    0,
+				"item_id":         "rs_1",
+				"summary_index":   0,
+				"text":            "Inspecting changed files",
+			},
+			{
+				"type":            "response.completed",
+				"sequence_number": 3,
+				"response": map[string]any{
+					"id":         "resp_1",
+					"object":     "response",
+					"created_at": 0,
+					"status":     "completed",
+					"model":      "test-model",
+					"output": []map[string]any{{
+						"id":     "msg_1",
+						"type":   "message",
+						"status": "completed",
+						"role":   "assistant",
+						"content": []map[string]any{{
+							"type":        "output_text",
+							"text":        "done",
+							"annotations": []any{},
+						}},
+					}},
+				},
+			},
+		} {
+			fmt.Fprintf(w, "data: %s\n\n", marshalJSON(event))
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	var events []StreamEvent
+	response, err := NewHTTPClient(server.Client()).CreateResponse(t.Context(), Request{
+		Model:            "test-model",
+		BaseURL:          server.URL,
+		APIKey:           "test-key",
+		ReasoningSummary: ReasoningSummaryAuto,
+		OnStreamEvent: func(event StreamEvent) error {
+			events = append(events, event)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Text != "done" {
+		t.Fatalf("response text = %q", response.Text)
+	}
+	if len(events) != 2 {
+		t.Fatalf("stream events = %#v", events)
+	}
+	if events[0].Kind != "reasoning_summary.delta" || events[0].Delta != "Inspecting " {
+		t.Fatalf("delta event = %#v", events[0])
+	}
+	if events[1].Kind != "reasoning_summary.done" || events[1].Text != "Inspecting changed files" {
+		t.Fatalf("done event = %#v", events[1])
 	}
 }
 

@@ -66,14 +66,15 @@ type BudgetDecision struct {
 type BudgetHandler func(context.Context, BudgetStatus) (BudgetDecision, error)
 
 type OpenAIRunner struct {
-	Config    config.Config
-	Client    openai.Client
-	Tools     *tools.Registry
-	ToolSpecs []tools.Definition
-	Validator Validator
-	Normalize TextNormalizer
-	Trace     *trace.Recorder
-	Budget    BudgetHandler
+	Config           config.Config
+	Client           openai.Client
+	Tools            *tools.Registry
+	ToolSpecs        []tools.Definition
+	Validator        Validator
+	Normalize        TextNormalizer
+	Trace            *trace.Recorder
+	Budget           BudgetHandler
+	ReasoningSummary string
 }
 
 func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error) {
@@ -148,21 +149,15 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 	var result Result
 	maxToolCalls := r.Config.MaxToolCalls
 	for step := 0; step < maxSteps; step++ {
-		req := openai.Request{
-			Model:         r.Config.Model,
-			ServiceTier:   r.Config.ServiceTier,
-			ThinkingMode:  r.Config.ThinkingEffort,
-			BaseURL:       r.Config.BaseURL,
-			APIKey:        r.Config.APIKey,
-			AuthAccountID: r.Config.AuthAccountID,
-			Instructions:  requestInstructions(instructions, toolSpecs),
-			Input:         messages,
-			Tools:         toolSpecs,
-			TextFormat:    textFormat,
-			// Do not ever add outbound max_tool_calls again.
-			// OpenAI-compatible providers in our target path reject it on /responses.
-			// The local runner already enforces the tool-call ceiling.
-		}
+		req := r.providerRequest(
+			requestInstructions(instructions, toolSpecs, step+1, maxSteps, result.ToolCalls, maxToolCalls),
+			messages,
+			toolSpecs,
+			textFormat,
+		)
+		// Do not ever add outbound max_tool_calls again.
+		// OpenAI-compatible providers in our target path reject it on /responses.
+		// The local runner already enforces the tool-call ceiling.
 		if err := writeTraceRequest(r.Trace, req); err != nil {
 			return Result{}, err
 		}
@@ -299,17 +294,7 @@ func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions
 
 func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions string, messages []openai.Item, textFormat *openai.TextFormat, status BudgetStatus) (Result, error) {
 	finalMessages := append(slices.Clone(messages), openai.NewMessage("developer", finalizationNotice(status)))
-	req := openai.Request{
-		Model:         r.Config.Model,
-		ServiceTier:   r.Config.ServiceTier,
-		ThinkingMode:  r.Config.ThinkingEffort,
-		BaseURL:       r.Config.BaseURL,
-		APIKey:        r.Config.APIKey,
-		AuthAccountID: r.Config.AuthAccountID,
-		Instructions:  finalArtifactInstructions(instructions),
-		Input:         finalMessages,
-		TextFormat:    textFormat,
-	}
+	req := r.providerRequest(finalArtifactInstructions(instructions), finalMessages, nil, textFormat)
 	if err := writeTraceRequest(r.Trace, req); err != nil {
 		return Result{}, err
 	}
@@ -330,6 +315,28 @@ func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions st
 		Text:     response.Text,
 		messages: append(slices.Clone(finalMessages), openai.NewMessage("assistant", response.Text)),
 	}, nil
+}
+
+func (r *OpenAIRunner) providerRequest(instructions string, input []openai.Item, toolSpecs []openai.ToolSpec, textFormat *openai.TextFormat) openai.Request {
+	request := openai.Request{
+		Model:            r.Config.Model,
+		ServiceTier:      r.Config.ServiceTier,
+		ThinkingMode:     r.Config.ThinkingEffort,
+		ReasoningSummary: r.ReasoningSummary,
+		BaseURL:          r.Config.BaseURL,
+		APIKey:           r.Config.APIKey,
+		AuthAccountID:    r.Config.AuthAccountID,
+		Instructions:     instructions,
+		Input:            input,
+		Tools:            toolSpecs,
+		TextFormat:       textFormat,
+	}
+	if r.Trace != nil {
+		request.OnStreamEvent = func(event openai.StreamEvent) error {
+			return r.Trace.WriteExact(event.Kind, event)
+		}
+	}
+	return request
 }
 
 func finalizationNotice(status BudgetStatus) string {
@@ -372,7 +379,7 @@ func writeTraceRequest(recorder *trace.Recorder, request openai.Request) error {
 	return recorder.WriteStructured("request", value)
 }
 
-func requestInstructions(taskInstructions string, toolSpecs []openai.ToolSpec) string {
+func requestInstructions(taskInstructions string, toolSpecs []openai.ToolSpec, step, maxSteps, usedTools, maxTools int) string {
 	prefix := taskInstructions
 	if prefix != "" {
 		prefix += "\n\n"
@@ -385,14 +392,17 @@ func requestInstructions(taskInstructions string, toolSpecs []openai.ToolSpec) s
 	for _, spec := range toolSpecs {
 		fmt.Fprintf(&toolsList, "- %s: %s\n", spec.Name, spec.Description)
 	}
-	return prefix + toolsList.String() + `
+	remainingTools := max(0, maxTools-usedTools)
+	return prefix + toolsList.String() + fmt.Sprintf(`
 # Agent loop
 You are in a bounded agent loop.
+This is model step %d of %d. You have %d of %d tool calls remaining.
 Use only listed read-only tools.
 Call tools only when they reduce material uncertainty; do not call tools just to repeat provided context.
-` + skillToolInstruction(toolSpecs) + `Prefer narrow tool calls that target the missing evidence.
+%sPrefer narrow tool calls that target the missing evidence.
+Conclude before the remaining budget reaches zero.
 Do not ask the user for more evidence.
-Return only the final artifact when enough evidence has been gathered.`
+Return only the final artifact when enough evidence has been gathered.`, step, maxSteps, remainingTools, maxTools, skillToolInstruction(toolSpecs))
 }
 
 func skillToolInstruction(toolSpecs []openai.ToolSpec) string {

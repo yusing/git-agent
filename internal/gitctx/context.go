@@ -85,6 +85,14 @@ type FileStat struct {
 	IsBinary bool   `json:"is_binary,omitempty"`
 }
 
+type ChangeSnapshot struct {
+	Paths         []string
+	Status        []PathChange
+	Stats         []FileStat
+	Diff          string
+	DiffTruncated bool
+}
+
 type CommitFile struct {
 	Path string
 	Blob string
@@ -99,10 +107,19 @@ type CommitFileSkip struct {
 	Reason string
 }
 
+type FileSource string
+
+const (
+	FileSourceWorktree FileSource = "worktree"
+	FileSourceIndex    FileSource = "index"
+	FileSourceHead     FileSource = "head"
+)
+
 type SubmoduleChange struct {
-	Path string `json:"path"`
-	Old  string `json:"old,omitempty"`
-	New  string `json:"new,omitempty"`
+	Path  string `json:"path"`
+	Old   string `json:"old,omitempty"`
+	New   string `json:"new,omitempty"`
+	Dirty bool   `json:"dirty,omitempty"`
 }
 
 const PullRequestBaseRef = "origin/HEAD"
@@ -208,11 +225,11 @@ func (r *Repository) StagedStatus() ([]PathChange, error) {
 }
 
 func (r *Repository) StagedDiff(maxBytes, maxLines int) (string, bool, error) {
-	diff, err := r.diffIndexAgainstHead()
+	diff, err := r.stagedTreeDiff()
 	if err != nil {
 		return "", false, err
 	}
-	limited, truncated := textutil.Limit(diff, maxBytes, maxLines)
+	limited, truncated := textutil.Limit(diff.String(), maxBytes, maxLines)
 	return limited, truncated, nil
 }
 
@@ -220,53 +237,225 @@ func (r *Repository) StagedDiffForPaths(paths []string, maxBytes, maxLines int) 
 	if len(paths) == 0 {
 		return "", false, nil
 	}
-	patch, err := r.patchIndexAgainstHead()
+	diff, err := r.stagedTreeDiff()
 	if err != nil {
 		return "", false, err
 	}
-	pathSet := make(map[string]bool, len(paths))
-	for _, path := range paths {
-		pathSet[filepath.ToSlash(path)] = true
-	}
-	selected := make([]fdiff.FilePatch, 0, len(paths))
-	for _, filePatch := range patch.FilePatches() {
-		if filePatchMatchesAnyPath(filePatch, pathSet) {
-			selected = append(selected, filePatch)
-		}
-	}
-	if len(selected) == 0 {
-		return "", false, nil
-	}
-	var b bytes.Buffer
-	if err := fdiff.NewUnifiedEncoder(&b, fdiff.DefaultContextLines).Encode(filePatchSet{patches: selected}); err != nil {
+	return limitedTreeDiffForPaths(diff, paths, maxBytes, maxLines)
+}
+
+func (r *Repository) UncommittedDiff(maxBytes, maxLines int) (string, bool, error) {
+	diff, err := r.worktreeTreeDiff()
+	if err != nil {
 		return "", false, err
 	}
-	limited, truncated := textutil.Limit(b.String(), maxBytes, maxLines)
+	limited, truncated := textutil.Limit(diff.String(), maxBytes, maxLines)
 	return limited, truncated, nil
 }
 
+func (r *Repository) UncommittedDiffForPaths(paths []string, maxBytes, maxLines int) (string, bool, error) {
+	if len(paths) == 0 {
+		return "", false, nil
+	}
+	diff, err := r.worktreeTreeDiff()
+	if err != nil {
+		return "", false, err
+	}
+	return limitedTreeDiffForPaths(diff, paths, maxBytes, maxLines)
+}
+
 func (r *Repository) StagedStat() ([]FileStat, error) {
-	patch, err := r.patchIndexAgainstHead()
+	diff, err := r.stagedTreeDiff()
 	if err != nil {
 		return nil, err
 	}
-	return fileStatsFromPatch(patch), nil
+	return diff.Stats(), nil
+}
+
+func (r *Repository) StagedSnapshot(maxBytes, maxLines int) (ChangeSnapshot, error) {
+	status, err := r.status()
+	if err != nil {
+		return ChangeSnapshot{}, err
+	}
+	diff, err := r.stagedTreeDiff()
+	if err != nil {
+		return ChangeSnapshot{}, err
+	}
+	return changeSnapshot(status, diff, maxBytes, maxLines), nil
+}
+
+func (r *Repository) UncommittedSnapshot(maxBytes, maxLines int) (ChangeSnapshot, error) {
+	status, err := r.status()
+	if err != nil {
+		return ChangeSnapshot{}, err
+	}
+	diff, err := r.worktreeTreeDiffStatus(status)
+	if err != nil {
+		return ChangeSnapshot{}, err
+	}
+	return changeSnapshot(status, diff, maxBytes, maxLines), nil
+}
+
+func changeSnapshot(status git.Status, diff *treeDiff, maxBytes, maxLines int) ChangeSnapshot {
+	paths := diff.Paths()
+	changes := make([]PathChange, 0, len(paths))
+	for _, path := range paths {
+		file := status[path]
+		if file == nil {
+			changes = append(changes, PathChange{Path: path})
+			continue
+		}
+		changes = append(changes, PathChange{Path: path, Staging: string(file.Staging), Worktree: string(file.Worktree)})
+	}
+	diffText, truncated := textutil.Limit(diff.String(), maxBytes, maxLines)
+	return ChangeSnapshot{
+		Paths:         paths,
+		Status:        changes,
+		Stats:         diff.Stats(),
+		Diff:          diffText,
+		DiffTruncated: truncated,
+	}
 }
 
 func (r *Repository) StagedSubmoduleChanges() ([]SubmoduleChange, error) {
-	headTree, err := r.headTree()
+	diff, err := r.stagedTreeDiff()
 	if err != nil {
 		return nil, err
 	}
-	indexTree, err := r.indexTree()
-	if err != nil {
-		return nil, err
-	}
-	return submoduleChangesBetweenTrees(headTree, indexTree)
+	return diff.submodules, nil
 }
 
 type filePatchSet struct {
 	patches []fdiff.FilePatch
+}
+
+type treeDiff struct {
+	patch      *object.Patch
+	submodules []SubmoduleChange
+}
+
+func newTreeDiff(from, to *object.Tree) (*treeDiff, error) {
+	patch, err := patchBetweenTrees(from, to)
+	if err != nil {
+		return nil, err
+	}
+	submodules, err := submoduleChangesBetweenTrees(from, to)
+	if err != nil {
+		return nil, err
+	}
+	return &treeDiff{patch: patch, submodules: submodules}, nil
+}
+
+func (d *treeDiff) String() string {
+	if d == nil {
+		return ""
+	}
+	base := d.patch.String()
+	supplement := submoduleDiffText(d.unrepresentedSubmodules(nil))
+	if base == "" || supplement == "" {
+		return base + supplement
+	}
+	return strings.TrimRight(base, "\n") + "\n" + supplement
+}
+
+func (d *treeDiff) Paths() []string {
+	if d == nil {
+		return nil
+	}
+	paths := map[string]bool{}
+	for _, path := range filePathsFromPatch(d.patch) {
+		paths[path] = true
+	}
+	for _, change := range d.submodules {
+		paths[change.Path] = true
+	}
+	return slices.Sorted(maps.Keys(paths))
+}
+
+func (d *treeDiff) Stats() []FileStat {
+	if d == nil {
+		return nil
+	}
+	stats := fileStatsFromPatch(d.patch)
+	seen := make(map[string]bool, len(stats))
+	for _, stat := range stats {
+		seen[stat.Path] = true
+	}
+	for _, change := range d.submodules {
+		if seen[change.Path] {
+			continue
+		}
+		stats = append(stats, FileStat{
+			Path:    change.Path,
+			Adds:    boolInt(change.New != ""),
+			Deletes: boolInt(change.Old != ""),
+		})
+	}
+	slices.SortFunc(stats, func(a, b FileStat) int { return cmp.Compare(a.Path, b.Path) })
+	return stats
+}
+
+func (d *treeDiff) unrepresentedSubmodules(selected map[string]bool) []SubmoduleChange {
+	if d == nil {
+		return nil
+	}
+	represented := map[string]bool{}
+	for _, path := range filePathsFromPatch(d.patch) {
+		represented[path] = true
+	}
+	changes := make([]SubmoduleChange, 0, len(d.submodules))
+	for _, change := range d.submodules {
+		if represented[change.Path] || selected != nil && !selected[change.Path] {
+			continue
+		}
+		changes = append(changes, change)
+	}
+	return changes
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func submoduleDiffText(changes []SubmoduleChange) string {
+	var b strings.Builder
+	for _, change := range changes {
+		oldPath := strconv.Quote("a/" + change.Path)
+		newPath := strconv.Quote("b/" + change.Path)
+		oldHash := strings.Repeat("0", 40)
+		newHash := strings.Repeat("0", 40)
+		if change.Old != "" {
+			oldHash = change.Old
+		} else {
+			oldPath = "/dev/null"
+		}
+		if change.New != "" {
+			newHash = change.New
+		} else {
+			newPath = "/dev/null"
+		}
+		fmt.Fprintf(&b, "diff --git %q %q\nindex %.7s..%.7s 160000\n--- %s\n+++ %s\n", "a/"+change.Path, "b/"+change.Path, oldHash, newHash, oldPath, newPath)
+		switch {
+		case change.Old == "":
+			newCommit := change.New
+			if change.Dirty {
+				newCommit += "-dirty"
+			}
+			fmt.Fprintf(&b, "@@ -0,0 +1 @@\n+Subproject commit %s\n", newCommit)
+		case change.New == "":
+			fmt.Fprintf(&b, "@@ -1 +0,0 @@\n-Subproject commit %s\n", change.Old)
+		default:
+			newCommit := change.New
+			if change.Dirty {
+				newCommit += "-dirty"
+			}
+			fmt.Fprintf(&b, "@@ -1 +1 @@\n-Subproject commit %s\n+Subproject commit %s\n", change.Old, newCommit)
+		}
+	}
+	return b.String()
 }
 
 func (p filePatchSet) FilePatches() []fdiff.FilePatch {
@@ -285,6 +474,44 @@ func filePatchMatchesAnyPath(patch fdiff.FilePatch, paths map[string]bool) bool 
 		}
 	}
 	return false
+}
+
+func patchForPaths(patch *object.Patch, paths []string) (string, error) {
+	pathSet := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		pathSet[filepath.ToSlash(path)] = true
+	}
+	selected := make([]fdiff.FilePatch, 0, len(paths))
+	for _, filePatch := range patch.FilePatches() {
+		if filePatchMatchesAnyPath(filePatch, pathSet) {
+			selected = append(selected, filePatch)
+		}
+	}
+	if len(selected) == 0 {
+		return "", nil
+	}
+	var b bytes.Buffer
+	if err := fdiff.NewUnifiedEncoder(&b, fdiff.DefaultContextLines).Encode(filePatchSet{patches: selected}); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+func limitedTreeDiffForPaths(diff *treeDiff, paths []string, maxBytes, maxLines int) (string, bool, error) {
+	pathSet := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		pathSet[filepath.ToSlash(path)] = true
+	}
+	base, err := patchForPaths(diff.patch, paths)
+	if err != nil {
+		return "", false, err
+	}
+	supplement := submoduleDiffText(diff.unrepresentedSubmodules(pathSet))
+	if base != "" && supplement != "" {
+		base = strings.TrimRight(base, "\n") + "\n"
+	}
+	limited, truncated := textutil.Limit(base+supplement, maxBytes, maxLines)
+	return limited, truncated, nil
 }
 
 func (r *Repository) LastVersionTag() (string, error) {
@@ -529,33 +756,78 @@ func (r *Repository) ShowFileAtRev(rev, path string, maxBytes, maxLines int) (st
 }
 
 func (r *Repository) StagedFilePrefix(path string, maxBytes int) (string, bool, error) {
-	if maxBytes <= 0 {
-		content, err := r.indexFileContent(path)
-		return content, false, err
-	}
-	idx, err := r.Repo.Storer.Index()
-	if err != nil {
-		return "", false, err
-	}
-	entry, err := idx.Entry(path)
-	if err != nil {
-		return "", false, err
-	}
-	obj, err := r.Repo.BlobObject(entry.Hash)
-	if err != nil {
-		return "", false, err
-	}
-	reader, err := obj.Reader()
+	return r.FilePrefix(FileSourceIndex, path, maxBytes)
+}
+
+func (r *Repository) FilePrefix(source FileSource, path string, maxBytes int) (string, bool, error) {
+	reader, err := r.OpenFile(source, path)
 	if err != nil {
 		return "", false, err
 	}
 	defer reader.Close()
+	if maxBytes <= 0 {
+		content, err := io.ReadAll(reader)
+		return string(content), false, err
+	}
 	var b bytes.Buffer
 	if _, err := io.Copy(&b, io.LimitReader(reader, int64(maxBytes)+1)); err != nil {
 		return "", false, err
 	}
 	limited, truncated := textutil.Limit(b.String(), maxBytes, 0)
 	return limited, truncated, nil
+}
+
+func (r *Repository) IndexFile(path string) (string, bool, error) {
+	content, err := r.indexFileContent(path)
+	if errors.Is(err, index.ErrEntryNotFound) {
+		return "", false, nil
+	}
+	return content, err == nil, err
+}
+
+func (r *Repository) OpenFile(source FileSource, path string) (io.ReadCloser, error) {
+	switch source {
+	case FileSourceWorktree:
+		root, err := os.OpenRoot(r.RootPath)
+		if err != nil {
+			return nil, err
+		}
+		file, err := root.Open(filepath.FromSlash(path))
+		closeErr := root.Close()
+		if err != nil || closeErr != nil {
+			if file != nil {
+				_ = file.Close()
+			}
+			return nil, errors.Join(err, closeErr)
+		}
+		return file, nil
+	case FileSourceIndex:
+		idx, err := r.Repo.Storer.Index()
+		if err != nil {
+			return nil, err
+		}
+		entry, err := idx.Entry(path)
+		if err != nil {
+			return nil, err
+		}
+		blob, err := r.Repo.BlobObject(entry.Hash)
+		if err != nil {
+			return nil, err
+		}
+		return blob.Reader()
+	case FileSourceHead:
+		commit, err := r.ResolveCommit("HEAD")
+		if err != nil {
+			return nil, err
+		}
+		file, err := commit.File(path)
+		if err != nil {
+			return nil, err
+		}
+		return file.Reader()
+	default:
+		return nil, fmt.Errorf("unknown repository file source %q", source)
+	}
 }
 
 func (r *Repository) ResolveRef(ref string) (string, error) {
@@ -855,7 +1127,22 @@ func (r *Repository) status() (git.Status, error) {
 	if err != nil {
 		return nil, err
 	}
-	return worktree.Status()
+	status, err := worktree.Status()
+	if err != nil {
+		return nil, err
+	}
+	for path, file := range status {
+		if file.Staging == git.Untracked && isInternalStatePath(path) {
+			delete(status, path)
+		}
+	}
+	return status, nil
+}
+
+func isInternalStatePath(path string) bool {
+	path = filepath.ToSlash(path)
+	first, _, _ := strings.Cut(path, "/")
+	return first == ".git-agent" || first == ".omx"
 }
 
 func (r *Repository) headCommit() (*object.Commit, error) {
@@ -883,11 +1170,11 @@ func (r *Repository) resolveRevision(ref string) (*plumbing.Hash, error) {
 }
 
 func (r *Repository) diffIndexAgainstHead() (string, error) {
-	patch, err := r.patchIndexAgainstHead()
+	diff, err := r.stagedTreeDiff()
 	if err != nil {
 		return "", err
 	}
-	return patch.String(), nil
+	return diff.String(), nil
 }
 
 func (r *Repository) indexFileContent(path string) (string, error) {
@@ -936,7 +1223,7 @@ func discoverRoot(start string) (string, error) {
 	}
 }
 
-func (r *Repository) patchIndexAgainstHead() (*object.Patch, error) {
+func (r *Repository) stagedTreeDiff() (*treeDiff, error) {
 	headTree, err := r.headTree()
 	if err != nil {
 		return nil, err
@@ -945,7 +1232,243 @@ func (r *Repository) patchIndexAgainstHead() (*object.Patch, error) {
 	if err != nil {
 		return nil, err
 	}
-	return patchBetweenTrees(headTree, indexTree)
+	return newTreeDiff(headTree, indexTree)
+}
+
+func (r *Repository) worktreeTreeDiff() (*treeDiff, error) {
+	status, err := r.status()
+	if err != nil {
+		return nil, err
+	}
+	return r.worktreeTreeDiffStatus(status)
+}
+
+func (r *Repository) worktreeTreeDiffStatus(status git.Status) (*treeDiff, error) {
+	headTree, err := r.headTree()
+	if err != nil {
+		return nil, err
+	}
+	worktreeTree, err := r.worktreeTree(status)
+	if err != nil {
+		return nil, err
+	}
+	diff, err := newTreeDiff(headTree, worktreeTree)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.addDirtySubmodules(diff, headTree); err != nil {
+		return nil, err
+	}
+	return diff, nil
+}
+
+func (r *Repository) addDirtySubmodules(diff *treeDiff, headTree *object.Tree) error {
+	worktree, err := r.Repo.Worktree()
+	if err != nil {
+		return err
+	}
+	submodules, err := worktree.Submodules()
+	if err != nil {
+		return err
+	}
+	baseHashes, err := collectSubmoduleEntries(headTree, "")
+	if err != nil {
+		return err
+	}
+	byPath := make(map[string]int, len(diff.submodules))
+	for i, change := range diff.submodules {
+		byPath[change.Path] = i
+	}
+	for _, submodule := range submodules {
+		subRepo, err := submodule.Repository()
+		if err != nil {
+			continue
+		}
+		subWorktree, err := subRepo.Worktree()
+		if err != nil {
+			_ = subRepo.Close()
+			continue
+		}
+		subStatus, statusErr := subWorktree.Status()
+		head, headErr := subRepo.Head()
+		closeErr := subRepo.Close()
+		if statusErr != nil || headErr != nil || closeErr != nil || subStatus.IsClean() {
+			continue
+		}
+		path := filepath.ToSlash(submodule.Config().Path)
+		if index, ok := byPath[path]; ok {
+			diff.submodules[index].Dirty = true
+			continue
+		}
+		change := SubmoduleChange{Path: path, Old: baseHashes[path], New: head.Hash().String(), Dirty: true}
+		diff.submodules = append(diff.submodules, change)
+		byPath[path] = len(diff.submodules) - 1
+	}
+	slices.SortFunc(diff.submodules, func(a, b SubmoduleChange) int { return cmp.Compare(a.Path, b.Path) })
+	return nil
+}
+
+func (r *Repository) worktreeTree(status git.Status) (*object.Tree, error) {
+	idx, err := r.Repo.Storer.Index()
+	if err != nil {
+		return nil, err
+	}
+	worktreeIndex := cloneIndex(idx)
+	submoduleHashes, err := r.worktreeSubmoduleHashes()
+	if err != nil {
+		return nil, err
+	}
+	st := newOverlayObjectStorer(r.Repo.Storer)
+	root, err := os.OpenRoot(r.RootPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+
+	const maxFileBytes = 8 * 1024 * 1024
+	const maxSnapshotBytes = 64 * 1024 * 1024
+	loadedBytes := int64(0)
+	for path, file := range status {
+		if file.Worktree == git.Unmodified {
+			continue
+		}
+		path = filepath.ToSlash(path)
+		if file.Worktree == git.Deleted {
+			_, _ = worktreeIndex.Remove(path)
+			continue
+		}
+
+		entry, entryErr := worktreeIndex.Entry(path)
+		if entryErr == nil && entry.Mode == filemode.Submodule {
+			if hash := submoduleHashes[path]; !hash.IsZero() {
+				entry.Hash = hash
+			}
+			continue
+		}
+		info, err := root.Lstat(path)
+		if err != nil {
+			return nil, fmt.Errorf("stat worktree path %q: %w", path, err)
+		}
+		var content []byte
+		mode := filemode.Regular
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := root.Readlink(path)
+			if err != nil {
+				return nil, fmt.Errorf("read worktree symlink %q: %w", path, err)
+			}
+			content = []byte(target)
+			mode = filemode.Symlink
+		case info.Mode().IsRegular():
+			remaining := int64(maxSnapshotBytes) - loadedBytes
+			limit := min(int64(maxFileBytes), remaining)
+			if limit <= 0 || info.Size() > limit {
+				content = omittedWorktreeContent(info.Size(), limit)
+			} else {
+				file, err := root.Open(path)
+				if err != nil {
+					return nil, fmt.Errorf("open worktree path %q: %w", path, err)
+				}
+				content, err = io.ReadAll(io.LimitReader(file, limit+1))
+				closeErr := file.Close()
+				if err != nil || closeErr != nil {
+					return nil, fmt.Errorf("read worktree path %q: %w", path, errors.Join(err, closeErr))
+				}
+				if int64(len(content)) > limit {
+					content = omittedWorktreeContent(info.Size(), limit)
+				} else {
+					loadedBytes += int64(len(content))
+				}
+			}
+			if info.Mode().Perm()&0o111 != 0 {
+				mode = filemode.Executable
+			}
+		default:
+			continue
+		}
+
+		hash, err := storeBlob(st, content)
+		if err != nil {
+			return nil, fmt.Errorf("store worktree path %q: %w", path, err)
+		}
+		if entryErr != nil {
+			entry, err = worktreeIndex.Add(path)
+			if err != nil {
+				return nil, err
+			}
+		}
+		entry.Hash = hash
+		entry.Mode = mode
+		entry.Size = uint32(min(int64(len(content)), int64(^uint32(0))))
+	}
+
+	hash, err := buildIndexTree(st, worktreeIndex)
+	if err != nil {
+		return nil, err
+	}
+	if hash.IsZero() {
+		return nil, nil
+	}
+	return object.GetTree(st, hash)
+}
+
+func (r *Repository) worktreeSubmoduleHashes() (map[string]plumbing.Hash, error) {
+	worktree, err := r.Repo.Worktree()
+	if err != nil {
+		return nil, err
+	}
+	submodules, err := worktree.Submodules()
+	if err != nil {
+		return nil, err
+	}
+	statuses, err := submodules.Status()
+	if err != nil {
+		return nil, err
+	}
+	hashes := make(map[string]plumbing.Hash, len(statuses))
+	for _, status := range statuses {
+		hash := status.Current
+		if hash.IsZero() {
+			hash = status.Expected
+		}
+		hashes[filepath.ToSlash(status.Path)] = hash
+	}
+	return hashes, nil
+}
+
+func omittedWorktreeContent(size, limit int64) []byte {
+	return fmt.Appendf(nil, "[git-agent: worktree file omitted; size=%d bytes exceeds %d-byte review cap]\n", size, max(0, limit))
+}
+
+func cloneIndex(src *index.Index) *index.Index {
+	if src == nil {
+		return &index.Index{Version: 2}
+	}
+	dst := *src
+	dst.Entries = make([]*index.Entry, len(src.Entries))
+	for i, entry := range src.Entries {
+		cloned := *entry
+		dst.Entries[i] = &cloned
+	}
+	dst.Cache = nil
+	return &dst
+}
+
+func storeBlob(st storer.EncodedObjectStorer, content []byte) (plumbing.Hash, error) {
+	obj := st.NewEncodedObject()
+	obj.SetType(plumbing.BlobObject)
+	writer, err := obj.Writer()
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+	if _, err := writer.Write(content); err != nil {
+		_ = writer.Close()
+		return plumbing.ZeroHash, err
+	}
+	if err := writer.Close(); err != nil {
+		return plumbing.ZeroHash, err
+	}
+	return st.SetEncodedObject(obj)
 }
 
 func (r *Repository) patchHeadAgainstParent() (*object.Patch, error) {

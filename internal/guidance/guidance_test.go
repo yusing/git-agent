@@ -74,6 +74,28 @@ func TestResolveFallsBackToClaudeOnlyWhenNoAgentsFound(t *testing.T) {
 	}
 }
 
+func TestResolveForRepoPathsUsesProvidedSnapshot(t *testing.T) {
+	t.Parallel()
+
+	files := map[string]string{
+		"AGENTS.md":          "staged root",
+		"internal/AGENTS.md": "staged internal",
+	}
+	resolved, err := ResolveForRepoPaths("/repo", []string{"internal/app.go"}, FamilyAuto, func(path string) (string, bool, error) {
+		content, ok := files[path]
+		return content, ok, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(resolved.Rendered, "staged root") || !strings.Contains(resolved.Rendered, "staged internal") {
+		t.Fatalf("rendered snapshot guidance:\n%s", resolved.Rendered)
+	}
+	if strings.Contains(resolved.Rendered, "worktree") {
+		t.Fatalf("rendered unexpected source:\n%s", resolved.Rendered)
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

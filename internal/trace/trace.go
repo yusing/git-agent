@@ -29,6 +29,7 @@ type Recorder struct {
 	dir                string
 	eventsPath         string
 	eventWriter        io.Writer
+	eventSink          func(Event) error
 	sessionPath        string
 	inMemory           bool
 	mu                 sync.Mutex
@@ -36,6 +37,13 @@ type Recorder struct {
 	snapshot           snapshot
 	currentStep        int
 	openToolPairByCall map[string]int
+}
+
+type Event struct {
+	Seq   int            `json:"seq"`
+	At    time.Time      `json:"at"`
+	Kind  string         `json:"kind"`
+	Value map[string]any `json:"value"`
 }
 
 type snapshot struct {
@@ -114,7 +122,7 @@ func New(root, command string) (*Recorder, error) {
 		currentStep:        -1,
 		openToolPairByCall: map[string]int{},
 	}
-	if err := recorder.appendEventLocked("session.started", maps.Clone(recorder.snapshot.Session)); err != nil {
+	if err := recorder.appendEventLocked("session.started", maps.Clone(recorder.snapshot.Session), true); err != nil {
 		return nil, err
 	}
 	if err := recorder.writeSnapshotLocked(); err != nil {
@@ -146,9 +154,22 @@ func newMemory(command string) *Recorder {
 func NewStream(command string, writer io.Writer) (*Recorder, error) {
 	recorder := newMemory(command)
 	recorder.eventWriter = writer
+	return startMemory(recorder)
+}
+
+func NewEventStream(command string, sink func(Event) error) (*Recorder, error) {
+	if sink == nil {
+		return nil, errors.New("event sink is required")
+	}
+	recorder := newMemory(command)
+	recorder.eventSink = sink
+	return startMemory(recorder)
+}
+
+func startMemory(recorder *Recorder) (*Recorder, error) {
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
-	if err := recorder.appendEventLocked("session.started", maps.Clone(recorder.snapshot.Session)); err != nil {
+	if err := recorder.appendEventLocked("session.started", maps.Clone(recorder.snapshot.Session), true); err != nil {
 		return nil, err
 	}
 	return recorder, nil
@@ -166,7 +187,18 @@ func (r *Recorder) Write(kind string, value any) error {
 		return nil
 	}
 
-	return r.writeMap(kind, normalizeMapValue(value))
+	return r.writeMap(kind, normalizeMapValue(value), true)
+}
+
+// WriteExact preserves string fields exactly for machine-consumed streaming
+// contracts. Unlike Write, it does not expand JSON-looking strings or compact
+// large strings into previews.
+func (r *Recorder) WriteExact(kind string, value any) error {
+	if r == nil {
+		return nil
+	}
+
+	return r.writeMap(kind, exactMapValue(value), false)
 }
 
 func (r *Recorder) WriteStructured(kind string, value map[string]any) error {
@@ -177,19 +209,19 @@ func (r *Recorder) WriteStructured(kind string, value map[string]any) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	return r.writeMapLocked(kind, value)
+	return r.writeMapLocked(kind, value, true)
 }
 
-func (r *Recorder) writeMap(kind string, value map[string]any) error {
+func (r *Recorder) writeMap(kind string, value map[string]any, compact bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	return r.writeMapLocked(kind, value)
+	return r.writeMapLocked(kind, value, compact)
 }
 
-func (r *Recorder) writeMapLocked(kind string, value map[string]any) error {
-	if !r.inMemory || r.eventWriter != nil {
-		if err := r.appendEventLocked(kind, value); err != nil {
+func (r *Recorder) writeMapLocked(kind string, value map[string]any, compact bool) error {
+	if !r.inMemory || r.eventWriter != nil || r.eventSink != nil {
+		if err := r.appendEventLocked(kind, value, compact); err != nil {
 			return err
 		}
 	}
@@ -203,6 +235,10 @@ func (r *Recorder) writeMapLocked(kind string, value map[string]any) error {
 }
 
 func Normalize(value any) any {
+	return normalizeValue(value, true)
+}
+
+func normalizeValue(value any, expandStrings bool) any {
 	data, err := sonic.Marshal(value)
 	if err != nil {
 		return value
@@ -211,11 +247,22 @@ func Normalize(value any) any {
 	if err := sonicUseNumber.Unmarshal(data, &normalized); err != nil {
 		return value
 	}
+	if !expandStrings {
+		return normalized
+	}
 	return expandJSONStrings(normalized)
 }
 
 func normalizeMapValue(value any) map[string]any {
 	normalized := Normalize(value)
+	if mapped, ok := normalized.(map[string]any); ok {
+		return mapped
+	}
+	return map[string]any{"value": normalized}
+}
+
+func exactMapValue(value any) map[string]any {
+	normalized := normalizeValue(value, false)
 	if mapped, ok := normalized.(map[string]any); ok {
 		return mapped
 	}
@@ -256,11 +303,15 @@ func expandJSONString(value string) any {
 	return expandJSONStrings(expanded)
 }
 
-func (r *Recorder) appendEventLocked(kind string, value map[string]any) error {
+func (r *Recorder) appendEventLocked(kind string, value map[string]any, compact bool) error {
 	r.seq++
-	eventValue, err := r.compactedMapValueLocked(value)
-	if err != nil {
-		return err
+	eventValue := maps.Clone(value)
+	if compact {
+		var err error
+		eventValue, err = r.compactedMapValueLocked(value)
+		if err != nil {
+			return err
+		}
 	}
 	now := time.Now().UTC()
 	if r.eventsPath != "" {
@@ -277,7 +328,12 @@ func (r *Recorder) appendEventLocked(kind string, value map[string]any) error {
 		}
 	}
 	if r.eventWriter != nil {
-		return writeConsoleTraceEvent(r.eventWriter, now, kind, eventValue)
+		if err := writeConsoleTraceEvent(r.eventWriter, now, kind, eventValue); err != nil {
+			return err
+		}
+	}
+	if r.eventSink != nil {
+		return r.eventSink(Event{Seq: r.seq, At: now, Kind: kind, Value: eventValue})
 	}
 	return nil
 }

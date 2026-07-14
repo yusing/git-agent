@@ -10,18 +10,66 @@ import (
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/openai"
 	"github.com/yusing/git-agent/internal/tools"
+	"github.com/yusing/git-agent/internal/trace"
 )
 
 type fakeClient struct {
-	responses []openai.Response
-	requests  []openai.Request
+	responses    []openai.Response
+	requests     []openai.Request
+	streamEvents []openai.StreamEvent
 }
 
 func (f *fakeClient) CreateResponse(_ context.Context, request openai.Request) (openai.Response, error) {
 	f.requests = append(f.requests, request)
+	for _, event := range f.streamEvents {
+		if request.OnStreamEvent != nil {
+			if err := request.OnStreamEvent(event); err != nil {
+				return openai.Response{}, err
+			}
+		}
+	}
 	resp := f.responses[0]
 	f.responses = f.responses[1:]
 	return resp, nil
+}
+
+func TestRunnerPublishesReasoningSummaryEvents(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeClient{
+		responses: []openai.Response{{Text: "done"}},
+		streamEvents: []openai.StreamEvent{
+			{Kind: "reasoning_summary.delta", ItemID: "rs_1", Delta: "Inspecting "},
+			{Kind: "reasoning_summary.done", ItemID: "rs_1", Text: "Inspecting changed files"},
+		},
+	}
+	var events []trace.Event
+	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := OpenAIRunner{
+		Config:           config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1},
+		Client:           client,
+		Trace:            recorder,
+		ReasoningSummary: openai.ReasoningSummaryAuto,
+	}
+
+	if _, err := runner.Run(t.Context(), Request{SystemPrompt: "system", UserPrompt: "user"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 5 {
+		t.Fatalf("trace events = %#v", events)
+	}
+	if events[2].Kind != "reasoning_summary.delta" || events[2].Value["delta"] != "Inspecting " {
+		t.Fatalf("delta trace event = %#v", events[2])
+	}
+	if events[3].Kind != "reasoning_summary.done" || events[3].Value["text"] != "Inspecting changed files" {
+		t.Fatalf("done trace event = %#v", events[3])
+	}
 }
 
 func TestRunnerRepairsInvalidOutputOnce(t *testing.T) {
@@ -160,7 +208,7 @@ func TestRunnerExecutesToolCallRoundTrip(t *testing.T) {
 	if got := client.requests[1].Input[len(client.requests[1].Input)-1]; got.Type != "function_call_output" || got.CallID != "call_1" {
 		t.Fatalf("missing tool output input: %#v", got)
 	}
-	if instructions := client.requests[0].Instructions; !containsAll(instructions, "bounded agent loop", "reduce material uncertainty", "do not call tools just to repeat provided context", "Do not ask the user for more evidence") {
+	if instructions := client.requests[0].Instructions; !containsAll(instructions, "bounded agent loop", "model step 1 of 3", "2 of 2 tool calls remaining", "reduce material uncertainty", "do not call tools just to repeat provided context", "Conclude before the remaining budget reaches zero", "Do not ask the user for more evidence") {
 		t.Fatalf("request instructions missing tool economy guidance: %s", instructions)
 	}
 	if strings.Contains(client.requests[0].Instructions, "Use skills_read") {

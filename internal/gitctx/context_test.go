@@ -44,6 +44,187 @@ func TestOpenAndInspectStagedChanges(t *testing.T) {
 	}
 }
 
+func TestUncommittedDiffUsesFinalWorktreeAcrossStagedAndUnstagedChanges(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "app.txt"), "base\n")
+	runGit(t, repoDir, "add", "app.txt")
+	runGit(t, repoDir, "commit", "-m", "base")
+	writeFile(t, filepath.Join(repoDir, "app.txt"), "staged\n")
+	runGit(t, repoDir, "add", "app.txt")
+	writeFile(t, filepath.Join(repoDir, "app.txt"), "final worktree\n")
+	writeFile(t, filepath.Join(repoDir, "new.txt"), "untracked\n")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diff, truncated, err := repo.UncommittedDiff(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if truncated {
+		t.Fatal("unexpected truncation")
+	}
+	for _, want := range []string{"-base", "+final worktree", "+untracked"} {
+		if !strings.Contains(diff, want) {
+			t.Fatalf("uncommitted diff missing %q:\n%s", want, diff)
+		}
+	}
+	if strings.Contains(diff, "+staged") {
+		t.Fatalf("uncommitted diff exposed intermediate staged content:\n%s", diff)
+	}
+
+	staged, _, err := repo.StagedDiff(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(staged, "+staged") || strings.Contains(staged, "+final worktree") {
+		t.Fatalf("staged diff lost index isolation:\n%s", staged)
+	}
+}
+
+func TestUncommittedSnapshotDropsStatusOnlyRevertedPath(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "app.txt"), "base\n")
+	runGit(t, repoDir, "add", "app.txt")
+	runGit(t, repoDir, "commit", "-m", "base")
+	writeFile(t, filepath.Join(repoDir, "app.txt"), "staged\n")
+	runGit(t, repoDir, "add", "app.txt")
+	writeFile(t, filepath.Join(repoDir, "app.txt"), "base\n")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repo.UncommittedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Paths) != 0 || snapshot.Diff != "" {
+		t.Fatalf("snapshot = %#v, want empty final worktree diff", snapshot)
+	}
+}
+
+func TestUncommittedSnapshotBoundsOversizedFiles(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	content := strings.Repeat("x", 8*1024*1024+1)
+	writeFile(t, filepath.Join(repoDir, "dump.txt"), content)
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repo.UncommittedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Paths) != 1 || snapshot.Paths[0] != "dump.txt" {
+		t.Fatalf("paths = %#v", snapshot.Paths)
+	}
+	if !strings.Contains(snapshot.Diff, "worktree file omitted") || strings.Contains(snapshot.Diff, strings.Repeat("x", 1024)) {
+		t.Fatalf("oversized diff was not safely represented:\n%s", snapshot.Diff)
+	}
+}
+
+func TestUncommittedSnapshotExcludesUntrackedInternalState(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "tracked.txt"), "base\n")
+	runGit(t, repoDir, "add", "tracked.txt")
+	runGit(t, repoDir, "commit", "-m", "base")
+	writeFile(t, filepath.Join(repoDir, ".omx", "state.json"), "secret\n")
+	writeFile(t, filepath.Join(repoDir, ".git-agent", "session.json"), "secret\n")
+	writeFile(t, filepath.Join(repoDir, "visible.txt"), "visible\n")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repo.UncommittedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Paths) != 1 || snapshot.Paths[0] != "visible.txt" {
+		t.Fatalf("snapshot paths = %#v, want [visible.txt]", snapshot.Paths)
+	}
+	if strings.Contains(snapshot.Diff, "secret") {
+		t.Fatalf("snapshot exposed internal state:\n%s", snapshot.Diff)
+	}
+}
+
+func TestUncommittedDiffUsesCurrentSubmoduleRevision(t *testing.T) {
+	t.Parallel()
+
+	subDir := initTempRepo(t)
+	writeFile(t, filepath.Join(subDir, "ui.txt"), "base\n")
+	runGit(t, subDir, "add", "ui.txt")
+	runGit(t, subDir, "commit", "-m", "base")
+	baseSHA := gitHead(t, subDir)
+	writeFile(t, filepath.Join(subDir, "ui.txt"), "staged\n")
+	runGit(t, subDir, "add", "ui.txt")
+	runGit(t, subDir, "commit", "-m", "staged")
+	stagedSHA := gitHead(t, subDir)
+	writeFile(t, filepath.Join(subDir, "ui.txt"), "final\n")
+	runGit(t, subDir, "add", "ui.txt")
+	runGit(t, subDir, "commit", "-m", "final")
+	finalSHA := gitHead(t, subDir)
+
+	repoDir := initTempRepo(t)
+	runGit(t, subDir, "checkout", baseSHA)
+	runGit(t, repoDir, "-c", "protocol.file.allow=always", "submodule", "add", subDir, "webui")
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-m", "add submodule")
+	runGit(t, filepath.Join(repoDir, "webui"), "checkout", stagedSHA)
+	runGit(t, repoDir, "add", "webui")
+	runGit(t, filepath.Join(repoDir, "webui"), "checkout", finalSHA)
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diff, _, err := repo.UncommittedDiff(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diff, finalSHA) || strings.Contains(diff, stagedSHA) {
+		t.Fatalf("uncommitted submodule diff does not use final revision; base=%s staged=%s final=%s:\n%s", baseSHA, stagedSHA, finalSHA, diff)
+	}
+	if !strings.Contains(diff, baseSHA) {
+		t.Fatalf("uncommitted submodule diff missing base revision:\n%s", diff)
+	}
+	filtered, _, err := repo.UncommittedDiffForPaths([]string{"webui"}, 16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filtered != diff {
+		t.Fatalf("filtered submodule diff = %q, want %q", filtered, diff)
+	}
+	snapshot, err := repo.UncommittedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Paths) != 1 || snapshot.Paths[0] != "webui" {
+		t.Fatalf("snapshot paths = %#v, want [webui]", snapshot.Paths)
+	}
+
+	runGit(t, repoDir, "reset", "webui")
+	runGit(t, filepath.Join(repoDir, "webui"), "checkout", baseSHA)
+	writeFile(t, filepath.Join(repoDir, "webui", "ui.txt"), "dirty only\n")
+	diff, _, err = repo.UncommittedDiff(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diff, "Subproject commit "+baseSHA+"-dirty") {
+		t.Fatalf("uncommitted diff missing dirty-only submodule state:\n%s", diff)
+	}
+}
+
 func TestLogMessagesFromIncludesFullCommitMessage(t *testing.T) {
 	t.Parallel()
 
@@ -523,6 +704,20 @@ func TestStagedSubmoduleChangesDetectsMovedIndexPointers(t *testing.T) {
 	change := changes[0]
 	if change.Path != "webui" || change.Old != baseSHA || change.New != releaseSHA {
 		t.Fatalf("change = %#v", change)
+	}
+	diff, _, err := repo.StagedDiff(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diff, baseSHA) || !strings.Contains(diff, releaseSHA) {
+		t.Fatalf("staged submodule diff missing gitlink revisions:\n%s", diff)
+	}
+	snapshot, err := repo.StagedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Paths) != 1 || snapshot.Paths[0] != "webui" {
+		t.Fatalf("snapshot paths = %#v, want [webui]", snapshot.Paths)
 	}
 }
 

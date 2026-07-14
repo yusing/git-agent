@@ -92,7 +92,10 @@ func Resolve(opts Options) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	return ResolveFromLocal(opts, cfg)
+}
 
+func ResolveFromLocal(opts Options, cfg Config) (Config, error) {
 	auth, err := resolveAuth(opts)
 	if err != nil {
 		return Config{}, err

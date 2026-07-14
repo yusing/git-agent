@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 )
@@ -28,6 +29,112 @@ type Resolved struct {
 	Family     Family
 	Sources    []Source
 	Rendered   string
+}
+
+type RepoFileReader func(path string) (content string, ok bool, err error)
+
+func ResolveForRepoPaths(repoRoot string, paths []string, requested Family, read RepoFileReader) (Resolved, error) {
+	if read == nil {
+		return Resolved{}, errors.New("guidance repository reader is required")
+	}
+	if len(paths) == 0 {
+		paths = []string{"."}
+	}
+	family := requested
+	if family == "" {
+		family = FamilyAuto
+	}
+	if family == FamilyNone {
+		return Resolved{TargetPath: repoRoot, Family: FamilyNone}, nil
+	}
+	if family == FamilyAuto {
+		family = FamilyClaude
+		for _, path := range paths {
+			found, err := repoPathHasFamily(path, FamilyAgents, read)
+			if err != nil {
+				return Resolved{}, err
+			}
+			if found {
+				family = FamilyAgents
+				break
+			}
+		}
+	}
+	if family != FamilyAgents && family != FamilyClaude {
+		return Resolved{}, fmt.Errorf("unknown guidance family %q", requested)
+	}
+
+	result := Resolved{Family: family}
+	seen := map[string]bool{}
+	for _, target := range paths {
+		if result.TargetPath == "" {
+			result.TargetPath = filepath.Join(repoRoot, filepath.FromSlash(target))
+		}
+		for _, dir := range repoScopeDirs(target) {
+			for _, name := range fileNames(family) {
+				rel := name
+				if dir != "" {
+					rel = dir + "/" + name
+				}
+				content, ok, err := read(rel)
+				if err != nil {
+					return Resolved{}, err
+				}
+				if !ok || seen[rel] {
+					continue
+				}
+				seen[rel] = true
+				result.Sources = append(result.Sources, Source{Path: filepath.Join(repoRoot, filepath.FromSlash(rel)), RelPath: rel, Content: content})
+				break
+			}
+		}
+	}
+	if len(result.Sources) == 0 {
+		result.Family = FamilyNone
+	}
+	result.Rendered = Render(result)
+	return result, nil
+}
+
+func repoPathHasFamily(path string, family Family, read RepoFileReader) (bool, error) {
+	for _, dir := range repoScopeDirs(path) {
+		for _, name := range fileNames(family) {
+			rel := name
+			if dir != "" {
+				rel = dir + "/" + name
+			}
+			_, ok, err := read(rel)
+			if err != nil || ok {
+				return ok, err
+			}
+		}
+	}
+	return false, nil
+}
+
+func repoScopeDirs(path string) []string {
+	cleaned := filepath.ToSlash(filepath.Clean(path))
+	dir := pathpkg.Dir(cleaned)
+	if cleaned == "." {
+		dir = "."
+	}
+	dirs := []string{""}
+	if dir == "." {
+		return dirs
+	}
+	current := ""
+	for part := range strings.SplitSeq(dir, "/") {
+		if part == "" || part == "." {
+			continue
+		}
+		if current == "" {
+			current = part
+		} else {
+			current += "/" + part
+		}
+		dirs = append(dirs, current)
+	}
+	return dirs
 }
 
 func ResolveForTargets(repoRoot string, targetPaths []string, requested Family) (Resolved, error) {

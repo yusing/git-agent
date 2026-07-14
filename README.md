@@ -1,6 +1,7 @@
 # git-agent
 
-Commit, PR, release, and repository-search context for AI-assisted Git work.
+Commit, PR, release, review, simplification, and repository-search context for
+AI-assisted Git work.
 
 `git-agent` gathers Git evidence with typed Go code, runs a bounded
 OpenAI-compatible tool-calling loop, and keeps model tools read-only. The
@@ -10,7 +11,8 @@ message generation by handing the final message to `git commit`.
 TL;DR: use `commit-msg` when you want a grounded commit message on stdout, use
 `commit` when you want the same message created as a Git commit, use
 `release-note` for release Markdown, and use `search` when an agent needs fast
-local implementation context.
+local implementation context. Use `review` for evidence-backed defects and
+`simplify` for behavior-preserving cleanup opportunities.
 
 ## Quick Start
 
@@ -45,6 +47,9 @@ directory is on `PATH`.
 | Squash PR message | `git-agent pr-message` | Squash merge message on stdout |
 | Release body | `git-agent release-note <base> <release>` | Release Markdown on stdout |
 | Version bump release body | `git-agent release-note patch` | Release Markdown for latest tag to `HEAD` |
+| Uncommitted review | `git-agent review` | Structured JSON findings plus agent-event URL |
+| Staged review | `git-agent review --staged` | Structured JSON findings for index changes only |
+| Codebase simplification audit | `git-agent simplify --codebase` | Structured JSON simplification opportunities |
 | Agent context search | `git-agent search --agent <query...>` | Brief results, plus progress URL when indexing |
 | Configure index sync | `git-agent config index.remote <git-url>` | Save a dedicated Git remote for shared revision indexes |
 | Push local indexes | `git-agent index sync` | Additively publish all completed local revision indexes |
@@ -80,11 +85,50 @@ entirely and format a deterministic local message.
 | Guidance discovery | AGENTS/CLAUDE-family project instructions, plus local Codex-style `SKILL.md` workflow guidance |
 | Commit execution | Optional explicit `git commit --file -` or `git commit --amend --file -` after message generation |
 | Release-note writing | Release Markdown from explicit refs or `patch`, `minor`, and `major` shortcuts |
+| Review and simplification | Strict JSON reports with repository evidence and replayable SSE agent events |
 | Embedding search | Local filesystem or committed-tree context search for agents and humans |
 | Trace artifacts | JSON request/response/tool-call traces for message generation commands |
 | Debug output | Human console diagnostics with `--debug`; pprof with `--pprof <addr>` |
 
 <!-- markdownlint-enable MD013 -->
+
+## Review and Simplify
+
+`review` and `simplify` are read-only Responses API workflows designed for LLM
+harnesses. Both default to all dirty changes, regardless of staging state.
+
+```sh
+# Review staged and unstaged work together
+git-agent review
+
+# Review only the Git index
+git-agent review --staged
+
+# Audit the full repository
+git-agent review --codebase
+
+# Find behavior-preserving cleanup opportunities in dirty changes
+git-agent simplify
+
+# Add lower-priority task focus after flags
+git-agent review --staged focus on cancellation and cleanup
+```
+
+Exactly one mode may be selected: `--codebase`, `--uncommitted`, or `--staged`.
+No mode means `--uncommitted`. Both commands write strict, evidence-located JSON
+reports to stdout. They have no request deadline by default; `--timeout
+<duration>` adds one explicitly. Without `--model` or `OPENAI_MODEL`, `review`
+uses `gpt-5.6-sol` with high reasoning and `simplify` uses `gpt-5.6-terra`
+with provider-default reasoning effort.
+
+Before the first provider request, each command prints an ephemeral event URL
+to stderr. Its replayable stream includes live reasoning-summary progress:
+
+```text
+review: agent events listening on http://127.0.0.1:43127/events?token=4YH2S7M6N5QK8J3C9RTP
+```
+
+See [docs/spec.md](docs/spec.md) for exact mode, schema, tool, and SSE contracts.
 
 ## Search
 
@@ -224,26 +268,28 @@ git-agent commit [--amend] [flags]
 git-agent pr-message [flags]
 git-agent release-note [--out <file>] [flags] <base> <release>
 git-agent release-note [--out <file>] [flags] patch|minor|major
+git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]
 git-agent search [flags] <query...>
 git-agent search --ls [--remote <url>] [--format text|json]
 git-agent search --ls-remotes [--format text|json|completion]
 git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]
+git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]
 git-agent config index.remote [<git-url>]
 git-agent config --unset index.remote
 git-agent index sync
 ```
 
-Common message-generation flags:
+Common generation and inspection flags:
 
 <!-- markdownlint-disable MD013 -->
 
 | Flag | Purpose |
 | --- | --- |
-| `--model <name>` | Override `OPENAI_MODEL` |
+| `--model <name>` | Override command default and `OPENAI_MODEL` |
 | `--fast` | Request fast service tier |
 | `--low`, `--medium`, `--high`, `--xhigh` | Set reasoning effort |
 | `--base-url <url>` | Override provider base URL |
-| `--timeout <duration>` | Override request timeout |
+| `--timeout <duration>` | Set request timeout; `review`/`simplify` default to none |
 | `--max-steps <n>` | Bound agent loop steps |
 | `--guidance-family auto\|agents\|claude\|codex\|none` | Force guidance family |
 | `--append-prompt <text>` | Add a bounded operator hint |
@@ -347,6 +393,9 @@ Message-generation commands write JSON traces under:
 Trace files include session metadata, provider requests/responses, tool calls,
 and returned tool output. API keys are redacted. `--debug` prints the trace
 directory to stderr.
+
+`review` and `simplify` stream those events from memory over SSE and do not
+create on-disk trace sessions.
 
 Search indexes use the same project metadata root:
 

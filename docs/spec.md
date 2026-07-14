@@ -11,8 +11,7 @@ It:
 - uses the official OpenAI Go SDK against an OpenAI-compatible Responses API
   endpoint
 - runs a bounded, read-only, tool-calling agent loop
-- emits only the final commit message or release note on stdout for
-  message-generation commands
+- emits final generation artifacts or strict review JSON on stdout
 - can optionally create the Git commit after generating a message
 - preserves project guidance behavior close to Codex for AGENTS-family files
 
@@ -25,6 +24,8 @@ Supported workflows:
 - `git-agent pr-message`
 - `git-agent release-note [--out <file>] <base> <release>`
 - `git-agent release-note [--out <file>] patch|minor|major`
+- `git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]`
+- `git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 - `git-agent search [flags] <query...>`
 - `git-agent search --ls [--remote <url>] [--format text|json]`
 - `git-agent search --ls-remotes [--format text|json|completion]`
@@ -139,6 +140,95 @@ written under `~/.git-agent/<path-sha>/sessions/`. With `--out <file>`, the
 command checks the target is writable before generation, streams the human
 console trace to stdout, writes the rendered Markdown to the file, and does not
 write a JSON trace session.
+
+#### `git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]`
+
+Run an evidence-backed, read-only code review and print one strict JSON report.
+Mode flags are mutually exclusive. No mode flag means `--uncommitted`.
+
+- `--uncommitted` reviews final dirty worktree state against `HEAD`, including
+  staged, unstaged, and untracked changes. A path changed in both index and
+  worktree appears once as final worktree content against `HEAD`. Untracked
+  `.git-agent/` and `.omx/` runtime state is excluded; tracked files under those
+  names remain ordinary review scope.
+- `--staged` reviews index state against `HEAD` and ignores unstaged content.
+- `--codebase` audits full repository without preloaded diff scope.
+
+Diff modes prepare paths, staged/worktree status, line stats, generated-heavy
+context pack, and bounded unified diff before first provider request. Empty
+diff scope fails before provider resolution. Codebase mode provides no packed
+diff; model discovers implementation, contracts, callers, and tests through
+read-only tools. Positional text remaining after flag parsing is escaped and
+appended as lower-priority operator hint, using same precedence rules as
+`--append-prompt`.
+
+In staged mode, repository guidance is read from index blobs, repository-local
+worktree skills are omitted, and `list_files`, `read_file`, `grep`, and `find`
+use index state. User, Codex, admin, and plugin skills remain available.
+Explicit `read_file source=worktree` is rejected. In all modes, `read_file`
+streams the selected source and applies byte/line caps before materializing
+content. Report validation verifies every evidence path and inclusive line end
+against the authoritative worktree/index source, with HEAD fallback for deleted
+diff evidence and one-line synthetic evidence for changed gitlinks.
+
+Review examines correctness, security, reliability, performance,
+maintainability, tests, and style. Style findings are preserved alongside other
+findings and must use `LOW`. Findings are ordered from highest to lowest
+severity. Recommendation is `REQUEST_CHANGES` when any `CRITICAL` or `HIGH`
+finding exists, `COMMENT` for only `MEDIUM`/`LOW` findings, and `APPROVE` when
+findings are empty.
+
+Provider text format uses strict JSON Schema. Output object requires `summary`,
+`recommendation`, and `findings`. Each finding requires `severity`, `aspect`,
+`title`, `impact`, `evidences`, and `proposed_fix`. `severity` is one of
+`CRITICAL`, `HIGH`, `MEDIUM`, or `LOW`; `aspect` is one of `correctness`,
+`security`, `reliability`, `performance`, `maintainability`, `tests`, or
+`style`. `evidences` contains at least one object with nonempty `title`,
+repository-relative `path`, and positive inclusive `line_start`/`line_end`.
+Validator rejects unknown fields, missing evidence, invalid paths/ranges,
+severity-order violations, invalid style severity, and recommendation mismatch.
+
+#### `git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]`
+
+Run a read-only simplification audit using same mode selection, prepared diff,
+guidance, skill, tool, validation-repair, SSE, and trailing-prompt contracts as
+`review`. It reports opportunities; it never edits files. Output object requires
+`summary` and `opportunities`. Each opportunity requires `aspect`, `title`,
+`body`, `evidences`, and `proposed_change`; `aspect` is one of `reuse`,
+`clarity`, or `efficiency`. Evidence objects use same required location schema
+as review findings. Only confirmed behavior-preserving opportunities belong in
+output; empty opportunities is valid.
+
+Both commands always bind an SSE server on `127.0.0.1:0` after local validation
+and print actual token-bearing `/events` URL to stderr before first provider
+request. Requests without that per-run token are rejected. SSE uses
+`id`, `event`, and JSON `data` fields, buffers events for late clients, and
+honors `Last-Event-ID`. Stream includes `session.started`, `session`, `request`,
+`reasoning_summary.delta`, `reasoning_summary.done`, `response`, `tool-call`,
+`tool-output`, `budget`, and terminal `final` or `error` events as applicable.
+Reasoning delta values contain `item_id`, `output_index`, `summary_index`,
+provider `sequence_number`, and `delta`; done values contain the same identity
+fields and complete `text`. Terminal event closes streams, then server shuts
+down. No on-disk trace session is created.
+
+Neither command has a request or overall task deadline by default. Explicit
+`--timeout <duration>` applies that deadline to both the provider HTTP client
+and the complete agent loop.
+
+Model precedence is `--model`, then `OPENAI_MODEL`, then the command default.
+Both commands request `reasoning.summary=auto` so summaries can stream as live
+agent progress. `review` defaults to `gpt-5.6-sol` and high reasoning; an
+explicit reasoning flag overrides high. `simplify` defaults to
+`gpt-5.6-terra` and omits reasoning effort so the provider default applies.
+
+Review defaults to 60 model steps and 48 tool calls. Simplify defaults to 45
+model steps and 36 tool calls. `--max-steps` overrides the command's model-step
+default. Every provider request states the current step and remaining tool-call
+budget. These local safety ceilings are never extended interactively for either
+command. At a ceiling, the runner records a JSON `budget` SSE event and makes a
+tool-free forced-finalization request using evidence already collected. On
+success, stderr contains only the event URL line and stdout contains only the
+final report JSON.
 
 #### `git-agent search [flags] <query...>`
 
@@ -643,6 +733,7 @@ unchanged. API-key providers retain the requested model identifier.
 ### stdout / stderr contract
 
 - stdout for generation-only commands: final generated artifact only
+- stdout for `review` and `simplify`: one strict JSON report only
 - stdout for `search`: JSON result by default; brief header and result lines
   with `--format brief`
 - stdout for `release-note --out <file>`: streaming human console trace lines
@@ -652,15 +743,17 @@ unchanged. API-key providers retain the requested model identifier.
   while generating the message, followed by Git's raw commit summary after
   success
 - stderr: diagnostics, console-formatted debug output, search and index-sync
-  progress, `--agent` progress probe URLs, validation failures, provider/tool
-  loop summaries when `--debug` is enabled, and stderr emitted by a successful
-  delegated `git commit`
+  progress, `--agent` progress probe URLs, review/simplify SSE URLs, validation
+  failures, provider/tool loop summaries when `--debug` is enabled, and stderr
+  emitted by a successful delegated `git commit`
 - `search` writes errors and optional `--debug` diagnostics to stderr only and
   never writes a model trace session
 - generation-only commands write a JSON trace session under
   `~/.git-agent/<path-sha>/sessions/`
   regardless of `--debug`, except `release-note --out <file>`; `--debug`
   prints the session directory on stderr when a JSON trace session is used
+- `review` and `simplify` keep trace events in memory for SSE replay and do not
+  write on-disk trace sessions
 - `release-note --out <file>` does not write an on-disk NDJSON trace session;
   its human console trace lines are streamed to stdout
 - `commit` / `commit --amend` do not write an on-disk NDJSON trace session;
@@ -716,6 +809,8 @@ Defaults:
 - `internal/tools`: curated read-only tool registry
 - `internal/tasks/commitmsg`: commit message behavior
 - `internal/tasks/releasenote`: release note behavior
+- `internal/tasks/review`: review and simplification modes, prompts, schemas,
+  validation, output shaping, and prepared change context
 - `internal/tasks/search`: filesystem/revision discovery, chunking, local
   binary vector cache, hybrid ranking, replay metadata, and JSON rendering
 - `internal/textutil`: shared normalization and output shaping helpers
@@ -1022,8 +1117,9 @@ The runtime must enforce:
 - maximum model steps
 - maximum tool calls
 - maximum bytes/lines per tool result
-- per-request timeout
-- overall task timeout for message-generation commands
+- per-request timeout where a command default or explicit `--timeout` applies
+- overall task timeout where a command default or explicit `--timeout` applies;
+  `review` and `simplify` are unlimited unless the flag is set
 
 ### Session trace format
 
@@ -1225,7 +1321,16 @@ Shared tools:
 - `repo_summary`
 - `list_files`
 - `read_file`
-- `search_files`
+- `grep`
+- `find`
+
+`read_file` accepts repository-relative path, optional inclusive line range,
+and source `worktree`, `index`, or `head`. Source selection lets staged review
+inspect index content without leaking later worktree edits. `grep` implements
+bounded RE2 matching over repository text files with optional safe glob. `find`
+implements bounded file/directory discovery by safe glob. Both are implemented
+in Go, do not invoke shell commands, skip internal state directories and
+symlinks, and return explicit truncation state.
 
 ### Skill tools
 
@@ -1268,6 +1373,20 @@ available. `pr-message` exposes no PR/repository diff tools; when skills are
 available, it exposes only `skills_read`. It precomputes `origin/HEAD` base
 metadata, changed paths, diff stats, branch commits, recent style commits, and
 a bounded full diff in Go before the first provider call.
+
+### Review and simplification tools
+
+Both inspection commands expose shared repository tools plus `skills_read` when
+skills are available. Diff modes additionally expose:
+
+- `review_diff`
+- `review_diff_for_paths`
+
+These names are stable across staged and uncommitted modes; registry binds them
+to selected authoritative scope. Codebase mode does not register diff tools.
+All tools remain read-only. Review and simplification requests use discovered
+skill summaries in initial developer context and call `skills_read` only for
+relevant skill bodies or referenced text resources.
 
 ### Release note tools
 

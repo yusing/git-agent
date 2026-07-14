@@ -1,18 +1,23 @@
 package tools
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	pathpkg "path"
 	"path/filepath"
-	"slices"
+	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/bytedance/sonic"
+	"github.com/go-git/go-git/v6/plumbing/format/index"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/skills"
 	"github.com/yusing/git-agent/internal/textutil"
@@ -46,13 +51,45 @@ type Registry struct {
 
 const SkillReadToolName = "skills_read"
 
+type ReviewMode string
+
+const (
+	ReviewModeCodebase    ReviewMode = "codebase"
+	ReviewModeUncommitted ReviewMode = "uncommitted"
+	ReviewModeStaged      ReviewMode = "staged"
+)
+
 func NewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Store) *Registry {
+	return newRegistry(repo, skillStore)
+}
+
+func NewReviewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Store, mode ReviewMode) *Registry {
 	registry := &Registry{tools: map[string]Tool{}}
-	for _, tool := range []Tool{
+	register(registry, []Tool{
+		repoSummaryTool{repo: repo},
+		listFilesTool{repo: repo, mode: mode},
+		readFileTool{repo: repo, mode: mode},
+		grepTool{repo: repo, mode: mode},
+		findTool{repo: repo, mode: mode},
+	})
+	if mode != ReviewModeCodebase {
+		register(registry, []Tool{
+			reviewDiffTool{repo: repo, mode: mode},
+			reviewDiffForPathsTool{repo: repo, mode: mode},
+		})
+	}
+	registerSkillsRead(registry, skillStore)
+	return registry
+}
+
+func newRegistry(repo *gitctx.Repository, skillStore *skills.Store) *Registry {
+	registry := &Registry{tools: map[string]Tool{}}
+	register(registry, []Tool{
 		repoSummaryTool{repo: repo},
 		listFilesTool{repo: repo},
 		readFileTool{repo: repo},
-		searchFilesTool{repo: repo},
+		grepTool{repo: repo},
+		findTool{repo: repo},
 		gitStagedPathsTool{repo: repo},
 		gitStagedStatusTool{repo: repo},
 		gitStagedStatTool{repo: repo},
@@ -75,15 +112,23 @@ func NewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Store) *R
 		submoduleGitlinkRangeTool{repo: repo},
 		submoduleLogRangeTool{repo: repo},
 		repoKindTool{repo: repo},
-	} {
+	})
+	registerSkillsRead(registry, skillStore)
+	return registry
+}
+
+func register(registry *Registry, tools []Tool) {
+	for _, tool := range tools {
 		registry.tools[tool.Definition().Name] = tool
 	}
+}
+
+func registerSkillsRead(registry *Registry, skillStore *skills.Store) {
 	if skillStore.Len() == 0 {
-		return registry
+		return
 	}
 	tool := skillsReadTool{store: skillStore}
 	registry.tools[tool.Definition().Name] = tool
-	return registry
 }
 
 func (r *Registry) Definitions(names []string) []Definition {
@@ -109,7 +154,7 @@ func CommitMessageToolNames() []string {
 		"repo_summary",
 		"list_files",
 		"read_file",
-		"search_files",
+		"grep",
 		"git_staged_paths",
 		"git_staged_status",
 		"git_staged_stat",
@@ -122,6 +167,14 @@ func CommitMessageToolNames() []string {
 		"git_amend_delta",
 		"git_show_file_at_rev",
 	}
+}
+
+func ReviewToolNames(mode ReviewMode) []string {
+	names := []string{"repo_summary", "list_files", "read_file", "grep", "find"}
+	if mode != ReviewModeCodebase {
+		names = append(names, "review_diff", "review_diff_for_paths")
+	}
+	return names
 }
 
 func SkillToolNames() []string {
@@ -139,6 +192,66 @@ var skippedDirs = map[string]bool{
 	".git":       true,
 	".git-agent": true,
 	".omx":       true,
+}
+
+func walkRepository(repo *gitctx.Repository, requested string, visit func(*os.Root, string, string, fs.DirEntry) error) error {
+	walkRoot, err := cleanRepoPath(requested)
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(repo.RootPath)
+	if err != nil {
+		return err
+	}
+	trackedFiles, trackedDirs, err := trackedRepositoryPaths(repo)
+	if err != nil {
+		_ = root.Close()
+		return err
+	}
+	walkErr := fs.WalkDir(root.FS(), walkRoot, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		path = filepath.ToSlash(path)
+		protected := hasSkippedDir(path)
+		if entry.IsDir() && protected && !trackedDirs[path] {
+			return filepath.SkipDir
+		}
+		if !entry.IsDir() && protected && !trackedFiles[path] {
+			return nil
+		}
+		return visit(root, walkRoot, path, entry)
+	})
+	return errors.Join(walkErr, root.Close())
+}
+
+func trackedRepositoryPaths(repo *gitctx.Repository) (map[string]bool, map[string]bool, error) {
+	idx, err := repo.Repo.Storer.Index()
+	if err != nil {
+		return nil, nil, err
+	}
+	files := make(map[string]bool, len(idx.Entries))
+	dirs := map[string]bool{".": true}
+	for _, entry := range idx.Entries {
+		path := filepath.ToSlash(entry.Name)
+		files[path] = true
+		for dir := pathpkg.Dir(path); dir != "."; dir = pathpkg.Dir(dir) {
+			dirs[dir] = true
+		}
+	}
+	return files, dirs, nil
+}
+
+func hasSkippedDir(path string) bool {
+	for part := range strings.SplitSeq(filepath.ToSlash(path), "/") {
+		if skippedDirs[part] {
+			return true
+		}
+	}
+	return false
 }
 
 type repoTool struct {
@@ -241,7 +354,61 @@ func (t repoSummaryTool) Execute(context.Context, Invocation) (Result, error) {
 	return jsonResult("repo_summary", t.repo.Summary(), false)
 }
 
-type listFilesTool repoTool
+type listFilesTool struct {
+	repo *gitctx.Repository
+	mode ReviewMode
+}
+
+var errListFilesComplete = errors.New("list_files entry cap reached")
+
+func stagedIndexEntries(repo *gitctx.Repository, requested string) ([]*index.Entry, error) {
+	root, err := cleanRepoPath(requested)
+	if err != nil {
+		return nil, err
+	}
+	idx, err := repo.Repo.Storer.Index()
+	if err != nil {
+		return nil, err
+	}
+	prefix := ""
+	if root != "." {
+		prefix = strings.TrimSuffix(root, "/")
+	}
+	byPath := make(map[string]*index.Entry, len(idx.Entries))
+	for _, entry := range idx.Entries {
+		path := filepath.ToSlash(entry.Name)
+		if prefix != "" && path != prefix && !strings.HasPrefix(path, prefix+"/") {
+			continue
+		}
+		byPath[path] = entry
+	}
+	paths := make([]string, 0, len(byPath))
+	for path := range byPath {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	entries := make([]*index.Entry, 0, len(paths))
+	for _, path := range paths {
+		entries = append(entries, byPath[path])
+	}
+	return entries, nil
+}
+
+func stagedFilePaths(repo *gitctx.Repository, requested string, maxEntries int) ([]string, bool, error) {
+	entries, err := stagedIndexEntries(repo, requested)
+	if err != nil {
+		return nil, false, err
+	}
+	truncated := len(entries) > maxEntries
+	if truncated {
+		entries = entries[:maxEntries]
+	}
+	paths := make([]string, len(entries))
+	for i, entry := range entries {
+		paths[i] = filepath.ToSlash(entry.Name)
+	}
+	return paths, truncated, nil
+}
 
 func (t listFilesTool) Definition() Definition {
 	return Definition{Name: "list_files", Description: "List repository files under an optional directory prefix.", Schema: schema(map[string]any{
@@ -262,59 +429,62 @@ func (t listFilesTool) Execute(_ context.Context, invocation Invocation) (Result
 	if maxEntries <= 0 {
 		maxEntries = 200
 	}
-	root, err := os.OpenRoot(t.repo.RootPath)
-	if err != nil {
-		return Result{}, err
-	}
-	defer root.Close()
-	walkRoot, err := cleanRepoPath(args.Path)
-	if err != nil {
-		return Result{}, err
+	if t.mode == ReviewModeStaged {
+		files, truncated, err := stagedFilePaths(t.repo, args.Path, maxEntries)
+		if err != nil {
+			return Result{}, err
+		}
+		return jsonResult("list_files", map[string]any{"files": files}, truncated)
 	}
 	var files []string
-	err = fs.WalkDir(root.FS(), walkRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.Type()&os.ModeSymlink != 0 {
+	err = walkRepository(t.repo, args.Path, func(_ *os.Root, _, path string, entry fs.DirEntry) error {
+		if entry.IsDir() {
 			return nil
 		}
-		if d.IsDir() && skippedDirs[d.Name()] {
-			return filepath.SkipDir
+		files = append(files, path)
+		if len(files) > maxEntries {
+			return errListFilesComplete
 		}
-		if d.IsDir() {
-			return nil
-		}
-		files = append(files, filepath.ToSlash(path))
 		return nil
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, errListFilesComplete) {
 		return Result{}, err
 	}
-	slices.Sort(files)
-	truncated := false
-	if len(files) > maxEntries {
+	truncated := len(files) > maxEntries
+	if truncated {
 		files = files[:maxEntries]
-		truncated = true
 	}
 	return jsonResult("list_files", map[string]any{"files": files}, truncated)
 }
 
-type readFileTool repoTool
+type readFileTool struct {
+	repo *gitctx.Repository
+	mode ReviewMode
+}
 
 func (t readFileTool) Definition() Definition {
+	sourceDescription := "File source. Empty means worktree."
+	if t.mode == ReviewModeStaged {
+		sourceDescription = "File source. Empty means index; worktree is unavailable in staged mode."
+	}
 	return Definition{Name: "read_file", Description: "Read a UTF-8 repository file with byte and line caps.", Schema: schema(map[string]any{
-		"path":      stringProp("Repository-relative file path."),
-		"max_bytes": intProp("Maximum bytes to return.", 1, 65536),
-		"max_lines": intProp("Maximum lines to return.", 1, 2000),
+		"path":       stringProp("Repository-relative file path."),
+		"source":     enumStringProp(sourceDescription, "", "worktree", "index", "head"),
+		"line_start": intProp("Optional inclusive first line. Zero starts at line 1.", 0, 10000000),
+		"line_end":   intProp("Optional inclusive last line. Zero reads through EOF.", 0, 10000000),
+		"max_bytes":  intProp("Maximum bytes to return.", 1, 65536),
+		"max_lines":  intProp("Maximum lines to return.", 1, 2000),
 	}, "path"), Strict: true}
 }
 
 func (t readFileTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
 	args, err := parseArgs[struct {
-		Path     string `json:"path"`
-		MaxBytes int    `json:"max_bytes"`
-		MaxLines int    `json:"max_lines"`
+		Path      string `json:"path"`
+		Source    string `json:"source"`
+		LineStart int    `json:"line_start"`
+		LineEnd   int    `json:"line_end"`
+		MaxBytes  int    `json:"max_bytes"`
+		MaxLines  int    `json:"max_lines"`
 	}](invocation.Arguments)
 	if err != nil {
 		return Result{}, err
@@ -326,18 +496,117 @@ func (t readFileTool) Execute(_ context.Context, invocation Invocation) (Result,
 	if err != nil {
 		return Result{}, err
 	}
-	root, err := os.OpenRoot(t.repo.RootPath)
+	source := args.Source
+	if t.mode == ReviewModeStaged {
+		if source == "worktree" {
+			return Result{}, fmt.Errorf("source worktree is unavailable in staged mode; use index or head")
+		}
+		if source == "" {
+			source = "index"
+		}
+	} else if source == "" {
+		source = "worktree"
+	}
+	if source != "worktree" && source != "index" && source != "head" {
+		return Result{}, fmt.Errorf("source must be worktree, index, or head")
+	}
+	reader, err := openRepositoryFile(t.repo, path, source)
 	if err != nil {
 		return Result{}, err
 	}
-	defer root.Close()
-	content, err := root.ReadFile(path)
-	if err != nil {
-		return Result{}, err
-	}
+	defer reader.Close()
 	maxBytes, maxLines := normalizeCaps(args.MaxBytes, args.MaxLines)
-	limited, truncated := textutil.Limit(string(content), maxBytes, maxLines)
-	return jsonResult("read_file", map[string]any{"path": args.Path, "content": limited}, truncated)
+	content, first, last, truncated, err := readLineRange(reader, args.LineStart, args.LineEnd, maxBytes, maxLines)
+	if err != nil {
+		return Result{}, err
+	}
+	return jsonResult("read_file", map[string]any{
+		"path":       args.Path,
+		"source":     source,
+		"line_start": first,
+		"line_end":   last,
+		"content":    content,
+	}, truncated)
+}
+
+func enumStringProp(description string, values ...string) map[string]any {
+	return map[string]any{"type": "string", "description": description, "enum": values}
+}
+
+func openRepositoryFile(repo *gitctx.Repository, path, source string) (io.ReadCloser, error) {
+	return repo.OpenFile(gitctx.FileSource(source), path)
+}
+
+func readLineRange(reader io.Reader, start, end, maxBytes, maxLines int) (string, int, int, bool, error) {
+	if start < 0 || end < 0 || (end > 0 && start > end) {
+		return "", 0, 0, false, fmt.Errorf("invalid line range %d:%d", start, end)
+	}
+	if start == 0 {
+		start = 1
+	}
+	var output bytes.Buffer
+	currentLine := 1
+	fileLines := 0
+	selectedLines := 0
+	lastSelected := 0
+	lineHasByte := false
+	buffer := make([]byte, 32*1024)
+	for {
+		n, readErr := reader.Read(buffer)
+		for _, value := range buffer[:n] {
+			lineHasByte = true
+			selected := currentLine >= start && (end == 0 || currentLine <= end)
+			if selected {
+				if lastSelected != currentLine {
+					if selectedLines >= maxLines {
+						return validUTF8Prefix(output.String()), start, lastSelected, true, nil
+					}
+					selectedLines++
+					lastSelected = currentLine
+				}
+				if output.Len() >= maxBytes {
+					return validUTF8Prefix(output.String()), start, lastSelected, true, nil
+				}
+				if value == 0 {
+					return "", 0, 0, false, errors.New("file is not UTF-8 text")
+				}
+				output.WriteByte(value)
+			}
+			if value == '\n' {
+				fileLines = currentLine
+				if end > 0 && currentLine >= end {
+					if !utf8.ValidString(output.String()) {
+						return "", 0, 0, false, errors.New("file is not UTF-8 text")
+					}
+					return output.String(), start, lastSelected, false, nil
+				}
+				currentLine++
+				lineHasByte = false
+			}
+		}
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				return "", 0, 0, false, readErr
+			}
+			if lineHasByte {
+				fileLines = currentLine
+			}
+			if start > fileLines && !(start == 1 && fileLines == 0) {
+				return "", 0, 0, false, fmt.Errorf("line_start %d exceeds file length %d", start, fileLines)
+			}
+			if !utf8.ValidString(output.String()) {
+				return "", 0, 0, false, errors.New("file is not UTF-8 text")
+			}
+			return output.String(), start, lastSelected, false, nil
+		}
+	}
+}
+
+func validUTF8Prefix(value string) string {
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 type skillsReadTool struct {
@@ -442,20 +711,25 @@ func cleanSkillReadPath(rel string) (string, bool) {
 	return "", false
 }
 
-type searchFilesTool repoTool
+type grepTool struct {
+	repo *gitctx.Repository
+	mode ReviewMode
+}
 
-func (t searchFilesTool) Definition() Definition {
-	return Definition{Name: "search_files", Description: "Search repository files for a literal pattern.", Schema: schema(map[string]any{
-		"pattern":     stringProp("Literal search string."),
+func (t grepTool) Definition() Definition {
+	return Definition{Name: "grep", Description: "Search repository text files with a safe RE2 expression.", Schema: schema(map[string]any{
+		"pattern":     stringProp("RE2 regular expression."),
 		"path":        stringProp("Repository-relative directory prefix."),
+		"glob":        stringProp("Optional repository-relative or basename glob, such as *.go."),
 		"max_matches": intProp("Maximum matches to return.", 1, 1000),
 	}, "pattern"), Strict: true}
 }
 
-func (t searchFilesTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
+func (t grepTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
 	args, err := parseArgs[struct {
 		Pattern    string `json:"pattern"`
 		Path       string `json:"path"`
+		Glob       string `json:"glob"`
 		MaxMatches int    `json:"max_matches"`
 	}](invocation.Arguments)
 	if err != nil {
@@ -464,54 +738,338 @@ func (t searchFilesTool) Execute(_ context.Context, invocation Invocation) (Resu
 	if args.Pattern == "" {
 		return Result{}, fmt.Errorf("pattern is required")
 	}
+	pattern, err := regexp.Compile(args.Pattern)
+	if err != nil {
+		return Result{}, fmt.Errorf("invalid RE2 pattern: %w", err)
+	}
+	if args.Glob != "" {
+		if _, err := pathpkg.Match(args.Glob, "probe"); err != nil {
+			return Result{}, fmt.Errorf("invalid glob: %w", err)
+		}
+	}
 	maxMatches := args.MaxMatches
 	if maxMatches <= 0 {
 		maxMatches = 100
 	}
-	root, err := os.OpenRoot(t.repo.RootPath)
-	if err != nil {
-		return Result{}, err
-	}
-	defer root.Close()
-	walkRoot, err := cleanRepoPath(args.Path)
-	if err != nil {
-		return Result{}, err
+	if t.mode == ReviewModeStaged {
+		return t.executeStaged(pattern, args.Path, args.Glob, maxMatches)
 	}
 	var matches []map[string]any
-	err = fs.WalkDir(root.FS(), walkRoot, func(path string, d fs.DirEntry, err error) error {
+	truncated := false
+	err = walkRepository(t.repo, args.Path, func(root *os.Root, _, path string, entry fs.DirEntry) error {
+		if entry.IsDir() {
+			return nil
+		}
+		if len(matches) >= maxMatches {
+			truncated = true
+			return fs.SkipAll
+		}
+		if args.Glob != "" && !globMatches(args.Glob, path) {
+			return nil
+		}
+		file, err := root.Open(path)
 		if err != nil {
-			return err
-		}
-		if d.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
-		if d.IsDir() && skippedDirs[d.Name()] {
-			return filepath.SkipDir
+		if info, err := entry.Info(); err == nil && info.Size() > 2*1024*1024 {
+			truncated = true
 		}
-		if d.IsDir() || len(matches) >= maxMatches {
-			return nil
-		}
-		content, err := root.ReadFile(path)
-		if err != nil {
-			return nil
-		}
+		scanner := bufio.NewScanner(io.LimitReader(file, 2*1024*1024+1))
+		scanner.Buffer(make([]byte, 64*1024), 256*1024)
 		lineNo := 0
-		for line := range strings.SplitSeq(string(content), "\n") {
+		binary := false
+		hitLimit := false
+		for scanner.Scan() {
 			lineNo++
-			if strings.Contains(line, args.Pattern) {
-				matches = append(matches, map[string]any{"path": filepath.ToSlash(path), "line": lineNo, "text": line})
+			line := scanner.Text()
+			if strings.IndexByte(line, 0) >= 0 {
+				binary = true
+				break
+			}
+			if pattern.MatchString(line) {
+				matches = append(matches, map[string]any{"path": path, "line": lineNo, "text": limitMatchText(line)})
 				if len(matches) >= maxMatches {
+					truncated = true
+					hitLimit = true
 					break
 				}
 			}
+		}
+		scanErr := scanner.Err()
+		_ = file.Close()
+		if scanErr != nil {
+			truncated = true
+		}
+		if binary {
+			return nil
+		}
+		if hitLimit {
+			return fs.SkipAll
 		}
 		return nil
 	})
 	if err != nil {
 		return Result{}, err
 	}
-	truncated := len(matches) >= maxMatches
-	return jsonResult("search_files", map[string]any{"matches": matches}, truncated)
+	return jsonResult("grep", map[string]any{"matches": matches}, truncated)
+}
+
+func (t grepTool) executeStaged(pattern *regexp.Regexp, requested, glob string, maxMatches int) (Result, error) {
+	entries, err := stagedIndexEntries(t.repo, requested)
+	if err != nil {
+		return Result{}, err
+	}
+	var matches []map[string]any
+	truncated := false
+	for _, entry := range entries {
+		path := filepath.ToSlash(entry.Name)
+		if glob != "" && !globMatches(glob, path) {
+			continue
+		}
+		blob, err := t.repo.Repo.BlobObject(entry.Hash)
+		if err != nil {
+			continue
+		}
+		reader, err := blob.Reader()
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(io.LimitReader(reader, 2*1024*1024+1))
+		scanner.Buffer(make([]byte, 64*1024), 256*1024)
+		lineNo := 0
+		for scanner.Scan() {
+			lineNo++
+			line := scanner.Text()
+			if strings.IndexByte(line, 0) >= 0 {
+				break
+			}
+			if pattern.MatchString(line) {
+				matches = append(matches, map[string]any{"path": path, "line": lineNo, "text": limitMatchText(line)})
+				if len(matches) >= maxMatches {
+					truncated = true
+					break
+				}
+			}
+		}
+		if scanner.Err() != nil || blob.Size > 2*1024*1024 {
+			truncated = true
+		}
+		_ = reader.Close()
+		if len(matches) >= maxMatches {
+			break
+		}
+	}
+	return jsonResult("grep", map[string]any{"matches": matches}, truncated)
+}
+
+func globMatches(pattern, path string) bool {
+	matched, _ := pathpkg.Match(pattern, path)
+	if matched {
+		return true
+	}
+	matched, _ = pathpkg.Match(pattern, pathpkg.Base(path))
+	return matched
+}
+
+func limitMatchText(text string) string {
+	const maxMatchBytes = 1000
+	if len(text) <= maxMatchBytes {
+		return text
+	}
+	text = text[:maxMatchBytes]
+	for !utf8.ValidString(text) {
+		text = text[:len(text)-1]
+	}
+	return text + "…"
+}
+
+type findTool struct {
+	repo *gitctx.Repository
+	mode ReviewMode
+}
+
+func (t findTool) Definition() Definition {
+	return Definition{Name: "find", Description: "Find repository files or directories by safe glob.", Schema: schema(map[string]any{
+		"path":        stringProp("Repository-relative directory prefix."),
+		"name":        stringProp("Optional basename or repository-relative glob."),
+		"type":        enumStringProp("Entry type. Empty means any.", "", "any", "file", "directory"),
+		"max_entries": intProp("Maximum entries to return.", 1, 1000),
+	}), Strict: true}
+}
+
+func (t findTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
+	args, err := parseArgs[struct {
+		Path       string `json:"path"`
+		Name       string `json:"name"`
+		Type       string `json:"type"`
+		MaxEntries int    `json:"max_entries"`
+	}](invocation.Arguments)
+	if err != nil {
+		return Result{}, err
+	}
+	if args.Name != "" {
+		if _, err := pathpkg.Match(args.Name, "probe"); err != nil {
+			return Result{}, fmt.Errorf("invalid name glob: %w", err)
+		}
+	}
+	maxEntries := args.MaxEntries
+	if maxEntries <= 0 {
+		maxEntries = 200
+	}
+	if t.mode == ReviewModeStaged {
+		return t.executeStaged(args.Path, args.Name, args.Type, maxEntries)
+	}
+	var entries []map[string]any
+	truncated := false
+	err = walkRepository(t.repo, args.Path, func(_ *os.Root, walkRoot, path string, entry fs.DirEntry) error {
+		if path == walkRoot {
+			return nil
+		}
+		kind := "file"
+		if entry.IsDir() {
+			kind = "directory"
+		}
+		if args.Type != "" && args.Type != "any" && args.Type != kind {
+			return nil
+		}
+		if args.Name != "" && !globMatches(args.Name, path) {
+			return nil
+		}
+		if len(entries) >= maxEntries {
+			truncated = true
+			return fs.SkipAll
+		}
+		entries = append(entries, map[string]any{"path": path, "type": kind})
+		return nil
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	return jsonResult("find", map[string]any{"entries": entries}, truncated)
+}
+
+func (t findTool) executeStaged(requested, name, entryType string, maxEntries int) (Result, error) {
+	files, _, err := stagedFilePaths(t.repo, requested, int(^uint(0)>>1))
+	if err != nil {
+		return Result{}, err
+	}
+	root, err := cleanRepoPath(requested)
+	if err != nil {
+		return Result{}, err
+	}
+	kinds := map[string]string{}
+	for _, file := range files {
+		kinds[file] = "file"
+		for parent := pathpkg.Dir(file); parent != "."; parent = pathpkg.Dir(parent) {
+			if root != "." && parent != root && !strings.HasPrefix(parent, root+"/") {
+				break
+			}
+			kinds[parent] = "directory"
+			if parent == root {
+				break
+			}
+		}
+	}
+	paths := make([]string, 0, len(kinds))
+	for path := range kinds {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	entries := make([]map[string]any, 0, min(len(paths), maxEntries))
+	truncated := false
+	for _, path := range paths {
+		kind := kinds[path]
+		if entryType != "" && entryType != "any" && entryType != kind {
+			continue
+		}
+		if name != "" && !globMatches(name, path) {
+			continue
+		}
+		if len(entries) >= maxEntries {
+			truncated = true
+			break
+		}
+		entries = append(entries, map[string]any{"path": path, "type": kind})
+	}
+	return jsonResult("find", map[string]any{"entries": entries}, truncated)
+}
+
+type reviewDiffTool struct {
+	repo *gitctx.Repository
+	mode ReviewMode
+}
+
+func (t reviewDiffTool) Definition() Definition {
+	return Definition{Name: "review_diff", Description: "Return the authoritative review diff with caps.", Schema: cappedSchema(), Strict: true}
+}
+
+func (t reviewDiffTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
+	args, err := parseArgs[capArgs](invocation.Arguments)
+	if err != nil {
+		return Result{}, err
+	}
+	maxBytes, maxLines := normalizeCaps(args.MaxBytes, args.MaxLines)
+	var diff string
+	var truncated bool
+	switch t.mode {
+	case ReviewModeUncommitted:
+		diff, truncated, err = t.repo.UncommittedDiff(maxBytes, maxLines)
+	case ReviewModeStaged:
+		diff, truncated, err = t.repo.StagedDiff(maxBytes, maxLines)
+	default:
+		return Result{}, fmt.Errorf("review_diff is unavailable in %s mode", t.mode)
+	}
+	if err != nil {
+		return Result{}, err
+	}
+	return jsonResult("review_diff", map[string]any{"mode": t.mode, "diff": diff}, truncated)
+}
+
+type reviewDiffForPathsTool struct {
+	repo *gitctx.Repository
+	mode ReviewMode
+}
+
+func (t reviewDiffForPathsTool) Definition() Definition {
+	return Definition{Name: "review_diff_for_paths", Description: "Return the authoritative review diff for selected repository-relative paths with caps.", Schema: schema(map[string]any{
+		"paths":     stringArrayProp("Repository-relative paths to include."),
+		"max_bytes": intProp("Maximum bytes to return.", 1, 65536),
+		"max_lines": intProp("Maximum lines to return.", 1, 2000),
+	}, "paths"), Strict: true}
+}
+
+func (t reviewDiffForPathsTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
+	args, err := parseArgs[struct {
+		Paths    []string `json:"paths"`
+		MaxBytes int      `json:"max_bytes"`
+		MaxLines int      `json:"max_lines"`
+	}](invocation.Arguments)
+	if err != nil {
+		return Result{}, err
+	}
+	if len(args.Paths) == 0 {
+		return Result{}, fmt.Errorf("paths is required")
+	}
+	for _, path := range args.Paths {
+		if _, err := cleanRepoPath(path); err != nil {
+			return Result{}, err
+		}
+	}
+	maxBytes, maxLines := normalizeCaps(args.MaxBytes, args.MaxLines)
+	var diff string
+	var truncated bool
+	switch t.mode {
+	case ReviewModeUncommitted:
+		diff, truncated, err = t.repo.UncommittedDiffForPaths(args.Paths, maxBytes, maxLines)
+	case ReviewModeStaged:
+		diff, truncated, err = t.repo.StagedDiffForPaths(args.Paths, maxBytes, maxLines)
+	default:
+		return Result{}, fmt.Errorf("review_diff_for_paths is unavailable in %s mode", t.mode)
+	}
+	if err != nil {
+		return Result{}, err
+	}
+	return jsonResult("review_diff_for_paths", map[string]any{"mode": t.mode, "paths": args.Paths, "diff": diff}, truncated)
 }
 
 type gitStagedPathsTool repoTool

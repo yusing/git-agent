@@ -95,6 +95,32 @@ func TestNewStreamCompactsLargeStringsInline(t *testing.T) {
 	}
 }
 
+func TestWriteExactPreservesMachineConsumedStrings(t *testing.T) {
+	t.Parallel()
+
+	var events []Event
+	recorder, err := NewEventStream("review", func(event Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	large := strings.Repeat("x", largeStringArtifactThreshold+1)
+	if err := recorder.WriteExact("reasoning_summary.done", map[string]any{
+		"delta": "{}",
+		"text":  large,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %#v", events)
+	}
+	if events[1].Value["delta"] != "{}" || events[1].Value["text"] != large {
+		t.Fatalf("exact event changed strings: %#v", events[1])
+	}
+}
+
 func TestNewStreamRequestOmitsInstructions(t *testing.T) {
 	t.Parallel()
 

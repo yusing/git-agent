@@ -3,9 +3,11 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -62,6 +64,8 @@ func TestRepositoryWalkToolsSkipInternalState(t *testing.T) {
 	mustWriteFile(t, filepath.Join(dir, "visible.txt"), "needle\n")
 	mustWriteFile(t, filepath.Join(dir, ".git-agent", "sessions", "trace.json"), "needle\n")
 	mustWriteFile(t, filepath.Join(dir, ".omx", "state.json"), "needle\n")
+	mustWriteFile(t, filepath.Join(dir, ".omx", "tracked.txt"), "tracked-needle\n")
+	runGit(t, dir, "add", "-f", ".omx/tracked.txt")
 
 	repo, err := gitctx.Open(dir)
 	if err != nil {
@@ -88,8 +92,11 @@ func TestRepositoryWalkToolsSkipInternalState(t *testing.T) {
 			}
 		}
 	}
+	if !slices.Contains(listed.Data.Files, ".omx/tracked.txt") {
+		t.Fatalf("list_files hid tracked internal path: %#v", listed.Data.Files)
+	}
 
-	searchResult, err := registry.Execute(t.Context(), Invocation{Name: "search_files", Arguments: `{"pattern":"needle"}`})
+	searchResult, err := registry.Execute(t.Context(), Invocation{Name: "grep", Arguments: `{"pattern":"needle"}`})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,8 +110,65 @@ func TestRepositoryWalkToolsSkipInternalState(t *testing.T) {
 	if err := json.Unmarshal([]byte(searchResult.Content), &searched); err != nil {
 		t.Fatal(err)
 	}
-	if len(searched.Data.Matches) != 1 || searched.Data.Matches[0].Path != "visible.txt" {
-		t.Fatalf("search_files should only match visible repo files: %#v", searched.Data.Matches)
+	if len(searched.Data.Matches) != 2 || searched.Data.Matches[0].Path != ".omx/tracked.txt" || searched.Data.Matches[1].Path != "visible.txt" {
+		t.Fatalf("grep should include visible and tracked internal files: %#v", searched.Data.Matches)
+	}
+}
+
+func TestStagedReviewToolsNeverReadUnstagedWorktree(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.name", "Test User")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	mustWriteFile(t, filepath.Join(dir, "app.txt"), "base\n")
+	runGit(t, dir, "add", "app.txt")
+	runGit(t, dir, "commit", "-m", "base")
+	mustWriteFile(t, filepath.Join(dir, "app.txt"), "staged-value\n")
+	runGit(t, dir, "add", "app.txt")
+	mustWriteFile(t, filepath.Join(dir, "app.txt"), "unstaged-secret\n")
+	mustWriteFile(t, filepath.Join(dir, "untracked-secret.txt"), "unstaged-secret\n")
+
+	repo, err := gitctx.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewReviewRegistryWithSkills(repo, nil, ReviewModeStaged)
+	if _, err := registry.Execute(t.Context(), Invocation{Name: "git_staged_status", Arguments: `{}`}); err == nil {
+		t.Fatal("review registry exposed a non-review tool")
+	}
+
+	readResult, err := registry.Execute(t.Context(), Invocation{Name: "read_file", Arguments: `{"path":"app.txt"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(readResult.Content, "staged-value") || strings.Contains(readResult.Content, "unstaged-secret") {
+		t.Fatalf("read_file leaked worktree content: %s", readResult.Content)
+	}
+	if _, err := registry.Execute(t.Context(), Invocation{Name: "read_file", Arguments: `{"path":"app.txt","source":"worktree"}`}); err == nil {
+		t.Fatal("read_file accepted worktree source in staged mode")
+	}
+
+	grepResult, err := registry.Execute(t.Context(), Invocation{Name: "grep", Arguments: `{"pattern":"staged-value|unstaged-secret"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(grepResult.Content, "staged-value") || strings.Contains(grepResult.Content, "unstaged-secret") {
+		t.Fatalf("grep leaked worktree content: %s", grepResult.Content)
+	}
+
+	for _, invocation := range []Invocation{
+		{Name: "list_files", Arguments: `{}`},
+		{Name: "find", Arguments: `{"type":"file"}`},
+	} {
+		result, err := registry.Execute(t.Context(), invocation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(result.Content, "app.txt") || strings.Contains(result.Content, "untracked-secret.txt") {
+			t.Fatalf("%s leaked worktree paths: %s", invocation.Name, result.Content)
+		}
 	}
 }
 
@@ -139,15 +203,78 @@ func TestRepositoryToolsDoNotFollowSymlinks(t *testing.T) {
 		t.Fatalf("list_files exposed symlink: %s", listResult.Content)
 	}
 
-	searchResult, err := registry.Execute(t.Context(), Invocation{Name: "search_files", Arguments: `{"pattern":"outside-secret"}`})
+	searchResult, err := registry.Execute(t.Context(), Invocation{Name: "grep", Arguments: `{"pattern":"outside-secret"}`})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(searchResult.Content, "outside-secret") {
-		t.Fatalf("search_files followed symlink: %s", searchResult.Content)
+		t.Fatalf("grep followed symlink: %s", searchResult.Content)
 	}
 	if _, err := registry.Execute(t.Context(), Invocation{Name: "gitmodules_table", Arguments: "{}"}); err == nil {
 		t.Fatal("gitmodules_table followed symlink outside repository")
+	}
+}
+
+func TestReadFileSelectsSnapshotAndInclusiveLineRange(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.name", "Test User")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	mustWriteFile(t, filepath.Join(dir, "app.txt"), "one\nbase\nthree\n")
+	runGit(t, dir, "add", "app.txt")
+	runGit(t, dir, "commit", "-m", "base")
+	mustWriteFile(t, filepath.Join(dir, "app.txt"), "one\nstaged\nthree\n")
+	runGit(t, dir, "add", "app.txt")
+	mustWriteFile(t, filepath.Join(dir, "app.txt"), "one\nworktree\nthree\n")
+
+	repo, err := gitctx.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistryWithSkills(repo, nil)
+	for source, want := range map[string]string{"head": "base", "index": "staged", "worktree": "worktree"} {
+		result, err := registry.Execute(t.Context(), Invocation{Name: "read_file", Arguments: fmt.Sprintf(`{"path":"app.txt","source":%q,"line_start":2,"line_end":2}`, source)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(result.Content, `"content": "`+want+`\n"`) {
+			t.Fatalf("source %s missing %q: %s", source, want, result.Content)
+		}
+		if !strings.Contains(result.Content, `"line_start": 2`) || !strings.Contains(result.Content, `"line_end": 2`) {
+			t.Fatalf("source %s missing selected range: %s", source, result.Content)
+		}
+	}
+}
+
+func TestFindAndGrepSupportBoundedDiscovery(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	mustWriteFile(t, filepath.Join(dir, "internal", "one.go"), "package internal\n\nfunc One() {}\n")
+	mustWriteFile(t, filepath.Join(dir, "internal", "two.txt"), "func text\n")
+	repo, err := gitctx.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistryWithSkills(repo, nil)
+
+	grepResult, err := registry.Execute(t.Context(), Invocation{Name: "grep", Arguments: `{"pattern":"^func [A-Z]","path":"internal","glob":"*.go","max_matches":10}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(grepResult.Content, "internal/one.go") || strings.Contains(grepResult.Content, "two.txt") {
+		t.Fatalf("grep result = %s", grepResult.Content)
+	}
+
+	findResult, err := registry.Execute(t.Context(), Invocation{Name: "find", Arguments: `{"path":"internal","name":"*.go","type":"file","max_entries":10}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(findResult.Content, "internal/one.go") || strings.Contains(findResult.Content, "two.txt") {
+		t.Fatalf("find result = %s", findResult.Content)
 	}
 }
 

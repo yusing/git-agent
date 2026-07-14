@@ -28,16 +28,30 @@ type EmbeddingClient interface {
 }
 
 type Request struct {
-	Model         string      `json:"model"`
-	ServiceTier   string      `json:"service_tier,omitempty"`
-	ThinkingMode  string      `json:"thinking_mode,omitempty"`
-	BaseURL       string      `json:"-"`
-	APIKey        string      `json:"-"`
-	AuthAccountID string      `json:"-"`
-	Instructions  string      `json:"instructions,omitempty"`
-	Input         []Item      `json:"input"`
-	Tools         []ToolSpec  `json:"tools,omitempty"`
-	TextFormat    *TextFormat `json:"text_format,omitempty"`
+	Model            string                  `json:"model"`
+	ServiceTier      string                  `json:"service_tier,omitempty"`
+	ThinkingMode     string                  `json:"thinking_mode,omitempty"`
+	ReasoningSummary string                  `json:"reasoning_summary,omitempty"`
+	BaseURL          string                  `json:"-"`
+	APIKey           string                  `json:"-"`
+	AuthAccountID    string                  `json:"-"`
+	Instructions     string                  `json:"instructions,omitempty"`
+	Input            []Item                  `json:"input"`
+	Tools            []ToolSpec              `json:"tools,omitempty"`
+	TextFormat       *TextFormat             `json:"text_format,omitempty"`
+	OnStreamEvent    func(StreamEvent) error `json:"-"`
+}
+
+const ReasoningSummaryAuto = "auto"
+
+type StreamEvent struct {
+	Kind           string `json:"-"`
+	ItemID         string `json:"item_id"`
+	OutputIndex    int64  `json:"output_index"`
+	SummaryIndex   int64  `json:"summary_index"`
+	SequenceNumber int64  `json:"sequence_number"`
+	Delta          string `json:"delta,omitempty"`
+	Text           string `json:"text,omitempty"`
 }
 
 type EmbeddingRequest struct {
@@ -134,11 +148,20 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 		return Response{}, err
 	}
 	stream := client.Responses.NewStreaming(ctx, params)
+	defer stream.Close()
 	var final *responses.Response
 	accum := newStreamAccumulator()
 	for stream.Next() {
 		event := stream.Current()
 		accum.apply(event)
+		if request.OnStreamEvent != nil {
+			streamEvent, ok := reasoningSummaryStreamEvent(event)
+			if ok {
+				if err := request.OnStreamEvent(streamEvent); err != nil {
+					return Response{}, fmt.Errorf("publishing provider stream event: %w", err)
+				}
+			}
+		}
 		if event.Type == "response.completed" {
 			completed := event.AsResponseCompleted()
 			final = &completed.Response
@@ -171,6 +194,33 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 		result.ToolCalls = mergeToolCalls(result.ToolCalls, accum.toolCalls())
 	}
 	return result, nil
+}
+
+func reasoningSummaryStreamEvent(event responses.ResponseStreamEventUnion) (StreamEvent, bool) {
+	switch event.Type {
+	case "response.reasoning_summary_text.delta":
+		delta := event.AsResponseReasoningSummaryTextDelta()
+		return StreamEvent{
+			Kind:           "reasoning_summary.delta",
+			ItemID:         delta.ItemID,
+			OutputIndex:    delta.OutputIndex,
+			SummaryIndex:   delta.SummaryIndex,
+			SequenceNumber: delta.SequenceNumber,
+			Delta:          delta.Delta,
+		}, true
+	case "response.reasoning_summary_text.done":
+		done := event.AsResponseReasoningSummaryTextDone()
+		return StreamEvent{
+			Kind:           "reasoning_summary.done",
+			ItemID:         done.ItemID,
+			OutputIndex:    done.OutputIndex,
+			SummaryIndex:   done.SummaryIndex,
+			SequenceNumber: done.SequenceNumber,
+			Text:           done.Text,
+		}, true
+	default:
+		return StreamEvent{}, false
+	}
 }
 
 func (c *SDKClient) CreateEmbeddings(ctx context.Context, request EmbeddingRequest) (EmbeddingResponse, error) {
@@ -569,8 +619,11 @@ func (r Request) toSDKParams() (responses.ResponseNewParams, error) {
 	if r.ServiceTier != "" {
 		params.ServiceTier = responses.ResponseNewParamsServiceTier(r.ServiceTier)
 	}
-	if r.ThinkingMode != "" {
-		params.Reasoning = shared.ReasoningParam{Effort: shared.ReasoningEffort(r.ThinkingMode)}
+	if r.ThinkingMode != "" || r.ReasoningSummary != "" {
+		params.Reasoning = shared.ReasoningParam{
+			Effort:  shared.ReasoningEffort(r.ThinkingMode),
+			Summary: shared.ReasoningSummary(r.ReasoningSummary),
+		}
 	}
 	return params, nil
 }

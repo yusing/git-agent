@@ -28,6 +28,7 @@ import (
 	skillctx "github.com/yusing/git-agent/internal/skills"
 	"github.com/yusing/git-agent/internal/tasks/commitmsg"
 	"github.com/yusing/git-agent/internal/tasks/releasenote"
+	reviewtask "github.com/yusing/git-agent/internal/tasks/review"
 	searchtask "github.com/yusing/git-agent/internal/tasks/search"
 	"github.com/yusing/git-agent/internal/tools"
 	"github.com/yusing/git-agent/internal/trace"
@@ -36,6 +37,12 @@ import (
 const (
 	releaseNoteMinMaxSteps = 12
 	releaseNoteMinTimeout  = 4 * time.Minute
+	reviewDefaultModel     = "gpt-5.6-sol"
+	simplifyDefaultModel   = "gpt-5.6-terra"
+	reviewDefaultMaxSteps  = 60
+	reviewDefaultMaxTools  = 48
+	simplifyDefaultSteps   = 45
+	simplifyDefaultTools   = 36
 )
 
 type App struct {
@@ -66,12 +73,194 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return a.runPRMessage(ctx, args[1:])
 	case "release-note":
 		return a.runReleaseNote(ctx, args[1:])
+	case "review":
+		return a.runCodeReview(ctx, reviewtask.KindReview, args[1:])
 	case "search":
 		return a.runSearch(ctx, args[1:])
+	case "simplify":
+		return a.runCodeReview(ctx, reviewtask.KindSimplify, args[1:])
 	case "-h", "--help", "help":
 		return usageError("")
 	default:
 		return usageError(fmt.Sprintf("unknown command %q", args[0]))
+	}
+}
+
+func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []string) error {
+	command := string(kind)
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	var opts config.Options
+	var codebase bool
+	var uncommitted bool
+	var staged bool
+	fs.BoolVar(&codebase, "codebase", false, "inspect the full codebase")
+	fs.BoolVar(&uncommitted, "uncommitted", false, "inspect all dirty worktree changes")
+	fs.BoolVar(&staged, "staged", false, "inspect staged changes only")
+	registerSharedFlags(fs, &opts)
+	fs.Lookup("timeout").Usage = "set request timeout (disabled by default)"
+	fs.Lookup("model").Usage = fmt.Sprintf("override model (default %s)", codeReviewDefaultModel(kind))
+	defaultSteps := reviewDefaultMaxSteps
+	if kind == reviewtask.KindSimplify {
+		defaultSteps = simplifyDefaultSteps
+	}
+	fs.Lookup("max-steps").Usage = fmt.Sprintf("set maximum agent steps (default %d)", defaultSteps)
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return codeReviewUsageError(command, fs)
+		}
+		return err
+	}
+	mode, err := reviewtask.ParseMode(codebase, uncommitted, staged)
+	if err != nil {
+		return err
+	}
+	extraPrompt := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	if opts.AppendPrompt != "" && extraPrompt != "" {
+		opts.AppendPrompt = strings.TrimSpace(opts.AppendPrompt) + "\n" + extraPrompt
+	} else if extraPrompt != "" {
+		opts.AppendPrompt = extraPrompt
+	}
+
+	localCfg, err := config.ResolveLocal(opts)
+	if err != nil {
+		return err
+	}
+	if err := a.maybeStartPprof(ctx, opts); err != nil {
+		return err
+	}
+	reviewTimeout := time.Duration(0)
+	if opts.Timeout != "" {
+		reviewTimeout = localCfg.Timeout
+	}
+	taskCtx, cancel := contextWithOptionalTimeout(ctx, reviewTimeout)
+	defer cancel()
+
+	repo, err := gitctx.Open(".")
+	if err != nil {
+		return err
+	}
+	prepared, err := reviewtask.Prepare(repo, mode)
+	if err != nil {
+		return err
+	}
+	renderedGuidance, err := resolveReviewGuidance(repo, localCfg.GuidanceFamily, prepared.Paths, mode)
+	if err != nil {
+		return err
+	}
+	skillStore, err := resolveReviewSkills(repo, mode)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.ResolveFromLocal(opts, localCfg)
+	if err != nil {
+		return err
+	}
+	cfg.Timeout = reviewTimeout
+	applyCodeReviewDefaults(kind, opts, &cfg)
+
+	eventServer, err := startAgentEventServer()
+	if err != nil {
+		return err
+	}
+	defer eventServer.Close()
+	if _, err := fmt.Fprintf(a.stderr, "%s: agent events listening on %s\n", command, eventServer.URL()); err != nil {
+		return err
+	}
+	recorder, err := trace.NewEventStream(command, eventServer.Publish)
+	if err != nil {
+		return err
+	}
+	session := map[string]any{
+		"command": command,
+		"mode":    mode,
+		"repo":    repo.Summary(),
+	}
+	if mode != reviewtask.ModeCodebase {
+		session["prepared_change_context"] = prepared
+	}
+	if skillStore.Len() > 0 {
+		session["skills"] = skillStore.Summary()
+	}
+	if err := recorder.Write("session", session); err != nil {
+		return err
+	}
+
+	allowedTools := withSkillTools(tools.ReviewToolNames(mode.ToolMode()), skillStore)
+	registry := tools.NewReviewRegistryWithSkills(repo, skillStore, mode.ToolMode())
+	runner := agent.OpenAIRunner{
+		Config:           cfg,
+		Client:           openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
+		Tools:            registry,
+		ToolSpecs:        registry.Definitions(allowedTools),
+		ReasoningSummary: openai.ReasoningSummaryAuto,
+		Validator: func(text string) []string {
+			return reviewtask.ValidateRepository(kind, text, repo, mode, prepared.Paths)
+		},
+		Normalize: func(text string) string { return reviewtask.Shape(kind, text) },
+		Trace:     recorder,
+	}
+	result, err := runner.Run(taskCtx, agent.Request{
+		SystemPrompt:      reviewtask.SystemPrompt(kind),
+		ToolPolicy:        toolPolicy(),
+		Environment:       environmentContext(repo, command, string(mode), cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls),
+		SkillInstructions: skillStore.Render(),
+		ProjectGuidance:   renderedGuidance,
+		UserPrompt:        appendUserPrompt(reviewtask.UserPrompt(kind, prepared), opts.AppendPrompt),
+		TextFormat:        reviewtask.TextFormat(kind),
+		AllowedToolNames:  allowedTools,
+		MaxSteps:          cfg.MaxSteps,
+		RepairOnValidator: true,
+	})
+	if err != nil {
+		traceErr := recorder.Write("error", map[string]any{"message": err.Error()})
+		return errors.Join(err, traceErr)
+	}
+	if err := recorder.Write("final", map[string]any{
+		"text":         result.Text,
+		"tool_calls":   result.ToolCalls,
+		"repair_calls": result.RepairCalls,
+	}); err != nil {
+		return err
+	}
+	eventServer.Finish()
+	_, err = fmt.Fprintln(a.stdout, strings.TrimSpace(result.Text))
+	return err
+}
+
+func contextWithOptionalTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout > 0 {
+		return context.WithTimeout(ctx, timeout)
+	}
+	return context.WithCancel(ctx)
+}
+
+func codeReviewDefaultModel(kind reviewtask.Kind) string {
+	if kind == reviewtask.KindSimplify {
+		return simplifyDefaultModel
+	}
+	return reviewDefaultModel
+}
+
+func applyCodeReviewDefaults(kind reviewtask.Kind, opts config.Options, cfg *config.Config) {
+	if opts.Model == "" && os.Getenv("OPENAI_MODEL") == "" {
+		cfg.Model = codeReviewDefaultModel(kind)
+	}
+	if kind == reviewtask.KindReview && cfg.ThinkingEffort == "" {
+		cfg.ThinkingEffort = "high"
+	}
+	if opts.MaxSteps == 0 {
+		if kind == reviewtask.KindReview {
+			cfg.MaxSteps = reviewDefaultMaxSteps
+		} else {
+			cfg.MaxSteps = simplifyDefaultSteps
+		}
+	}
+	if kind == reviewtask.KindReview {
+		cfg.MaxToolCalls = reviewDefaultMaxTools
+	} else {
+		cfg.MaxToolCalls = simplifyDefaultTools
 	}
 }
 
@@ -1466,6 +1655,35 @@ func resolveGuidanceForPaths(repo *gitctx.Repository, requestedFamily string, pa
 	return resolved.Rendered, nil
 }
 
+func resolveReviewGuidance(repo *gitctx.Repository, requestedFamily string, paths []string, mode reviewtask.Mode) (string, error) {
+	if mode != reviewtask.ModeStaged {
+		return resolveGuidanceForPaths(repo, requestedFamily, paths)
+	}
+	family, err := guidance.ParseFamily(requestedFamily)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := guidance.ResolveForRepoPaths(repo.RootPath, paths, family, repo.IndexFile)
+	if err != nil {
+		return "", err
+	}
+	return resolved.Rendered, nil
+}
+
+func resolveReviewSkills(repo *gitctx.Repository, mode reviewtask.Mode) (*skillctx.Store, error) {
+	if mode != reviewtask.ModeStaged {
+		return resolveSkills(repo)
+	}
+	workDir, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	options := skillctx.DefaultOptions(repo.RootPath, workDir)
+	options.RepoRoot = ""
+	options.WorkDir = ""
+	return skillctx.Discover(options)
+}
+
 func resolveSkills(repo *gitctx.Repository) (*skillctx.Store, error) {
 	workDir, err := os.Getwd()
 	if err != nil {
@@ -1587,11 +1805,44 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent pr-message [flags]\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] patch|minor|major\n")
+	b.WriteString("  git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]\n")
 	b.WriteString("  git-agent search [flags] <query...>\n")
 	b.WriteString("  git-agent search --ls [--remote <url>] [--format text|json]\n")
 	b.WriteString("  git-agent search --ls-remotes [--format text|json|completion]\n")
 	b.WriteString("  git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]\n")
+	b.WriteString("  git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]\n")
 	b.WriteString("\nRun `git-agent search --help` for search flags.\n")
+	b.WriteString("Run `git-agent review --help` or `git-agent simplify --help` for inspection flags.\n")
+	return errors.New(b.String())
+}
+
+func codeReviewUsageError(command string, fs *flag.FlagSet) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Usage: git-agent %s [--codebase|--uncommitted|--staged] [flags] [prompt...]\n\n", command)
+	b.WriteString("Modes:\n")
+	b.WriteString("  --uncommitted  inspect all dirty changes (default)\n")
+	b.WriteString("  --staged       inspect staged changes only\n")
+	b.WriteString("  --codebase     inspect the full codebase\n\n")
+	b.WriteString("Flags:\n")
+	placeholders := map[string]string{
+		"append-prompt":   "text",
+		"base-url":        "url",
+		"guidance-family": "family",
+		"max-steps":       "n",
+		"model":           "model",
+		"pprof":           "addr",
+		"timeout":         "duration",
+	}
+	fs.VisitAll(func(f *flag.Flag) {
+		if f.Name == "codebase" || f.Name == "uncommitted" || f.Name == "staged" {
+			return
+		}
+		fmt.Fprintf(&b, "  --%s", f.Name)
+		if placeholder := placeholders[f.Name]; placeholder != "" {
+			fmt.Fprintf(&b, " <%s>", placeholder)
+		}
+		fmt.Fprintf(&b, "\n      %s\n", f.Usage)
+	})
 	return errors.New(b.String())
 }
 
