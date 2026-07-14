@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/giturl"
 	"github.com/yusing/git-agent/internal/metadata"
 	"github.com/yusing/git-agent/internal/openai"
@@ -2530,20 +2532,6 @@ func TestFilteredSearchPreservesLegacySharedRecords(t *testing.T) {
 	}
 }
 
-func TestMissingVectorKeysCountsDuplicateInputs(t *testing.T) {
-	opts := Options{EmbeddingModel: "text-embedding-3-small", EmbeddingDimensions: 3}
-	chunk := Chunk{EmbeddingText: "path: repeated.txt\n\nrepeated text"}
-	keys := missingVectorKeys([]Chunk{chunk, chunk, chunk}, nil, opts)
-	if len(keys) != 1 {
-		t.Fatalf("missing keys = %#v, want one unique input", keys)
-	}
-	for _, count := range keys {
-		if count != 3 {
-			t.Fatalf("missing input count = %d, want 3", count)
-		}
-	}
-}
-
 func TestRevisionReindexDoesNotReuseFilesystemEmbeddings(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "a.txt", "alpha\n")
@@ -2646,6 +2634,93 @@ func TestRemoteSearchUsesCachedCommittedTree(t *testing.T) {
 	if !slices.Contains(listed.Files, "remote.txt") {
 		t.Fatalf("files = %#v, missing remote.txt", listed.Files)
 	}
+	packFiles, err := filepath.Glob(filepath.Join(repoDir, "objects", "pack", "*.pack"))
+	if err != nil || len(packFiles) == 0 {
+		t.Fatalf("cached packs = %#v, err = %v", packFiles, err)
+	}
+	assertNoLooseGitObjects(t, filepath.Join(repoDir, "objects"))
+}
+
+func TestTranslateAdvertisedRevisionResolvesSymbolicAndPeeledRefs(t *testing.T) {
+	head := plumbing.NewHash("1111111111111111111111111111111111111111")
+	peeled := plumbing.NewHash("2222222222222222222222222222222222222222")
+	refs := []*plumbing.Reference{
+		plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("main")),
+		plumbing.NewHashReference(plumbing.NewBranchReferenceName("main"), head),
+		plumbing.NewHashReference(plumbing.ReferenceName("refs/tags/v1"), plumbing.NewHash("3333333333333333333333333333333333333333")),
+		plumbing.NewHashReference(plumbing.ReferenceName("refs/tags/v1^{}"), peeled),
+	}
+	translated, resolved, err := translateAdvertisedRevision("HEAD~1", refs)
+	if err != nil || translated != head.String()+"~1" || resolved != "" {
+		t.Fatalf("HEAD~1 = %q, %q, %v", translated, resolved, err)
+	}
+	translated, resolved, err = translateAdvertisedRevision("v1", refs)
+	if err != nil || translated != peeled.String() || resolved != peeled.String() {
+		t.Fatalf("annotated tag = %q, %q, %v", translated, resolved, err)
+	}
+}
+
+func TestRemoteEmbeddingFailurePublishesNoMetadataOrIndex(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	remote := t.TempDir()
+	writeFile(t, remote, "fail.go", "package fail\n")
+	_ = commitSearchRepo(t, remote)
+	before, err := filepath.Glob(filepath.Join(os.TempDir(), "git-agent-remote-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Run(t.Context(), failOnPathEmbedder("fail.go"), Options{
+		Root: t.TempDir(), Remote: remote, IndexOnly: true,
+		MinRelatedness: DefaultMinRelatedness, Limit: DefaultLimit,
+		EmbeddingModel: "test-model", EmbeddingDimensions: 3,
+	}, "")
+	if err == nil {
+		t.Fatal("expected embedding failure")
+	}
+	metadataDir, err := metadata.RemoteDir(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(metadataDir, "remote.json")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("remote metadata error = %v, want not exist", err)
+	}
+	var manifests []string
+	_ = filepath.WalkDir(filepath.Join(metadataDir, "search"), func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr == nil && !entry.IsDir() && entry.Name() == "manifest.json" {
+			manifests = append(manifests, path)
+		}
+		return nil
+	})
+	if len(manifests) != 0 {
+		t.Fatalf("published manifests = %#v", manifests)
+	}
+	after, err := filepath.Glob(filepath.Join(os.TempDir(), "git-agent-remote-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(before, after) {
+		t.Fatalf("temporary overlays before = %#v, after = %#v", before, after)
+	}
+}
+
+func assertNoLooseGitObjects(t *testing.T, objectsDir string) {
+	t.Helper()
+	entries, err := os.ReadDir(objectsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || len(entry.Name()) != 2 || strings.ContainsAny(entry.Name(), "ghijklmnopqrstuvwxyz") {
+			continue
+		}
+		objects, err := os.ReadDir(filepath.Join(objectsDir, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(objects) > 0 {
+			t.Fatalf("loose Git objects remain in %s", filepath.Join(objectsDir, entry.Name()))
+		}
+	}
 }
 
 func TestRemoteProgressWriterReportsCompleteUpdates(t *testing.T) {
@@ -2675,6 +2750,13 @@ func TestRemoteProgressWriterReportsCompleteUpdates(t *testing.T) {
 	}
 	if !slices.Equal(updates, want) {
 		t.Fatalf("updates = %#v, want %#v", updates, want)
+	}
+}
+
+func TestRemoteProgressWriterWithoutCallbackIsNilWriter(t *testing.T) {
+	var output io.Writer = newRemoteProgressWriter(nil, "https://example.test/repo.git", ProgressStatusFetching)
+	if output != nil {
+		t.Fatalf("progress output = %#v, want nil", output)
 	}
 }
 
@@ -2854,6 +2936,176 @@ func TestRevisionSearchUsesIgnoreFilesFromResolvedCommit(t *testing.T) {
 		return file.Path == "ignored-binary.dat"
 	}) {
 		t.Fatalf("skipped files include ignored binary: %#v", out.Diagnostics.SkippedFiles)
+	}
+}
+
+func TestRemoteStreamAppliesTargetTreeFilters(t *testing.T) {
+	matcher := buildRevisionIgnoreMatcher([]revisionIgnoreFile{
+		{path: ".gitignore", name: ".gitignore", text: "ignored.txt\n"},
+		{path: ".gitagentignore", name: ".gitagentignore", text: "ignored-dir/\nignored-binary.dat\n"},
+	})
+	if revisionPathIgnored(matcher, "pkg/keep.go") {
+		t.Fatal("fixture ignore matcher excludes pkg/keep.go")
+	}
+	remote := t.TempDir()
+	writeFile(t, remote, ".gitignore", "ignored.txt\n")
+	writeFile(t, remote, ".gitagentignore", "ignored-dir/\nignored-binary.dat\n")
+	writeFile(t, remote, "pkg/keep.go", "package pkg\n")
+	writeFile(t, remote, "pkg/keep_test.go", "package pkg\n")
+	writeFile(t, remote, "ignored.txt", "ignored\n")
+	writeFile(t, remote, "ignored-dir/file.go", "package ignored\n")
+	writeFile(t, remote, "ignored-binary.dat", "ignored\x00binary\n")
+	writeFile(t, remote, "binary.dat", "binary\x00data\n")
+	writeFile(t, remote, "large.go", strings.Repeat("x", int(MaxFileBytes)+1))
+	_ = commitSearchRepo(t, remote)
+
+	out, err := Run(t.Context(), fakeEmbedder{}, Options{
+		Root: t.TempDir(), Remote: remote, CodeOnly: true, NoTests: true,
+		IndexOnly: true, MinRelatedness: DefaultMinRelatedness, Limit: DefaultLimit,
+		EmbeddingModel: "test-model", EmbeddingDimensions: 3,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Diagnostics.Files != 2 || out.Diagnostics.Chunks != 2 {
+		t.Fatalf("diagnostics = %#v, want both scoped Go files indexed", out.Diagnostics)
+	}
+	if out.Retrieval.Skipped.Binary != 1 || out.Retrieval.Skipped.Oversized != 1 {
+		t.Fatalf("skipped = %#v", out.Retrieval.Skipped)
+	}
+	listed, err := ListIndexFiles(t.Context(), ListFilesOptions{Root: t.TempDir(), Remote: remote, NoTests: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(listed.Files, []string{"pkg/keep.go"}) {
+		t.Fatalf("listed files = %#v", listed.Files)
+	}
+
+	cached, err := Run(t.Context(), &countingEmbedder{}, Options{
+		Root: t.TempDir(), Remote: remote, CodeOnly: true, NoTests: true,
+		IndexOnly: true, MinRelatedness: DefaultMinRelatedness, Limit: DefaultLimit,
+		EmbeddingModel: "test-model", EmbeddingDimensions: 3,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cached.Retrieval.Skipped.Oversized != 1 || cached.Diagnostics.Files != 2 {
+		t.Fatalf("cached diagnostics = %#v, skipped = %#v", cached.Diagnostics, cached.Retrieval.Skipped)
+	}
+}
+
+func TestRemoteStreamEmbeddingStartsBeforePackCompletes(t *testing.T) {
+	files := make(chan fileContent)
+	releasePack := make(chan struct{})
+	packCompleted := make(chan struct{})
+	embedder := newBlockingEmbedder()
+	t.Cleanup(embedder.releaseEmbeddings)
+	done := make(chan error, 1)
+	metadataDir := t.TempDir()
+	indexDir := filepath.Join(t.TempDir(), "index")
+	go func() {
+		_, err := indexRemoteFileStream(t.Context(), embedder, files, metadataDir, indexDir, Options{
+			Reindex: true, EmbeddingModel: "test-model", EmbeddingDimensions: 3,
+			EmbeddingBatchInputs: 1, EmbeddingConcurrency: 1,
+		}, false)
+		done <- err
+	}()
+	go func() {
+		files <- fileContent{path: "ready.go", source: "revision", text: "package ready\n", size: 14}
+		<-releasePack
+		close(files)
+		close(packCompleted)
+	}()
+	<-embedder.entered
+	select {
+	case <-packCompleted:
+		t.Fatal("pack completed before embedding started")
+	default:
+	}
+	embedder.releaseEmbeddings()
+	close(releasePack)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCachedRemoteTreatsFilteredBlobAsOversized(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "keep.go", "package keep\n")
+	writeFile(t, root, "large.go", strings.Repeat("x", int(MaxFileBytes)+1))
+	rev := commitSearchRepo(t, root)
+	repo, err := git.PlainOpen(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := repo.CommitObject(plumbing.NewHash(rev))
+	if err != nil {
+		t.Fatal(err)
+	}
+	large, err := commit.File("large.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := large.Hash.String()
+	if err := os.Remove(filepath.Join(root, ".git", "objects", hash[:2], hash[2:])); err != nil {
+		t.Fatal(err)
+	}
+	wrapped, err := gitctx.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, skipped, skippedFiles, err := discoverCachedRemoteFiles(wrapped, rev, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].path != "keep.go" || skipped.Oversized != 1 ||
+		!slices.Contains(skippedFiles, SkippedFile{Path: "large.go", Reason: "oversized"}) {
+		t.Fatalf("files = %#v, skipped = %#v, skipped files = %#v", files, skipped, skippedFiles)
+	}
+}
+
+func TestExactReuseStopsAfterAllInputsResolve(t *testing.T) {
+	metadataDir := t.TempDir()
+	firstDir := filepath.Join(metadataDir, "search", "a")
+	blockedDir := filepath.Join(metadataDir, "search", "b")
+	if err := os.MkdirAll(firstDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(blockedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	chunk := chunksForFile(fileContent{path: "ready.go", source: "revision", text: "package ready\n", size: 14})[0]
+	inputHash := embeddingInputHash(chunk.EmbeddingText, 0)
+	if err := writeJSON(filepath.Join(firstDir, "manifest.json"), manifest{
+		Version: legacyIndexVersion, EmbeddingModel: "test-model", Dimensions: 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(firstDir, "embeddings.json"), []vectorRecord{{
+		EmbeddingInputHash: inputHash, EmbeddingModel: "test-model", Dimensions: 3, Vector: []float64{1, 0, 0},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(blockedDir, "manifest.json"), manifest{
+		Version: legacyIndexVersion, EmbeddingModel: "test-model", Dimensions: 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := lockIndex(t.Context(), blockedDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Unlock()
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	records, err := loadExactReuseVectors(canceled, metadataDir, filepath.Join(metadataDir, "search", "target"), []Chunk{chunk}, Options{
+		EmbeddingModel: "test-model", EmbeddingDimensions: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].EmbeddingInputHash != inputHash {
+		t.Fatalf("records = %#v", records)
 	}
 }
 

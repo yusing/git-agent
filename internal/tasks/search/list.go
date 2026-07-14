@@ -397,12 +397,14 @@ func writeTreeChildren(b *strings.Builder, node *treeNode, prefix string) {
 }
 
 type indexSelection struct {
-	root        string
-	metadataDir string
-	indexDir    string
-	source      Source
-	resolvedRev string
-	repo        *gitctx.Repository
+	root         string
+	metadataDir  string
+	indexDir     string
+	source       Source
+	resolvedRev  string
+	repo         *gitctx.Repository
+	remoteFiles  *remoteReadyFiles
+	remoteFinish func(bool) error
 }
 
 func resolveIndexSelection(ctx context.Context, rootOpt, remote, rev string, filters Filters, reindex, fetchAllowed bool, progressLog func(Progress) error) (indexSelection, error) {

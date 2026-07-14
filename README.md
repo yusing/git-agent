@@ -242,6 +242,9 @@ new shared vector generation without changing older snapshots. Interrupted
 cache writes remain incomplete and rebuild on the next search instead of being
 used as completed indexes.
 
+Remote indexing can overlap download and embedding, reducing first-search and
+refresh time when the remote supplies selected files early enough.
+
 Useful flags:
 
 <!-- markdownlint-disable MD013 -->

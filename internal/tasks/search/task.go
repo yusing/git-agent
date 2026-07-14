@@ -23,6 +23,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -321,6 +322,7 @@ type historyEntry struct {
 }
 
 func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query string) (Output, error) {
+	opts.ProgressLog = serializeProgress(opts.ProgressLog)
 	started := time.Now()
 	phaseStarted := started
 	var diag Diagnostics
@@ -392,6 +394,14 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	if err != nil {
 		return fail(err)
 	}
+	remoteFinished := false
+	if selection.remoteFinish != nil {
+		defer func() {
+			if !remoteFinished {
+				_ = selection.remoteFinish(false)
+			}
+		}()
+	}
 	root := selection.root
 	source := selection.source
 	resolvedRev := selection.resolvedRev
@@ -436,7 +446,47 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	var discoveredFiles []fileContent
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
-	if source.Mode == "revision" || source.Mode == "remote" {
+	var chunks []Chunk
+	var vectors map[string][]float64
+	var records []vectorRecord
+	var reused int
+	var dimensions int
+	var embeddedChunks int
+	var embeddedDone int
+	streamIndexed := false
+	if selection.remoteFiles != nil {
+		streamResult, streamErr := indexRemoteFileStream(selection.remoteFiles.ctx, client, selection.remoteFiles.Files, selection.metadataDir, selection.indexDir, opts, filters.Code)
+		if streamErr != nil {
+			if selection.remoteFiles.ctx.Err() != nil {
+				if _, readyErr := selection.remoteFiles.Wait(); readyErr != nil {
+					return fail(fmt.Errorf("fetch remote %s: %s", source.Remote, sanitizeRemoteError(readyErr, opts.Remote, source.Remote)))
+				}
+			}
+			return fail(streamErr)
+		}
+		files = streamResult.files
+		discoveredFiles = streamResult.discoveredFiles
+		chunks = streamResult.chunks
+		vectors = streamResult.vectors
+		records = streamResult.records
+		reused = streamResult.reused
+		dimensions = streamResult.dimensions
+		embeddedChunks = streamResult.embedded
+		embeddedDone = streamResult.embedded
+		streamIndexed = true
+		readyResult, readyErr := selection.remoteFiles.filesResult()
+		if readyErr != nil {
+			return fail(fmt.Errorf("fetch remote %s: %s", source.Remote, sanitizeRemoteError(readyErr, opts.Remote, source.Remote)))
+		}
+		skipped = readyResult.Skipped
+		skippedFiles = readyResult.SkippedFiles
+	} else if source.Mode == "remote" {
+		files, skipped, skippedFiles, err = discoverCachedRemoteFiles(selection.repo, resolvedRev, scope)
+		if err != nil {
+			return fail(err)
+		}
+		discoveredFiles = files
+	} else if source.Mode == "revision" {
 		files, skipped, skippedFiles, err = discoverRevisionFiles(selection.repo, resolvedRev, scope, debugLog)
 		if err != nil {
 			return fail(err)
@@ -450,14 +500,18 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		discoveredFiles = files
 	}
 	diag.SkippedFiles = skippedFiles
-	if filters.Code {
+	if filters.Code && !streamIndexed {
 		files = filterCodeFiles(files)
 	}
 	diag.Files = len(files)
 	mark("discover")
 
-	chunks := buildChunks(files)
+	if !streamIndexed {
+		chunks = buildChunks(files)
+	}
 	diag.Chunks = len(chunks)
+	diag.EmbeddedChunks = embeddedChunks
+	diag.EmbeddedDone = embeddedDone
 	mark("chunk")
 
 	indexDir := selection.indexDir
@@ -477,38 +531,36 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	defer func() {
 		_ = unlockIndex()
 	}()
-	oldVectors, _ := loadVectors(indexDir)
-	var seedVectors []vectorRecord
-	if !opts.Reindex {
-		missingKeys := missingVectorKeys(chunks, oldVectors, opts)
-		if len(missingKeys) > 0 {
-			if err := unlockIndex(); err != nil {
-				return fail(err)
-			}
-			seedVectors, err = loadBestReuseCandidate(ctx, selection.metadataDir, indexDir, missingKeys, opts)
-			if err != nil {
-				return fail(err)
-			}
-			indexLock, err = lockIndex(ctx, indexDir)
-			if err != nil {
-				return fail(err)
-			}
-			indexLocked = true
-			oldVectors, _ = loadVectors(indexDir)
+	var oldVectors []vectorRecord
+	var exactVectors []vectorRecord
+	if !opts.Reindex && !streamIndexed {
+		if err := unlockIndex(); err != nil {
+			return fail(err)
 		}
+		exactVectors, err = loadExactReuseVectors(ctx, selection.metadataDir, indexDir, chunks, opts)
+		if err != nil {
+			return fail(err)
+		}
+		indexLock, err = lockIndex(ctx, indexDir)
+		if err != nil {
+			return fail(err)
+		}
+		indexLocked = true
 	}
+	oldVectors, _ = loadVectors(indexDir)
 	reuseOpts := opts
 	if opts.Reindex && indexBuiltSince(indexDir, started) {
 		reuseOpts.Reindex = false
 	}
-	reusePool := make([]vectorRecord, 0, len(seedVectors)+len(oldVectors))
-	reusePool = append(reusePool, seedVectors...)
-	reusePool = append(reusePool, oldVectors...)
-	vectors, records, reused := reuseVectors(chunks, reusePool, reuseOpts)
+	if !streamIndexed {
+		reusePool := make([]vectorRecord, 0, len(exactVectors)+len(oldVectors))
+		reusePool = append(reusePool, exactVectors...)
+		reusePool = append(reusePool, oldVectors...)
+		vectors, records, reused = reuseVectors(chunks, reusePool, reuseOpts)
+	}
 	diag.ReusedChunks = reused
 	mark("cache")
 
-	var dimensions int
 	if len(vectors) > 0 {
 		for _, vector := range vectors {
 			dimensions = len(vector)
@@ -516,8 +568,12 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		}
 	}
 	missing := missingChunks(chunks, vectors)
-	diag.EmbeddedChunks = len(missing)
+	diag.EmbeddedChunks += len(missing)
 	if len(missing) > 0 {
+		progressStatus := ""
+		if selection.remoteFiles != nil {
+			progressStatus = ProgressStatusFetching
+		}
 		batchInputs := embeddingBatchInputs(opts)
 		batchMaxChars := embeddingBatchMaxChars(opts)
 		concurrency := embeddingConcurrency(opts)
@@ -548,7 +604,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 			slog.String("index_dir", indexDir),
 		)
 		if opts.ProgressLog != nil {
-			if err := opts.ProgressLog(Progress{Total: len(missing), Reused: reused}); err != nil {
+			if err := opts.ProgressLog(Progress{Status: progressStatus, Total: len(missing), Reused: reused}); err != nil {
 				mark("embed_index")
 				return fail(err)
 			}
@@ -625,7 +681,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 				slog.Duration("client_elapsed", result.clientElapsed.Round(time.Millisecond)),
 			)
 			if opts.ProgressLog != nil {
-				if err := opts.ProgressLog(Progress{Done: diag.EmbeddedDone, Total: len(missing), Reused: reused, Elapsed: elapsedRaw}); err != nil {
+				if err := opts.ProgressLog(Progress{Status: progressStatus, Done: diag.EmbeddedDone, Total: len(missing), Reused: reused, Elapsed: elapsedRaw}); err != nil {
 					if embedErr == nil {
 						embedErr = err
 					}
@@ -644,6 +700,20 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		}
 	}
 	mark("embed_index")
+	if selection.remoteFiles != nil {
+		if _, err := selection.remoteFiles.Wait(); err != nil {
+			return fail(fmt.Errorf("fetch remote %s: %s", source.Remote, sanitizeRemoteError(err, opts.Remote, source.Remote)))
+		}
+	}
+	slices.SortFunc(records, func(a, b vectorRecord) int {
+		if order := strings.Compare(a.Path, b.Path); order != 0 {
+			return order
+		}
+		if order := cmp.Compare(a.StartLine, b.StartLine); order != 0 {
+			return order
+		}
+		return cmp.Compare(a.EndLine, b.EndLine)
+	})
 
 	var forceVectorKeys map[string]bool
 	if reuseOpts.Reindex {
@@ -656,7 +726,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	if filters.Code {
 		records = preserveSharedFilteredRecords(records, oldVectors, discoveredFiles, opts)
 	}
-	shouldSave := len(missing) > 0 || reuseOpts.Reindex
+	shouldSave := len(missing) > 0 || embeddedChunks > 0 || reuseOpts.Reindex
 	if !shouldSave {
 		if sharedScope {
 			shouldSave = scopedRecordsChanged(records, oldVectors, scope, opts)
@@ -694,6 +764,12 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		if err := activeSync.close(); err != nil {
 			return fail(err)
 		}
+	}
+	if selection.remoteFinish != nil {
+		if err := selection.remoteFinish(true); err != nil {
+			return fail(err)
+		}
+		remoteFinished = true
 	}
 
 	indexStatus := "miss"
@@ -829,6 +905,18 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		Results: results,
 		Replay:  replay,
 	}), nil
+}
+
+func serializeProgress(progressLog func(Progress) error) func(Progress) error {
+	if progressLog == nil {
+		return nil
+	}
+	var mu sync.Mutex
+	return func(progress Progress) error {
+		mu.Lock()
+		defer mu.Unlock()
+		return progressLog(progress)
+	}
 }
 
 func selectedSyncTarget(opts Options, selection indexSelection) (indexSyncTarget, bool) {
@@ -1445,36 +1533,19 @@ func loadLegacyVectors(dir string) ([]vectorRecord, error) {
 	return records, nil
 }
 
-type reuseCandidate struct {
-	dir       string
-	matches   int
-	createdAt time.Time
-}
-
-func missingVectorKeys(chunks []Chunk, records []vectorRecord, opts Options) map[string]int {
-	available := make(map[string]bool, len(records))
-	for _, record := range records {
-		if reusableVectorRecord(record, opts) {
-			available[record.EmbeddingInputHash] = true
-		}
-	}
-	missing := map[string]int{}
-	for _, chunk := range chunks {
-		key := embeddingInputHash(chunk.EmbeddingText, opts.EmbeddingMaxInput)
-		if !available[key] {
-			missing[key]++
-		}
-	}
-	return missing
-}
-
-func loadBestReuseCandidate(ctx context.Context, metadataDir, targetDir string, targetKeys map[string]int, opts Options) ([]vectorRecord, error) {
-	if opts.Reindex || len(targetKeys) == 0 {
+func loadExactReuseVectors(ctx context.Context, metadataDir, targetDir string, chunks []Chunk, opts Options) ([]vectorRecord, error) {
+	if opts.Reindex || len(chunks) == 0 {
 		return nil, nil
 	}
+	targetHashes := make(map[string]bool, len(chunks))
+	for _, chunk := range chunks {
+		targetHashes[embeddingInputHash(chunk.EmbeddingText, opts.EmbeddingMaxInput)] = true
+	}
+	byHash := make(map[string]vectorRecord, len(targetHashes))
+	sharedHashes := make(map[string]bool, len(targetHashes))
+	errReuseComplete := errors.New("exact vector reuse complete")
+	complete := func() bool { return len(byHash) == len(targetHashes) }
 	searchRoot := filepath.Join(metadataDir, "search")
-
-	var candidates []reuseCandidate
 	err := filepath.WalkDir(searchRoot, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			if path == searchRoot {
@@ -1483,92 +1554,99 @@ func loadBestReuseCandidate(ctx context.Context, metadataDir, targetDir string, 
 			return nil
 		}
 		if entry.IsDir() {
-			if entry.Name() == "query-locks" {
+			if entry.Name() == "query-locks" || entry.Name() == vectorStoreDirName {
 				return fs.SkipDir
 			}
 			return nil
 		}
-		if entry.Name() != "manifest.json" {
+		if entry.Name() != "manifest.json" || filepath.Dir(path) == targetDir {
 			return nil
+		}
+		if complete() {
+			return errReuseComplete
 		}
 		dir := filepath.Dir(path)
-		if dir == targetDir {
-			return nil
-		}
-		var candidate reuseCandidate
-		candidate.dir = dir
-		candidateErr := withIndexLock(ctx, dir, func() error {
+		return withIndexLock(ctx, dir, func() error {
 			found, err := loadManifest(dir)
-			if err != nil {
-				return err
-			}
-			if found.EmbeddingModel != opts.EmbeddingModel || found.Dimensions != opts.EmbeddingDimensions {
+			if err != nil || found.EmbeddingModel != opts.EmbeddingModel || found.Dimensions != opts.EmbeddingDimensions {
 				return nil
 			}
-			records, err := loadVectorIndexRecords(dir)
+			if found.VectorStore == sharedVectorStoreVersion {
+				records, err := loadVectorIndexRecords(dir)
+				if err != nil {
+					return nil
+				}
+				for _, record := range records {
+					if targetHashes[record.EmbeddingInputHash] && byHash[record.EmbeddingInputHash].EmbeddingInputHash == "" &&
+						record.VectorKey == vectorStoreKey(record.EmbeddingInputHash, opts.EmbeddingModel, opts.EmbeddingDimensions) {
+						sharedHashes[record.EmbeddingInputHash] = true
+					}
+				}
+				if err := loadSharedExactVectors(metadataDir, sharedHashes, opts, byHash); err != nil {
+					return err
+				}
+				if complete() {
+					return errReuseComplete
+				}
+				return nil
+			}
+			records, err := loadVectors(dir)
 			if err != nil {
-				return err
+				return nil
 			}
-			matched := map[string]bool{}
 			for _, record := range records {
-				if !reusableVectorIndexRecord(record, opts) {
-					continue
-				}
-				key := record.EmbeddingInputHash
-				if targetKeys[key] > 0 {
-					matched[key] = true
+				if targetHashes[record.EmbeddingInputHash] && reusableVectorRecord(record, opts) {
+					byHash[record.EmbeddingInputHash] = record
 				}
 			}
-			for key := range matched {
-				candidate.matches += targetKeys[key]
+			if complete() {
+				return errReuseComplete
 			}
-			candidate.createdAt = found.CreatedAt
 			return nil
 		})
-		if candidateErr != nil {
-			if errors.Is(candidateErr, context.Canceled) || errors.Is(candidateErr, context.DeadlineExceeded) {
-				return candidateErr
-			}
-			return nil
-		}
-		if candidate.matches > 0 {
-			candidates = append(candidates, candidate)
-		}
-		return nil
 	})
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, errReuseComplete) {
 		return nil, err
 	}
-	slices.SortFunc(candidates, func(a, b reuseCandidate) int {
-		if diff := cmp.Compare(b.matches, a.matches); diff != 0 {
-			return diff
-		}
-		return b.createdAt.Compare(a.createdAt)
-	})
-	for _, candidate := range candidates {
-		var records []vectorRecord
-		if err := withIndexLock(ctx, candidate.dir, func() error {
-			var err error
-			records, err = loadVectors(candidate.dir)
-			return err
-		}); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return nil, err
-			}
+	if err := loadSharedExactVectors(metadataDir, sharedHashes, opts, byHash); err != nil {
+		return nil, err
+	}
+	result := make([]vectorRecord, 0, len(byHash))
+	for _, record := range byHash {
+		result = append(result, record)
+	}
+	return result, nil
+}
+
+func loadSharedExactVectors(metadataDir string, targetHashes map[string]bool, opts Options, dst map[string]vectorRecord) error {
+	store := newVectorStore(metadataDir)
+	catalog, _, err := store.loadCatalog()
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	payload, err := os.Open(filepath.Join(store.dir, vectorStorePayloadName))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer payload.Close()
+	for inputHash := range targetHashes {
+		entry, ok := catalog.Entries[vectorStoreKey(inputHash, opts.EmbeddingModel, opts.EmbeddingDimensions)]
+		if !ok || entry.Dimensions != opts.EmbeddingDimensions {
 			continue
 		}
-		if opts.DebugLog != nil {
-			opts.DebugLog("search_cache_seed",
-				slog.String("index_dir", candidate.dir),
-				slog.Int("matching_chunks", candidate.matches),
-			)
+		vector, err := readStoredVector(payload, entry)
+		if err != nil {
+			continue
 		}
-		return records, nil
+		dst[inputHash] = vectorRecord{EmbeddingInputHash: inputHash, EmbeddingModel: opts.EmbeddingModel, Dimensions: opts.EmbeddingDimensions, Vector: vector}
 	}
-	return nil, nil
+	return nil
 }
 
 func reuseVectors(chunks []Chunk, old []vectorRecord, opts Options) (map[string][]float64, []vectorRecord, int) {
@@ -1603,12 +1681,6 @@ func preservableVectorRecord(record vectorRecord, opts Options) bool {
 	return record.EmbeddingModel == opts.EmbeddingModel &&
 		record.Dimensions == opts.EmbeddingDimensions &&
 		len(record.Vector) == record.Dimensions
-}
-
-func reusableVectorIndexRecord(record vectorIndexRecord, opts Options) bool {
-	return record.EmbeddingInputHash != "" &&
-		record.EmbeddingModel == opts.EmbeddingModel &&
-		record.Dimensions == opts.EmbeddingDimensions
 }
 
 func preserveSharedFilteredRecords(records, old []vectorRecord, files []fileContent, opts Options) []vectorRecord {
@@ -1786,6 +1858,162 @@ func missingEmbeddingTexts(chunks []Chunk) []string {
 		texts[i] = chunk.EmbeddingText
 	}
 	return texts
+}
+
+type remoteStreamIndexResult struct {
+	files           []fileContent
+	discoveredFiles []fileContent
+	chunks          []Chunk
+	vectors         map[string][]float64
+	records         []vectorRecord
+	reused          int
+	embedded        int
+	dimensions      int
+}
+
+func indexRemoteFileStream(ctx context.Context, client openai.EmbeddingClient, files <-chan fileContent, metadataDir, indexDir string, opts Options, codeOnly bool) (remoteStreamIndexResult, error) {
+	result := remoteStreamIndexResult{vectors: make(map[string][]float64)}
+	var current []vectorRecord
+	if !opts.Reindex {
+		if err := withIndexLock(ctx, indexDir, func() error {
+			current, _ = loadVectors(indexDir)
+			return nil
+		}); err != nil {
+			return result, err
+		}
+	}
+	batchInputs := embeddingBatchInputs(opts)
+	batchChars := embeddingBatchMaxChars(opts)
+	batchWindow := batchInputs * embeddingConcurrency(opts)
+	var candidates []Chunk
+	var pending []Chunk
+	earlyWindowSent := false
+	var embedStarted time.Time
+
+	reuseCandidates := func() error {
+		if len(candidates) == 0 {
+			return nil
+		}
+		exact, err := loadExactReuseVectors(ctx, metadataDir, indexDir, candidates, opts)
+		if err != nil {
+			return err
+		}
+		pool := make([]vectorRecord, 0, len(current)+len(exact))
+		pool = append(pool, current...)
+		pool = append(pool, exact...)
+		reusedVectors, reusedRecords, count := reuseVectors(candidates, pool, opts)
+		for id, vector := range reusedVectors {
+			result.vectors[id] = vector
+		}
+		result.records = append(result.records, reusedRecords...)
+		result.reused += count
+		pending = append(pending, missingChunks(candidates, reusedVectors)...)
+		candidates = candidates[:0]
+		return nil
+	}
+
+	embed := func(batch []Chunk) error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if opts.ProgressLog != nil {
+			if err := opts.ProgressLog(Progress{Status: ProgressStatusFetching, Done: result.embedded, Total: result.embedded + len(pending), Reused: result.reused}); err != nil {
+				return err
+			}
+		}
+		if embedStarted.IsZero() {
+			embedStarted = time.Now()
+		}
+		batchVectors, dimensions, err := embedTexts(ctx, client, opts, missingEmbeddingTexts(batch))
+		if err != nil {
+			return err
+		}
+		if len(batchVectors) != len(batch) {
+			return fmt.Errorf("embedding response vectors = %d, want %d", len(batchVectors), len(batch))
+		}
+		if result.dimensions == 0 {
+			result.dimensions = dimensions
+		}
+		if dimensions != result.dimensions {
+			return fmt.Errorf("embedding dimensions mismatch: %d and %d", result.dimensions, dimensions)
+		}
+		for i, chunk := range batch {
+			vector := batchVectors[i]
+			result.vectors[chunk.ID] = vector
+			result.records = append(result.records, vectorRecordForChunk(chunk, vector, opts))
+		}
+		result.embedded += len(batch)
+		if opts.ProgressLog != nil {
+			if err := opts.ProgressLog(Progress{Status: ProgressStatusFetching, Done: result.embedded, Total: result.embedded + len(pending) - len(batch), Reused: result.reused, Elapsed: time.Since(embedStarted)}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	flush := func(final bool) error {
+		if len(pending) == 0 {
+			return nil
+		}
+		texts := cappedEmbeddingInputs(missingEmbeddingTexts(pending), opts.EmbeddingMaxInput)
+		end := 0
+		for end < len(pending) {
+			next := embeddingBatchEnd(texts, end, batchInputs, batchChars)
+			complete := final || next < len(pending) || next-end == batchInputs || totalTextChars(texts[end:next]) >= batchChars
+			if !complete {
+				break
+			}
+			end = next
+		}
+		if end == 0 {
+			return nil
+		}
+		if err := embed(pending[:end]); err != nil {
+			return fmt.Errorf("embedding request failed: %w", err)
+		}
+		pending = slices.Delete(pending, 0, end)
+		return nil
+	}
+
+	for file := range files {
+		result.discoveredFiles = append(result.discoveredFiles, file)
+		if codeOnly && !isCodePath(file.path) {
+			continue
+		}
+		result.files = append(result.files, file)
+		fileChunks := chunksForFile(file)
+		for i := range fileChunks {
+			fileChunks[i].ID = fmt.Sprintf("c%06d", len(result.chunks)+i+1)
+		}
+		result.chunks = append(result.chunks, fileChunks...)
+		candidates = append(candidates, fileChunks...)
+		candidateTexts := cappedEmbeddingInputs(missingEmbeddingTexts(candidates), opts.EmbeddingMaxInput)
+		if !earlyWindowSent && (len(candidates) >= batchWindow || totalTextChars(candidateTexts) >= batchChars*embeddingConcurrency(opts)) {
+			embeddedBefore := result.embedded
+			if err := reuseCandidates(); err != nil {
+				return result, err
+			}
+			if err := flush(false); err != nil {
+				return result, err
+			}
+			earlyWindowSent = result.embedded > embeddedBefore
+		}
+	}
+	if err := reuseCandidates(); err != nil {
+		return result, err
+	}
+	if err := flush(true); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func totalTextChars(texts []string) int {
+	total := 0
+	for _, text := range texts {
+		total += len(text)
+	}
+	return total
 }
 
 func embedTexts(ctx context.Context, client openai.EmbeddingClient, opts Options, texts []string) ([][]float64, int, error) {
@@ -2480,14 +2708,15 @@ func appendSearchIgnoreFilesFromDir(patterns []gitignore.Pattern, dir, relDir st
 	return patterns
 }
 
+type revisionIgnoreFile struct {
+	path string
+	dir  string
+	name string
+	text string
+}
+
 func revisionIgnoreMatcher(repo *gitctx.Repository, rev string, scope []string) (gitignore.Matcher, error) {
-	type ignoreFile struct {
-		path string
-		dir  string
-		name string
-		text string
-	}
-	var ignoreFiles []ignoreFile
+	var ignoreFiles []revisionIgnoreFile
 	err := repo.WalkCommitTextFiles(rev, 0, func(path string) bool {
 		if !searchIgnoreFileNames[filepath.Base(path)] {
 			return false
@@ -2499,7 +2728,7 @@ func revisionIgnoreMatcher(repo *gitctx.Repository, rev string, scope []string) 
 		if found := filepath.ToSlash(filepath.Dir(file.Path)); found != "." {
 			dir = found
 		}
-		ignoreFiles = append(ignoreFiles, ignoreFile{
+		ignoreFiles = append(ignoreFiles, revisionIgnoreFile{
 			path: filepath.ToSlash(file.Path),
 			dir:  dir,
 			name: filepath.Base(file.Path),
@@ -2510,7 +2739,11 @@ func revisionIgnoreMatcher(repo *gitctx.Repository, rev string, scope []string) 
 	if err != nil {
 		return nil, err
 	}
-	slices.SortFunc(ignoreFiles, func(a, b ignoreFile) int {
+	return buildRevisionIgnoreMatcher(ignoreFiles), nil
+}
+
+func buildRevisionIgnoreMatcher(ignoreFiles []revisionIgnoreFile) gitignore.Matcher {
+	slices.SortFunc(ignoreFiles, func(a, b revisionIgnoreFile) int {
 		if order := strings.Compare(a.dir, b.dir); order != 0 {
 			return order
 		}
@@ -2531,7 +2764,7 @@ func revisionIgnoreMatcher(repo *gitctx.Repository, rev string, scope []string) 
 		}
 		patterns = appendSearchIgnorePatterns(patterns, file.text, base)
 	}
-	return gitignore.NewMatcher(patterns), nil
+	return gitignore.NewMatcher(patterns)
 }
 
 func ignoreFileOrder(name string) int {

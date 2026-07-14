@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,6 +17,8 @@ import (
 	git "github.com/go-git/go-git/v6"
 	gitconfig "github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
+	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/giturl"
 	"github.com/yusing/git-agent/internal/metadata"
@@ -34,7 +37,12 @@ type remoteProgressWriter struct {
 	status      string
 }
 
-func newRemoteProgressWriter(progressLog func(Progress) error, rawRemote, status string) *remoteProgressWriter {
+type remoteProgressOutput interface {
+	io.Writer
+	Flush() error
+}
+
+func newRemoteProgressWriter(progressLog func(Progress) error, rawRemote, status string) remoteProgressOutput {
 	if progressLog == nil {
 		return nil
 	}
@@ -104,7 +112,12 @@ func resolveRemoteIndexSelection(ctx context.Context, remoteURL, rev string, fil
 	if err != nil {
 		return indexSelection{}, err
 	}
-	defer func() { _ = lock.Unlock() }()
+	lockOwned := true
+	defer func() {
+		if lockOwned {
+			_ = lock.Unlock()
+		}
+	}()
 
 	cache := loadRemoteCache(cachePath)
 	repo, ok, err := openRemoteRepo(repoDir)
@@ -122,22 +135,6 @@ func resolveRemoteIndexSelection(ctx context.Context, remoteURL, rev string, fil
 			return indexSelection{}, err
 		}
 	}
-	reportFetch := func() error {
-		if progressLog != nil {
-			return progressLog(Progress{Status: ProgressStatusFetching})
-		}
-		return nil
-	}
-	if needFetch {
-		if err := reportFetch(); err != nil {
-			return indexSelection{}, err
-		}
-		if err := fetchRemote(ctx, repo, remoteURL, shallowFetch, progressLog); err != nil {
-			return indexSelection{}, fmt.Errorf("fetch remote %s: %s", remote, sanitizeRemoteError(err, remoteURL, remote))
-		}
-		cache.LastFetchedAt = time.Now().UTC()
-	}
-
 	wrapped, err := gitctx.OpenGitDir(repoDir)
 	if err != nil {
 		return indexSelection{}, err
@@ -146,46 +143,195 @@ func resolveRemoteIndexSelection(ctx context.Context, remoteURL, rev string, fil
 	if sourceRev == "" {
 		sourceRev = "HEAD"
 	}
-	resolvedRev, err := resolveRemoteRef(wrapped, sourceRev)
-	fetchAndResolve := func(shallow bool) (string, error) {
-		if err := reportFetch(); err != nil {
-			return "", err
-		}
-		if err := fetchRemote(ctx, repo, remoteURL, shallow, progressLog); err != nil {
-			return "", fmt.Errorf("fetch remote %s: %s", remote, sanitizeRemoteError(err, remoteURL, remote))
-		}
-		cache.LastFetchedAt = time.Now().UTC()
-		wrapped, err = gitctx.OpenGitDir(repoDir)
-		if err != nil {
-			return "", err
-		}
-		return resolveRemoteRef(wrapped, sourceRev)
+	resolvedRev, resolveErr := resolveRemoteRef(wrapped, sourceRev)
+	if resolveErr != nil && fetchAllowed {
+		needFetch = true
 	}
-	if err != nil && fetchAllowed && !needFetch {
-		resolvedRev, err = fetchAndResolve(true)
+	if !needFetch {
+		if resolveErr != nil {
+			return indexSelection{}, fmt.Errorf("resolve --rev %q for remote %s: %w", sourceRev, remote, resolveErr)
+		}
+		source := Source{Mode: "remote", Remote: remote, Rev: sourceRev, ResolvedRev: resolvedRev, OriginIdentity: giturl.Identity(remoteURL)}
+		finish := func(success bool) error {
+			if !success || !fetchAllowed {
+				return nil
+			}
+			completionLock, err := lockIndex(ctx, filepath.Join(metadataDir, "remote"))
+			if err != nil {
+				return err
+			}
+			cache.URL = giturl.Sanitize(remoteURL)
+			cache.LastResolvedRev = resolvedRev
+			return errors.Join(saveRemoteCache(cachePath, cache), completionLock.Unlock())
+		}
+		return indexSelection{
+			metadataDir:  metadataDir,
+			indexDir:     indexDir(metadataDir, source.Mode, "", resolvedRev, filters),
+			source:       source,
+			resolvedRev:  resolvedRev,
+			repo:         wrapped,
+			remoteFinish: finish,
+		}, nil
 	}
-	if err != nil && fetchAllowed {
-		resolvedRev, err = fetchAndResolve(false)
+
+	refs, err := listRemoteRefs(ctx, repo, remoteURL)
+	if err != nil {
+		return indexSelection{}, fmt.Errorf("list remote %s: %s", remote, sanitizeRemoteError(err, remoteURL, remote))
 	}
+	translatedRev, advertisedRev, err := translateAdvertisedRevision(sourceRev, refs)
 	if err != nil {
 		return indexSelection{}, fmt.Errorf("resolve --rev %q for remote %s: %w", sourceRev, remote, err)
 	}
-	cache.URL = remote
-	cache.LastResolvedRev = resolvedRev
-	if fetchAllowed {
-		if err := saveRemoteCache(cachePath, cache); err != nil {
-			return indexSelection{}, err
+	resolvedRev = advertisedRev
+	if resolvedRev == "" {
+		resolvedRev, err = wrapped.ResolveRef(translatedRev)
+		if err != nil {
+			resolvedRev, err = preflightRemoteRevision(ctx, remoteURL, sourceRev, shallowFetch, progressLog)
+			if errors.Is(err, transport.ErrFilterNotSupported) {
+				resolvedRev = ""
+			} else if err != nil {
+				return indexSelection{}, fmt.Errorf("preflight --rev %q for remote %s: %s", sourceRev, remote, sanitizeRemoteError(err, remoteURL, remote))
+			}
 		}
+	}
+
+	ready, overlayRepo, err := startRemoteReadyFiles(ctx, repo, remoteURL, shallowFetch, filters.Scope, progressLog, lock, cachePath, cache)
+	if err != nil {
+		return indexSelection{}, fmt.Errorf("start remote stream: %w", err)
+	}
+	lockOwned = false
+	if resolvedRev == "" {
+		resolvedRev, err = ready.resolve(translatedRev)
+		if err != nil {
+			ready.Cancel(err)
+			_ = ready.Finish(false, "")
+			return indexSelection{}, fmt.Errorf("resolve --rev %q for remote %s: %s", sourceRev, remote, sanitizeRemoteError(err, remoteURL, remote))
+		}
+	}
+	if err := ready.target(resolvedRev); err != nil {
+		ready.Cancel(err)
+		_ = ready.Finish(false, "")
+		return indexSelection{}, err
 	}
 	source := Source{Mode: "remote", Remote: remote, Rev: sourceRev, ResolvedRev: resolvedRev, OriginIdentity: giturl.Identity(remoteURL)}
 	return indexSelection{
-		root:        "",
 		metadataDir: metadataDir,
 		indexDir:    indexDir(metadataDir, source.Mode, "", resolvedRev, filters),
 		source:      source,
 		resolvedRev: resolvedRev,
-		repo:        wrapped,
+		repo:        overlayRepo,
+		remoteFiles: ready,
+		remoteFinish: func(success bool) error {
+			if !success {
+				ready.Cancel(context.Canceled)
+			}
+			return ready.Finish(success, resolvedRev)
+		},
 	}, nil
+}
+
+func listRemoteRefs(ctx context.Context, repo *git.Repository, remoteURL string) ([]*plumbing.Reference, error) {
+	remote := git.NewRemote(repo.Storer, &gitconfig.RemoteConfig{Name: "origin", URLs: []string{remoteURL}})
+	return remote.ListContext(ctx, &git.ListOptions{ClientOptions: remoteClientOptions(), PeelingOption: git.AppendPeeled})
+}
+
+func translateAdvertisedRevision(rev string, refs []*plumbing.Reference) (translated, resolved string, err error) {
+	base := rev
+	suffix := ""
+	if index := strings.IndexAny(rev, "~^"); index >= 0 {
+		base, suffix = rev[:index], rev[index:]
+	}
+	byName := make(map[string]*plumbing.Reference, len(refs))
+	for _, ref := range refs {
+		byName[ref.Name().String()] = ref
+	}
+	if base == "HEAD" {
+		if hash, ok := advertisedRefHash(byName, plumbing.HEAD.String()); ok {
+			base = hash.String()
+		} else {
+			return "", "", errors.New("remote did not advertise HEAD")
+		}
+	} else if !plumbing.IsHash(base) {
+		candidates := []string{base, "refs/heads/" + base, "refs/tags/" + base}
+		if branch, ok := strings.CutPrefix(base, "origin/"); ok {
+			candidates = append(candidates, "refs/heads/"+branch)
+		}
+		if branch, ok := strings.CutPrefix(base, "refs/remotes/origin/"); ok {
+			candidates = append(candidates, "refs/heads/"+branch)
+		}
+		var hash plumbing.Hash
+		var ok bool
+		for _, candidate := range candidates {
+			if peeled, found := advertisedRefHash(byName, candidate+"^{}"); found {
+				hash, ok = peeled, true
+				break
+			}
+			if found, exists := advertisedRefHash(byName, candidate); exists {
+				hash, ok = found, true
+				break
+			}
+		}
+		if !ok {
+			return "", "", fmt.Errorf("revision base %q was not advertised", base)
+		}
+		base = hash.String()
+	}
+	translated = base + suffix
+	if suffix == "" && plumbing.IsHash(base) {
+		resolved = base
+	}
+	return translated, resolved, nil
+}
+
+func advertisedRefHash(refs map[string]*plumbing.Reference, name string) (plumbing.Hash, bool) {
+	for range len(refs) + 1 {
+		ref, ok := refs[name]
+		if !ok {
+			return plumbing.ZeroHash, false
+		}
+		if ref.Type() != plumbing.SymbolicReference {
+			return ref.Hash(), ref.Hash() != plumbing.ZeroHash
+		}
+		name = ref.Target().String()
+	}
+	return plumbing.ZeroHash, false
+}
+
+func preflightRemoteRevision(ctx context.Context, remoteURL, rev string, shallow bool, progressLog func(Progress) error) (resolved string, err error) {
+	tempDir, err := os.MkdirTemp("", "git-agent-preflight-*")
+	if err != nil {
+		return "", err
+	}
+	defer func() { err = errors.Join(err, os.RemoveAll(tempDir)) }()
+	repo, err := git.PlainInit(tempDir, true)
+	if err != nil {
+		return "", err
+	}
+	defer repo.Close()
+	_, err = repo.CreateRemote(&gitconfig.RemoteConfig{Name: "origin", URLs: []string{remoteURL}, Fetch: remoteFetchRefSpecs()})
+	if err != nil {
+		return "", err
+	}
+	depth := 0
+	if shallow {
+		depth = 1
+	}
+	progress := newRemoteProgressWriter(progressLog, remoteURL, ProgressStatusFetching)
+	err = repo.FetchContext(ctx, &git.FetchOptions{
+		RemoteName: "origin", RemoteURL: remoteURL, ClientOptions: remoteClientOptions(), RefSpecs: remoteFetchRefSpecs(),
+		Depth: depth, Tags: plumbing.NoTags, Force: true, Prune: true, Progress: progress, Filter: packp.FilterBlobNone(),
+	})
+	if progress != nil {
+		err = errors.Join(err, progress.Flush())
+	}
+	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+		return "", err
+	}
+	wrapper, err := gitctx.OpenGitDir(tempDir)
+	if err != nil {
+		return "", err
+	}
+	return resolveRemoteRef(wrapper, rev)
 }
 
 func sanitizeRemoteError(err error, raw, sanitized string) string {

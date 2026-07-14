@@ -306,6 +306,29 @@ touch the network. If a requested revision cannot be resolved from the cached
 repository, the command fetches and retries before failing. Fetch failures fail
 the command clearly rather than silently using stale data.
 
+When a remote fetch is required, search resolves direct revisions from the
+remote's advertised refs before transferring the main pack. Revision
+expressions that need unavailable commit metadata, such as `HEAD~1`, use a
+temporary `blob:none` preflight. The temporary repository is removed before the
+command returns. A server without object-filter support is handled by the main
+unfiltered fetch; search does not download an unfiltered preflight and then
+repeat that transfer.
+
+The main fetch and index build form one cancelable producer/consumer operation.
+The received pack is written to the cached bare repository while a temporary
+object overlay parses the same bytes. Once the selected commit and tree are
+known, search waits for the selected tree's ignore files, builds one ignore
+matcher, chunks selected-tree files as they arrive, and dispatches complete
+embedding windows while file production remains open. It never embeds blobs
+merely because they occur in the pack. The final partial embedding window is
+dispatched only after file production closes. Pack ordering, delta bases,
+ignore-file availability, reuse lookup, and embedding batch size can delay
+overlap, so this concurrency is lossless best-effort rather than a promise that
+every fetch overlaps provider work. Blob size is checked before content is read,
+and reads remain bounded. A fresh filtered cache classifies intentionally absent
+over-limit blobs as oversized during later cache-hit traversal. The final remote
+cache contains pack storage, not the temporary parsed objects.
+
 SSH transport tries identities from an available SSH agent first, including
 Pageant or the native agent on Windows, then unencrypted default private keys at
 `~/.ssh/id_ed25519`, `~/.ssh/id_ecdsa`, `~/.ssh/id_rsa`, and
@@ -381,6 +404,12 @@ omitted, `--agent` changes the output format default
 from JSON to brief. The server shuts down when the search command exits. Cache-hit
 searches that need neither a remote fetch nor embeddings do not start the server
 and do not print a progress URL.
+
+Remote fetch and embedding progress callbacks are serialized. While the fetch
+is active, `fetching` updates may also carry discovered, completed, and reused
+embedding counts; the total can increase until selected-file production closes.
+Terminal completion means both object transfer and all required embedding work
+have completed.
 
 Persistent metadata is stored under `~/.git-agent/<path-sha>/`, where
 `<path-sha>` is the SHA-256 of the cleaned absolute project root. Search writes
@@ -508,6 +537,14 @@ index source use
 one index writer. Other processes wait for the writer, reload the completed
 cache, and skip embedding chunks that the writer just stored; parallel
 `--reindex` waiters also reuse a cache completed after their command started.
+
+For remote indexing, successful pack transfer alone does not publish
+`remote.json`, shared-vector updates, a snapshot manifest, history, or index-sync
+export. Publication starts only after the selected file producer and all index
+embedding requests succeed. A fetch, pack-parse, progress, cancellation, or
+embedding failure cancels its peers, removes temporary overlay storage, and
+leaves no completed snapshot for that attempt. Provider results completed before
+such a failure remain process memory only.
 
 #### `git-agent search --ls [--remote <url>] [--format text|json]`
 
