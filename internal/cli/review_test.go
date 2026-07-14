@@ -168,6 +168,8 @@ func TestReviewHelpDocumentsDefaultMode(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Usage: git-agent review",
+		"--background",
+		"continue in a detached process after advertising events",
 		"--uncommitted  inspect all dirty changes (default)",
 		"--staged       inspect staged changes only",
 		"--codebase     inspect the full codebase",

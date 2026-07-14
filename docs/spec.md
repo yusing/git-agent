@@ -233,6 +233,13 @@ tool-free forced-finalization request using evidence already collected. On
 success, stderr contains only the event URL line and stdout contains only the
 final report JSON.
 
+`--background` starts `review` or `simplify` in a detached process. The
+launcher waits until the event server is listening, prints the same URL line
+and the platform-specific command that stops the detached process, then exits
+successfully. The detached process closes inherited standard streams and runs
+through the terminal SSE event. Launcher stdout is empty; the strict report is
+carried by the `final` SSE event.
+
 All agent loops use a 217,600-token context budget, 80% of the common
 272,000-token model context window. Provider-reported input tokens take
 precedence over a serialized-request estimate. At threshold, runner immediately
@@ -745,6 +752,7 @@ unchanged. API-key providers retain the requested model identifier.
 
 - stdout for generation-only commands: final generated artifact only
 - stdout for `review` and `simplify`: one strict JSON report only
+- stdout for background `review` and `simplify`: empty; consume the `final` SSE event
 - stdout for `search`: JSON result by default; brief header and result lines
   with `--format brief`
 - stdout for `release-note --out <file>`: streaming human console trace lines

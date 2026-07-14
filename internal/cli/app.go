@@ -92,9 +92,11 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	fs.SetOutput(io.Discard)
 
 	var opts config.Options
+	var background bool
 	var codebase bool
 	var uncommitted bool
 	var staged bool
+	fs.BoolVar(&background, "background", false, "continue in a detached process after advertising events")
 	fs.BoolVar(&codebase, "codebase", false, "inspect the full codebase")
 	fs.BoolVar(&uncommitted, "uncommitted", false, "inspect all dirty worktree changes")
 	fs.BoolVar(&staged, "staged", false, "inspect staged changes only")
@@ -111,6 +113,9 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 			return codeReviewUsageError(command, fs)
 		}
 		return err
+	}
+	if background && !isBackgroundReviewChild() {
+		return startBackgroundReview(command, args, a.stderr)
 	}
 	mode, err := reviewtask.ParseMode(codebase, uncommitted, staged)
 	if err != nil {
@@ -168,6 +173,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	if _, err := fmt.Fprintf(a.stderr, "%s: agent events listening on %s\n", command, eventServer.URL()); err != nil {
 		return err
 	}
+	closeBackgroundReviewStderr(a.stderr)
 	recorder, err := trace.NewEventStream(command, eventServer.Publish)
 	if err != nil {
 		return err

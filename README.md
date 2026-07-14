@@ -107,6 +107,9 @@ git-agent review --staged
 # Audit the full repository
 git-agent review --codebase
 
+# Advertise the event stream, detach, and continue in background
+git-agent review --background
+
 # Find behavior-preserving cleanup opportunities in dirty changes
 git-agent simplify
 
@@ -127,6 +130,17 @@ to stderr. Its replayable stream includes live reasoning-summary progress:
 ```text
 review: agent events listening on http://127.0.0.1:43127/events?token=4YH2S7M6N5QK8J3C9RTP
 ```
+
+With `--background`, the launcher exits immediately after printing this URL
+and the exact command for stopping the detached agent beside it:
+
+```text
+review: stop background agent: kill -- 12345
+```
+
+The detached review or simplification process continues serving events through
+the terminal event. Launcher stdout stays empty; the strict report remains
+available in the SSE `final` event.
 
 See [docs/spec.md](docs/spec.md) for exact mode, schema, tool, and SSE contracts.
 
