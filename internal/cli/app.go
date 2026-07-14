@@ -260,7 +260,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	}
 
 	allowedTools := withSkillTools(tools.ReviewToolNames(mode.ToolMode()), skillStore)
-	registry := tools.NewReviewRegistryWithSkills(repo, skillStore, mode.ToolMode())
+	registry := tools.NewReviewRegistryWithSkills(repo, skillStore, mode.ToolMode(), tools.NewReviewScope(prepared.Paths, prepared.Status, prepared.Stats))
 	runner := agent.OpenAIRunner{
 		Config:           cfg,
 		Client:           openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),

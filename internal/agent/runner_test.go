@@ -235,7 +235,7 @@ func TestRunnerReturnsToolErrorsToModelForRecovery(t *testing.T) {
 		{ToolCalls: []openai.ToolCall{{ID: "fc_2", CallID: "call_2", Name: "read_file", Arguments: `{"path":"actual.go"}`}}},
 		{Text: "recovered"},
 	}}
-	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeCodebase)
+	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeCodebase, tools.ReviewScope{})
 	var events []trace.Event
 	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
 		events = append(events, event)
@@ -303,7 +303,7 @@ func TestRunnerDoesNotRecoverToolErrorsAfterCancellation(t *testing.T) {
 		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "read_file", Arguments: `{"path":"missing.go"}`}}},
 		{Text: "must not recover"},
 	}}
-	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeCodebase)
+	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeCodebase, tools.ReviewScope{})
 	runner := OpenAIRunner{
 		Config:    config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 2},
 		Client:    client,
@@ -369,20 +369,10 @@ func TestRunnerFinalizesOnRepeatedCanonicalToolCall(t *testing.T) {
 	}
 }
 
-func TestRunnerPublishesRuntimeContextAndEnforcesBudget(t *testing.T) {
+func TestRunnerRejectsInitialRequestAtEstimatedContextThreshold(t *testing.T) {
 	t.Parallel()
 
-	repoDir := t.TempDir()
-	runGit(t, repoDir, "init")
-	repo, err := gitctx.Open(repoDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeClient{responses: []openai.Response{
-		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: `{}`}}},
-		{Text: "done"},
-	}}
-	registry := tools.NewRegistryWithSkills(repo, nil)
+	client := &fakeClient{responses: []openai.Response{{Text: "unexpected provider call"}}}
 	var events []trace.Event
 	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
 		events = append(events, event)
@@ -393,19 +383,22 @@ func TestRunnerPublishesRuntimeContextAndEnforcesBudget(t *testing.T) {
 	}
 	runner := OpenAIRunner{
 		Config: config.Config{Model: "test", MaxSteps: 10, MaxToolCalls: 10, ContextTokens: 1},
-		Client: client, Tools: registry,
-		ToolSpecs: registry.Definitions([]string{"repo_summary"}), Trace: recorder,
+		Client: client, Trace: recorder,
 	}
 
-	if _, err := runner.Run(t.Context(), Request{UserPrompt: "review", MaxSteps: 10}); err != nil {
-		t.Fatal(err)
+	_, err = runner.Run(t.Context(), Request{UserPrompt: "review", MaxSteps: 10})
+	if err == nil || !strings.Contains(err.Error(), "initial request") {
+		t.Fatalf("error = %v, want initial-request context-budget error", err)
+	}
+	if len(client.requests) != 0 {
+		t.Fatalf("provider requests = %d, want 0", len(client.requests))
 	}
 	foundStatus, foundBudget := false, false
 	for _, event := range events {
 		if event.Kind == "runtime.status" && event.Value["estimated_context_tokens"] != nil && fmt.Sprint(event.Value["step"]) == "1" {
 			foundStatus = true
 		}
-		if event.Kind == "budget" && event.Value["reason"] == "context_budget_exhausted" {
+		if event.Kind == "budget" && event.Value["reason"] == "initial_context_budget_exhausted" {
 			foundBudget = true
 		}
 	}

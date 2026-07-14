@@ -1,12 +1,14 @@
 package review
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	git "github.com/go-git/go-git/v6"
+	"github.com/yusing/git-agent/internal/contextpack"
 	"github.com/yusing/git-agent/internal/gitctx"
 )
 
@@ -172,6 +174,43 @@ func TestFilePrefixIsBounded(t *testing.T) {
 	}
 	if len(prefix) > 8*1024+256 || strings.Contains(prefix, "tail-marker") {
 		t.Fatalf("prefix was not bounded: len=%d", len(prefix))
+	}
+}
+
+func TestUserPromptBoundsLargePreparedContext(t *testing.T) {
+	const (
+		files         = 53_000
+		promptEntries = 128
+	)
+	prepared := PreparedContext{
+		Mode:   ModeUncommitted,
+		Paths:  []string{"sentinel.ts"},
+		Status: []gitctx.PathChange{{Path: "sentinel.ts", Worktree: "?"}},
+		Stats:  []gitctx.FileStat{{Path: "sentinel.ts"}},
+		ContextPack: contextpack.ContextPack{
+			Overview: contextpack.ChangeOverview{Files: files},
+		},
+	}
+	for i := range promptEntries + 1 {
+		path := fmt.Sprintf("outlier/%03d.ts", i)
+		prepared.ContextPack.Outliers = append(prepared.ContextPack.Outliers, contextpack.FileSummary{Path: path})
+	}
+
+	prompt := UserPrompt(KindReview, prepared)
+	if len(prompt) >= 256*1024 {
+		t.Fatalf("user prompt bytes = %d, want bounded compact context", len(prompt))
+	}
+	if strings.Contains(prompt, `"paths"`) || strings.Contains(prompt, `"status"`) || strings.Contains(prompt, `"stats"`) {
+		t.Fatal("user prompt contains duplicate raw change lists")
+	}
+	if !strings.Contains(prompt, `"context_pack_truncated": true`) {
+		t.Fatal("user prompt does not disclose context-pack truncation")
+	}
+	if !strings.Contains(prompt, "Use review_changes") {
+		t.Fatal("user prompt does not identify complete change-inventory tool")
+	}
+	if strings.Contains(prompt, fmt.Sprintf("outlier/%03d.ts", promptEntries)) {
+		t.Fatal("user prompt contains outlier beyond context-pack limit")
 	}
 }
 

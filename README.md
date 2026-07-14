@@ -127,6 +127,14 @@ JSON reports to stdout. They have no request deadline by default; `--timeout
 uses `gpt-5.6-sol` and `simplify` uses `gpt-5.6-terra`; both use provider-default
 reasoning effort unless an effort flag is supplied.
 
+Diff-mode prompts include a bounded context-pack view and bounded unified diff;
+full changed-path scope remains available to validation and read-only repository
+tools without duplicating every path, status, and stat in the initial request.
+The model can page through that complete inventory before requesting narrow
+path-specific diffs.
+Requests whose initial serialized estimate reaches the configured context budget
+fail before contacting the provider.
+
 The launch object's replayable event URL includes live reasoning-summary
 progress:
 

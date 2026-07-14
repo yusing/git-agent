@@ -157,12 +157,15 @@ Mode flags are mutually exclusive. No mode flag means `--uncommitted`.
 - `--codebase` audits full repository without preloaded diff scope.
 
 Diff modes prepare paths, staged/worktree status, line stats, generated-heavy
-context pack, and bounded unified diff before first provider request. Empty
-diff scope fails before provider resolution. Codebase mode provides no packed
-diff; model discovers implementation, contracts, callers, and tests through
-read-only tools. Positional text remaining after flag parsing is escaped and
-appended as lower-priority operator hint, using same precedence rules as
-`--append-prompt`.
+context pack, and bounded unified diff before the first provider request. The
+initial prompt contains a bounded view of context-pack groups, outliers, and
+artifacts plus the bounded diff; it does not duplicate the complete raw path,
+status, or stat lists. Truncation is explicit. Full scope remains authoritative
+for report validation and read-only repository tools. Empty diff scope fails
+before provider resolution. Codebase mode provides no packed diff; model
+discovers implementation, contracts, callers, and tests through read-only
+tools. Positional text remaining after flag parsing is escaped and appended as
+lower-priority operator hint, using same precedence rules as `--append-prompt`.
 
 In staged mode, repository guidance is read from index blobs, repository-local
 worktree skills are omitted, and `list_files`, `read_file`, `grep`, and `find`
@@ -262,8 +265,10 @@ indefinitely, and do not create a trace session. The containing directory is
 `0700`.
 
 All agent loops use a 217,600-token context budget, 80% of the common
-272,000-token model context window. Provider-reported input tokens take
-precedence over a serialized-request estimate. At threshold, runner immediately
+272,000-token model context window. Before the first provider call, a serialized
+request estimate at or above that budget fails locally without contacting the
+provider. After a successful response, provider-reported input tokens take
+precedence over serialized-request estimates. At threshold, runner immediately
 makes one tool-free forced-finalization request so model reports all findings
 gathered so far. Exact repeated tool calls and already-seen tool outputs also
 force finalization because they add no evidence. These progress guards do not
@@ -1475,14 +1480,18 @@ a bounded full diff in Go before the first provider call.
 Both inspection commands expose shared repository tools plus `skills_read` when
 skills are available. Diff modes additionally expose:
 
+- `review_changes`
 - `review_diff`
 - `review_diff_for_paths`
 
 These names are stable across staged and uncommitted modes; registry binds them
-to selected authoritative scope. Codebase mode does not register diff tools.
-All tools remain read-only. Review and simplification requests use discovered
-skill summaries in initial developer context and call `skills_read` only for
-relevant skill bodies or referenced text resources.
+to selected authoritative scope. `review_changes` pages through the complete
+prepared path, status, and line-stat inventory using zero-based `offset` and a
+bounded `limit`, so prompt compaction never makes changed paths undiscoverable.
+Codebase mode does not register diff tools. All tools remain read-only. Review
+and simplification requests use discovered skill summaries in initial developer
+context and call `skills_read` only for relevant skill bodies or referenced text
+resources.
 
 ### Release note tools
 

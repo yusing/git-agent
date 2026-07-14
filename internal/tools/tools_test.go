@@ -159,7 +159,7 @@ func TestStagedReviewToolsNeverReadUnstagedWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewReviewRegistryWithSkills(repo, nil, ReviewModeStaged)
+	registry := NewReviewRegistryWithSkills(repo, nil, ReviewModeStaged, ReviewScope{})
 	if _, err := registry.Execute(t.Context(), Invocation{Name: "git_staged_status", Arguments: `{}`}); err == nil {
 		t.Fatal("review registry exposed a non-review tool")
 	}
@@ -194,6 +194,43 @@ func TestStagedReviewToolsNeverReadUnstagedWorktree(t *testing.T) {
 		if !strings.Contains(result.Content, "app.txt") || strings.Contains(result.Content, "untracked-secret.txt") {
 			t.Fatalf("%s leaked worktree paths: %s", invocation.Name, result.Content)
 		}
+	}
+}
+
+func TestReviewChangesPaginatesAuthoritativeScope(t *testing.T) {
+	t.Parallel()
+
+	paths := make([]string, 130)
+	status := make([]gitctx.PathChange, len(paths))
+	stats := make([]gitctx.FileStat, len(paths))
+	for i := range paths {
+		paths[i] = fmt.Sprintf("change-%03d.go", i)
+		status[i] = gitctx.PathChange{Path: paths[i], Worktree: "M"}
+		stats[i] = gitctx.FileStat{Path: paths[i], Adds: i}
+	}
+	scope := NewReviewScope(paths, status, stats)
+	registry := NewReviewRegistryWithSkills(nil, nil, ReviewModeUncommitted, scope)
+	result, err := registry.Execute(t.Context(), Invocation{Name: "review_changes", Arguments: `{"offset":128,"limit":1}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Data struct {
+			Changes    []ReviewChange `json:"changes"`
+			Total      int            `json:"total"`
+			NextOffset int            `json:"next_offset"`
+			HasMore    bool           `json:"has_more"`
+		} `json:"data"`
+		Truncated bool `json:"truncated"`
+	}
+	if err := json.Unmarshal([]byte(result.Content), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if len(envelope.Data.Changes) != 1 || envelope.Data.Changes[0].Path != "change-128.go" || envelope.Data.Changes[0].Adds != 128 {
+		t.Fatalf("changes = %#v", envelope.Data.Changes)
+	}
+	if envelope.Data.Total != 130 || envelope.Data.NextOffset != 129 || !envelope.Data.HasMore || !envelope.Truncated {
+		t.Fatalf("page metadata = %#v", envelope)
 	}
 }
 

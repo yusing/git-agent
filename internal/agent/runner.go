@@ -168,6 +168,15 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 		if err := r.writeRuntimeStatus("requesting", step+1, maxSteps, result.ToolCalls, maxToolCalls, estimatedTokens, 0, started); err != nil {
 			return Result{}, err
 		}
+		if step == 0 && r.Config.ContextTokens > 0 && estimatedTokens >= r.Config.ContextTokens {
+			if err := r.Trace.Write("budget", map[string]any{
+				"kind": BudgetKindContext, "decision": "reject", "reason": "initial_context_budget_exhausted",
+				"step": step + 1, "used": estimatedTokens, "limit": r.Config.ContextTokens,
+			}); err != nil {
+				return Result{}, err
+			}
+			return Result{}, fmt.Errorf("initial request estimated at %d tokens meets or exceeds context budget %d", estimatedTokens, r.Config.ContextTokens)
+		}
 		// Do not ever add outbound max_tool_calls again.
 		// OpenAI-compatible providers in our target path reject it on /responses.
 		// The local runner already enforces the tool-call ceiling.

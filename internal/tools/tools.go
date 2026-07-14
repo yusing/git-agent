@@ -59,11 +59,45 @@ const (
 	ReviewModeStaged      ReviewMode = "staged"
 )
 
+type ReviewChange struct {
+	Path     string `json:"path"`
+	Staging  string `json:"staging"`
+	Worktree string `json:"worktree,omitempty"`
+	Adds     int    `json:"adds"`
+	Deletes  int    `json:"deletes"`
+	IsBinary bool   `json:"is_binary,omitempty"`
+}
+
+type ReviewScope struct {
+	Changes []ReviewChange
+}
+
+func NewReviewScope(paths []string, status []gitctx.PathChange, stats []gitctx.FileStat) ReviewScope {
+	statusByPath := make(map[string]gitctx.PathChange, len(status))
+	for _, change := range status {
+		statusByPath[change.Path] = change
+	}
+	statsByPath := make(map[string]gitctx.FileStat, len(stats))
+	for _, stat := range stats {
+		statsByPath[stat.Path] = stat
+	}
+	changes := make([]ReviewChange, 0, len(paths))
+	for _, path := range paths {
+		status := statusByPath[path]
+		stat := statsByPath[path]
+		changes = append(changes, ReviewChange{
+			Path: path, Staging: status.Staging, Worktree: status.Worktree,
+			Adds: stat.Adds, Deletes: stat.Deletes, IsBinary: stat.IsBinary,
+		})
+	}
+	return ReviewScope{Changes: changes}
+}
+
 func NewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Store) *Registry {
 	return newRegistry(repo, skillStore)
 }
 
-func NewReviewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Store, mode ReviewMode) *Registry {
+func NewReviewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Store, mode ReviewMode, scope ReviewScope) *Registry {
 	registry := &Registry{tools: map[string]Tool{}}
 	register(registry, []Tool{
 		repoSummaryTool{repo: repo},
@@ -74,6 +108,7 @@ func NewReviewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Sto
 	})
 	if mode != ReviewModeCodebase {
 		register(registry, []Tool{
+			reviewChangesTool{mode: mode, scope: scope},
 			reviewDiffTool{repo: repo, mode: mode},
 			reviewDiffForPathsTool{repo: repo, mode: mode},
 		})
@@ -172,7 +207,7 @@ func CommitMessageToolNames() []string {
 func ReviewToolNames(mode ReviewMode) []string {
 	names := []string{"repo_summary", "list_files", "read_file", "grep", "find"}
 	if mode != ReviewModeCodebase {
-		names = append(names, "review_diff", "review_diff_for_paths")
+		names = append(names, "review_changes", "review_diff", "review_diff_for_paths")
 	}
 	return names
 }
@@ -1014,6 +1049,43 @@ func (t findTool) executeStaged(requested, name, entryType string, maxEntries in
 type reviewDiffTool struct {
 	repo *gitctx.Repository
 	mode ReviewMode
+}
+
+const maxReviewChangesPage = 500
+
+type reviewChangesTool struct {
+	mode  ReviewMode
+	scope ReviewScope
+}
+
+func (t reviewChangesTool) Definition() Definition {
+	return Definition{Name: "review_changes", Description: "Return one page of the authoritative changed-path inventory with status and line stats.", Schema: schema(map[string]any{
+		"offset": map[string]any{"type": "integer", "description": "Zero-based page offset.", "minimum": 0},
+		"limit":  intProp("Maximum changes to return.", 1, maxReviewChangesPage),
+	}), Strict: true}
+}
+
+func (t reviewChangesTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
+	args, err := parseArgs[struct {
+		Offset int `json:"offset"`
+		Limit  int `json:"limit"`
+	}](invocation.Arguments)
+	if err != nil {
+		return Result{}, err
+	}
+	if args.Offset < 0 {
+		return Result{}, fmt.Errorf("offset must be non-negative")
+	}
+	if args.Limit < 1 || args.Limit > maxReviewChangesPage {
+		return Result{}, fmt.Errorf("limit must be between 1 and %d", maxReviewChangesPage)
+	}
+	start := min(args.Offset, len(t.scope.Changes))
+	end := min(start+args.Limit, len(t.scope.Changes))
+	hasMore := end < len(t.scope.Changes)
+	return jsonResult("review_changes", map[string]any{
+		"mode": t.mode, "changes": t.scope.Changes[start:end], "total": len(t.scope.Changes),
+		"next_offset": end, "has_more": hasMore,
+	}, hasMore)
 }
 
 func (t reviewDiffTool) Definition() Definition {
