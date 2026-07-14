@@ -47,9 +47,9 @@ directory is on `PATH`.
 | Squash PR message | `git-agent pr-message` | Squash merge message on stdout |
 | Release body | `git-agent release-note <base> <release>` | Release Markdown on stdout |
 | Version bump release body | `git-agent release-note patch` | Release Markdown for latest tag to `HEAD` |
-| Uncommitted review | `git-agent review` | Structured JSON findings plus agent-event URL |
-| Staged review | `git-agent review --staged` | Structured JSON findings for index changes only |
-| Codebase simplification audit | `git-agent simplify --codebase` | Structured JSON simplification opportunities |
+| Uncommitted review | `git-agent review` | Detached task launch JSON |
+| Staged review | `git-agent review --staged` | Detached staged-review launch JSON |
+| Codebase simplification audit | `git-agent simplify --codebase` | Detached codebase-audit launch JSON |
 | Agent context search | `git-agent search --agent <query...>` | Brief results, plus progress URL when indexing |
 | Configure index sync | `git-agent config index.remote <git-url>` | Save a dedicated Git remote for shared revision indexes |
 | Push local indexes | `git-agent index sync` | Additively publish all completed local revision indexes |
@@ -100,6 +100,8 @@ harnesses. Both default to all dirty changes, regardless of staging state.
 ```sh
 # Review staged and unstaged work together
 git-agent review
+# {"command":"review","id":"...","pid":12345,"url":"http://127.0.0.1:..."}
+git-agent review --wait <id-from-launch-json>
 
 # Review only the Git index
 git-agent review --staged
@@ -107,40 +109,38 @@ git-agent review --staged
 # Audit the full repository
 git-agent review --codebase
 
-# Advertise the event stream, detach, and continue in background
-git-agent review --background
-
 # Find behavior-preserving cleanup opportunities in dirty changes
 git-agent simplify
+git-agent simplify --wait <id-from-launch-json>
 
 # Add lower-priority task focus after flags
 git-agent review --staged focus on cancellation and cleanup
 ```
 
 Exactly one mode may be selected: `--codebase`, `--uncommitted`, or `--staged`.
-No mode means `--uncommitted`. Both commands write strict, evidence-located JSON
-reports to stdout. They have no request deadline by default; `--timeout
+No mode means `--uncommitted`. Both commands always launch detached and write
+one strict launch JSON object to stdout. It contains `command`, durable task
+`id`, producer `pid`, and authenticated event `url`. Successful launch writes
+nothing to stderr. Matching `--wait <id>` forms write strict, evidence-located
+JSON reports to stdout. They have no request deadline by default; `--timeout
 <duration>` adds one explicitly. Without `--model` or `OPENAI_MODEL`, `review`
-uses `gpt-5.6-sol` and `simplify` uses `gpt-5.6-terra`; both use
-provider-default reasoning effort unless an effort flag is supplied.
+uses `gpt-5.6-sol` and `simplify` uses `gpt-5.6-terra`; both use provider-default
+reasoning effort unless an effort flag is supplied.
 
-Before the first provider request, each command prints an ephemeral event URL
-to stderr. Its replayable stream includes live reasoning-summary progress:
-
-```text
-review: agent events listening on http://127.0.0.1:43127/events?token=4YH2S7M6N5QK8J3C9RTP
-```
-
-With `--background`, the launcher exits immediately after printing this URL
-and the exact command for stopping the detached agent beside it:
+The launch object's replayable event URL includes live reasoning-summary
+progress:
 
 ```text
-review: stop background agent: kill -- 12345
+{"command":"review","id":"4YH2S7M6N5QK8J3C9RTPABCD","pid":12345,"url":"http://127.0.0.1:43127/events?token=..."}
 ```
 
 The detached review or simplification process continues serving events through
-the terminal event. Launcher stdout stays empty; the strict report remains
-available in the SSE `final` event.
+the terminal event. `review --wait <id>` or `simplify --wait <id>` waits without
+a deadline and prints only the strict final report JSON. Completed reports can
+be retrieved repeatedly. Failed, unknown, malformed, corrupt, dead-producer,
+or wrong-command tasks fail with empty stdout; signals cancel an active wait.
+Invalid tool arguments and missing evidence paths are returned to the model as
+structured errors so it can correct the request instead of aborting the task.
 
 See [docs/spec.md](docs/spec.md) for exact mode, schema, tool, and SSE contracts.
 
@@ -152,11 +152,11 @@ simplification progress in a Herdr activity pane. From a managed root Codex
 session, run:
 
 ```sh
-git-agent review --background --uncommitted
+git-agent review --uncommitted
 ```
 
-`--background` lets the Codex tool call return while `codex-herdr` follows the
-review. Git Agent prints the exact command for stopping the detached process.
+The command returns launch JSON while `codex-herdr` follows the review. Its
+`pid` identifies the detached process when manual termination is needed.
 
 Git Agent does not require `codex-herdr`; both commands still work normally on
 their own.
@@ -303,11 +303,13 @@ git-agent pr-message [flags]
 git-agent release-note [--out <file>] [flags] <base> <release>
 git-agent release-note [--out <file>] [flags] patch|minor|major
 git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]
+git-agent review --wait <id>
 git-agent search [flags] <query...>
 git-agent search --ls [--remote <url>] [--format text|json]
 git-agent search --ls-remotes [--format text|json|completion]
 git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]
 git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]
+git-agent simplify --wait <id>
 git-agent config index.remote [<git-url>]
 git-agent config --unset index.remote
 git-agent index sync
@@ -429,13 +431,25 @@ and returned tool output. API keys are redacted. `--debug` prints the trace
 directory to stderr.
 
 `review` and `simplify` stream those events from memory over SSE and do not
-create on-disk trace sessions.
-
-Search indexes use the same project metadata root:
+create on-disk trace sessions. Detached runs persist only a small task record
+under:
 
 ```text
-~/.git-agent/<path-sha>/search/
+~/.git-agent/<project-identity-sha>/background/<task-id>.json
 ```
+
+Git repositories with `origin` use the SHA-256 of its normalized repository
+identity, so common SSH and HTTPS URL spellings and separate clones share task
+records. Projects without `origin` use the cleaned absolute project-path SHA.
+
+Search indexes use a project identity metadata root:
+
+```text
+~/.git-agent/<project-identity-sha>/search/
+```
+
+As with background records, Git repositories with `origin` use normalized
+origin identity and otherwise fall back to the cleaned absolute path.
 
 On the next run for an existing project, legacy metadata from
 `<project>/.git-agent/` is migrated into the home metadata directory
@@ -475,6 +489,9 @@ Fish completion install defaults:
 - Repository tools do not follow symlinks outside the repository.
 - Metadata, indexes, and trace artifacts under `~/.git-agent/` are restricted to
   the current user on platforms with Unix-style permission bits.
+- Detached task records contain producer metadata and the exact terminal
+  `final` or `error` event. They are owner-only and retained indefinitely so a
+  completed report remains retrievable; no trace session is created for them.
 
 ## Specification
 

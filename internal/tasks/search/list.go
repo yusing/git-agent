@@ -18,6 +18,7 @@ import (
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/giturl"
 	"github.com/yusing/git-agent/internal/metadata"
+	"github.com/yusing/git-agent/internal/projectidentity"
 )
 
 // IndexInfo describes one on-disk search index under a project metadata root.
@@ -434,11 +435,7 @@ func resolveIndexSelection(ctx context.Context, rootOpt, remote, rev string, fil
 		indexRoot = found.RootPath
 		repo = found
 	}
-	origin := repositoryOrigin(repo)
-	originIdentity := ""
-	if origin != "" {
-		originIdentity = giturl.Identity(origin)
-	}
+	originIdentity := projectidentity.Origin(repo)
 	source.OriginIdentity = originIdentity
 	legacyMetadataDir, err := metadata.Dir(indexRoot)
 	if err != nil {
@@ -461,21 +458,6 @@ func resolveIndexSelection(ctx context.Context, rootOpt, remote, rev string, fil
 		resolvedRev: resolvedRev,
 		repo:        repo,
 	}, nil
-}
-
-func repositoryOrigin(repo *gitctx.Repository) string {
-	if repo == nil {
-		return ""
-	}
-	cfg, err := repo.Repo.Config()
-	if err != nil {
-		return ""
-	}
-	remote := cfg.Remotes["origin"]
-	if remote == nil || len(remote.URLs) == 0 {
-		return ""
-	}
-	return remote.URLs[0]
 }
 
 func inspectIndex(dir, searchRoot string) (IndexInfo, error) {

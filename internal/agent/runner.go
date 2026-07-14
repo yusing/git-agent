@@ -237,8 +237,17 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 				return Result{}, err
 			}
 			toolResult, err := r.Tools.Execute(ctx, tools.Invocation{Name: call.Name, Arguments: call.Arguments})
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return Result{}, fmt.Errorf("tool %s canceled: %w", call.Name, ctxErr)
+			}
 			if err != nil {
-				return Result{}, fmt.Errorf("tool %s failed: %w", call.Name, err)
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return Result{}, fmt.Errorf("tool %s failed: %w", call.Name, err)
+				}
+				toolResult, err = tools.ErrorResult(call.Name, err)
+				if err != nil {
+					return Result{}, fmt.Errorf("encode tool %s error: %w", call.Name, err)
+				}
 			}
 			if err := r.Trace.Write("tool-output", map[string]any{
 				"name":      call.Name,
@@ -522,6 +531,7 @@ You are in a bounded agent loop.
 This is model step %d of %d. You have %d of %d tool calls remaining.
 Use only listed read-only tools.
 Call tools only when they reduce material uncertainty; do not call tools just to repeat provided context.
+When a tool output has ok=false, correct the invocation or use different evidence and continue.
 %sPrefer narrow tool calls that target the missing evidence.
 Conclude before the remaining budget reaches zero.
 Do not ask the user for more evidence.

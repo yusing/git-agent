@@ -25,7 +25,9 @@ Supported workflows:
 - `git-agent release-note [--out <file>] <base> <release>`
 - `git-agent release-note [--out <file>] patch|minor|major`
 - `git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]`
+- `git-agent review --wait <id>`
 - `git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]`
+- `git-agent simplify --wait <id>`
 - `git-agent search [flags] <query...>`
 - `git-agent search --ls [--remote <url>] [--format text|json]`
 - `git-agent search --ls-remotes [--format text|json|completion]`
@@ -199,9 +201,9 @@ guidance, skill, tool, validation-repair, SSE, and trailing-prompt contracts as
 as review findings. Only confirmed behavior-preserving opportunities belong in
 output; empty opportunities is valid.
 
-Both commands always bind an SSE server on `127.0.0.1:0` after local validation
-and print actual token-bearing `/events` URL to stderr before first provider
-request. Requests without that per-run token are rejected. SSE uses
+Both commands always bind an SSE server on `127.0.0.1:0` after local validation.
+The launcher publishes its actual token-bearing `/events` URL in launch JSON
+before the first provider request. Requests without that per-run token are rejected. SSE uses
 `id`, `event`, and JSON `data` fields, buffers events for late clients, and
 honors `Last-Event-ID`. Stream includes `session.started`, `session`, `request`,
 `reasoning_summary.delta`, `reasoning_summary.done`, `response`, `tool-call`,
@@ -230,15 +232,34 @@ default. Every provider request states the current step and remaining tool-call
 budget. These local safety ceilings are never extended interactively for either
 command. At a ceiling, the runner records a JSON `budget` SSE event and makes a
 tool-free forced-finalization request using evidence already collected. On
-success, stderr contains only the event URL line and stdout contains only the
-final report JSON.
+success, the detached worker persists and publishes the terminal report; it
+writes no report to stdout.
 
-`--background` starts `review` or `simplify` in a detached process. The
-launcher waits until the event server is listening, prints the same URL line
-and the platform-specific command that stops the detached process, then exits
-successfully. The detached process closes inherited standard streams and runs
-through the terminal SSE event. Launcher stdout is empty; the strict report is
-carried by the `final` SSE event.
+Every `review` or `simplify` invocation without `--wait` starts a detached
+process. The launcher waits until the event server is listening, then writes
+exactly one JSON object and newline to stdout with string `command`, string
+`id`, positive integer `pid`, and string `url` fields. Successful launch writes
+nothing to stderr. The detached worker closes inherited standard streams and
+runs through the terminal SSE event.
+
+`review --wait <id>` and `simplify --wait <id>` accept no mode, prompt, timeout,
+model, generation, debug, or pprof option. A wait has no deadline, polls the
+durable record, verifies the producer PID while running, and respects
+process-context cancellation. A matching `final` event writes only its
+`value.text` as strict report JSON to stdout. Retrieval remains repeatable after
+completion. A stored `error`, unknown or malformed ID, corrupt record, dead
+producer, or task created by the other command returns nonzero with empty
+stdout.
+
+The detached producer creates a versioned running record before publishing its
+launch JSON, refreshes its update timestamp with a heartbeat while running, then
+atomically replaces it with a `0600` record containing task ID, command, PID,
+start/update timestamps, and the exact terminal `final` or `error` trace event.
+Terminal events are written without trace compaction and published to SSE.
+Records live under
+`~/.git-agent/<project-identity-sha>/background/<task-id>.json`, are retained
+indefinitely, and do not create a trace session. The containing directory is
+`0700`.
 
 All agent loops use a 217,600-token context budget, 80% of the common
 272,000-token model context window. Provider-reported input tokens take
@@ -411,17 +432,19 @@ embedding counts; the total can increase until selected-file production closes.
 Terminal completion means both object transfer and all required embedding work
 have completed.
 
-Persistent metadata is stored under `~/.git-agent/<path-sha>/`, where
-`<path-sha>` is the SHA-256 of the cleaned absolute project root. Search writes
-indexes under `~/.git-agent/<path-sha>/search/`. When a legacy
+Persistent metadata defaults to `~/.git-agent/<path-sha>/`, where `<path-sha>`
+is the SHA-256 of the cleaned absolute project root. When a legacy
 `<project>/.git-agent/` directory exists, the next project run migrates its
 contents into the home metadata directory before writing new data.
-For local Git repository with `origin`, search metadata instead uses SHA-256 of
-normalized origin identity. Common SSH and HTTPS spellings for same host and
-repository path share one identity. On first use, completed legacy search data
-under absolute-path key is merged into origin-keyed search store and obsolete
-legacy search tree is removed; non-search metadata remains under existing key.
-Identity migration applies even when index sync is not configured.
+Search indexes and background task records use the same project identity
+resolver. A local Git repository with `origin` uses SHA-256 of normalized origin
+identity; common SSH and HTTPS spellings for the same host and repository path,
+including separate clones, share one identity. A repository without `origin`
+or a non-Git project falls back to cleaned absolute-path SHA. On first search
+use, completed legacy search data under the absolute-path key is merged into the
+origin-keyed search store and the obsolete legacy search tree is removed;
+non-search metadata remains under its existing key. Search identity migration
+applies even when index sync is not configured.
 Remote metadata is stored under `~/.git-agent/remotes/<remote-sha>/`, where
 `<remote-sha>` is the SHA-256 of the sanitized remote URL. Remote search indexes
 are stored under that remote metadata root and are keyed by resolved commit SHA,
@@ -666,6 +689,9 @@ Message-generation subcommands reserve this shared flag surface:
 - `--debug`
 - `--pprof <addr>`
 
+`review` and `simplify` additionally support `--wait <id>` only as the isolated
+retrieval form documented above.
+
 `release-note` additionally supports:
 
 - `--out <file>`: write rendered Markdown to file and stream human console trace
@@ -788,8 +814,10 @@ unchanged. API-key providers retain the requested model identifier.
 ### stdout / stderr contract
 
 - stdout for generation-only commands: final generated artifact only
-- stdout for `review` and `simplify`: one strict JSON report only
-- stdout for background `review` and `simplify`: empty; consume the `final` SSE event
+- stdout for `review` and `simplify` launchers: one strict JSON object containing
+  `command`, `id`, `pid`, and `url`
+- stdout for `review --wait <id>` and `simplify --wait <id>`: the stored strict
+  final report JSON only
 - stdout for `search`: JSON result by default; brief header and result lines
   with `--format brief`
 - stdout for `release-note --out <file>`: streaming human console trace lines
@@ -799,8 +827,8 @@ unchanged. API-key providers retain the requested model identifier.
   while generating the message, followed by Git's raw commit summary after
   success
 - stderr: diagnostics, console-formatted debug output, search and index-sync
-  progress, `--agent` progress probe URLs, review/simplify SSE URLs, validation
-  failures, provider/tool loop summaries when `--debug` is enabled, and stderr
+  progress, `--agent` progress probe URLs, validation failures, provider/tool
+  loop summaries when `--debug` is enabled, and stderr
   emitted by a successful delegated `git commit`
 - `search` writes errors and optional `--debug` diagnostics to stderr only and
   never writes a model trace session
@@ -809,7 +837,8 @@ unchanged. API-key providers retain the requested model identifier.
   regardless of `--debug`, except `release-note --out <file>`; `--debug`
   prints the session directory on stderr when a JSON trace session is used
 - `review` and `simplify` keep trace events in memory for SSE replay and do not
-  write on-disk trace sessions
+  write on-disk trace sessions; detached runs persist only their durable task
+  record
 - `release-note --out <file>` does not write an on-disk NDJSON trace session;
   its human console trace lines are streamed to stdout
 - `commit` / `commit --amend` do not write an on-disk NDJSON trace session;
@@ -830,8 +859,11 @@ Nonzero exit codes are returned for:
 - missing required environment configuration
 - provider/API failures
 - embeddings auth/config/backend failures for `search`
-- tool execution failures
+- trace-recording failures and context cancellation or deadlines during tool
+  execution
 - validation failures that cannot be repaired
+- failed, unknown, malformed, corrupt, dead-producer, canceled, or wrong-command
+  background waits
 
 ### Build and install
 
@@ -858,10 +890,13 @@ Defaults:
 - `internal/cli`: argument parsing and command dispatch
 - `internal/config`: environment and flag materialization
 - `internal/agent`: bounded agent loop contract
+- `internal/background`: atomic durable background task records and waiting
 - `internal/openai`: official OpenAI Go SDK adapter for the Responses API and
   minimal embeddings adapter for `search`
 - `internal/guidance`: project guidance discovery and rendering
 - `internal/gitctx`: typed repository inspection
+- `internal/projectidentity`: shared normalized-origin or path-fallback project
+  identity resolution
 - `internal/tools`: curated read-only tool registry
 - `internal/tasks/commitmsg`: commit message behavior
 - `internal/tasks/releasenote`: release note behavior
@@ -944,8 +979,10 @@ including:
    appending any `--append-prompt` hint as lower-priority escaped prompt data
 9. send request to the Responses API through the official OpenAI Go SDK
 10. record each request and response in the active trace
-11. if the model requests tools, execute only registered read-only tools
-12. record each tool call and tool output in the active trace
+11. if the model requests tools, execute only registered read-only tools;
+    return non-context execution errors as structured failed tool outputs so the
+    model can correct arguments or choose other evidence
+12. record each tool call and successful or failed tool output in the active trace
 13. append function-call and function-call-output items and continue until final
     text is returned
 14. if the local budget is exhausted, force a no-tool finalization request while
@@ -1481,6 +1518,21 @@ Tool result envelope:
 }
 ```
 
+Recoverable tool execution errors use the same channel:
+
+```json
+{
+  "ok": false,
+  "tool": "read_file",
+  "error": "openat missing.go: no such file or directory",
+  "truncated": false
+}
+```
+
+Failed invocations consume one tool call and are appended as
+`function_call_output`, allowing the model to correct a path or arguments on a
+later step. Context cancellation and deadline errors remain terminal.
+
 The tool loop records both the model's function-call arguments and the exact
 tool-output envelope sent back to the model.
 
@@ -1796,6 +1848,11 @@ fields such as `instructions`, but generated text and repository-derived
 summaries or previews may still appear in stdout; large string values are
 compacted inline with preview metadata.
 
+Detached review and simplification records are not trace sessions. Each
+contains producer metadata and the exact terminal `final` report or `error`
+event, which can include repository-derived output or provider error text.
+Records are retained indefinitely to support repeat retrieval.
+
 Mitigation:
 
 - redact API keys from request traces
@@ -1806,6 +1863,8 @@ Mitigation:
 - print trace directory only when `--debug` is enabled
 - document that commit-command stdout may contain repository context and should
   be handled like trace data
+- store detached-task records and directories with owner-only permissions and
+  document their indefinite retention
 
 ## 9. Current acceptance criteria
 
@@ -1840,3 +1899,6 @@ The in-repository implementation is complete when:
 - generation-only stdout contains only the final generated artifact, except
   `release-note --out <file>` streams human console trace lines and writes the
   artifact to the requested file
+- `review` and `simplify` launchers emit one `command`/`id`/`pid`/`url` JSON
+  object on stdout with empty success stderr, and `--wait <id>` emits only a
+  repeatable strict final report or fails with empty stdout

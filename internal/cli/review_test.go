@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +15,7 @@ import (
 	reviewtask "github.com/yusing/git-agent/internal/tasks/review"
 )
 
-func TestReviewAndSimplifyEmitStrictJSONAndAgentEventURL(t *testing.T) {
+func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) {
 	tests := []struct {
 		command   string
 		output    string
@@ -26,7 +25,7 @@ func TestReviewAndSimplifyEmitStrictJSONAndAgentEventURL(t *testing.T) {
 	}{
 		{
 			command: "review",
-			output:  `{"summary":"No defects found","recommendation":"APPROVE","findings":[]}`,
+			output:  `{"summary":"` + strings.Repeat("x", 20<<10) + `","recommendation":"APPROVE","findings":[]}`,
 			key:     "findings",
 			model:   reviewDefaultModel,
 		},
@@ -90,6 +89,8 @@ func TestReviewAndSimplifyEmitStrictJSONAndAgentEventURL(t *testing.T) {
 			t.Setenv("OPENAI_API_KEY", "test-key")
 			t.Setenv("OPENAI_BASE_URL", server.URL)
 			t.Setenv("OPENAI_MODEL", "")
+			t.Setenv(detachedChildEnv, "1")
+			t.Setenv(detachedTaskIDEnv, cliWaitTaskID)
 
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
@@ -97,16 +98,35 @@ func TestReviewAndSimplifyEmitStrictJSONAndAgentEventURL(t *testing.T) {
 			if err := app.Run(t.Context(), []string{test.command, "--staged", "operator", "focus"}); err != nil {
 				t.Fatal(err)
 			}
-			var report map[string]any
-			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
-				t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+			if stdout.Len() != 0 {
+				t.Fatalf("detached worker stdout = %q, want empty", stdout.String())
 			}
-			if _, ok := report[test.key].([]any); !ok {
-				t.Fatalf("report = %#v", report)
+			var expectedReport map[string]any
+			if err := json.Unmarshal([]byte(test.output), &expectedReport); err != nil {
+				t.Fatal(err)
 			}
-			wantPrefix := test.command + ": agent events listening on "
-			eventURL, err := url.Parse(strings.TrimSpace(strings.TrimPrefix(stderr.String(), wantPrefix)))
-			if err != nil || !strings.HasPrefix(stderr.String(), wantPrefix) || eventURL.Hostname() != "127.0.0.1" || eventURL.Path != "/events" || eventURL.Query().Get("token") == "" {
+			if _, ok := expectedReport[test.key].([]any); !ok {
+				t.Fatalf("expected report = %#v", expectedReport)
+			}
+			record, err := backgroundStoreForCurrentProject(t).Read(cliWaitTaskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if record.Command != test.command || record.Terminal == nil || record.Terminal.Kind != "final" {
+				t.Fatalf("background record = %#v", record)
+			}
+			storedReport, ok := record.Terminal.Value["text"].(map[string]any)
+			if !ok || storedReport["summary"] != expectedReport["summary"] {
+				t.Fatalf("stored final report = %#v", record.Terminal.Value["text"])
+			}
+			if _, err := os.Stat(filepath.Join(projectMetadataDir(t, repoDir), "sessions")); !os.IsNotExist(err) {
+				t.Fatalf("background command created trace sessions: %v", err)
+			}
+			var launch detachedLaunch
+			if err := json.Unmarshal(stderr.Bytes(), &launch); err != nil {
+				t.Fatalf("worker launch metadata is not JSON: %v\n%s", err, stderr.String())
+			}
+			if launch.Command != test.command || launch.ID != cliWaitTaskID || launch.PID != os.Getpid() || !strings.HasPrefix(launch.URL, "http://127.0.0.1:") || !strings.Contains(launch.URL, "/events?token=") {
 				t.Fatalf("stderr = %q", stderr.String())
 			}
 		})
@@ -137,6 +157,8 @@ func TestReviewBudgetExhaustionForcesJSONWithoutPrompt(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_BASE_URL", server.URL)
 	t.Setenv("OPENAI_MODEL", "")
+	t.Setenv(detachedChildEnv, "1")
+	t.Setenv(detachedTaskIDEnv, cliWaitTaskID)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -147,13 +169,28 @@ func TestReviewBudgetExhaustionForcesJSONWithoutPrompt(t *testing.T) {
 	if strings.Contains(stderr.String(), "Budget reached") || strings.Count(stderr.String(), "\n") != 1 {
 		t.Fatalf("stderr contains non-contract output: %q", stderr.String())
 	}
+	if stdout.Len() != 0 {
+		t.Fatalf("detached worker stdout = %q, want empty", stdout.String())
+	}
+	record, err := backgroundStoreForCurrentProject(t).Read(cliWaitTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Terminal == nil || record.Terminal.Kind != "final" {
+		t.Fatalf("detached record = %#v", record)
+	}
 	var report reviewtask.ReviewReport
-	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
-		t.Fatalf("stdout is not review JSON: %v\n%s", err, stdout.String())
+	reportJSON, err := json.Marshal(record.Terminal.Value["text"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(reportJSON, &report); err != nil {
+		t.Fatalf("stored final is not review JSON: %v\n%s", err, reportJSON)
 	}
 }
 
 func TestReviewModeValidationHappensBeforeProviderResolution(t *testing.T) {
+	t.Setenv(detachedChildEnv, "1")
 	app := &App{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
 	err := app.Run(t.Context(), []string{"review", "--codebase", "--staged"})
 	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
@@ -168,8 +205,8 @@ func TestReviewHelpDocumentsDefaultMode(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Usage: git-agent review",
-		"--background",
-		"continue in a detached process after advertising events",
+		"git-agent review --wait <id>",
+		"wait for a detached task and print its report",
 		"--uncommitted  inspect all dirty changes (default)",
 		"--staged       inspect staged changes only",
 		"--codebase     inspect the full codebase",

@@ -45,18 +45,17 @@ func Dir(projectRoot string) (string, error) {
 // legacy absolute-path-keyed search tree on first use while leaving sessions
 // and other project metadata at their existing path-keyed location.
 func SearchDir(projectRoot, originIdentity string) (string, error) {
-	if strings.TrimSpace(originIdentity) == "" {
-		return Dir(projectRoot)
-	}
-	home, err := os.UserHomeDir()
+	dir, err := ProjectDir(projectRoot, originIdentity)
 	if err != nil {
 		return "", err
+	}
+	if strings.TrimSpace(originIdentity) == "" {
+		return dir, nil
 	}
 	legacy, err := Dir(projectRoot)
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, dirName, IdentitySHA(originIdentity))
 	if legacy == dir {
 		return dir, nil
 	}
@@ -85,6 +84,24 @@ func SearchDir(projectRoot, originIdentity string) (string, error) {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return "", err
 	}
+	if err := secureDir(dir); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// ProjectDir returns the shared metadata directory for a project. Repositories
+// with an origin use its normalized identity; all other projects use their
+// cleaned absolute path.
+func ProjectDir(projectRoot, originIdentity string) (string, error) {
+	if strings.TrimSpace(originIdentity) == "" {
+		return Dir(projectRoot)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, dirName, IdentitySHA(originIdentity))
 	if err := secureDir(dir); err != nil {
 		return "", err
 	}

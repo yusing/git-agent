@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,12 +20,14 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/yusing/git-agent/internal/agent"
+	backgroundtask "github.com/yusing/git-agent/internal/background"
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/giturl"
 	"github.com/yusing/git-agent/internal/guidance"
 	"github.com/yusing/git-agent/internal/metadata"
 	"github.com/yusing/git-agent/internal/openai"
+	"github.com/yusing/git-agent/internal/projectidentity"
 	skillctx "github.com/yusing/git-agent/internal/skills"
 	"github.com/yusing/git-agent/internal/tasks/commitmsg"
 	"github.com/yusing/git-agent/internal/tasks/releasenote"
@@ -86,20 +89,20 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	}
 }
 
-func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []string) error {
+func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []string) (returnErr error) {
 	command := string(kind)
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
 	var opts config.Options
-	var background bool
 	var codebase bool
 	var uncommitted bool
 	var staged bool
-	fs.BoolVar(&background, "background", false, "continue in a detached process after advertising events")
+	var waitID string
 	fs.BoolVar(&codebase, "codebase", false, "inspect the full codebase")
 	fs.BoolVar(&uncommitted, "uncommitted", false, "inspect all dirty worktree changes")
 	fs.BoolVar(&staged, "staged", false, "inspect staged changes only")
+	fs.StringVar(&waitID, "wait", "", "wait for a detached task and print its report")
 	registerSharedFlags(fs, &opts)
 	fs.Lookup("timeout").Usage = "set request timeout (disabled by default)"
 	fs.Lookup("model").Usage = fmt.Sprintf("override model (default %s)", codeReviewDefaultModel(kind))
@@ -114,9 +117,25 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		}
 		return err
 	}
-	if background && !isBackgroundReviewChild() {
-		return startBackgroundReview(command, args, a.stderr)
+	waitRequested := false
+	waitConflict := false
+	fs.Visit(func(flag *flag.Flag) {
+		if flag.Name == "wait" {
+			waitRequested = true
+			return
+		}
+		waitConflict = true
+	})
+	if waitRequested {
+		if waitConflict || len(fs.Args()) > 0 {
+			return fmt.Errorf("--wait cannot be combined with modes, prompts, or other flags")
+		}
+		return a.waitForDetachedTask(ctx, command, waitID)
 	}
+	if !isDetachedChild() {
+		return startDetachedTask(command, args, a.stdout)
+	}
+	taskID := detachedTaskID()
 	mode, err := reviewtask.ParseMode(codebase, uncommitted, staged)
 	if err != nil {
 		return err
@@ -146,6 +165,39 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	if err != nil {
 		return err
 	}
+	identity := projectidentity.FromRepository(repo)
+	metadataDir, err := identity.Dir()
+	if err != nil {
+		return err
+	}
+	backgroundStore, err := backgroundtask.NewStore(metadataDir)
+	if err != nil {
+		return err
+	}
+	if err := backgroundStore.Create(taskID, command, os.Getpid(), time.Now()); err != nil {
+		return err
+	}
+	heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
+	heartbeatDone := make(chan error, 1)
+	go func() {
+		err := backgroundStore.Heartbeat(heartbeatCtx, taskID)
+		if err != nil {
+			cancel()
+		}
+		heartbeatDone <- err
+	}()
+	heartbeatFinished := false
+	finishHeartbeat := func() error {
+		if heartbeatFinished {
+			return nil
+		}
+		heartbeatFinished = true
+		stopHeartbeat()
+		return <-heartbeatDone
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, finishHeartbeat())
+	}()
 	prepared, err := reviewtask.Prepare(repo, mode)
 	if err != nil {
 		return err
@@ -170,11 +222,25 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		return err
 	}
 	defer eventServer.Close()
-	if _, err := fmt.Fprintf(a.stderr, "%s: agent events listening on %s\n", command, eventServer.URL()); err != nil {
+	if err := writeDetachedLaunch(a.stderr, detachedLaunch{
+		Command: command,
+		ID:      taskID,
+		PID:     os.Getpid(),
+		URL:     eventServer.URL(),
+	}); err != nil {
 		return err
 	}
-	closeBackgroundReviewStderr(a.stderr)
-	recorder, err := trace.NewEventStream(command, eventServer.Publish)
+	if file, ok := a.stderr.(*os.File); ok {
+		_ = file.Close()
+	}
+	eventSink := func(event trace.Event) error {
+		var recordErr error
+		if event.Kind == "final" || event.Kind == "error" {
+			recordErr = backgroundStore.Complete(taskID, event, time.Now())
+		}
+		return errors.Join(recordErr, eventServer.Publish(event))
+	}
+	recorder, err := trace.NewEventStream(command, eventSink)
 	if err != nil {
 		return err
 	}
@@ -219,19 +285,52 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
 	})
+	err = errors.Join(err, finishHeartbeat())
 	if err != nil {
-		traceErr := recorder.Write("error", map[string]any{"message": err.Error()})
+		traceErr := recorder.WriteExact("error", map[string]any{"message": err.Error()})
+		eventServer.Finish()
 		return errors.Join(err, traceErr)
 	}
-	if err := recorder.Write("final", map[string]any{
-		"text":         result.Text,
+	var report map[string]any
+	decoder := json.NewDecoder(strings.NewReader(result.Text))
+	decoder.UseNumber()
+	if err := decoder.Decode(&report); err != nil {
+		return fmt.Errorf("decode validated review report: %w", err)
+	}
+	if err := recorder.WriteExact("final", map[string]any{
+		"text":         report,
 		"tool_calls":   result.ToolCalls,
 		"repair_calls": result.RepairCalls,
 	}); err != nil {
 		return err
 	}
 	eventServer.Finish()
-	_, err = fmt.Fprintln(a.stdout, strings.TrimSpace(result.Text))
+	return nil
+}
+
+func (a *App) waitForDetachedTask(ctx context.Context, command, id string) error {
+	identity, err := projectidentity.Resolve(".")
+	if err != nil {
+		return err
+	}
+	metadataDir, err := identity.Dir()
+	if err != nil {
+		return err
+	}
+	store, err := backgroundtask.NewStore(metadataDir)
+	if err != nil {
+		return err
+	}
+	report, err := store.Wait(ctx, id, command)
+	if err != nil {
+		return err
+	}
+	data, err := sonic.Marshal(report)
+	if err != nil {
+		return fmt.Errorf("encode background task %s report: %w", id, err)
+	}
+	data = append(data, '\n')
+	_, err = a.stdout.Write(data)
 	return err
 }
 
@@ -1809,11 +1908,13 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] patch|minor|major\n")
 	b.WriteString("  git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]\n")
+	b.WriteString("  git-agent review --wait <id>\n")
 	b.WriteString("  git-agent search [flags] <query...>\n")
 	b.WriteString("  git-agent search --ls [--remote <url>] [--format text|json]\n")
 	b.WriteString("  git-agent search --ls-remotes [--format text|json|completion]\n")
 	b.WriteString("  git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]\n")
 	b.WriteString("  git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]\n")
+	b.WriteString("  git-agent simplify --wait <id>\n")
 	b.WriteString("\nRun `git-agent search --help` for search flags.\n")
 	b.WriteString("Run `git-agent review --help` or `git-agent simplify --help` for inspection flags.\n")
 	return errors.New(b.String())
@@ -1822,6 +1923,7 @@ func usageError(prefix string) error {
 func codeReviewUsageError(command string, fs *flag.FlagSet) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Usage: git-agent %s [--codebase|--uncommitted|--staged] [flags] [prompt...]\n\n", command)
+	fmt.Fprintf(&b, "       git-agent %s --wait <id>\n\n", command)
 	b.WriteString("Modes:\n")
 	b.WriteString("  --uncommitted  inspect all dirty changes (default)\n")
 	b.WriteString("  --staged       inspect staged changes only\n")
@@ -1835,6 +1937,7 @@ func codeReviewUsageError(command string, fs *flag.FlagSet) error {
 		"model":           "model",
 		"pprof":           "addr",
 		"timeout":         "duration",
+		"wait":            "id",
 	}
 	fs.VisitAll(func(f *flag.Flag) {
 		if f.Name == "codebase" || f.Name == "uncommitted" || f.Name == "staged" {

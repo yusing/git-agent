@@ -2,15 +2,8 @@
 
 package cli
 
-import (
-	"fmt"
-	"syscall"
-)
+import "syscall"
 
-func backgroundProcessAttributes() *syscall.SysProcAttr {
+func detachedProcessAttributes() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setsid: true}
-}
-
-func backgroundStopCommand(pid int) string {
-	return fmt.Sprintf("kill -- %d", pid)
 }

@@ -1,89 +1,137 @@
 package cli
 
 import (
-	"bufio"
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+
+	backgroundtask "github.com/yusing/git-agent/internal/background"
 )
 
-const backgroundReviewChildEnv = "GIT_AGENT_BACKGROUND_REVIEW_CHILD"
+const (
+	detachedChildEnv  = "GIT_AGENT_DETACHED_CHILD"
+	detachedTaskIDEnv = "GIT_AGENT_DETACHED_TASK_ID"
+)
 
-func isBackgroundReviewChild() bool {
-	return os.Getenv(backgroundReviewChildEnv) == "1"
+func isDetachedChild() bool {
+	return os.Getenv(detachedChildEnv) == "1"
 }
 
-func startBackgroundReview(command string, args []string, stderr io.Writer) error {
+func detachedTaskID() string {
+	return os.Getenv(detachedTaskIDEnv)
+}
+
+type detachedLaunch struct {
+	Command string `json:"command"`
+	ID      string `json:"id"`
+	PID     int    `json:"pid"`
+	URL     string `json:"url"`
+}
+
+const maxDetachedLaunchBytes = 4096
+
+func startDetachedTask(command string, args []string, stdout io.Writer) error {
 	executable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate git-agent executable: %w", err)
 	}
-	output, err := startBackgroundProcess(executable, append([]string{command}, args...), os.Environ())
+	taskID := backgroundtask.NewID()
+	launch, err := startDetachedProcess(executable, append([]string{command}, args...), detachedChildEnvironment(os.Environ(), taskID))
 	if err != nil {
 		return err
 	}
-	_, err = io.WriteString(stderr, output)
-	return err
+	if launch.Command != command || launch.ID != taskID {
+		return errors.New("detached task advertised mismatched identity")
+	}
+	return writeDetachedLaunch(stdout, launch)
 }
 
-func startBackgroundProcess(executable string, args, env []string) (string, error) {
+func startDetachedProcess(executable string, args, env []string) (detachedLaunch, error) {
 	reader, writer, err := os.Pipe()
 	if err != nil {
-		return "", fmt.Errorf("create background startup pipe: %w", err)
+		return detachedLaunch{}, fmt.Errorf("create background startup pipe: %w", err)
 	}
 	defer reader.Close()
 
 	null, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
 		writer.Close()
-		return "", fmt.Errorf("open null device: %w", err)
+		return detachedLaunch{}, fmt.Errorf("open null device: %w", err)
 	}
 	defer null.Close()
 
 	process, err := os.StartProcess(executable, append([]string{executable}, args...), &os.ProcAttr{
-		Env:   backgroundChildEnvironment(env),
+		Env:   env,
 		Files: []*os.File{null, null, writer},
-		Sys:   backgroundProcessAttributes(),
+		Sys:   detachedProcessAttributes(),
 	})
 	writer.Close()
 	if err != nil {
-		return "", fmt.Errorf("start background review: %w", err)
+		return detachedLaunch{}, fmt.Errorf("start detached task: %w", err)
 	}
 
-	line, readErr := bufio.NewReader(reader).ReadString('\n')
+	launch, readErr := readDetachedLaunch(reader)
 	if readErr != nil {
 		state, waitErr := process.Wait()
-		return "", errors.Join(fmt.Errorf("background review exited before advertising events: %s", state), readErr, waitErr)
+		return detachedLaunch{}, errors.Join(fmt.Errorf("detached task exited before advertising launch metadata: %s", state), readErr, waitErr)
 	}
-	role, _, advertised := strings.Cut(line, ": agent events listening on ")
-	if !advertised {
+	if launch.PID != process.Pid {
 		state, waitErr := process.Wait()
-		return "", errors.Join(fmt.Errorf("background review failed to advertise events: %s", strings.TrimSpace(line)), waitErr, fmt.Errorf("process state: %s", state))
+		return detachedLaunch{}, errors.Join(fmt.Errorf("detached task advertised PID %d, started PID %d", launch.PID, process.Pid), waitErr, fmt.Errorf("process state: %s", state))
 	}
 	if err := process.Release(); err != nil {
-		return "", fmt.Errorf("release background review: %w", err)
+		return detachedLaunch{}, fmt.Errorf("release detached task: %w", err)
 	}
-	return line + role + ": stop background agent: " + backgroundStopCommand(process.Pid) + "\n", nil
+	return launch, nil
 }
 
-func backgroundChildEnvironment(env []string) []string {
-	marker := backgroundReviewChildEnv + "="
-	child := make([]string, 0, len(env)+1)
+func writeDetachedLaunch(writer io.Writer, launch detachedLaunch) error {
+	if err := json.NewEncoder(writer).Encode(launch); err != nil {
+		return fmt.Errorf("encode detached task launch metadata: %w", err)
+	}
+	return nil
+}
+
+func readDetachedLaunch(reader io.Reader) (detachedLaunch, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, maxDetachedLaunchBytes+1))
+	if err != nil {
+		return detachedLaunch{}, fmt.Errorf("read detached task launch metadata: %w", err)
+	}
+	if len(data) > maxDetachedLaunchBytes {
+		_, drainErr := io.Copy(io.Discard, reader)
+		return detachedLaunch{}, errors.Join(fmt.Errorf("detached task launch metadata exceeds %d bytes", maxDetachedLaunchBytes), drainErr)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var launch detachedLaunch
+	if err := decoder.Decode(&launch); err != nil {
+		return detachedLaunch{}, fmt.Errorf("decode detached task launch metadata: %w", err)
+	}
+	if launch.Command == "" || launch.ID == "" || launch.PID <= 0 || launch.URL == "" {
+		return detachedLaunch{}, errors.New("detached task launch metadata is incomplete")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("multiple JSON values")
+		}
+		return detachedLaunch{}, fmt.Errorf("decode detached task launch metadata: %w", err)
+	}
+	return launch, nil
+}
+
+func detachedChildEnvironment(env []string, taskID string) []string {
+	childMarker := detachedChildEnv + "="
+	idMarker := detachedTaskIDEnv + "="
+	child := make([]string, 0, len(env)+2)
 	for _, variable := range env {
-		if !strings.HasPrefix(variable, marker) {
+		if !strings.HasPrefix(variable, childMarker) && !strings.HasPrefix(variable, idMarker) {
 			child = append(child, variable)
 		}
 	}
-	return append(child, marker+"1")
-}
-
-func closeBackgroundReviewStderr(stderr io.Writer) {
-	if !isBackgroundReviewChild() {
-		return
-	}
-	if file, ok := stderr.(*os.File); ok {
-		_ = file.Close()
-	}
+	return append(child, childMarker+"1", idMarker+taskID)
 }

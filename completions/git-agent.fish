@@ -53,11 +53,11 @@ complete -c git-agent -n '__git_agent_using_command commit-msg' -l amend -d 'Gen
 complete -c git-agent -n '__git_agent_using_command review' -l codebase -d 'Inspect the full codebase'
 complete -c git-agent -n '__git_agent_using_command review' -l uncommitted -d 'Inspect all dirty worktree changes'
 complete -c git-agent -n '__git_agent_using_command review' -l staged -d 'Inspect staged changes only'
-complete -c git-agent -n '__git_agent_using_command review' -l background -d 'Continue after advertising the event URL'
+complete -c git-agent -n '__git_agent_using_command review' -l wait -r -d 'Wait for a detached task ID and print its report'
 complete -c git-agent -n '__git_agent_using_command simplify' -l codebase -d 'Inspect the full codebase'
 complete -c git-agent -n '__git_agent_using_command simplify' -l uncommitted -d 'Inspect all dirty worktree changes'
 complete -c git-agent -n '__git_agent_using_command simplify' -l staged -d 'Inspect staged changes only'
-complete -c git-agent -n '__git_agent_using_command simplify' -l background -d 'Continue after advertising the event URL'
+complete -c git-agent -n '__git_agent_using_command simplify' -l wait -r -d 'Wait for a detached task ID and print its report'
 
 complete -c git-agent -n '__git_agent_has_subcommand' -l model -r -d 'Set generation model'
 complete -c git-agent -n '__git_agent_has_subcommand' -l fast -d 'Use priority service tier'

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,30 @@ import (
 	"github.com/yusing/git-agent/internal/gitctx"
 	skillctx "github.com/yusing/git-agent/internal/skills"
 )
+
+func TestErrorResultUsesStableBoundedEnvelope(t *testing.T) {
+	t.Parallel()
+
+	result, err := ErrorResult("read_file", errors.New(strings.Repeat("missing evidence\n", 500)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		OK        bool   `json:"ok"`
+		Tool      string `json:"tool"`
+		Error     string `json:"error"`
+		Truncated bool   `json:"truncated"`
+	}
+	if err := json.Unmarshal([]byte(result.Content), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.OK || envelope.Tool != "read_file" || !envelope.Truncated || !result.Truncated {
+		t.Fatalf("error envelope = %#v, result = %#v", envelope, result)
+	}
+	if len(envelope.Error) > maxErrorBytes+len("\n[truncated]\n") {
+		t.Fatalf("error output has %d bytes", len(envelope.Error))
+	}
+}
 
 func TestToolDefinitionsAreStrictAndEnvelopeResults(t *testing.T) {
 	t.Parallel()

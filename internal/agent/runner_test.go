@@ -2,8 +2,12 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -211,6 +215,110 @@ func TestRunnerExecutesToolCallRoundTrip(t *testing.T) {
 	}
 	if strings.Contains(client.requests[0].Instructions, "Use skills_read") {
 		t.Fatalf("request instructions should not mention unavailable skills_read: %s", client.requests[0].Instructions)
+	}
+}
+
+func TestRunnerReturnsToolErrorsToModelForRecovery(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	if err := os.WriteFile(filepath.Join(repoDir, "actual.go"), []byte("package actual\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := gitctx.Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeClient{responses: []openai.Response{
+		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "read_file", Arguments: `{"path":"missing.go"}`}}},
+		{ToolCalls: []openai.ToolCall{{ID: "fc_2", CallID: "call_2", Name: "read_file", Arguments: `{"path":"actual.go"}`}}},
+		{Text: "recovered"},
+	}}
+	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeCodebase)
+	var events []trace.Event
+	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := OpenAIRunner{
+		Config:    config.Config{Model: "test", MaxSteps: 4, MaxToolCalls: 3},
+		Client:    client,
+		Tools:     registry,
+		ToolSpecs: registry.Definitions([]string{"read_file"}),
+		Trace:     recorder,
+	}
+
+	result, err := runner.Run(t.Context(), Request{UserPrompt: "review", MaxSteps: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "recovered" || result.ToolCalls != 2 || len(client.requests) != 3 {
+		t.Fatalf("result = %#v, requests = %d", result, len(client.requests))
+	}
+	output := client.requests[1].Input[len(client.requests[1].Input)-1]
+	if output.Type != "function_call_output" || output.CallID != "call_1" {
+		t.Fatalf("tool error output item = %#v", output)
+	}
+	var envelope struct {
+		OK    bool   `json:"ok"`
+		Tool  string `json:"tool"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(output.Output), &envelope); err != nil {
+		t.Fatalf("tool error output is not JSON: %v\n%s", err, output.Output)
+	}
+	if envelope.OK || envelope.Tool != "read_file" || !strings.Contains(envelope.Error, "missing.go") {
+		t.Fatalf("tool error envelope = %#v", envelope)
+	}
+	corrected := client.requests[2].Input[len(client.requests[2].Input)-1]
+	if corrected.Type != "function_call_output" || corrected.CallID != "call_2" || !strings.Contains(corrected.Output, "package actual") {
+		t.Fatalf("corrected tool output item = %#v", corrected)
+	}
+	var traced bool
+	for _, event := range events {
+		content, ok := event.Value["content"].(map[string]any)
+		if event.Kind == "tool-output" && ok && content["ok"] == false && content["tool"] == "read_file" {
+			traced = true
+		}
+	}
+	if !traced {
+		t.Fatalf("trace missing tool error output: %#v", events)
+	}
+}
+
+func TestRunnerDoesNotRecoverToolErrorsAfterCancellation(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	repo, err := gitctx.Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeClient{responses: []openai.Response{
+		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "read_file", Arguments: `{"path":"missing.go"}`}}},
+		{Text: "must not recover"},
+	}}
+	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeCodebase)
+	runner := OpenAIRunner{
+		Config:    config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 2},
+		Client:    client,
+		Tools:     registry,
+		ToolSpecs: registry.Definitions([]string{"read_file"}),
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err = runner.Run(ctx, Request{UserPrompt: "review", MaxSteps: 3})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context cancellation", err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("requests = %d, want no recovery request", len(client.requests))
 	}
 }
 

@@ -184,6 +184,8 @@ func SkillToolNames() []string {
 const (
 	defaultMaxBytes = 32 * 1024
 	defaultMaxLines = 800
+	maxErrorBytes   = 4 * 1024
+	maxErrorLines   = 40
 
 	deprecatedReleaseNoteToolPrefix = "Deprecated: release-note generation now precomputes this evidence in Go and no longer exposes this tool to the model. "
 )
@@ -282,12 +284,27 @@ func schema(properties map[string]any, required ...string) map[string]any {
 }
 
 func jsonResult(tool string, value any, truncated bool) (Result, error) {
-	envelope := map[string]any{
+	return marshalResultEnvelope(map[string]any{
 		"ok":        true,
 		"tool":      tool,
 		"data":      value,
 		"truncated": truncated,
-	}
+	}, truncated)
+}
+
+// ErrorResult returns the stable tool-output envelope used when the model can
+// correct a failed invocation and continue the agent loop.
+func ErrorResult(tool string, err error) (Result, error) {
+	message, truncated := textutil.Limit(err.Error(), maxErrorBytes, maxErrorLines)
+	return marshalResultEnvelope(map[string]any{
+		"ok":        false,
+		"tool":      tool,
+		"error":     message,
+		"truncated": truncated,
+	}, truncated)
+}
+
+func marshalResultEnvelope(envelope map[string]any, truncated bool) (Result, error) {
 	data, err := sonic.MarshalIndent(envelope, "", "  ")
 	if err != nil {
 		return Result{}, err
