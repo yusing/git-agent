@@ -251,7 +251,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	}
 
 	allowedTools := withSkillTools(tools.ReviewToolNames(mode.ToolMode()), skillStore)
-	registry := tools.NewReviewRegistryWithSkills(repo, skillStore, mode.ToolMode(), tools.NewReviewScope(prepared.Paths, prepared.Status, prepared.Stats))
+	registry := tools.NewReviewRegistryWithSkills(repo, skillStore, mode.ToolMode(), tools.NewReviewScope(prepared.Paths, prepared.Status, prepared.Stats), prepared.Fingerprint)
 	runner := agent.OpenAIRunner{
 		Config:           cfg,
 		Client:           openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
@@ -259,7 +259,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		ToolSpecs:        registry.Definitions(allowedTools),
 		ReasoningSummary: openai.ReasoningSummaryAuto,
 		Validator: func(text string) []string {
-			return reviewtask.ValidateRepository(kind, text, repo, mode, prepared.Paths)
+			return reviewtask.ValidateRepository(kind, text, repo, mode, prepared.Paths, prepared.Fingerprint)
 		},
 		Normalize: func(text string) string { return reviewtask.Shape(kind, text) },
 		Trace:     recorder,

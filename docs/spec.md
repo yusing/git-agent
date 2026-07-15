@@ -161,10 +161,15 @@ context pack, and bounded unified diff before the first provider request. The
 initial prompt contains a bounded view of context-pack groups, outliers, and
 artifacts plus the bounded diff; it does not duplicate the complete raw path,
 status, or stat lists. Truncation is explicit. Full scope remains authoritative
-for report validation and read-only repository tools. Empty diff scope fails
-before provider resolution. Codebase mode provides no packed diff; model
-discovers implementation, contracts, callers, and tests through read-only
-tools. Positional text remaining after flag parsing is escaped and appended as
+for report validation and read-only repository tools. Diff preparation also
+records a launch fingerprint from complete base and authoritative target trees
+plus dirty-submodule state. Every diff-mode repository tool call and final
+report validation recomputes that fingerprint; any worktree, index, `HEAD`, or
+dirty-submodule drift fails with an explicit rerun error. Codebase mode remains
+live and has no fingerprint guard. Empty diff scope fails before provider
+resolution. Codebase mode provides no packed diff; model discovers
+implementation, contracts, callers, and tests through read-only tools.
+Positional text remaining after flag parsing is escaped and appended as
 lower-priority operator hint, using same precedence rules as `--append-prompt`.
 
 In staged mode, repository guidance is read from index blobs, repository-local
@@ -1499,10 +1504,12 @@ These names are stable across staged and uncommitted modes; registry binds them
 to selected authoritative scope. `review_changes` pages through the complete
 prepared path, status, and line-stat inventory using zero-based `offset` and a
 bounded `limit`, so prompt compaction never makes changed paths undiscoverable.
-Codebase mode does not register diff tools. All tools remain read-only. Review
-and simplification requests use discovered skill summaries in initial developer
-context and call `skills_read` only for relevant skill bodies or referenced text
-resources.
+Before any diff-mode repository tool executes, registry verifies current
+authoritative repository fingerprint still matches prepared scope. Codebase
+mode does not register diff tools or apply drift checks. All tools remain
+read-only. Review and simplification requests use discovered skill summaries in
+initial developer context and call `skills_read` only for relevant skill bodies
+or referenced text resources.
 
 ### Release note tools
 

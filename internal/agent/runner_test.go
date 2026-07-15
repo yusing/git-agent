@@ -235,7 +235,7 @@ func TestRunnerReturnsToolErrorsToModelForRecovery(t *testing.T) {
 		{ToolCalls: []openai.ToolCall{{ID: "fc_2", CallID: "call_2", Name: "read_file", Arguments: `{"path":"actual.go"}`}}},
 		{Text: "recovered"},
 	}}
-	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeCodebase, tools.ReviewScope{})
+	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeCodebase, tools.ReviewScope{}, gitctx.ChangeFingerprint{})
 	var events []trace.Event
 	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
 		events = append(events, event)
@@ -303,7 +303,7 @@ func TestRunnerDoesNotRecoverToolErrorsAfterCancellation(t *testing.T) {
 		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "read_file", Arguments: `{"path":"missing.go"}`}}},
 		{Text: "must not recover"},
 	}}
-	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeCodebase, tools.ReviewScope{})
+	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeCodebase, tools.ReviewScope{}, gitctx.ChangeFingerprint{})
 	runner := OpenAIRunner{
 		Config:    config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 2},
 		Client:    client,

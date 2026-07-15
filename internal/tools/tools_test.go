@@ -159,7 +159,11 @@ func TestStagedReviewToolsNeverReadUnstagedWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewReviewRegistryWithSkills(repo, nil, ReviewModeStaged, ReviewScope{})
+	fingerprint, err := repo.StagedFingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewReviewRegistryWithSkills(repo, nil, ReviewModeStaged, ReviewScope{}, fingerprint)
 	if _, err := registry.Execute(t.Context(), Invocation{Name: "git_staged_status", Arguments: `{}`}); err == nil {
 		t.Fatal("review registry exposed a non-review tool")
 	}
@@ -209,7 +213,7 @@ func TestReviewChangesPaginatesAuthoritativeScope(t *testing.T) {
 		stats[i] = gitctx.FileStat{Path: paths[i], Adds: i}
 	}
 	scope := NewReviewScope(paths, status, stats)
-	registry := NewReviewRegistryWithSkills(nil, nil, ReviewModeUncommitted, scope)
+	registry := NewReviewRegistryWithSkills(nil, nil, ReviewModeUncommitted, scope, gitctx.ChangeFingerprint{})
 	result, err := registry.Execute(t.Context(), Invocation{Name: "review_changes", Arguments: `{"offset":128,"limit":1}`})
 	if err != nil {
 		t.Fatal(err)
@@ -231,6 +235,73 @@ func TestReviewChangesPaginatesAuthoritativeScope(t *testing.T) {
 	}
 	if envelope.Data.Total != 130 || envelope.Data.NextOffset != 129 || !envelope.Data.HasMore || !envelope.Truncated {
 		t.Fatalf("page metadata = %#v", envelope)
+	}
+}
+
+func TestDiffReviewToolsRejectRepositoryDrift(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		mode        ReviewMode
+		prepare     func(*testing.T, string)
+		fingerprint func(*gitctx.Repository) (gitctx.ChangeFingerprint, error)
+		drift       func(*testing.T, string)
+	}{
+		{
+			name: "worktree",
+			mode: ReviewModeUncommitted,
+			prepare: func(t *testing.T, dir string) {
+				mustWriteFile(t, filepath.Join(dir, "app.txt"), "launch\n")
+			},
+			fingerprint: (*gitctx.Repository).UncommittedFingerprint,
+			drift: func(t *testing.T, dir string) {
+				mustWriteFile(t, filepath.Join(dir, "app.txt"), "later\n")
+			},
+		},
+		{
+			name: "index",
+			mode: ReviewModeStaged,
+			prepare: func(t *testing.T, dir string) {
+				mustWriteFile(t, filepath.Join(dir, "app.txt"), "launch\n")
+				runGit(t, dir, "add", "app.txt")
+			},
+			fingerprint: (*gitctx.Repository).StagedFingerprint,
+			drift: func(t *testing.T, dir string) {
+				mustWriteFile(t, filepath.Join(dir, "app.txt"), "later\n")
+				runGit(t, dir, "add", "app.txt")
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			runGit(t, dir, "init")
+			runGit(t, dir, "config", "user.name", "Test User")
+			runGit(t, dir, "config", "user.email", "test@example.com")
+			mustWriteFile(t, filepath.Join(dir, "app.txt"), "base\n")
+			runGit(t, dir, "add", "app.txt")
+			runGit(t, dir, "commit", "-m", "base")
+			test.prepare(t, dir)
+
+			repo, err := gitctx.Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fingerprint, err := test.fingerprint(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			registry := NewReviewRegistryWithSkills(repo, nil, test.mode, ReviewScope{}, fingerprint)
+			test.drift(t, dir)
+
+			_, err = registry.Execute(t.Context(), Invocation{Name: "read_file", Arguments: `{"path":"app.txt"}`})
+			if !errors.Is(err, gitctx.ErrChangeSnapshotStale) {
+				t.Fatalf("read_file error = %v, want stale snapshot", err)
+			}
+		})
 	}
 }
 

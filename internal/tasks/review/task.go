@@ -41,13 +41,14 @@ var (
 )
 
 type PreparedContext struct {
-	Mode          Mode                    `json:"mode"`
-	Paths         []string                `json:"paths,omitempty"`
-	Status        []gitctx.PathChange     `json:"status,omitempty"`
-	Stats         []gitctx.FileStat       `json:"stats,omitempty"`
-	ContextPack   contextpack.ContextPack `json:"context_pack,omitzero"`
-	Diff          string                  `json:"diff,omitempty"`
-	DiffTruncated bool                    `json:"diff_truncated,omitempty"`
+	Mode          Mode                     `json:"mode"`
+	Paths         []string                 `json:"paths,omitempty"`
+	Status        []gitctx.PathChange      `json:"status,omitempty"`
+	Stats         []gitctx.FileStat        `json:"stats,omitempty"`
+	ContextPack   contextpack.ContextPack  `json:"context_pack,omitzero"`
+	Diff          string                   `json:"diff,omitempty"`
+	DiffTruncated bool                     `json:"diff_truncated,omitempty"`
+	Fingerprint   gitctx.ChangeFingerprint `json:"fingerprint,omitzero"`
 }
 
 const maxPromptContextEntries = 128
@@ -146,6 +147,7 @@ func Prepare(repo *gitctx.Repository, mode Mode) (PreparedContext, error) {
 	prepared.Stats = snapshot.Stats
 	prepared.Diff = snapshot.Diff
 	prepared.DiffTruncated = snapshot.DiffTruncated
+	prepared.Fingerprint = snapshot.Fingerprint
 	prepared.ContextPack = buildContextPack(repo, prepared)
 	return prepared, nil
 }
@@ -345,7 +347,19 @@ func Validate(kind Kind, text string) []string {
 	}
 }
 
-func ValidateRepository(kind Kind, text string, repo *gitctx.Repository, mode Mode, syntheticPaths []string) []string {
+func ValidateRepository(kind Kind, text string, repo *gitctx.Repository, mode Mode, syntheticPaths []string, fingerprint gitctx.ChangeFingerprint) []string {
+	if repo != nil && mode != ModeCodebase {
+		var err error
+		switch mode {
+		case ModeStaged:
+			err = repo.CheckStagedFingerprint(fingerprint)
+		case ModeUncommitted:
+			err = repo.CheckUncommittedFingerprint(fingerprint)
+		}
+		if err != nil {
+			return []string{err.Error()}
+		}
+	}
 	errs := Validate(kind, text)
 	if repo == nil || len(errs) > 0 {
 		return errs

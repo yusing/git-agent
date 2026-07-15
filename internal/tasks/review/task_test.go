@@ -121,12 +121,40 @@ func TestValidateRepositoryRejectsMissingAndOutOfRangeEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	report := `{"summary":"one","recommendation":"COMMENT","findings":[{"severity":"MEDIUM","aspect":"correctness","title":"bad","impact":"bad result","evidences":[{"title":"location","path":"app.go","line_start":1,"line_end":2}],"proposed_fix":"fix"}]}`
-	if errs := ValidateRepository(KindReview, report, repo, ModeCodebase, nil); !containsError(errs, "line_end 2 exceeds") {
+	if errs := ValidateRepository(KindReview, report, repo, ModeCodebase, nil, gitctx.ChangeFingerprint{}); !containsError(errs, "line_end 2 exceeds") {
 		t.Fatalf("out-of-range errors = %v", errs)
 	}
 	report = strings.Replace(report, `"path":"app.go","line_start":1,"line_end":2`, `"path":"missing.go","line_start":1,"line_end":1`, 1)
-	if errs := ValidateRepository(KindReview, report, repo, ModeCodebase, nil); !containsError(errs, "does not exist") {
+	if errs := ValidateRepository(KindReview, report, repo, ModeCodebase, nil, gitctx.ChangeFingerprint{}); !containsError(errs, "does not exist") {
 		t.Fatalf("missing-path errors = %v", errs)
+	}
+}
+
+func TestValidateRepositoryRejectsDriftForEmptyReport(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if _, err := git.PlainInit(dir, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app.go"), []byte("package launch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := gitctx.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := Prepare(repo, ModeUncommitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app.go"), []byte("package later\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	report := `{"summary":"clean","recommendation":"APPROVE","findings":[]}`
+	errs := ValidateRepository(KindReview, report, repo, ModeUncommitted, prepared.Paths, prepared.Fingerprint)
+	if !containsError(errs, gitctx.ErrChangeSnapshotStale.Error()) {
+		t.Fatalf("errors = %v, want stale snapshot", errs)
 	}
 }
 

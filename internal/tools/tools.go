@@ -46,7 +46,14 @@ type Tool interface {
 }
 
 type Registry struct {
-	tools map[string]Tool
+	tools       map[string]Tool
+	reviewGuard *reviewStateGuard
+}
+
+type reviewStateGuard struct {
+	repo        *gitctx.Repository
+	mode        ReviewMode
+	fingerprint gitctx.ChangeFingerprint
 }
 
 const SkillReadToolName = "skills_read"
@@ -97,8 +104,11 @@ func NewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Store) *R
 	return newRegistry(repo, skillStore)
 }
 
-func NewReviewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Store, mode ReviewMode, scope ReviewScope) *Registry {
+func NewReviewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Store, mode ReviewMode, scope ReviewScope, fingerprint gitctx.ChangeFingerprint) *Registry {
 	registry := &Registry{tools: map[string]Tool{}}
+	if repo != nil && mode != ReviewModeCodebase {
+		registry.reviewGuard = &reviewStateGuard{repo: repo, mode: mode, fingerprint: fingerprint}
+	}
 	register(registry, []Tool{
 		repoSummaryTool{repo: repo},
 		listFilesTool{repo: repo, mode: mode},
@@ -181,7 +191,23 @@ func (r *Registry) Execute(ctx context.Context, invocation Invocation) (Result, 
 	if !ok {
 		return Result{}, fmt.Errorf("tool %q is not registered", invocation.Name)
 	}
+	if r.reviewGuard != nil && invocation.Name != SkillReadToolName {
+		if err := r.reviewGuard.check(); err != nil {
+			return Result{}, err
+		}
+	}
 	return tool.Execute(ctx, invocation)
+}
+
+func (g *reviewStateGuard) check() error {
+	switch g.mode {
+	case ReviewModeStaged:
+		return g.repo.CheckStagedFingerprint(g.fingerprint)
+	case ReviewModeUncommitted:
+		return g.repo.CheckUncommittedFingerprint(g.fingerprint)
+	default:
+		return nil
+	}
 }
 
 func CommitMessageToolNames() []string {

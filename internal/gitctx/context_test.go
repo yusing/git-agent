@@ -129,6 +129,14 @@ func TestUncommittedSnapshotBoundsOversizedFiles(t *testing.T) {
 	if !strings.Contains(snapshot.Diff, "worktree file omitted") || strings.Contains(snapshot.Diff, strings.Repeat("x", 1024)) {
 		t.Fatalf("oversized diff was not safely represented:\n%s", snapshot.Diff)
 	}
+	writeFile(t, filepath.Join(repoDir, "dump.txt"), strings.Repeat("y", len(content)))
+	fingerprint, err := repo.UncommittedFingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fingerprint == snapshot.Fingerprint {
+		t.Fatal("same-size oversized rewrite did not change fingerprint")
+	}
 }
 
 func TestUncommittedSnapshotExcludesUntrackedInternalState(t *testing.T) {
@@ -222,6 +230,18 @@ func TestUncommittedDiffUsesCurrentSubmoduleRevision(t *testing.T) {
 	}
 	if !strings.Contains(diff, "Subproject commit "+baseSHA+"-dirty") {
 		t.Fatalf("uncommitted diff missing dirty-only submodule state:\n%s", diff)
+	}
+	fingerprint, err := repo.UncommittedFingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(repoDir, "webui", "ui.txt"), "different dirty content\n")
+	changedFingerprint, err := repo.UncommittedFingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedFingerprint == fingerprint {
+		t.Fatal("dirty submodule rewrite did not change fingerprint")
 	}
 }
 
