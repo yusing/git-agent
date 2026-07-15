@@ -4,6 +4,7 @@ package background
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,29 +12,182 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/yusing/git-agent/internal/gitctx"
+	"github.com/yusing/git-agent/internal/textutil"
 	"github.com/yusing/git-agent/internal/trace"
 )
 
 const (
-	recordVersion       = 1
+	legacyRecordVersion = 1
+	recordVersion       = 2
 	defaultPollInterval = 100 * time.Millisecond
 	heartbeatInterval   = 5 * time.Second
 	heartbeatStaleAfter = 30 * time.Second
 	maxRecordBytes      = 4 << 20
+	maxDiagnosticEvents = 8
+	maxDiagnosticBytes  = 4 << 10
+	maxDiagnosticLines  = 40
 )
 
 // Record is the versioned durable state of one background task.
 type Record struct {
-	Version   int          `json:"version"`
-	ID        string       `json:"id"`
-	Command   string       `json:"command"`
-	PID       int          `json:"pid"`
-	StartedAt time.Time    `json:"started_at"`
-	UpdatedAt time.Time    `json:"updated_at"`
-	Terminal  *trace.Event `json:"terminal,omitempty"`
+	Version   int                `json:"version"`
+	ID        string             `json:"id"`
+	Command   string             `json:"command"`
+	PID       int                `json:"pid"`
+	StartedAt time.Time          `json:"started_at"`
+	UpdatedAt time.Time          `json:"updated_at"`
+	Terminal  *trace.Event       `json:"terminal,omitempty"`
+	Failure   *FailureDiagnostic `json:"failure,omitempty"`
+}
+
+type FailureDiagnostic struct {
+	Model                 string                    `json:"model,omitempty"`
+	Mode                  string                    `json:"mode,omitempty"`
+	MaxSteps              int                       `json:"max_steps,omitempty"`
+	MaxToolCalls          int                       `json:"max_tool_calls,omitempty"`
+	RepositoryFingerprint *gitctx.ChangeFingerprint `json:"repository_fingerprint,omitempty"`
+	ToolEvents            []FailureToolEvent        `json:"tool_events,omitempty"`
+}
+
+type FailureToolEvent struct {
+	Seq       int    `json:"seq"`
+	Kind      string `json:"kind"`
+	Tool      string `json:"tool,omitempty"`
+	CallID    string `json:"call_id,omitempty"`
+	Payload   string `json:"payload,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
+}
+
+func (d *FailureDiagnostic) RecordToolEvent(event trace.Event) {
+	if d == nil || (event.Kind != "tool-call" && event.Kind != "tool-output") {
+		return
+	}
+	toolEvent := FailureToolEvent{
+		Seq:    event.Seq,
+		Kind:   event.Kind,
+		Tool:   diagnosticString(event.Value["name"]),
+		CallID: diagnosticString(event.Value["call_id"]),
+	}
+	if event.Kind == "tool-output" {
+		toolEvent.Truncated, _ = event.Value["truncated"].(bool)
+		toolEvent.Payload, toolEvent.Truncated = diagnosticToolOutput(event.Value["content"], toolEvent.Truncated)
+	} else {
+		toolEvent.Payload, toolEvent.Truncated = diagnosticToolCall(event.Value["arguments"])
+	}
+	if len(d.ToolEvents) == maxDiagnosticEvents {
+		copy(d.ToolEvents, d.ToolEvents[1:])
+		d.ToolEvents[len(d.ToolEvents)-1] = toolEvent
+		return
+	}
+	d.ToolEvents = append(d.ToolEvents, toolEvent)
+}
+
+func diagnosticString(value any) string {
+	text, _ := value.(string)
+	limited, _ := textutil.Limit(text, 256, 1)
+	return limited
+}
+
+func diagnosticToolCall(value any) (string, bool) {
+	raw := diagnosticJSON(value)
+	summary := diagnosticPayloadIdentity(raw)
+	arguments, ok := diagnosticObject(value)
+	if !ok {
+		payload, truncated := marshalDiagnosticSummary(summary)
+		return payload, truncated || len(raw) > 0
+	}
+	safeKeys := map[string]bool{
+		"path": true, "paths": true, "source": true, "line_start": true, "line_end": true,
+		"offset": true, "limit": true, "max_bytes": true, "max_lines": true, "max_matches": true,
+		"glob": true, "type": true,
+	}
+	omitted := false
+	for key, item := range arguments {
+		if safeKeys[key] {
+			summary[key] = item
+		} else {
+			omitted = true
+		}
+	}
+	payload, truncated := marshalDiagnosticSummary(summary)
+	return payload, omitted || truncated
+}
+
+func diagnosticToolOutput(value any, alreadyTruncated bool) (string, bool) {
+	raw := diagnosticJSON(value)
+	summary := diagnosticPayloadIdentity(raw)
+	envelope, ok := diagnosticObject(value)
+	if !ok {
+		payload, truncated := marshalDiagnosticSummary(summary)
+		return payload, alreadyTruncated || truncated || len(raw) > 0
+	}
+	included := map[string]bool{"ok": true, "tool": true, "truncated": true, "error": true}
+	for _, key := range []string{"ok", "tool", "truncated"} {
+		if item, exists := envelope[key]; exists {
+			summary[key] = item
+		}
+	}
+	if message, ok := envelope["error"].(string); ok {
+		summary["error"] = diagnosticString(message)
+	}
+	if data, ok := envelope["data"].(map[string]any); ok {
+		included["data"] = true
+		keys := make([]string, 0, len(data))
+		for key := range data {
+			keys = append(keys, key)
+		}
+		slices.Sort(keys)
+		summary["data_keys"] = keys
+	}
+	omitted := false
+	for key := range envelope {
+		if !included[key] || key == "data" {
+			omitted = true
+		}
+	}
+	payload, truncated := marshalDiagnosticSummary(summary)
+	return payload, alreadyTruncated || omitted || truncated
+}
+
+func diagnosticObject(value any) (map[string]any, bool) {
+	if mapped, ok := value.(map[string]any); ok {
+		return mapped, true
+	}
+	text, ok := value.(string)
+	if !ok {
+		return nil, false
+	}
+	var mapped map[string]any
+	if json.Unmarshal([]byte(text), &mapped) != nil {
+		return nil, false
+	}
+	return mapped, true
+}
+
+func diagnosticJSON(value any) []byte {
+	if text, ok := value.(string); ok {
+		return []byte(text)
+	}
+	data, _ := json.Marshal(value)
+	return data
+}
+
+func diagnosticPayloadIdentity(raw []byte) map[string]any {
+	sum := sha256.Sum256(raw)
+	return map[string]any{"bytes": len(raw), "sha256": fmt.Sprintf("%x", sum)}
+}
+
+func marshalDiagnosticSummary(summary map[string]any) (string, bool) {
+	data, err := json.Marshal(summary)
+	if err != nil {
+		return "", true
+	}
+	return textutil.Limit(string(data), maxDiagnosticBytes, maxDiagnosticLines)
 }
 
 // Store owns background records beneath one project metadata directory.
@@ -129,9 +283,16 @@ func (s *Store) Create(id, command string, pid int, now time.Time) error {
 }
 
 // Complete atomically adds the exact terminal final or error event.
-func (s *Store) Complete(id string, terminal trace.Event, now time.Time) error {
+func (s *Store) Complete(id string, terminal trace.Event, failure *FailureDiagnostic, now time.Time) error {
 	if terminal.Kind != "final" && terminal.Kind != "error" {
 		return fmt.Errorf("background terminal event kind %q is invalid", terminal.Kind)
+	}
+	if terminal.Kind == "final" && failure != nil {
+		return errors.New("successful background task cannot contain failure diagnostics")
+	}
+	failure = boundedFailureDiagnostic(failure)
+	if err := validateFailureDiagnostic(failure); err != nil {
+		return err
 	}
 	if now.IsZero() {
 		return errors.New("background task update time is required")
@@ -144,10 +305,36 @@ func (s *Store) Complete(id string, terminal trace.Event, now time.Time) error {
 		if record.Terminal != nil {
 			return fmt.Errorf("background task %s is already complete", id)
 		}
+		record.Version = recordVersion
 		record.UpdatedAt = now.UTC()
 		record.Terminal = &terminal
+		record.Failure = failure
 		return s.writeRecord(path, record)
 	})
+}
+
+func boundedFailureDiagnostic(diagnostic *FailureDiagnostic) *FailureDiagnostic {
+	if diagnostic == nil {
+		return nil
+	}
+	bounded := *diagnostic
+	bounded.Model = diagnosticString(diagnostic.Model)
+	bounded.Mode = diagnosticString(diagnostic.Mode)
+	if diagnostic.RepositoryFingerprint != nil {
+		fingerprint := *diagnostic.RepositoryFingerprint
+		bounded.RepositoryFingerprint = &fingerprint
+	}
+	start := max(0, len(diagnostic.ToolEvents)-maxDiagnosticEvents)
+	bounded.ToolEvents = append([]FailureToolEvent(nil), diagnostic.ToolEvents[start:]...)
+	for index := range bounded.ToolEvents {
+		event := &bounded.ToolEvents[index]
+		event.Tool = diagnosticString(event.Tool)
+		event.CallID = diagnosticString(event.CallID)
+		payload, truncated := textutil.Limit(event.Payload, maxDiagnosticBytes, maxDiagnosticLines)
+		event.Payload = payload
+		event.Truncated = event.Truncated || truncated
+	}
+	return &bounded
 }
 
 // Read returns one complete, validated record snapshot.
@@ -249,7 +436,7 @@ func (s *Store) readPath(path, id string) (Record, error) {
 }
 
 func validateRecord(record Record, id string) error {
-	if record.Version != recordVersion {
+	if record.Version != legacyRecordVersion && record.Version != recordVersion {
 		return fmt.Errorf("background task %s has unsupported record version %d", id, record.Version)
 	}
 	if record.ID != id {
@@ -263,6 +450,44 @@ func validateRecord(record Record, id string) error {
 	}
 	if record.Terminal != nil && record.Terminal.Kind != "final" && record.Terminal.Kind != "error" {
 		return fmt.Errorf("background task %s has invalid terminal event kind %q", id, record.Terminal.Kind)
+	}
+	if record.Version == legacyRecordVersion && record.Failure != nil {
+		return fmt.Errorf("background task %s legacy record contains failure diagnostics", id)
+	}
+	if record.Failure != nil && (record.Terminal == nil || record.Terminal.Kind != "error") {
+		return fmt.Errorf("background task %s has diagnostics without terminal error", id)
+	}
+	if err := validateFailureDiagnostic(record.Failure); err != nil {
+		return fmt.Errorf("background task %s: %w", id, err)
+	}
+	return nil
+}
+
+func validateFailureDiagnostic(diagnostic *FailureDiagnostic) error {
+	if diagnostic == nil {
+		return nil
+	}
+	if len(diagnostic.Model) > 512 || len(diagnostic.Mode) > 512 {
+		return errors.New("background failure diagnostic identity exceeds limits")
+	}
+	if diagnostic.MaxSteps < 0 || diagnostic.MaxToolCalls < 0 {
+		return errors.New("background failure diagnostic budgets must be non-negative")
+	}
+	if len(diagnostic.ToolEvents) > maxDiagnosticEvents {
+		return fmt.Errorf("background failure diagnostic exceeds %d tool events", maxDiagnosticEvents)
+	}
+	if fingerprint := diagnostic.RepositoryFingerprint; fingerprint != nil {
+		if len(fingerprint.BaseTree) > 128 || len(fingerprint.TargetTree) > 128 || len(fingerprint.DirtySubmodules) > 128 {
+			return errors.New("background failure diagnostic fingerprint exceeds limits")
+		}
+	}
+	for _, event := range diagnostic.ToolEvents {
+		if event.Kind != "tool-call" && event.Kind != "tool-output" {
+			return fmt.Errorf("background failure diagnostic event kind %q is invalid", event.Kind)
+		}
+		if len(event.Tool) > 512 || len(event.CallID) > 512 || len(event.Payload) > maxDiagnosticBytes+256 {
+			return errors.New("background failure diagnostic event exceeds limits")
+		}
 	}
 	return nil
 }

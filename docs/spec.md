@@ -265,8 +265,14 @@ The detached producer creates a versioned running record before publishing its
 launch JSON, refreshes its update timestamp with a heartbeat while running, then
 atomically replaces it with a `0600` record containing task ID, command, PID,
 start/update timestamps, and the exact terminal `final` or `error` trace event.
-Terminal events are written without trace compaction and published to SSE.
-Records live under
+Version 2 failure records additionally contain model, mode, step/tool budgets,
+launch repository fingerprint when applicable, and the last eight sanitized
+tool-call/tool-output summaries. Each diagnostic payload is capped at 4 KiB and
+40 lines. Successful records contain no failure diagnostic. Readers continue to
+accept version 1 records, which have no diagnostic field. Diagnostics never
+contain API credentials, provider endpoints, full requests/responses, or
+unbounded repository content; they are not full traces. Terminal events are
+written without trace compaction and published to SSE. Records live under
 `~/.git-agent/<project-identity-sha>/background/<task-id>.json`, are retained
 indefinitely, and do not create a trace session. The containing directory is
 `0700`.

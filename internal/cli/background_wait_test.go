@@ -29,7 +29,7 @@ func TestReviewAndSimplifyWaitPrintOnlyRepeatableFinalJSON(t *testing.T) {
 			if err := store.Complete(cliWaitTaskID, trace.Event{
 				Seq: 4, At: now.Add(time.Second), Kind: "final",
 				Value: map[string]any{"text": map[string]any{"summary": "complete", "items": []any{}}},
-			}, now.Add(time.Second)); err != nil {
+			}, nil, now.Add(time.Second)); err != nil {
 				t.Fatal(err)
 			}
 
@@ -66,7 +66,7 @@ func TestWaitFailuresKeepStdoutEmpty(t *testing.T) {
 	}
 	if err := store.Complete(cliWaitTaskID, trace.Event{
 		Seq: 4, At: now.Add(time.Second), Kind: "error", Value: map[string]any{"message": "stored failure"},
-	}, now.Add(time.Second)); err != nil {
+	}, nil, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 

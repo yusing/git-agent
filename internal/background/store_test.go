@@ -2,7 +2,9 @@ package background
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/trace"
 )
 
@@ -36,7 +39,7 @@ func TestStoreWaitsForAndRepeatsFinalReports(t *testing.T) {
 						At:    started.Add(time.Second),
 						Kind:  "final",
 						Value: map[string]any{"text": map[string]any{"summary": "done"}},
-					}, started.Add(time.Second))
+					}, nil, started.Add(time.Second))
 				})
 				return true
 			}
@@ -67,11 +70,88 @@ func TestStoreReturnsStoredErrorsAndRejectsWrongKind(t *testing.T) {
 	}
 	if err := store.Complete(testTaskID, trace.Event{
 		Seq: 2, At: now.Add(time.Second), Kind: "error", Value: map[string]any{"message": "provider unavailable"},
-	}, now.Add(time.Second)); err != nil {
+	}, nil, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Wait(t.Context(), testTaskID, "review"); err == nil || !strings.Contains(err.Error(), "provider unavailable") {
 		t.Fatalf("stored error = %v", err)
+	}
+}
+
+func TestStorePersistsBoundedFailureDiagnostics(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Now().UTC()
+	if err := store.Create(testTaskID, "review", 42, now); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := gitctx.ChangeFingerprint{BaseTree: strings.Repeat("a", 40), TargetTree: strings.Repeat("b", 40)}
+	diagnostic := &FailureDiagnostic{
+		Model: "gpt-test", Mode: "staged", MaxSteps: 60, MaxToolCalls: 48,
+		RepositoryFingerprint: &fingerprint,
+	}
+	for seq := 1; seq <= maxDiagnosticEvents+2; seq++ {
+		kind := "tool-call"
+		value := map[string]any{
+			"name": "read_file", "call_id": fmt.Sprintf("call_%d", seq),
+			"arguments": strings.Repeat("argument", maxDiagnosticBytes),
+		}
+		if seq%2 == 0 {
+			kind = "tool-output"
+			value = map[string]any{
+				"name": "read_file", "call_id": fmt.Sprintf("call_%d", seq),
+				"content": strings.Repeat("repository content\n", maxDiagnosticLines+20),
+			}
+		}
+		diagnostic.RecordToolEvent(trace.Event{Seq: seq, Kind: kind, Value: value})
+	}
+	if err := store.Complete(testTaskID, trace.Event{
+		Seq: 20, At: now.Add(time.Second), Kind: "error", Value: map[string]any{"message": "provider unavailable"},
+	}, diagnostic, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	record, err := store.Read(testTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Version != recordVersion || record.Failure == nil || record.Failure.Model != "gpt-test" {
+		t.Fatalf("failure record = %#v", record)
+	}
+	if len(record.Failure.ToolEvents) != maxDiagnosticEvents || record.Failure.ToolEvents[0].Seq != 3 {
+		t.Fatalf("diagnostic events = %#v", record.Failure.ToolEvents)
+	}
+	for _, event := range record.Failure.ToolEvents {
+		if len(event.Payload) > maxDiagnosticBytes+256 || !event.Truncated {
+			t.Fatalf("unbounded diagnostic event = %#v", event)
+		}
+		if strings.Contains(event.Payload, "repository content") || strings.Contains(event.Payload, "argumentargument") {
+			t.Fatalf("diagnostic retained raw tool payload: %#v", event)
+		}
+	}
+}
+
+func TestStoreReadsLegacyRecordsWithoutDiagnostics(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Now().UTC()
+	record := Record{
+		Version: legacyRecordVersion, ID: testTaskID, Command: "review", PID: 42,
+		StartedAt: now, UpdatedAt: now,
+		Terminal: &trace.Event{Seq: 1, At: now, Kind: "final", Value: map[string]any{"text": map[string]any{"summary": "legacy"}}},
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.dir, testTaskID+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := store.Wait(t.Context(), testTaskID, "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.(map[string]any)["summary"] != "legacy" {
+		t.Fatalf("legacy result = %#v", result)
 	}
 }
 
@@ -214,7 +294,7 @@ func TestStorePublishesAtomicPrivateRecordSnapshots(t *testing.T) {
 	}
 	if err := store.Complete(testTaskID, trace.Event{
 		Seq: 2, At: now.Add(time.Second), Kind: "final", Value: map[string]any{"text": map[string]any{"summary": "done"}},
-	}, now.Add(time.Second)); err != nil {
+	}, nil, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	close(done)

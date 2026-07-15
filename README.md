@@ -446,6 +446,11 @@ under:
 ~/.git-agent/<project-identity-sha>/background/<task-id>.json
 ```
 
+Failed task records include bounded debugging context: model/mode identity,
+launch repository fingerprint, and recent sanitized tool-call/tool-output
+summaries. They do not contain provider credentials, full requests/responses,
+or an unbounded repository trace.
+
 Git repositories with `origin` use the SHA-256 of its normalized repository
 identity, so common SSH and HTTPS URL spellings and separate clones share task
 records. Projects without `origin` use the cleaned absolute project-path SHA.
@@ -501,8 +506,9 @@ config directory already exists.
 - Metadata, indexes, and trace artifacts under `~/.git-agent/` are restricted to
   the current user on platforms with Unix-style permission bits.
 - Detached task records contain producer metadata and the exact terminal
-  `final` or `error` event. They are owner-only and retained indefinitely so a
-  completed report remains retrievable; no trace session is created for them.
+  `final` or `error` event. Failed records also contain bounded sanitized
+  diagnostics. Records are owner-only and retained indefinitely so a completed
+  report remains retrievable; no trace session is created for them.
 
 ## Specification
 

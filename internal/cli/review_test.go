@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,6 +131,74 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 				t.Fatalf("stderr = %q", stderr.String())
 			}
 		})
+	}
+}
+
+func TestDetachedReviewPersistsBoundedFailureDiagnostics(t *testing.T) {
+	repoDir := initRepo(t)
+	t.Chdir(repoDir)
+	path := filepath.Join(repoDir, "app.go")
+	if err := os.WriteFile(path, []byte("package app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "add", "app.go")
+	server := newScriptedResponsesServer(t, []func(string) string{
+		func(string) string {
+			return responseWithToolCalls("resp_tool", toolCallSpec{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: `{}`})
+		},
+		func(string) string { return responseWithText("resp_empty", "") },
+	})
+	defer server.Close()
+	t.Setenv("OPENAI_API_KEY", "diagnostic-secret")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "")
+	t.Setenv(detachedChildEnv, "1")
+	t.Setenv(detachedTaskIDEnv, cliWaitTaskID)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"review", "--staged"}); err == nil {
+		t.Fatal("review unexpectedly succeeded")
+	}
+	record, err := backgroundStoreForCurrentProject(t).Read(cliWaitTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Terminal == nil || record.Terminal.Kind != "error" || record.Failure == nil {
+		t.Fatalf("failed background record = %#v", record)
+	}
+	if record.Failure.Model != reviewDefaultModel || record.Failure.Mode != "staged" || record.Failure.RepositoryFingerprint == nil {
+		t.Fatalf("failure identity = %#v", record.Failure)
+	}
+	if len(record.Failure.ToolEvents) != 2 || record.Failure.ToolEvents[0].Kind != "tool-call" || record.Failure.ToolEvents[1].Kind != "tool-output" {
+		t.Fatalf("failure tool events = %#v", record.Failure.ToolEvents)
+	}
+	data, err := json.Marshal(record.Failure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "diagnostic-secret") || strings.Contains(string(data), server.URL) {
+		t.Fatalf("failure diagnostic contains provider credentials or endpoint: %s", data)
+	}
+}
+
+func TestDetachedReviewPersistsEarlyFailure(t *testing.T) {
+	repoDir := initRepo(t)
+	t.Chdir(repoDir)
+	t.Setenv(detachedChildEnv, "1")
+	t.Setenv(detachedTaskIDEnv, cliWaitTaskID)
+
+	app := &App{stdout: io.Discard, stderr: io.Discard}
+	if err := app.Run(t.Context(), []string{"review", "--staged"}); err == nil {
+		t.Fatal("empty staged review unexpectedly succeeded")
+	}
+	record, err := backgroundStoreForCurrentProject(t).Read(cliWaitTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Terminal == nil || record.Terminal.Kind != "error" || record.Failure == nil || record.Failure.Mode != "staged" {
+		t.Fatalf("early failure record = %#v", record)
 	}
 }
 

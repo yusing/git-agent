@@ -179,6 +179,16 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	if err := backgroundStore.Create(taskID, command, os.Getpid(), time.Now()); err != nil {
 		return err
 	}
+	failureDiagnostic := &backgroundtask.FailureDiagnostic{Mode: string(mode)}
+	recordCompleted := false
+	defer func() {
+		if returnErr == nil || recordCompleted {
+			return
+		}
+		now := time.Now().UTC()
+		terminal := trace.Event{At: now, Kind: "error", Value: map[string]any{"message": returnErr.Error()}}
+		returnErr = errors.Join(returnErr, backgroundStore.Complete(taskID, terminal, failureDiagnostic, now))
+	}()
 	heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
 	heartbeatDone := make(chan error, 1)
 	go func() {
@@ -204,6 +214,10 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	if err != nil {
 		return err
 	}
+	if mode != reviewtask.ModeCodebase {
+		fingerprint := prepared.Fingerprint
+		failureDiagnostic.RepositoryFingerprint = &fingerprint
+	}
 	renderedGuidance, err := resolveReviewGuidance(repo, localCfg.GuidanceFamily, prepared.Paths, mode)
 	if err != nil {
 		return err
@@ -218,6 +232,9 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	}
 	cfg.Timeout = reviewTimeout
 	applyCodeReviewDefaults(kind, opts, &cfg)
+	failureDiagnostic.Model = cfg.Model
+	failureDiagnostic.MaxSteps = cfg.MaxSteps
+	failureDiagnostic.MaxToolCalls = cfg.MaxToolCalls
 
 	eventServer, err := startDetachedAgentEventServer(a.stderr, command, taskID)
 	if err != nil {
@@ -225,9 +242,17 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	}
 	defer eventServer.Close()
 	eventSink := func(event trace.Event) error {
+		failureDiagnostic.RecordToolEvent(event)
 		var recordErr error
 		if event.Kind == "final" || event.Kind == "error" {
-			recordErr = backgroundStore.Complete(taskID, event, time.Now())
+			var diagnostic *backgroundtask.FailureDiagnostic
+			if event.Kind == "error" {
+				diagnostic = failureDiagnostic
+			}
+			recordErr = backgroundStore.Complete(taskID, event, diagnostic, time.Now())
+			if recordErr == nil {
+				recordCompleted = true
+			}
 		}
 		return errors.Join(recordErr, eventServer.Publish(event))
 	}
