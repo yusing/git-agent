@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"net"
+	"io"
 	"net/http"
+	"net/url"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -17,7 +19,7 @@ import (
 
 type agentEventServer struct {
 	server   *http.Server
-	listener net.Listener
+	endpoint localHTTPEndpoint
 	token    string
 
 	mu     sync.Mutex
@@ -27,13 +29,14 @@ type agentEventServer struct {
 }
 
 func startAgentEventServer() (*agentEventServer, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	token := rand.Text()
+	listener, endpoint, err := listenLocalHTTP("/events", url.Values{"token": []string{token}})
 	if err != nil {
 		return nil, err
 	}
 	events := &agentEventServer{
-		listener: listener,
-		token:    rand.Text(),
+		endpoint: endpoint,
+		token:    token,
 		notify:   make(chan struct{}),
 	}
 	mux := http.NewServeMux()
@@ -52,9 +55,27 @@ func startAgentEventServer() (*agentEventServer, error) {
 	return events, nil
 }
 
-func (s *agentEventServer) URL() string {
-	return "http://" + s.listener.Addr().String() + "/events?token=" + s.token
+func startDetachedAgentEventServer(stderr io.Writer, command, taskID string) (*agentEventServer, error) {
+	events, err := startAgentEventServer()
+	if err != nil {
+		return nil, err
+	}
+	if err := writeDetachedLaunch(stderr, detachedLaunch{
+		Command:  command,
+		ID:       taskID,
+		PID:      os.Getpid(),
+		Endpoint: events.Endpoint(),
+	}); err != nil {
+		events.Close()
+		return nil, err
+	}
+	if file, ok := stderr.(*os.File); ok {
+		_ = file.Close()
+	}
+	return events, nil
 }
+
+func (s *agentEventServer) Endpoint() localHTTPEndpoint { return s.endpoint }
 
 func (s *agentEventServer) Publish(event trace.Event) error {
 	s.mu.Lock()

@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -14,7 +13,7 @@ import (
 
 type searchProgressAgent struct {
 	server   *http.Server
-	listener net.Listener
+	endpoint localHTTPEndpoint
 
 	mu       sync.RWMutex
 	snapshot searchProgressSnapshot
@@ -33,12 +32,12 @@ type searchProgressSnapshot struct {
 }
 
 func startSearchProgressAgent() (*searchProgressAgent, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, endpoint, err := listenLocalHTTP("/progress", nil)
 	if err != nil {
 		return nil, err
 	}
 	agent := &searchProgressAgent{
-		listener: listener,
+		endpoint: endpoint,
 		snapshot: searchProgressSnapshot{
 			Status:    "waiting",
 			UpdatedAt: time.Now().UTC(),
@@ -59,9 +58,7 @@ func startSearchProgressAgent() (*searchProgressAgent, error) {
 	return agent, nil
 }
 
-func (a *searchProgressAgent) URL() string {
-	return "http://" + a.listener.Addr().String() + "/progress"
-}
+func (a *searchProgressAgent) Endpoint() localHTTPEndpoint { return a.endpoint }
 
 func (a *searchProgressAgent) Update(progress searchtask.Progress) {
 	a.mu.Lock()

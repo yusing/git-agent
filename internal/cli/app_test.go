@@ -282,7 +282,7 @@ func TestSearchHelpReturnsUsage(t *testing.T) {
 		"--format json|brief; --ls: text|json; --ls-remotes: text|json|completion; --ls-files: tree|json": "output format by search mode",
 		"--code":                     "search code files only",
 		"--no-tests":                 "exclude common test files and test directories from results and ls-files output",
-		"--agent":                    "serve search indexing progress on localhost when embeddings need work",
+		"--agent":                    "serve search indexing progress on a local socket when embeddings need work",
 		"--ls":                       "list search indexes for the current project or remote",
 		"--ls-remotes":               "list cached remote repositories",
 		"--ls-files":                 "list indexed files from the selected search index",
@@ -762,11 +762,13 @@ func TestSearchProgressAgentServesCurrentProgress(t *testing.T) {
 	}
 	defer agent.Close()
 
-	if !strings.HasPrefix(agent.URL(), "http://127.0.0.1:") || !strings.HasSuffix(agent.URL(), "/progress") {
-		t.Fatalf("agent URL = %q", agent.URL())
+	endpoint := agent.Endpoint()
+	if endpoint.Network != localHTTPNetwork || !filepath.IsAbs(endpoint.Address) || endpoint.URL != "http://localhost/progress" {
+		t.Fatalf("agent endpoint = %#v", endpoint)
 	}
+	client := localHTTPTestClient(t, endpoint)
 	readSnapshot := func() searchProgressSnapshot {
-		resp, err := http.Get(agent.URL())
+		resp, err := client.Get(endpoint.URL)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -798,13 +800,17 @@ func TestSearchProgressAgentServesCurrentProgress(t *testing.T) {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
 
-	resp, err := http.Get(strings.TrimSuffix(agent.URL(), "/progress") + "/not-progress")
+	resp, err := client.Get(strings.TrimSuffix(endpoint.URL, "/progress") + "/not-progress")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	agent.Close()
+	if _, err := os.Stat(endpoint.Address); !os.IsNotExist(err) {
+		t.Fatalf("progress socket remains after close: %v", err)
 	}
 }
 
@@ -829,8 +835,12 @@ func TestSearchAgentPrintsProgressURLOnlyWhenIndexNeedsWork(t *testing.T) {
 	if err := app.Run(t.Context(), []string{"search", "--agent", "release", "notes"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stderr.String(), "search: progress agent listening on http://127.0.0.1:") || !strings.Contains(stderr.String(), "/progress\n") {
-		t.Fatalf("stderr = %q", stderr.String())
+	var endpoint localHTTPEndpoint
+	if err := json.Unmarshal(stderr.Bytes(), &endpoint); err != nil {
+		t.Fatalf("decode endpoint %q: %v", stderr.String(), err)
+	}
+	if endpoint.Network != localHTTPNetwork || !filepath.IsAbs(endpoint.Address) || endpoint.URL != "http://localhost/progress" {
+		t.Fatalf("endpoint = %#v", endpoint)
 	}
 	if got := stdout.String(); !strings.HasPrefix(got, "# mode=filesystem index=built\n1.00 notes.txt:1 release notes live here\n") {
 		t.Fatalf("stdout = %q", got)

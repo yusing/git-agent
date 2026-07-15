@@ -78,6 +78,8 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return a.runReleaseNote(ctx, args[1:])
 	case "review":
 		return a.runCodeReview(ctx, reviewtask.KindReview, args[1:])
+	case reviewTestCommand:
+		return a.runReviewTest(ctx, args[1:])
 	case "search":
 		return a.runSearch(ctx, args[1:])
 	case "simplify":
@@ -217,22 +219,11 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	cfg.Timeout = reviewTimeout
 	applyCodeReviewDefaults(kind, opts, &cfg)
 
-	eventServer, err := startAgentEventServer()
+	eventServer, err := startDetachedAgentEventServer(a.stderr, command, taskID)
 	if err != nil {
 		return err
 	}
 	defer eventServer.Close()
-	if err := writeDetachedLaunch(a.stderr, detachedLaunch{
-		Command: command,
-		ID:      taskID,
-		PID:     os.Getpid(),
-		URL:     eventServer.URL(),
-	}); err != nil {
-		return err
-	}
-	if file, ok := a.stderr.(*os.File); ok {
-		_ = file.Close()
-	}
 	eventSink := func(event trace.Event) error {
 		var recordErr error
 		if event.Kind == "final" || event.Kind == "error" {
@@ -464,7 +455,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	fs.BoolVar(&reindex, "reindex", false, "rebuild embeddings for the selected source")
 	fs.BoolVar(&codeOnly, "code", false, "search code files only")
 	fs.BoolVar(&noTests, "no-tests", false, "exclude common test files and test directories from results and ls-files output")
-	fs.BoolVar(&agentMode, "agent", false, "serve search indexing progress on localhost when embeddings need work")
+	fs.BoolVar(&agentMode, "agent", false, "serve search indexing progress on a local socket when embeddings need work")
 	fs.BoolVar(&listIndexes, "ls", false, "list search indexes for the current project or remote")
 	fs.BoolVar(&listRemotes, "ls-remotes", false, "list cached remote repositories")
 	fs.BoolVar(&listFiles, "ls-files", false, "list indexed files from the selected search index")
@@ -562,7 +553,10 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 				if err != nil {
 					return err
 				}
-				fmt.Fprintf(a.stderr, "search: progress agent listening on %s\n", progressAgent.URL())
+				if err := sonic.ConfigDefault.NewEncoder(a.stderr).Encode(progressAgent.Endpoint()); err != nil {
+					progressAgent.Close()
+					return err
+				}
 			}
 			progressAgent.Update(progress)
 			return nil

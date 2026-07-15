@@ -18,7 +18,8 @@ func TestAgentEventServerRequiresToken(t *testing.T) {
 	}
 	defer server.Close()
 
-	eventURL, err := url.Parse(server.URL())
+	endpoint := server.Endpoint()
+	eventURL, err := url.Parse(endpoint.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +27,8 @@ func TestAgentEventServerRequiresToken(t *testing.T) {
 		t.Fatalf("event URL has no token: %s", eventURL)
 	}
 	eventURL.RawQuery = ""
-	response, err := http.Get(eventURL.String())
+	endpoint.URL = eventURL.String()
+	response, err := localHTTPTestClient(t, endpoint).Get(endpoint.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,12 +54,13 @@ func TestAgentEventServerReplaysEventsAndHonorsLastEventID(t *testing.T) {
 	}
 	server.Finish()
 
-	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL(), nil)
+	endpoint := server.Endpoint()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, endpoint.URL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request.Header.Set("Last-Event-ID", "1")
-	response, err := http.DefaultClient.Do(request)
+	response, err := localHTTPTestClient(t, endpoint).Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +105,8 @@ func TestEventRecorderPublishesEveryTraceEvent(t *testing.T) {
 	}
 	server.Finish()
 
-	response, err := http.Get(server.URL())
+	endpoint := server.Endpoint()
+	response, err := localHTTPTestClient(t, endpoint).Get(endpoint.URL)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -204,8 +204,9 @@ guidance, skill, tool, validation-repair, SSE, and trailing-prompt contracts as
 as review findings. Only confirmed behavior-preserving opportunities belong in
 output; empty opportunities is valid.
 
-Both commands always bind an SSE server on `127.0.0.1:0` after local validation.
-The launcher publishes its actual token-bearing `/events` URL in launch JSON
+Both commands always bind an HTTP server to a private local Unix-domain socket
+after local validation. The launcher publishes its socket network, absolute
+address, and token-bearing `http://localhost/events` request URL in launch JSON
 before the first provider request. Requests without that per-run token are rejected. SSE uses
 `id`, `event`, and JSON `data` fields, buffers events for late clients, and
 honors `Last-Event-ID`. Stream includes `session.started`, `session`, `request`,
@@ -241,9 +242,10 @@ writes no report to stdout.
 Every `review` or `simplify` invocation without `--wait` starts a detached
 process. The launcher waits until the event server is listening, then writes
 exactly one JSON object and newline to stdout with string `command`, string
-`id`, positive integer `pid`, and string `url` fields. Successful launch writes
-nothing to stderr. The detached worker closes inherited standard streams and
-runs through the terminal SSE event.
+`id`, positive integer `pid`, and strict `endpoint` object containing string
+`network`, `address`, and `url` fields. Successful launch writes nothing to
+stderr. The detached worker closes inherited standard streams and runs through
+the terminal SSE event.
 
 `review --wait <id>` and `simplify --wait <id>` accept no mode, prompt, timeout,
 model, generation, debug, or pprof option. A wait has no deadline, polls the
@@ -263,6 +265,13 @@ Records live under
 `~/.git-agent/<project-identity-sha>/background/<task-id>.json`, are retained
 indefinitely, and do not create a trace session. The containing directory is
 `0700`.
+
+`git-agent review-test` is an internal integration fixture. It requires no
+arguments, provider authentication, or repository access. It uses the same
+detached launch JSON and authenticated local-socket SSE transport as `review`, then
+publishes deterministic reasoning-summary, tool-call, tool-output, and final
+events. It creates no durable background record and is intentionally omitted
+from normal command help and shell completion.
 
 All agent loops use a 217,600-token context budget, 80% of the common
 272,000-token model context window. Before the first provider call, a serialized
@@ -419,9 +428,10 @@ The progress line is rewritten and cleared with ANSI control sequences before
 stdout is written. Non-interactive stderr receives no progress output.
 `--agent` starts a local progress probe server instead of terminal progress when
 a remote needs fetching or embeddings need to be built or rebuilt. The server
-listens on
-`127.0.0.1:0`, prints its actual `http://127.0.0.1:<port>/progress` URL to stderr,
-and returns JSON for `GET /progress` with status, including `fetching` before a
+listens on a private Unix-domain socket and prints one endpoint JSON object to
+stderr containing `network`, absolute socket `address`, and the fixed
+`http://localhost/progress` request URL. A client dials that socket and receives
+JSON for `GET /progress` with status, including `fetching` before a
 remote network operation and sanitized server-side fetch detail when available,
 completed chunk count, total chunk count, reused chunk count, percent, elapsed
 milliseconds, and last update time. Interactive terminal mode rewrites the same
@@ -429,7 +439,7 @@ remote-fetch detail in place and clears it before stdout. When `--format` is
 omitted, `--agent` changes the output format default
 from JSON to brief. The server shuts down when the search command exits. Cache-hit
 searches that need neither a remote fetch nor embeddings do not start the server
-and do not print a progress URL.
+and do not print progress endpoint metadata.
 
 Remote fetch and embedding progress callbacks are serialized. While the fetch
 is active, `fetching` updates may also carry discovered, completed, and reused
@@ -715,7 +725,7 @@ retrieval form documented above.
 - `--code`: search source-code files only
 - `--no-tests`: exclude common test files and test directories from results and
   `--ls-files` output
-- `--agent`: serve current indexing progress on `127.0.0.1:<port>/progress`
+- `--agent`: serve current indexing progress over a private local socket
   when embeddings need to be built or rebuilt; defaults output to brief unless
   `--format` is set
 - `--index`: build embeddings for the selected source without searching
@@ -832,7 +842,7 @@ unchanged. API-key providers retain the requested model identifier.
   while generating the message, followed by Git's raw commit summary after
   success
 - stderr: diagnostics, console-formatted debug output, search and index-sync
-  progress, `--agent` progress probe URLs, validation failures, provider/tool
+  progress, `--agent` progress probe endpoints, validation failures, provider/tool
   loop summaries when `--debug` is enabled, and stderr
   emitted by a successful delegated `git commit`
 - `search` writes errors and optional `--debug` diagnostics to stderr only and

@@ -4,8 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -13,15 +13,15 @@ import (
 
 func TestDetachedProcessKeepsEventEndpointAliveAfterAdvertisement(t *testing.T) {
 	if os.Getenv("GIT_AGENT_DETACHED_TEST_HELPER") == "1" {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		listener, endpoint, err := listenLocalHTTP("/events", url.Values{"token": []string{"test"}})
 		if err != nil {
 			os.Exit(2)
 		}
 		_ = writeDetachedLaunch(os.Stderr, detachedLaunch{
-			Command: "review",
-			ID:      "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-			PID:     os.Getpid(),
-			URL:     "http://" + listener.Addr().String() + "/events?token=test",
+			Command:  "review",
+			ID:       "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+			PID:      os.Getpid(),
+			Endpoint: endpoint,
 		})
 		_ = os.Stderr.Close()
 		conn, err := listener.Accept()
@@ -53,10 +53,10 @@ func TestDetachedProcessKeepsEventEndpointAliveAfterAdvertisement(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if launch.Command != "review" || launch.ID != "ABCDEFGHIJKLMNOPQRSTUVWXYZ" || launch.PID <= 0 || launch.URL == "" {
+	if launch.Command != "review" || launch.ID != "ABCDEFGHIJKLMNOPQRSTUVWXYZ" || launch.PID <= 0 || launch.Endpoint.Address == "" {
 		t.Fatalf("launch = %#v", launch)
 	}
-	response, err := http.Get(launch.URL)
+	response, err := localHTTPTestClient(t, launch.Endpoint).Get(launch.Endpoint.URL)
 	if err != nil {
 		t.Fatalf("event endpoint unavailable after launcher returned: %v", err)
 	}
@@ -87,5 +87,12 @@ func TestDetachedLaunchRejectsAndDrainsOversizedJSON(t *testing.T) {
 	}
 	if input.Len() != 0 {
 		t.Fatalf("launch bytes remaining = %d", input.Len())
+	}
+}
+
+func TestDetachedLaunchReportsChildStartupDiagnostic(t *testing.T) {
+	_, err := readDetachedLaunch(strings.NewReader("listen unix /tmp/git-agent/http.sock: permission denied\n"))
+	if err == nil || !strings.Contains(err.Error(), `detached task startup: "listen unix /tmp/git-agent/http.sock: permission denied"`) {
+		t.Fatalf("error = %v", err)
 	}
 }

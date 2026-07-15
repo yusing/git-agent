@@ -50,7 +50,7 @@ directory is on `PATH`.
 | Uncommitted review | `git-agent review` | Detached task launch JSON |
 | Staged review | `git-agent review --staged` | Detached staged-review launch JSON |
 | Codebase simplification audit | `git-agent simplify --codebase` | Detached codebase-audit launch JSON |
-| Agent context search | `git-agent search --agent <query...>` | Brief results, plus progress URL when indexing |
+| Agent context search | `git-agent search --agent <query...>` | Brief results, plus progress endpoint when indexing |
 | Configure index sync | `git-agent config index.remote <git-url>` | Save a dedicated Git remote for shared revision indexes |
 | Push local indexes | `git-agent index sync` | Additively publish all completed local revision indexes |
 | List search indexes | `git-agent search --ls` | Local index summaries for the current project |
@@ -100,7 +100,7 @@ harnesses. Both default to all dirty changes, regardless of staging state.
 ```sh
 # Review staged and unstaged work together
 git-agent review
-# {"command":"review","id":"...","pid":12345,"url":"http://127.0.0.1:..."}
+# {"command":"review","id":"...","pid":12345,"endpoint":{"network":"unix","address":"/tmp/.../http.sock","url":"http://localhost/events?token=..."}}
 git-agent review --wait <id-from-launch-json>
 
 # Review only the Git index
@@ -135,11 +135,11 @@ path-specific diffs.
 Requests whose initial serialized estimate reaches the configured context budget
 fail before contacting the provider.
 
-The launch object's replayable event URL includes live reasoning-summary
+The launch object's replayable local endpoint includes live reasoning-summary
 progress:
 
 ```text
-{"command":"review","id":"4YH2S7M6N5QK8J3C9RTPABCD","pid":12345,"url":"http://127.0.0.1:43127/events?token=..."}
+{"command":"review","id":"4YH2S7M6N5QK8J3C9RTPABCD","pid":12345,"endpoint":{"network":"unix","address":"/tmp/git-agent-.../http.sock","url":"http://localhost/events?token=..."}}
 ```
 
 The detached review or simplification process continues serving events through
@@ -269,7 +269,7 @@ Useful flags:
 | `--format` | Use `json\|brief` for search, `text\|json` for `--ls`, `text\|json\|completion` for `--ls-remotes`, and `tree\|json` for `--ls-files` |
 | `--index` | Build missing embeddings without searching |
 | `--reindex` | Rebuild existing embeddings and drop stale cache entries |
-| `--agent` | Use agent-friendly brief output and serve remote-fetch details and indexing progress on localhost when work is needed |
+| `--agent` | Use agent-friendly brief output and serve remote-fetch details and indexing progress on a private local socket when work is needed |
 | `--ls` | List search indexes for the current project or `--remote` cache without embedding or querying |
 | `--ls-remotes` | List cached remote repositories without embedding, fetching, or querying |
 | `--ls-files` | List files in the selected search index without embedding or querying; `--no-tests` filters listed paths without changing the selected index |

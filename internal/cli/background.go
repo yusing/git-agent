@@ -26,10 +26,10 @@ func detachedTaskID() string {
 }
 
 type detachedLaunch struct {
-	Command string `json:"command"`
-	ID      string `json:"id"`
-	PID     int    `json:"pid"`
-	URL     string `json:"url"`
+	Command  string            `json:"command"`
+	ID       string            `json:"id"`
+	PID      int               `json:"pid"`
+	Endpoint localHTTPEndpoint `json:"endpoint"`
 }
 
 const maxDetachedLaunchBytes = 4096
@@ -105,13 +105,17 @@ func readDetachedLaunch(reader io.Reader) (detachedLaunch, error) {
 		_, drainErr := io.Copy(io.Discard, reader)
 		return detachedLaunch{}, errors.Join(fmt.Errorf("detached task launch metadata exceeds %d bytes", maxDetachedLaunchBytes), drainErr)
 	}
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] != '{' {
+		return detachedLaunch{}, fmt.Errorf("detached task startup: %q", string(trimmed))
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var launch detachedLaunch
 	if err := decoder.Decode(&launch); err != nil {
 		return detachedLaunch{}, fmt.Errorf("decode detached task launch metadata: %w", err)
 	}
-	if launch.Command == "" || launch.ID == "" || launch.PID <= 0 || launch.URL == "" {
+	if launch.Command == "" || launch.ID == "" || launch.PID <= 0 || launch.Endpoint.Network == "" || launch.Endpoint.Address == "" || launch.Endpoint.URL == "" {
 		return detachedLaunch{}, errors.New("detached task launch metadata is incomplete")
 	}
 	var trailing any
