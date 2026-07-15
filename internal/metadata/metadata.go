@@ -27,11 +27,11 @@ func Dir(projectRoot string) (string, error) {
 		return "", err
 	}
 	root = filepath.Clean(root)
-	home, err := os.UserHomeDir()
+	metadataRoot, err := Root()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, dirName, PathSHA(root))
+	dir := filepath.Join(metadataRoot, PathSHA(root))
 	if err := migrate(filepath.Join(root, dirName), dir); err != nil {
 		return "", err
 	}
@@ -97,11 +97,11 @@ func ProjectDir(projectRoot, originIdentity string) (string, error) {
 	if strings.TrimSpace(originIdentity) == "" {
 		return Dir(projectRoot)
 	}
-	home, err := os.UserHomeDir()
+	metadataRoot, err := Root()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, dirName, IdentitySHA(originIdentity))
+	dir := filepath.Join(metadataRoot, IdentitySHA(originIdentity))
 	if err := secureDir(dir); err != nil {
 		return "", err
 	}
@@ -155,13 +155,22 @@ func secureDir(dir string) error {
 	return os.WriteFile(marker, nil, 0o600)
 }
 
-// RemoteRoot returns the directory containing cached remote repository metadata.
-func RemoteRoot() (string, error) {
+// Root returns the directory containing per-project metadata.
+func Root() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, dirName, "remotes"), nil
+	return filepath.Join(home, dirName), nil
+}
+
+// RemoteRoot returns the directory containing cached remote repository metadata.
+func RemoteRoot() (string, error) {
+	root, err := Root()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "remotes"), nil
 }
 
 // PathSHA returns the SHA-256 hex digest for a cleaned project path.

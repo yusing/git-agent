@@ -584,7 +584,10 @@ func shouldRetryWithoutStreaming(err error) bool {
 	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "unexpected end of json input") ||
-		strings.Contains(message, "unexpected eof")
+		strings.Contains(message, "unexpected eof") ||
+		strings.Contains(message, "stream error:") &&
+			strings.Contains(message, "received from peer") &&
+			(strings.Contains(message, "internal_error") || strings.Contains(message, "refused_stream"))
 }
 
 func fallbackWithoutStreaming(ctx context.Context, client openaisdk.Client, params responses.ResponseNewParams, streamErr error) (Response, error) {

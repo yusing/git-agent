@@ -207,12 +207,59 @@ func NewStore(metadataDir string) (*Store, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("secure background record directory: %w", err)
 	}
+	return storeAt(dir), nil
+}
+
+// FindStore locates a task record across project metadata directories.
+func FindStore(metadataRoot, id string) (*Store, error) {
+	if err := validateID(id); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(metadataRoot)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("unknown background task %s", id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read background metadata root: %w", err)
+	}
+	var matches []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(metadataRoot, entry.Name(), "background")
+		info, err := os.Lstat(dir)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("inspect background store %s: %w", entry.Name(), err)
+		}
+		if !info.IsDir() {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(dir, id+".json")); err == nil {
+			matches = append(matches, dir)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("inspect background task %s: %w", id, err)
+		}
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("unknown background task %s", id)
+	}
+	if len(matches) > 1 {
+		return nil, fmt.Errorf("background task %s exists in multiple project stores", id)
+	}
+	return storeAt(matches[0]), nil
+}
+
+func storeAt(dir string) *Store {
 	return &Store{
 		dir:          dir,
 		pollInterval: defaultPollInterval,
 		processAlive: processIsAlive,
 		now:          time.Now,
-	}, nil
+	}
 }
 
 // Heartbeat refreshes a running record until ctx is canceled.

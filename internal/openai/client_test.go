@@ -1051,6 +1051,28 @@ func TestCreateResponseFallsBackToNonStreamingOnMalformedStreamJSON(t *testing.T
 	}
 }
 
+func TestRetryWithoutStreamingForTransientHTTP2StreamErrors(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name    string
+		message string
+		want    bool
+	}{
+		{name: "internal", message: "stream error: stream ID 55; INTERNAL_ERROR; received from peer", want: true},
+		{name: "refused stream", message: "stream error: stream ID 55; REFUSED_STREAM; received from peer", want: true},
+		{name: "cancel", message: "stream error: stream ID 55; CANCEL; received from peer", want: false},
+		{name: "local internal", message: "stream error: stream ID 55; INTERNAL_ERROR", want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := fmt.Errorf("provider stream: %w", errors.New(test.message))
+			if got := shouldRetryWithoutStreaming(err); got != test.want {
+				t.Fatalf("shouldRetryWithoutStreaming() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func marshalJSON(v any) string {
 	data, err := json.Marshal(v)
 	if err != nil {

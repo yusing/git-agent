@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/yusing/git-agent/internal/config"
+	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/openai"
 	"github.com/yusing/git-agent/internal/provider"
 	"github.com/yusing/git-agent/internal/tools"
@@ -276,7 +277,7 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 				return Result{}, fmt.Errorf("tool %s canceled: %w", call.Name, ctxErr)
 			}
 			if err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, gitctx.ErrChangeSnapshotStale) {
 					return Result{}, fmt.Errorf("tool %s failed: %w", call.Name, err)
 				}
 				toolResult, err = tools.ErrorResult(call.Name, err)

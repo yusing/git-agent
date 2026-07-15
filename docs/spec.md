@@ -224,7 +224,9 @@ tokens, and context-token budget.
 Reasoning delta values contain `item_id`, `output_index`, `summary_index`,
 provider `sequence_number`, and `delta`; done values contain the same identity
 fields and complete `text`. Terminal event closes streams, then server shuts
-down.
+down. A truncated provider stream or HTTP/2 `INTERNAL_ERROR` or
+`REFUSED_STREAM` receives one non-streaming retry of that model step. Other
+provider stream failures remain terminal.
 
 Neither command has a request or overall task deadline by default. Explicit
 `--timeout <duration>` applies that deadline to both the provider HTTP client
@@ -273,7 +275,8 @@ the terminal SSE event.
 
 `review --wait <id>` and `simplify --wait <id>` accept no mode, prompt, timeout,
 model, generation, debug, or pprof option. A wait has no deadline, polls the
-durable record, verifies the producer PID while running, and respects
+globally unique task ID across project metadata stores, verifies the producer
+PID while running, and respects
 process-context cancellation. A matching `final` event writes only its
 `value.text` as strict report JSON to stdout. Retrieval remains repeatable after
 completion. A stored `error`, unknown or malformed ID, corrupt record, dead
@@ -1026,8 +1029,9 @@ including:
 9. send request to the Responses API through the official OpenAI Go SDK
 10. stream each request and response when console or SSE tracing is active
 11. if the model requests tools, execute only registered read-only tools;
-    return non-context execution errors as structured failed tool outputs so the
-    model can correct arguments or choose other evidence
+    return recoverable non-context execution errors as structured failed tool
+    outputs so the model can correct arguments or choose other evidence, but
+    abort immediately when the authoritative review snapshot changed
 12. stream each tool call and successful or failed tool output when tracing is active
 13. append complete provider continuation output before local
     function-call-output items and continue until final text is returned

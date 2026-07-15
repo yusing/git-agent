@@ -162,10 +162,13 @@ progress:
 The detached review or simplification process continues serving events through
 the terminal event. `review --wait <id>` or `simplify --wait <id>` waits without
 a deadline and prints only the strict final report JSON. Completed reports can
-be retrieved repeatedly. Failed, unknown, malformed, corrupt, dead-producer,
+be retrieved repeatedly from any working directory because task IDs are resolved
+across project metadata stores. Failed, unknown, malformed, corrupt, dead-producer,
 or wrong-command tasks fail with empty stdout; signals cancel an active wait.
 Invalid tool arguments and missing evidence paths are returned to the model as
-structured errors so it can correct the request instead of aborting the task.
+structured errors so it can correct the request instead of aborting the task;
+an authoritative repository-state change aborts immediately. Retryable HTTP/2
+stream resets and truncated provider streams receive one non-streaming retry.
 
 See [docs/spec.md](docs/spec.md) for exact mode, schema, tool, and SSE contracts.
 

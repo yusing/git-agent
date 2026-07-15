@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,16 +23,10 @@ func TestReviewAndSimplifyWaitPrintOnlyRepeatableFinalJSON(t *testing.T) {
 			t.Chdir(repoDir)
 			t.Setenv("HOME", t.TempDir())
 			store := backgroundStoreForCurrentProject(t)
-			now := time.Now().UTC()
-			if err := store.Create(cliWaitTaskID, command, os.Getpid(), now); err != nil {
-				t.Fatal(err)
-			}
-			if err := store.Complete(cliWaitTaskID, trace.Event{
-				Seq: 4, At: now.Add(time.Second), Kind: "final",
+			completeWaitTask(t, store, command, trace.Event{
+				Kind:  "final",
 				Value: map[string]any{"text": map[string]any{"summary": "complete", "items": []any{}}},
-			}, nil, now.Add(time.Second)); err != nil {
-				t.Fatal(err)
-			}
+			})
 
 			for range 2 {
 				var stdout bytes.Buffer
@@ -55,20 +50,46 @@ func TestReviewAndSimplifyWaitPrintOnlyRepeatableFinalJSON(t *testing.T) {
 	}
 }
 
+func TestWaitFindsTaskFromAnotherRepository(t *testing.T) {
+	sourceRepo := initRepo(t)
+	home := os.Getenv("HOME")
+	t.Chdir(sourceRepo)
+	store := backgroundStoreForCurrentProject(t)
+	completeWaitTask(t, store, "review", trace.Event{
+		Kind:  "final",
+		Value: map[string]any{"text": map[string]any{"summary": "complete", "items": []any{}}},
+	})
+
+	otherDir := t.TempDir()
+	legacyPath := filepath.Join(otherDir, ".git-agent")
+	if err := os.WriteFile(legacyPath, []byte("untouched\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Chdir(otherDir)
+	var stdout bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &bytes.Buffer{}}
+	if err := app.Run(t.Context(), []string{"review", "--wait", cliWaitTaskID}); err != nil {
+		t.Fatal(err)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report["summary"] != "complete" {
+		t.Fatalf("report = %#v", report)
+	}
+	if legacy, err := os.ReadFile(legacyPath); err != nil || string(legacy) != "untouched\n" {
+		t.Fatalf("legacy metadata = %q, %v", legacy, err)
+	}
+}
+
 func TestWaitFailuresKeepStdoutEmpty(t *testing.T) {
 	repoDir := initRepo(t)
 	t.Chdir(repoDir)
 	t.Setenv("HOME", t.TempDir())
 	store := backgroundStoreForCurrentProject(t)
-	now := time.Now().UTC()
-	if err := store.Create(cliWaitTaskID, "review", os.Getpid(), now); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Complete(cliWaitTaskID, trace.Event{
-		Seq: 4, At: now.Add(time.Second), Kind: "error", Value: map[string]any{"message": "stored failure"},
-	}, nil, now.Add(time.Second)); err != nil {
-		t.Fatal(err)
-	}
+	completeWaitTask(t, store, "review", trace.Event{Kind: "error", Value: map[string]any{"message": "stored failure"}})
 
 	for _, test := range []struct {
 		name string
@@ -91,6 +112,19 @@ func TestWaitFailuresKeepStdoutEmpty(t *testing.T) {
 				t.Fatalf("stdout = %q, want empty", stdout.String())
 			}
 		})
+	}
+}
+
+func completeWaitTask(t *testing.T, store *backgroundtask.Store, command string, terminal trace.Event) {
+	t.Helper()
+	now := time.Now().UTC()
+	if err := store.Create(cliWaitTaskID, command, os.Getpid(), now); err != nil {
+		t.Fatal(err)
+	}
+	terminal.Seq = 4
+	terminal.At = now.Add(time.Second)
+	if err := store.Complete(cliWaitTaskID, terminal, nil, terminal.At); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -464,6 +464,46 @@ func TestRunnerReturnsToolErrorsToModelForRecovery(t *testing.T) {
 	}
 }
 
+func TestRunnerStopsWhenReviewSnapshotChanges(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	path := filepath.Join(repoDir, "actual.go")
+	if err := os.WriteFile(path, []byte("package actual\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := gitctx.Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := repo.UncommittedFingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeUncommitted, tools.ReviewScope{}, fingerprint)
+	if err := os.WriteFile(path, []byte("package changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeClient{responses: []openai.Response{{
+		ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "read_file", Arguments: `{"path":"actual.go"}`}},
+	}, {Text: "must not recover"}}}
+	runner := OpenAIRunner{
+		Config:    config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 2},
+		Client:    client,
+		Tools:     registry,
+		ToolSpecs: registry.Definitions([]string{"read_file"}),
+	}
+
+	_, err = runner.Run(t.Context(), Request{UserPrompt: "review", MaxSteps: 3})
+	if !errors.Is(err, gitctx.ErrChangeSnapshotStale) {
+		t.Fatalf("error = %v, want stale review snapshot", err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("requests = %d, want no recovery request", len(client.requests))
+	}
+}
+
 func TestRunnerDoesNotRecoverToolErrorsAfterCancellation(t *testing.T) {
 	t.Parallel()
 

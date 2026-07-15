@@ -340,15 +340,11 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 }
 
 func (a *App) waitForDetachedTask(ctx context.Context, command, id string) error {
-	identity, err := projectidentity.Resolve(".")
+	metadataRoot, err := metadata.Root()
 	if err != nil {
 		return err
 	}
-	metadataDir, err := identity.Dir()
-	if err != nil {
-		return err
-	}
-	store, err := backgroundtask.NewStore(metadataDir)
+	store, err := backgroundtask.FindStore(metadataRoot, id)
 	if err != nil {
 		return err
 	}

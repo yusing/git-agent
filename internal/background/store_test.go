@@ -234,6 +234,13 @@ func TestStoreRejectsInvalidUnknownCorruptAndConflictingRecords(t *testing.T) {
 	}
 }
 
+func TestFindStoreReturnsUnknownWhenMetadataRootDoesNotExist(t *testing.T) {
+	_, err := FindStore(filepath.Join(t.TempDir(), "missing"), testTaskID)
+	if err == nil || !strings.Contains(err.Error(), "unknown background task") {
+		t.Fatalf("error = %v, want unknown background task", err)
+	}
+}
+
 func TestStorePublishesAtomicPrivateRecordSnapshots(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now().UTC()
