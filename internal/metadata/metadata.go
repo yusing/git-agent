@@ -42,8 +42,8 @@ func Dir(projectRoot string) (string, error) {
 }
 
 // SearchDir returns origin-keyed project metadata for search. It moves a
-// legacy absolute-path-keyed search tree on first use while leaving sessions
-// and other project metadata at their existing path-keyed location.
+// legacy absolute-path-keyed search tree on first use while leaving other
+// project metadata at its existing path-keyed location.
 func SearchDir(projectRoot, originIdentity string) (string, error) {
 	dir, err := ProjectDir(projectRoot, originIdentity)
 	if err != nil {

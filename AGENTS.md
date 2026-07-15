@@ -14,7 +14,7 @@
   context.
 - `internal/tools/`: curated read-only model tool registry and tool envelopes.
 - `internal/textutil/`: text normalization and output shaping helpers.
-- `internal/trace/`: JSON session traces and human console trace rendering.
+- `internal/trace/`: in-memory event recording and human console trace rendering.
 - `docs/spec.md`: behavioral specification and execution-flow diagrams.
 - `README.md`: user-facing command, configuration, build, and debug
   documentation. DO NOT REPEAT CONTRACT FROM SPEC TO README.

@@ -110,9 +110,6 @@ func runSearch() {
 	if len(vectorFiles) == 0 {
 		t.Fatal("search binary vector cache was not written")
 	}
-	if _, err := os.Stat(filepath.Join(projectMetadataDir(t, root), "sessions")); !os.IsNotExist(err) {
-		t.Fatalf("search should not create model sessions, stat err = %v", err)
-	}
 }
 
 func TestSearchRealProviderEndToEndOnThisRepo(t *testing.T) {
@@ -235,7 +232,6 @@ Accept braced do-option maps while preserving positional help order and validati
 			t.Fatalf("body line too long after shaping: %d %q\n%s", len(line), line, output)
 		}
 	}
-	assertTraceArtifacts(t, fixture.repoDir, "*-commit-msg", 1)
 }
 
 func TestCommitMsgSubmoduleOnlySkipsProviderAuth(t *testing.T) {
@@ -269,9 +265,6 @@ webui
 	}
 	if stderr.String() != "" {
 		t.Fatalf("stderr = %q", stderr.String())
-	}
-	if _, err := os.Stat(filepath.Join(projectMetadataDir(t, fixture.repoDir), "sessions")); !os.IsNotExist(err) {
-		t.Fatalf("deterministic commit-msg should not create trace sessions, stat err = %v", err)
 	}
 	migratedMarker := filepath.Join(projectMetadataDir(t, fixture.repoDir), "search", "legacy.txt")
 	if data, err := os.ReadFile(migratedMarker); err != nil || string(data) != "legacy\n" {
@@ -309,9 +302,6 @@ webui
   - ` + fixture.submoduleReleaseSHA[:7] + `: fix(webui): refresh login`
 	if got := gitHeadMessage(t, fixture.repoDir); got != want {
 		t.Fatalf("HEAD message:\n%s\nwant:\n%s", got, want)
-	}
-	if _, err := os.Stat(filepath.Join(projectMetadataDir(t, fixture.repoDir), "sessions")); !os.IsNotExist(err) {
-		t.Fatalf("deterministic commit should not create trace sessions, stat err = %v", err)
 	}
 }
 
@@ -413,14 +403,6 @@ response shape.`)
 	if mode == providerModeFake && !strings.HasPrefix(output, "fix(agent): persist verified providers\n") {
 		t.Fatalf("fake-provider amend output did not preserve original subject:\n%s", output)
 	}
-	minToolCalls := 1
-	if mode == providerModeReal {
-		// Prepared amend context should be sufficient for a real model to finish
-		// without extra tools; the fake provider path still exercises tool
-		// round-trips.
-		minToolCalls = 0
-	}
-	assertTraceArtifacts(t, fixture.repoDir, "*-commit-msg", minToolCalls)
 }
 
 func TestPRMessageEndToEndWithRealisticFixture(t *testing.T) {
@@ -483,7 +465,6 @@ cases in tests.`)
 	if mode == providerModeFake && !strings.Contains(output, "feat(auth): add strict session policy reasons") {
 		t.Fatalf("unexpected fake-provider pr message:\n%s", output)
 	}
-	assertTraceArtifacts(t, fixture.repoDir, "*-pr-message", 0)
 }
 
 func TestReleaseNoteEndToEndWithRealisticFixture(t *testing.T) {
@@ -607,7 +588,6 @@ func TestReleaseNoteEndToEndWithRealisticFixture(t *testing.T) {
 			}
 		}
 	}
-	assertTraceArtifacts(t, fixture.repoDir, "*-release-note", 0)
 }
 
 type providerMode string
@@ -1519,45 +1499,6 @@ func streamCompletedEvent(responseJSON string) string {
 		"sequence_number": 1,
 		"response":        payload,
 	})
-}
-
-func assertTraceArtifacts(t *testing.T, repoDir, pattern string, minToolCalls int) {
-	t.Helper()
-
-	sessions, err := filepath.Glob(filepath.Join(projectMetadataDir(t, repoDir), "sessions", pattern))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sessions) != 1 {
-		t.Fatalf("sessions = %#v, want one", sessions)
-	}
-	for _, name := range []string{"events.ndjson", "session.json"} {
-		if _, err := os.Stat(filepath.Join(sessions[0], name)); err != nil {
-			t.Fatalf("missing trace file %s: %v", name, err)
-		}
-	}
-	data, err := os.ReadFile(filepath.Join(sessions[0], "session.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var session struct {
-		Items []map[string]any `json:"items"`
-	}
-	if err := json.Unmarshal(data, &session); err != nil {
-		t.Fatal(err)
-	}
-	var toolCalls, toolOutputs int
-	for _, item := range session.Items {
-		switch item["type"] {
-		case "function_call":
-			toolCalls++
-		case "function_call_output":
-			toolOutputs++
-		}
-	}
-	if toolCalls < minToolCalls || toolOutputs < minToolCalls {
-		t.Fatalf("trace missing tool artifacts: calls=%d outputs=%d session=%s", toolCalls, toolOutputs, sessions[0])
-	}
 }
 
 func writeFixtureFile(t *testing.T, path, content string) {

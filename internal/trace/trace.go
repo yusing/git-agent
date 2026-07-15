@@ -1,10 +1,6 @@
 package trace
 
 import (
-	"bytes"
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	stdjson "encoding/json"
 	"errors"
 	"fmt"
@@ -12,8 +8,6 @@ import (
 	"log/slog"
 	"maps"
 	"os"
-	"path/filepath"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -22,21 +16,13 @@ import (
 	"unicode/utf8"
 
 	"github.com/bytedance/sonic"
-	"github.com/yusing/git-agent/internal/metadata"
 )
 
 type Recorder struct {
-	dir                string
-	eventsPath         string
-	eventWriter        io.Writer
-	eventSink          func(Event) error
-	sessionPath        string
-	inMemory           bool
-	mu                 sync.Mutex
-	seq                int
-	snapshot           snapshot
-	currentStep        int
-	openToolPairByCall map[string]int
+	eventWriter io.Writer
+	eventSink   func(Event) error
+	mu          sync.Mutex
+	seq         int
 }
 
 type Event struct {
@@ -46,140 +32,40 @@ type Event struct {
 	Value map[string]any `json:"value"`
 }
 
-type snapshot struct {
-	Version int              `json:"version"`
-	Session map[string]any   `json:"session"`
-	Static  map[string]any   `json:"static,omitempty"`
-	Items   []map[string]any `json:"items,omitempty"`
-	Steps   []step           `json:"steps,omitempty"`
-	Final   map[string]any   `json:"final,omitempty"`
-	Error   map[string]any   `json:"error,omitempty"`
-}
-
-type step struct {
-	Step     int              `json:"step"`
-	Request  *stepRequest     `json:"request,omitempty"`
-	Response *stepResponse    `json:"response,omitempty"`
-	Tools    []stepTool       `json:"tools,omitempty"`
-	Budgets  []map[string]any `json:"budgets,omitempty"`
-}
-
-type stepTool struct {
-	CallItem   int            `json:"call_item,omitempty"`
-	OutputItem int            `json:"output_item,omitempty"`
-	Trace      map[string]any `json:"trace,omitempty"`
-}
-
-type stepRequest struct {
-	Model        any `json:"model,omitempty"`
-	Instructions any `json:"instructions,omitempty"`
-	InputEnd     int `json:"input_end"`
-}
-
-type stepResponse struct {
-	ID         any   `json:"id,omitempty"`
-	FinishKind any   `json:"finish_kind,omitempty"`
-	Text       any   `json:"text,omitempty"`
-	ToolCalls  []int `json:"tool_calls,omitempty"`
-}
-
 const (
-	largeStringArtifactThreshold = 16 * 1024
-	artifactPreviewBytes         = 1200
-	consoleStringPreviewBytes    = 1200
-	consoleStringPreviewLines    = 20
-	consoleInlineFields          = 6
-	consoleInlineWidth           = 140
+	largeStringPreviewThreshold = 16 * 1024
+	consoleStringPreviewBytes   = 1200
+	consoleStringPreviewLines   = 20
+	consoleInlineFields         = 6
+	consoleInlineWidth          = 140
 )
 
 var sonicUseNumber = sonic.Config{UseNumber: true}.Froze()
 
-func New(root, command string) (*Recorder, error) {
-	now := time.Now().UTC()
-	stamp := now.Format("20060102T150405.000000000Z")
-	sessionID := stamp + "-" + command
-	metadataDir, err := metadata.Dir(root)
-	if err != nil {
-		return nil, err
-	}
-	dir := filepath.Join(metadataDir, "sessions", sessionID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
-	}
-	recorder := &Recorder{
-		dir:         dir,
-		eventsPath:  filepath.Join(dir, "events.ndjson"),
-		sessionPath: filepath.Join(dir, "session.json"),
-		snapshot: snapshot{
-			Version: 2,
-			Session: map[string]any{
-				"id":         sessionID,
-				"started_at": now.Format(time.RFC3339Nano),
-				"command":    command,
-			},
-			Static: map[string]any{},
-		},
-		currentStep:        -1,
-		openToolPairByCall: map[string]int{},
-	}
-	if err := recorder.appendEventLocked("session.started", maps.Clone(recorder.snapshot.Session), true); err != nil {
-		return nil, err
-	}
-	if err := recorder.writeSnapshotLocked(); err != nil {
-		return nil, err
-	}
-	return recorder, nil
-}
-
-func newMemory(command string) *Recorder {
-	now := time.Now().UTC()
-	stamp := now.Format("20060102T150405.000000000Z")
-	sessionID := stamp + "-" + command
-	return &Recorder{
-		inMemory: true,
-		snapshot: snapshot{
-			Version: 2,
-			Session: map[string]any{
-				"id":         sessionID,
-				"started_at": now.Format(time.RFC3339Nano),
-				"command":    command,
-			},
-			Static: map[string]any{},
-		},
-		currentStep:        -1,
-		openToolPairByCall: map[string]int{},
-	}
-}
-
 func NewStream(command string, writer io.Writer) (*Recorder, error) {
-	recorder := newMemory(command)
-	recorder.eventWriter = writer
-	return startMemory(recorder)
+	return startMemory(&Recorder{eventWriter: writer}, command)
 }
 
 func NewEventStream(command string, sink func(Event) error) (*Recorder, error) {
 	if sink == nil {
 		return nil, errors.New("event sink is required")
 	}
-	recorder := newMemory(command)
-	recorder.eventSink = sink
-	return startMemory(recorder)
+	return startMemory(&Recorder{eventSink: sink}, command)
 }
 
-func startMemory(recorder *Recorder) (*Recorder, error) {
+func startMemory(recorder *Recorder, command string) (*Recorder, error) {
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
-	if err := recorder.appendEventLocked("session.started", maps.Clone(recorder.snapshot.Session), true); err != nil {
+	now := time.Now().UTC()
+	value := map[string]any{
+		"id":         now.Format("20060102T150405.000000000Z") + "-" + command,
+		"started_at": now.Format(time.RFC3339Nano),
+		"command":    command,
+	}
+	if err := recorder.appendEventLocked("session.started", value, true); err != nil {
 		return nil, err
 	}
 	return recorder, nil
-}
-
-func (r *Recorder) Dir() string {
-	if r == nil {
-		return ""
-	}
-	return r.dir
 }
 
 func (r *Recorder) Write(kind string, value any) error {
@@ -187,7 +73,7 @@ func (r *Recorder) Write(kind string, value any) error {
 		return nil
 	}
 
-	return r.writeMap(kind, normalizeMapValue(value), true)
+	return r.writeMap(kind, normalizedMapValue(value, true), true)
 }
 
 // WriteExact preserves string fields exactly for machine-consumed streaming
@@ -198,7 +84,7 @@ func (r *Recorder) WriteExact(kind string, value any) error {
 		return nil
 	}
 
-	return r.writeMap(kind, exactMapValue(value), false)
+	return r.writeMap(kind, normalizedMapValue(value, false), false)
 }
 
 func (r *Recorder) WriteStructured(kind string, value map[string]any) error {
@@ -220,18 +106,7 @@ func (r *Recorder) writeMap(kind string, value map[string]any, compact bool) err
 }
 
 func (r *Recorder) writeMapLocked(kind string, value map[string]any, compact bool) error {
-	if !r.inMemory || r.eventWriter != nil || r.eventSink != nil {
-		if err := r.appendEventLocked(kind, value, compact); err != nil {
-			return err
-		}
-	}
-	if err := r.applyLocked(kind, value); err != nil {
-		return err
-	}
-	if r.inMemory {
-		return nil
-	}
-	return r.writeSnapshotLocked()
+	return r.appendEventLocked(kind, value, compact)
 }
 
 func Normalize(value any) any {
@@ -253,16 +128,8 @@ func normalizeValue(value any, expandStrings bool) any {
 	return expandJSONStrings(normalized)
 }
 
-func normalizeMapValue(value any) map[string]any {
-	normalized := Normalize(value)
-	if mapped, ok := normalized.(map[string]any); ok {
-		return mapped
-	}
-	return map[string]any{"value": normalized}
-}
-
-func exactMapValue(value any) map[string]any {
-	normalized := normalizeValue(value, false)
+func normalizedMapValue(value any, expandStrings bool) map[string]any {
+	normalized := normalizeValue(value, expandStrings)
 	if mapped, ok := normalized.(map[string]any); ok {
 		return mapped
 	}
@@ -314,19 +181,6 @@ func (r *Recorder) appendEventLocked(kind string, value map[string]any, compact 
 		}
 	}
 	now := time.Now().UTC()
-	if r.eventsPath != "" {
-		file, err := os.OpenFile(r.eventsPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-		if err != nil {
-			return err
-		}
-		if err := writeSlogJSONEvent(file, r.seq, now, kind, eventValue); err != nil {
-			_ = file.Close()
-			return err
-		}
-		if err := file.Close(); err != nil {
-			return err
-		}
-	}
 	if r.eventWriter != nil {
 		if err := writeConsoleTraceEvent(r.eventWriter, now, kind, eventValue); err != nil {
 			return err
@@ -336,18 +190,6 @@ func (r *Recorder) appendEventLocked(kind string, value map[string]any, compact 
 		return r.eventSink(Event{Seq: r.seq, At: now, Kind: kind, Value: eventValue})
 	}
 	return nil
-}
-
-func writeSlogJSONEvent(writer io.Writer, seq int, at time.Time, kind string, value map[string]any) error {
-	handler := slog.NewJSONHandler(writer, &slog.HandlerOptions{ReplaceAttr: dropSlogEnvelopeAttr})
-	record := slog.NewRecord(at, slog.LevelInfo, "", 0)
-	record.AddAttrs(
-		slog.Int("seq", seq),
-		slog.String("at", at.Format(time.RFC3339Nano)),
-		slog.String("kind", kind),
-		slog.Any("value", value),
-	)
-	return handler.Handle(context.Background(), record)
 }
 
 func writeConsoleTraceEvent(writer io.Writer, at time.Time, kind string, value map[string]any) error {
@@ -854,296 +696,6 @@ func lineCount(value string) int {
 	return strings.Count(value, "\n") + 1
 }
 
-func dropSlogEnvelopeAttr(_ []string, attr slog.Attr) slog.Attr {
-	switch attr.Key {
-	case slog.TimeKey, slog.LevelKey, slog.MessageKey:
-		return slog.Attr{}
-	default:
-		return attr
-	}
-}
-
-func (r *Recorder) applyLocked(kind string, value map[string]any) error {
-	switch kind {
-	case "session":
-		maps.Copy(r.snapshot.Session, value)
-	case "request":
-		return r.applyRequestLocked(value)
-	case "response":
-		r.applyResponseLocked(value)
-	case "tool-call":
-		return r.applyToolCallLocked(value)
-	case "tool-output":
-		return r.applyToolOutputLocked(value)
-	case "budget":
-		r.applyBudgetLocked(value)
-	case "final":
-		r.snapshot.Final = maps.Clone(value)
-		r.snapshot.Error = nil
-	case "error":
-		r.snapshot.Error = maps.Clone(value)
-	default:
-		// Keep the event in NDJSON even if the compact snapshot does not model it yet.
-	}
-	return nil
-}
-
-func (r *Recorder) applyRequestLocked(value map[string]any) error {
-	input, ok := value["input"].([]any)
-	if !ok {
-		return fmt.Errorf("trace request missing input array: %#v", value["input"])
-	}
-	if err := r.appendRequestItemsLocked(input); err != nil {
-		return err
-	}
-
-	if _, ok := r.snapshot.Static["model"]; !ok {
-		if model, ok := value["model"]; ok {
-			r.snapshot.Static["model"] = model
-		}
-	}
-	if _, ok := r.snapshot.Static["tools"]; !ok {
-		if tools, ok := value["tools"].([]any); ok && len(tools) > 0 {
-			r.snapshot.Static["tools"] = tools
-		}
-	}
-
-	r.snapshot.Steps = append(r.snapshot.Steps, step{
-		Step: len(r.snapshot.Steps) + 1,
-		Request: &stepRequest{
-			Model:        value["model"],
-			Instructions: value["instructions"],
-			InputEnd:     len(r.snapshot.Items),
-		},
-	})
-	r.currentStep = len(r.snapshot.Steps) - 1
-	r.openToolPairByCall = map[string]int{}
-	return nil
-}
-
-func (r *Recorder) appendRequestItemsLocked(input []any) error {
-	type insertion struct {
-		at    int
-		items []map[string]any
-	}
-
-	requestInputEnd := r.currentRequestInputEnd()
-	insertions := make([]insertion, 0, 1)
-	inputIdx := 0
-	for itemIdx, existing := range r.snapshot.Items {
-		have := stripItemIndex(existing)
-		if inputIdx < len(input) && reflect.DeepEqual(have, input[inputIdx]) {
-			inputIdx++
-			continue
-		}
-		if itemIdx < requestInputEnd || inputIdx >= len(input) {
-			return requestInputDivergenceError(inputIdx, have, input)
-		}
-
-		start := inputIdx
-		for inputIdx < len(input) && isReasoningItem(input[inputIdx]) {
-			inputIdx++
-		}
-		if start == inputIdx || inputIdx >= len(input) || !reflect.DeepEqual(have, input[inputIdx]) {
-			return requestInputDivergenceError(inputIdx, have, input)
-		}
-
-		items := make([]map[string]any, inputIdx-start)
-		for idx, value := range input[start:inputIdx] {
-			items[idx] = maps.Clone(value.(map[string]any))
-		}
-		insertions = append(insertions, insertion{at: itemIdx, items: items})
-		inputIdx++
-	}
-
-	offset := 0
-	for _, insertion := range insertions {
-		r.insertRequestItemsLocked(insertion.at+offset, insertion.items)
-		offset += len(insertion.items)
-	}
-	for _, item := range input[inputIdx:] {
-		if _, err := r.appendItemLocked(item); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (r *Recorder) currentRequestInputEnd() int {
-	current := r.currentStepPtr()
-	if current == nil || current.Request == nil {
-		return 0
-	}
-	return current.Request.InputEnd
-}
-
-func isReasoningItem(item any) bool {
-	mapped, ok := item.(map[string]any)
-	return ok && mapped["type"] == "reasoning"
-}
-
-func requestInputDivergenceError(idx int, have map[string]any, input []any) error {
-	if idx >= len(input) {
-		return fmt.Errorf("trace request input ended before item %d: have=%s", idx, mustJSON(have))
-	}
-	return fmt.Errorf("trace request input diverged at item %d: have=%s want=%s", idx, mustJSON(have), mustJSON(input[idx]))
-}
-
-func (r *Recorder) insertRequestItemsLocked(at int, items []map[string]any) {
-	r.snapshot.Items = slices.Insert(r.snapshot.Items, at, items...)
-	for idx := at; idx < len(r.snapshot.Items); idx++ {
-		r.snapshot.Items[idx]["idx"] = idx
-	}
-	for stepIdx := range r.snapshot.Steps {
-		step := &r.snapshot.Steps[stepIdx]
-		if step.Response != nil {
-			for idx, item := range step.Response.ToolCalls {
-				if item >= at {
-					step.Response.ToolCalls[idx] += len(items)
-				}
-			}
-		}
-		for idx := range step.Tools {
-			if step.Tools[idx].CallItem >= at {
-				step.Tools[idx].CallItem += len(items)
-			}
-			if step.Tools[idx].OutputItem >= at {
-				step.Tools[idx].OutputItem += len(items)
-			}
-		}
-	}
-}
-
-func (r *Recorder) applyResponseLocked(value map[string]any) {
-	current := r.currentStepPtr()
-	if current == nil {
-		return
-	}
-	response := &stepResponse{
-		ID:         value["id"],
-		FinishKind: value["finish_kind"],
-		Text:       value["text"],
-	}
-	if toolCalls, ok := value["tool_calls"].([]any); ok && len(toolCalls) > 0 {
-		response.ToolCalls = make([]int, 0, len(toolCalls))
-	}
-	current.Response = response
-}
-
-func (r *Recorder) applyToolCallLocked(value map[string]any) error {
-	current := r.currentStepPtr()
-	if current == nil {
-		return errors.New("trace tool-call recorded before any request step")
-	}
-
-	item := maps.Clone(value)
-	item["type"] = "function_call"
-	itemIdx, err := r.appendItemLocked(item)
-	if err != nil {
-		return err
-	}
-
-	callID := stringField(item, "call_id")
-	if callID == "" {
-		callID = stringField(item, "id")
-	}
-	if callID != "" {
-		r.openToolPairByCall[callID] = len(current.Tools)
-	}
-	current.Tools = append(current.Tools, stepTool{CallItem: itemIdx})
-	if current.Response == nil {
-		current.Response = &stepResponse{}
-	}
-	current.Response.ToolCalls = append(current.Response.ToolCalls, itemIdx)
-	return nil
-}
-
-func (r *Recorder) applyToolOutputLocked(value map[string]any) error {
-	current := r.currentStepPtr()
-	if current == nil {
-		return errors.New("trace tool-output recorded before any request step")
-	}
-
-	item := map[string]any{
-		"type":    "function_call_output",
-		"call_id": value["call_id"],
-	}
-	if content, ok := value["content"]; ok {
-		item["output"] = content
-	}
-	itemIdx, err := r.appendItemLocked(item)
-	if err != nil {
-		return err
-	}
-
-	callID := stringField(item, "call_id")
-	if pairIdx, ok := r.openToolPairByCall[callID]; ok && pairIdx < len(current.Tools) {
-		current.Tools[pairIdx].OutputItem = itemIdx
-		current.Tools[pairIdx].Trace = maps.Clone(value)
-	} else {
-		current.Tools = append(current.Tools, stepTool{
-			OutputItem: itemIdx,
-			Trace:      maps.Clone(value),
-		})
-	}
-	return nil
-}
-
-func (r *Recorder) applyBudgetLocked(value map[string]any) {
-	current := r.currentStepPtr()
-	if current == nil {
-		return
-	}
-	current.Budgets = append(current.Budgets, maps.Clone(value))
-}
-
-func (r *Recorder) appendItemLocked(value any) (int, error) {
-	item, ok := value.(map[string]any)
-	if !ok {
-		return 0, fmt.Errorf("trace item must be object, got %T", value)
-	}
-	copied := maps.Clone(item)
-	copied["idx"] = len(r.snapshot.Items)
-	r.snapshot.Items = append(r.snapshot.Items, copied)
-	return copied["idx"].(int), nil
-}
-
-func (r *Recorder) currentStepPtr() *step {
-	if r.currentStep < 0 || r.currentStep >= len(r.snapshot.Steps) {
-		return nil
-	}
-	return &r.snapshot.Steps[r.currentStep]
-}
-
-func (r *Recorder) writeSnapshotLocked() error {
-	if r.inMemory {
-		return nil
-	}
-
-	snapshotValue, err := r.compactedSnapshotValueLocked()
-	if err != nil {
-		return err
-	}
-
-	var buf bytes.Buffer
-	encoder := sonic.ConfigDefault.NewEncoder(&buf)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(snapshotValue); err != nil {
-		return err
-	}
-	tmpPath := r.sessionPath + ".tmp"
-	data := bytes.TrimSuffix(buf.Bytes(), []byte{'\n'})
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, r.sessionPath)
-}
-
-func (r *Recorder) compactedSnapshotValueLocked() (any, error) {
-	return r.compactedValueLocked(r.snapshot)
-}
-
 func (r *Recorder) compactedMapValueLocked(value map[string]any) (map[string]any, error) {
 	compacted, err := r.compactedValueLocked(value)
 	if err != nil {
@@ -1189,13 +741,10 @@ func (r *Recorder) compactLargeStringsLocked(value any) (any, error) {
 		}
 		return value, nil
 	case string:
-		if len(value) < largeStringArtifactThreshold {
+		if len(value) < largeStringPreviewThreshold {
 			return value, nil
 		}
-		if r.inMemory {
-			return inlineStringPreview(value), nil
-		}
-		return r.writeStringArtifactLocked(value)
+		return inlineStringPreview(value), nil
 	default:
 		return value, nil
 	}
@@ -1213,63 +762,4 @@ func inlineStringPreview(value string) map[string]any {
 		result["multiline"] = true
 	}
 	return result
-}
-
-func (r *Recorder) writeStringArtifactLocked(value string) (map[string]any, error) {
-	sum := sha256.Sum256([]byte(value))
-	hash := hex.EncodeToString(sum[:])
-	relativePath := filepath.ToSlash(filepath.Join("artifacts", hash+".txt"))
-	path := filepath.Join(r.dir, relativePath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
-			return nil, err
-		}
-	} else if err != nil {
-		return nil, err
-	}
-	return map[string]any{
-		"artifact_ref": "artifact://sha256/" + hash,
-		"path":         relativePath,
-		"sha256":       hash,
-		"bytes":        len(value),
-		"preview":      stringPreview(value, artifactPreviewBytes),
-		"truncated":    true,
-	}, nil
-}
-
-func stringPreview(value string, maxBytes int) string {
-	if len(value) <= maxBytes {
-		return value
-	}
-	preview := value[:maxBytes]
-	for !utf8.ValidString(preview) && len(preview) > 0 {
-		preview = preview[:len(preview)-1]
-	}
-	return strings.TrimRight(preview, "\n") + "\n[artifact truncated]\n"
-}
-
-func stripItemIndex(item map[string]any) map[string]any {
-	copied := maps.Clone(item)
-	delete(copied, "idx")
-	return copied
-}
-
-func stringField(value map[string]any, key string) string {
-	raw, ok := value[key]
-	if !ok {
-		return ""
-	}
-	text, _ := raw.(string)
-	return text
-}
-
-func mustJSON(value any) string {
-	data, err := sonic.MarshalString(value)
-	if err != nil {
-		return fmt.Sprintf("%#v", value)
-	}
-	return data
 }

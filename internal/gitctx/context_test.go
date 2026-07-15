@@ -147,7 +147,7 @@ func TestUncommittedSnapshotExcludesUntrackedInternalState(t *testing.T) {
 	runGit(t, repoDir, "add", "tracked.txt")
 	runGit(t, repoDir, "commit", "-m", "base")
 	writeFile(t, filepath.Join(repoDir, ".omx", "state.json"), "secret\n")
-	writeFile(t, filepath.Join(repoDir, ".git-agent", "session.json"), "secret\n")
+	writeFile(t, filepath.Join(repoDir, ".git-agent", "search", "cache.json"), "secret\n")
 	writeFile(t, filepath.Join(repoDir, "visible.txt"), "visible\n")
 
 	repo, err := Open(repoDir)

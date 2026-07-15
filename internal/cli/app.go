@@ -1000,14 +1000,7 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	recorder, err := trace.New(repo.RootPath, "commit-msg")
-	if err != nil {
-		return err
-	}
-	if cfg.Debug {
-		a.writeDebugEvent("trace", slog.String("trace_dir", recorder.Dir()))
-	}
-	result, err := a.generateCommitMessage(taskCtx, cfg, repo, stagedPaths, mode, "commit-msg", recorder)
+	result, err := a.generateCommitMessage(taskCtx, cfg, repo, stagedPaths, mode, "commit-msg", nil)
 	if err != nil {
 		return err
 	}
@@ -1166,26 +1159,28 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 	if err != nil {
 		return agent.Result{}, err
 	}
-	session := map[string]any{
-		"command":      command,
-		"mode":         mode,
-		"repo":         repo.Summary(),
-		"staged_paths": stagedPaths,
-	}
-	if skillStore.Len() > 0 {
-		session["skills"] = skillStore.Summary()
-	}
-	if preparedCommit != nil {
-		session["prepared_commit_context"] = preparedCommit.TraceValue()
-	}
-	if preparedAmend != nil {
-		session["prepared_amend_context"] = preparedAmend.TraceValue()
-	}
-	if originalAmendMessage != "" {
-		session["original_head_message"] = originalAmendMessage
-	}
-	if err := recorder.Write("session", session); err != nil {
-		return agent.Result{}, err
+	if recorder != nil {
+		session := map[string]any{
+			"command":      command,
+			"mode":         mode,
+			"repo":         repo.Summary(),
+			"staged_paths": stagedPaths,
+		}
+		if skillStore.Len() > 0 {
+			session["skills"] = skillStore.Summary()
+		}
+		if preparedCommit != nil {
+			session["prepared_commit_context"] = preparedCommit.TraceValue()
+		}
+		if preparedAmend != nil {
+			session["prepared_amend_context"] = preparedAmend.TraceValue()
+		}
+		if originalAmendMessage != "" {
+			session["original_head_message"] = originalAmendMessage
+		}
+		if err := recorder.Write("session", session); err != nil {
+			return agent.Result{}, err
+		}
 	}
 	validator := func(text string) []string { return commitmsg.Validate(mode, text) }
 	if preparedCommit != nil {
@@ -1341,27 +1336,6 @@ func (a *App) runPRMessage(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	recorder, err := trace.New(repo.RootPath, "pr-message")
-	if err != nil {
-		return err
-	}
-	if cfg.Debug {
-		a.writeDebugEvent("trace", slog.String("trace_dir", recorder.Dir()))
-	}
-	session := map[string]any{
-		"command":       "pr-message",
-		"mode":          commitmsg.ModePR,
-		"repo":          repo.Summary(),
-		"base_ref":      gitctx.PullRequestBaseRef,
-		"changed_paths": prepared.ChangedPaths,
-		"prepared":      prepared,
-	}
-	if skillStore.Len() > 0 {
-		session["skills"] = skillStore.Summary()
-	}
-	if err := recorder.Write("session", session); err != nil {
-		return err
-	}
 	allowedTools := withSkillTools(nil, skillStore)
 	var registry *tools.Registry
 	var toolSpecs []tools.Definition
@@ -1376,7 +1350,7 @@ func (a *App) runPRMessage(ctx context.Context, args []string) error {
 		ToolSpecs: toolSpecs,
 		Validator: func(text string) []string { return commitmsg.Validate(commitmsg.ModePR, text) },
 		Normalize: commitmsg.Shape,
-		Trace:     recorder,
+		Trace:     nil,
 		Budget:    a.budgetHandler(),
 	}
 	environment := environmentContext(repo, "pr-message", gitctx.PullRequestBaseRef+"..HEAD", cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
@@ -1396,13 +1370,6 @@ func (a *App) runPRMessage(ctx context.Context, args []string) error {
 	}
 	if errs := commitmsg.Validate(commitmsg.ModePR, result.Text); len(errs) > 0 {
 		return fmt.Errorf("validation failed after shaping: %v", errs)
-	}
-	if err := recorder.Write("final", map[string]any{
-		"text":         result.Text,
-		"tool_calls":   result.ToolCalls,
-		"repair_calls": result.RepairCalls,
-	}); err != nil {
-		return err
 	}
 	return a.writeResult(cfg, result)
 }
@@ -1473,32 +1440,27 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 	var recorder *trace.Recorder
 	if outSet {
 		recorder, err = trace.NewStream("release-note", a.stdout)
-	} else {
-		recorder, err = trace.New(repo.RootPath, "release-note")
 	}
 	if err != nil {
 		return err
 	}
-	if cfg.Debug && !outSet {
-		a.writeDebugEvent("trace", slog.String("trace_dir", recorder.Dir()))
-	}
-	session := map[string]any{
-		"command": "release-note",
-		"range":   rangeArgs.BaseRef + ".." + rangeArgs.ReleaseRef,
-		"repo":    repo.Summary(),
-	}
-	if skillStore.Len() > 0 {
-		session["skills"] = skillStore.Summary()
-	}
-	if rangeArgs.Inferred {
-		session["inferred_from"] = rangeArgs.Bump
-		session["release_revision"] = rangeArgs.ReleaseRevision
-	}
-	if outSet {
+	if recorder != nil {
+		session := map[string]any{
+			"command": "release-note",
+			"range":   rangeArgs.BaseRef + ".." + rangeArgs.ReleaseRef,
+			"repo":    repo.Summary(),
+		}
+		if skillStore.Len() > 0 {
+			session["skills"] = skillStore.Summary()
+		}
+		if rangeArgs.Inferred {
+			session["inferred_from"] = rangeArgs.Bump
+			session["release_revision"] = rangeArgs.ReleaseRevision
+		}
 		session["out"] = outputPath
-	}
-	if err := recorder.Write("session", session); err != nil {
-		return err
+		if err := recorder.Write("session", session); err != nil {
+			return err
+		}
 	}
 	registry := tools.NewRegistryWithSkills(repo, skillStore)
 	prepared, err := releasenote.PrepareContextFromRevision(repo, rangeArgs.BaseRef, rangeArgs.ReleaseRef, rangeArgs.ReleaseRevision)

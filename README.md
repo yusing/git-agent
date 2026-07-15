@@ -87,7 +87,6 @@ entirely and format a deterministic local message.
 | Release-note writing | Release Markdown from explicit refs or `patch`, `minor`, and `major` shortcuts |
 | Review and simplification | Strict JSON reports with repository evidence and replayable SSE agent events |
 | Embedding search | Local filesystem or committed-tree context search for agents and humans |
-| Trace artifacts | JSON request/response/tool-call traces for message generation commands |
 | Debug output | Human console diagnostics with `--debug`; pprof with `--pprof <addr>` |
 
 <!-- markdownlint-enable MD013 -->
@@ -172,7 +171,7 @@ their own.
 ## Search
 
 `git-agent search` is embedding-backed implementation-location search. It does
-not run the Responses API or create message-generation sessions.
+not run the Responses API.
 
 ```sh
 # Search current filesystem files; Git repositories share a root index
@@ -337,13 +336,13 @@ Common generation and inspection flags:
 | `--max-steps <n>` | Bound agent loop steps |
 | `--guidance-family auto\|agents\|claude\|codex\|none` | Force guidance family |
 | `--append-prompt <text>` | Add a bounded operator hint |
-| `--debug` | Print diagnostics and trace location |
+| `--debug` | Print diagnostics |
 | `--pprof <addr>` | Serve Go pprof endpoints |
 
 <!-- markdownlint-enable MD013 -->
 
-`release-note --out <file>` writes the rendered Markdown to the file, streams a
-human console trace to stdout, and skips the on-disk JSON trace session.
+`release-note --out <file>` writes the rendered Markdown to the file and streams
+a human console trace to stdout.
 
 ## Configuration
 
@@ -428,19 +427,8 @@ flowchart TD
     Search --> SearchOutput["JSON or brief stdout"]
 ```
 
-Message-generation commands write JSON traces under:
-
-```text
-~/.git-agent/<path-sha>/sessions/<timestamp>-<command>/
-```
-
-Trace files include session metadata, provider requests/responses, tool calls,
-and returned tool output. API keys are redacted. `--debug` prints the trace
-directory to stderr.
-
-`review` and `simplify` stream those events from memory over SSE and do not
-create on-disk trace sessions. Detached runs persist only a small task record
-under:
+`review` and `simplify` stream events from memory over SSE. Detached runs
+persist only a small task record under:
 
 ```text
 ~/.git-agent/<project-identity-sha>/background/<task-id>.json
@@ -501,14 +489,14 @@ config directory already exists.
 - Message generation sends prepared repository context to the configured
   provider.
 - Search sends indexed chunks and queries to the configured embedding provider.
-- API keys and bearer tokens are redacted from traces, debug output, and errors.
+- API keys and bearer tokens are redacted from debug output and errors.
 - Repository tools do not follow symlinks outside the repository.
-- Metadata, indexes, and trace artifacts under `~/.git-agent/` are restricted to
+- Metadata and indexes under `~/.git-agent/` are restricted to
   the current user on platforms with Unix-style permission bits.
 - Detached task records contain producer metadata and the exact terminal
   `final` or `error` event. Failed records also contain bounded sanitized
   diagnostics. Records are owner-only and retained indefinitely so a completed
-  report remains retrievable; no trace session is created for them.
+  report remains retrievable.
 
 ## Specification
 

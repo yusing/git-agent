@@ -55,6 +55,7 @@ Supported workflows:
 #### `git-agent commit-msg`
 
 Generate a commit message from the staged diff in the current repository.
+Stdout contains only the final message.
 The command precomputes staged paths, status, stats, recent style commits, and
 the bounded staged diff before generation so the authoritative staged scope is
 visible before any optional follow-up tool calls. For generated-heavy staged
@@ -89,9 +90,9 @@ any optional follow-up tool calls.
 
 Generate a commit message from staged changes using the same prompt,
 validation, shaping, guidance, and read-only model tools as `commit-msg`, then
-create the commit by running `git commit --file -` in the repository root. This
-mode writes no on-disk NDJSON trace. On success, stdout streams a human console
-trace while generating the message, then prints Git's raw commit summary after `git commit`
+create the commit by running `git commit --file -` in the repository root. On
+success, stdout streams a human console trace while generating the message,
+then prints Git's raw commit summary after `git commit`
 succeeds. Trace lines use short local times such as `15:04:05 INF final`, color
 field keys when stdout is a terminal, and render long or multiline values as
 indented preview blocks. Because commit creation is delegated to Git, normal Git
@@ -137,11 +138,9 @@ version `1.0.1`.
 The command precomputes release-note evidence in Go before generation and then
 asks the model to write from that prepared context, with only a minimal
 read-only fallback tool available for rare gaps.
-By default the rendered Markdown is printed to stdout and a JSON trace is
-written under `~/.git-agent/<path-sha>/sessions/`. With `--out <file>`, the
+By default the rendered Markdown is printed to stdout. With `--out <file>`, the
 command checks the target is writable before generation, streams the human
-console trace to stdout, writes the rendered Markdown to the file, and does not
-write a JSON trace session.
+console trace to stdout, and writes the rendered Markdown to the file.
 
 #### `git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 
@@ -223,7 +222,7 @@ tokens, and context-token budget.
 Reasoning delta values contain `item_id`, `output_index`, `summary_index`,
 provider `sequence_number`, and `delta`; done values contain the same identity
 fields and complete `text`. Terminal event closes streams, then server shuts
-down. No on-disk trace session is created.
+down.
 
 Neither command has a request or overall task deadline by default. Explicit
 `--timeout <duration>` applies that deadline to both the provider HTTP client
@@ -273,9 +272,8 @@ accept version 1 records, which have no diagnostic field. Diagnostics never
 contain API credentials, provider endpoints, full requests/responses, or
 unbounded repository content; they are not full traces. Terminal events are
 written without trace compaction and published to SSE. Records live under
-`~/.git-agent/<project-identity-sha>/background/<task-id>.json`, are retained
-indefinitely, and do not create a trace session. The containing directory is
-`0700`.
+`~/.git-agent/<project-identity-sha>/background/<task-id>.json` and are retained
+indefinitely. The containing directory is `0700`.
 
 `git-agent review-test` is an internal integration fixture. It requires no
 arguments, provider authentication, or repository access. It uses the same
@@ -384,9 +382,8 @@ fallbacks. Encrypted private keys require an agent because the command never
 prompts for a passphrase. Server host keys are verified against OpenSSH
 `known_hosts`; verification is never disabled.
 
-Search does not run the Responses API, does not call model tools, does not
-create `~/.git-agent/<path-sha>/sessions/` traces, does not generate
-explanations, and does not use lexical fallback. It frames and embeds the query
+Search does not run the Responses API, call model tools, generate explanations,
+or use lexical fallback. It frames and embeds the query
 as an implementation-location search when the configured embedding input cap can
 include the framing; otherwise it embeds the raw query so user query text is not
 truncated away. Search embeds local chunks, performs an exact cosine scan over
@@ -420,7 +417,7 @@ complete, then publishes compatible records after persistence. Filesystem mode
 first ensures and publishes committed HEAD revision index, then builds or
 queries actual working tree. Filesystem discovery continues to include staged,
 unstaged, and untracked files, but dirty-worktree-only vectors, query history,
-absolute roots, locks, temporary files, sessions, auth data, and cached bare
+absolute roots, locks, temporary files, auth data, and cached bare
 repositories are never exported.
 
 `--format json` is the default stdout contract. `--format brief` first writes a
@@ -722,7 +719,7 @@ retrieval form documented above.
 `release-note` additionally supports:
 
 - `--out <file>`: write rendered Markdown to file and stream human console trace
-  to stdout instead of writing an on-disk JSON trace session
+  to stdout
 
 `search` additionally supports:
 
@@ -857,19 +854,11 @@ unchanged. API-key providers retain the requested model identifier.
   progress, `--agent` progress probe endpoints, validation failures, provider/tool
   loop summaries when `--debug` is enabled, and stderr
   emitted by a successful delegated `git commit`
-- `search` writes errors and optional `--debug` diagnostics to stderr only and
-  never writes a model trace session
-- generation-only commands write a JSON trace session under
-  `~/.git-agent/<path-sha>/sessions/`
-  regardless of `--debug`, except `release-note --out <file>`; `--debug`
-  prints the session directory on stderr when a JSON trace session is used
-- `review` and `simplify` keep trace events in memory for SSE replay and do not
-  write on-disk trace sessions; detached runs persist only their durable task
-  record
-- `release-note --out <file>` does not write an on-disk NDJSON trace session;
-  its human console trace lines are streamed to stdout
-- `commit` / `commit --amend` do not write an on-disk NDJSON trace session;
-  their human console trace lines are streamed to stdout
+- `search` writes errors and optional `--debug` diagnostics to stderr only
+- `review` and `simplify` keep trace events in memory for SSE replay; detached
+  runs persist only their durable task record
+- `release-note --out <file>` and `commit` / `commit --amend` stream human
+  console trace lines to stdout
 - `commit` / `commit --amend` delegate commit creation to `git commit`, so Git
   config, hooks, `commit.gpgSign`, system `gpg`, and `gpg-agent` behavior apply
 - if commit creation fails after message generation, the command returns nonzero
@@ -933,8 +922,7 @@ Defaults:
 - `internal/tasks/search`: filesystem/revision discovery, chunking, local
   binary vector cache, hybrid ranking, replay metadata, and JSON rendering
 - `internal/textutil`: shared normalization and output shaping helpers
-- `internal/trace`: JSON session recorder for requests, responses, tool calls,
-  and tool outputs
+- `internal/trace`: in-memory and console event recording
 
 ### Request assembly layers
 
@@ -993,9 +981,8 @@ including:
    submodule-only messages before provider auth is required
 4. for normal submodule-only staged changes, format and return the local
    message without the SDK-backed agent loop
-5. resolve provider config and create a JSON trace session, or a
-   stdout-streaming human console trace for
-   `commit` / `commit --amend`
+5. resolve provider config and create a stdout-streaming human console trace
+   for `commit` / `commit --amend`
 6. precompute task context before the first provider call: staged context for
    normal commit messages, amend context for `--amend`, PR context for
    `pr-message`, or release-note context for `release-note` including resolved
@@ -1006,11 +993,11 @@ including:
 8. build task-specific instructions, developer context, and initial user prompt,
    appending any `--append-prompt` hint as lower-priority escaped prompt data
 9. send request to the Responses API through the official OpenAI Go SDK
-10. record each request and response in the active trace
+10. stream each request and response when console or SSE tracing is active
 11. if the model requests tools, execute only registered read-only tools;
     return non-context execution errors as structured failed tool outputs so the
     model can correct arguments or choose other evidence
-12. record each tool call and successful or failed tool output in the active trace
+12. stream each tool call and successful or failed tool output when tracing is active
 13. append function-call and function-call-output items and continue until final
     text is returned
 14. if the local budget is exhausted, force a no-tool finalization request while
@@ -1039,16 +1026,14 @@ flowchart TD
     LocalMessage --> Stdout
     SubmoduleOnly -- no --> Resolve[Resolve provider config from flags, env, defaults]
     Resolve --> Guidance[Resolve project guidance for staged paths]
-    Guidance --> Trace[Create home metadata session trace]
-    Trace --> Registry[Register read-only commit-message tools plus optional skills_read]
+    Guidance --> Registry[Register read-only commit-message tools plus optional skills_read]
     Registry --> Runner[Build OpenAI runner with validator and tool specs]
     Runner --> Request[Assemble request layers]
     Request --> Model[Call Responses API]
     Model --> ToolDecision{Tool calls?}
     ToolDecision -- yes --> ToolBudget{Within tool budget?}
     ToolBudget -- yes --> ExecuteTools[Execute allowed read-only tools]
-    ExecuteTools --> RecordTools[Trace tool call and output]
-    RecordTools --> Continue[Append function call and output items]
+    ExecuteTools --> Continue[Append function call and output items]
     Continue --> Model
     ToolBudget -- no --> Budget[Extend interactively or force final artifact]
     Budget --> Model
@@ -1061,8 +1046,7 @@ flowchart TD
     Revalidate --> Preserve
     Valid -- yes --> Preserve[Preserve supported task ID suffix]
     Preserve --> FinalValidate[Validate shaped output]
-    FinalValidate --> FinalTrace[Trace final artifact]
-    FinalTrace --> Stdout([Print artifact only to stdout])
+    FinalValidate --> Stdout([Print artifact only to stdout])
 ```
 
 #### `git-agent commit-msg --amend`
@@ -1077,8 +1061,7 @@ flowchart TD
     StagedPaths --> Prepare[Precompute amend context]
     Prepare --> Evidence[Collect original HEAD message, HEAD diff, final amended diff, staged diagnostics]
     Evidence --> Guidance[Resolve project guidance for final amended paths]
-    Guidance --> Trace[Create home metadata session trace with amend mode]
-    Trace --> Registry[Register read-only commit-message tools plus optional skills_read]
+    Guidance --> Registry[Register read-only commit-message tools plus optional skills_read]
     Registry --> Runner[Build OpenAI runner with amend validator and tool specs]
     Runner --> Request[Assemble amend request layers with prepared amend context]
     Request --> Model[Call Responses API]
@@ -1086,8 +1069,7 @@ flowchart TD
     ToolDecision -- yes --> ToolBudget{Within tool budget?}
     ToolBudget -- yes --> ExecuteTools[Execute allowed read-only tools]
     ExecuteTools --> FinalDiff[Model uses prepared final diff or narrower git_final_amended_diff as authoritative evidence]
-    FinalDiff --> RecordTools[Trace tool call and output]
-    RecordTools --> Continue[Append function call and output items]
+    FinalDiff --> Continue[Append function call and output items]
     Continue --> Model
     ToolBudget -- no --> Budget[Extend interactively or force final artifact]
     Budget --> Model
@@ -1100,8 +1082,7 @@ flowchart TD
     Revalidate --> Preserve
     Valid -- yes --> Preserve[Preserve supported task ID suffix]
     Preserve --> FinalValidate[Reject delta or process phrasing]
-    FinalValidate --> FinalTrace[Trace final artifact]
-    FinalTrace --> Stdout([Print artifact only to stdout])
+    FinalValidate --> Stdout([Print artifact only to stdout])
 ```
 
 #### `git-agent commit` / `git-agent commit --amend`
@@ -1131,7 +1112,7 @@ flowchart TD
     Request --> Model[Call Responses API]
     Model --> ToolDecision{Tool calls?}
     ToolDecision -- yes --> ExecuteTools[Execute allowed read-only tools]
-    ExecuteTools --> RecordTools[Stream trace event and update in-memory snapshot]
+    ExecuteTools --> RecordTools[Stream trace event]
     RecordTools --> Continue[Append function call and output items]
     Continue --> Model
     ToolDecision -- no --> Validate[Validate and shape commit message]
@@ -1158,15 +1139,13 @@ flowchart TD
     OpenRepo --> Prepare[Precompute PR context for origin/HEAD..HEAD]
     Prepare --> Evidence[Collect base, changed paths, stats, branch commits, recent commits, bounded diff]
     Evidence --> Guidance[Resolve project guidance for changed paths]
-    Guidance --> Trace[Create home metadata session trace]
-    Trace --> Registry[Register optional skills_read tool]
+    Guidance --> Registry[Register optional skills_read tool]
     Registry --> Runner[Build OpenAI runner with prepared context and optional skill tool specs]
     Runner --> Request[Assemble request layers with prepared PR context]
     Request --> Model[Call Responses API]
     Model --> ToolDecision{Skill tool call?}
     ToolDecision -- yes --> ExecuteSkill[Execute skills_read]
-    ExecuteSkill --> RecordSkill[Trace tool call and output]
-    RecordSkill --> Continue[Append function call and output items]
+    ExecuteSkill --> Continue[Append function call and output items]
     Continue --> Model
     ToolDecision -- no --> Shape[Shape body wrapping]
     Shape --> Validate[Validate shaped squash commit message]
@@ -1176,8 +1155,7 @@ flowchart TD
     Reshape --> Revalidate[Revalidate shaped repaired output]
     Revalidate --> FinalValidate
     Valid -- yes --> FinalValidate[Validate shaped output]
-    FinalValidate --> FinalTrace[Trace final artifact]
-    FinalTrace --> Stdout([Print artifact only to stdout])
+    FinalValidate --> Stdout([Print artifact only to stdout])
 ```
 
 #### `git-agent release-note <base> <release>` or `git-agent release-note patch|minor|major`
@@ -1194,9 +1172,8 @@ flowchart TD
     Timeout --> OpenRepo[Open repository]
     OpenRepo --> Guidance[Resolve project guidance for repository root]
     Guidance --> Trace{--out set?}
-    Trace -- no --> JSONTrace[Create home metadata session trace]
+    Trace -- no --> Registry[Register repo_summary plus optional skills_read]
     Trace -- yes --> StreamTrace[Create stdout-streaming console trace]
-    JSONTrace --> Registry[Register repo_summary plus optional skills_read]
     StreamTrace --> Registry
     Registry --> Infer{Version bump shortcut?}
     Infer -- yes --> Bump[Find latest reachable semver tag and bump patch/minor/major; use HEAD for evidence]
@@ -1212,8 +1189,7 @@ flowchart TD
     Model --> ToolDecision{Fallback or skill tool call?}
     ToolDecision -- yes --> ToolBudget{Within tool budget?}
     ToolBudget -- yes --> ExecuteTool[Execute repo_summary or skills_read]
-    ExecuteTool --> RecordTools[Trace tool call and output]
-    RecordTools --> Continue[Append function call and output items]
+    ExecuteTool --> Continue[Append function call and output items]
     Continue --> Model
     ToolBudget -- no --> Budget[Extend interactively or force final artifact]
     Budget --> Model
@@ -1225,8 +1201,7 @@ flowchart TD
     Valid -- yes --> BuildDoc
     BuildDoc --> ValidateDoc[Validate rendered document requirements]
     ValidateDoc --> Render[Render final Markdown]
-    Render --> FinalTrace[Trace final artifact]
-    FinalTrace --> Output{--out set?}
+    Render --> Output{--out set?}
     Output -- no --> Stdout([Print artifact only to stdout])
     Output -- yes --> File([Write artifact to --out file])
 ```
@@ -1241,59 +1216,6 @@ The runtime must enforce:
 - per-request timeout where a command default or explicit `--timeout` applies
 - overall task timeout where a command default or explicit `--timeout` applies;
   `review` and `simplify` are unlimited unless the flag is set
-
-### Session trace format
-
-Generation-only commands store persistent traces under:
-
-```text
-~/.git-agent/<path-sha>/sessions/<timestamp>-<command>/
-```
-
-`<path-sha>` is the SHA-256 of the cleaned absolute project root. Existing
-`<project>/.git-agent/` metadata is migrated into this home directory on the
-next project run.
-
-Persistent trace directories contain:
-
-```text
-events.ndjson
-session.json
-artifacts/<sha256>.txt
-```
-
-`events.ndjson` is an append-only NDJSON event stream. `session.json` is a
-compacted snapshot for humans and test diagnostics. Large string values are
-stored under `artifacts/` and replaced by artifact metadata in both files.
-
-`git-agent commit` and `git-agent commit --amend` do not create an on-disk trace
-session. They stream readable console trace lines to stdout. Console trace lines
-are summarized, so they keep the event type and useful counters without dumping
-raw request/response JSON or full diffs. Large or multiline string values in
-stdout stream traces are rendered as indented preview blocks with truncation
-metadata because there is no artifact directory and raw multiline patches are
-not console-friendly.
-
-Each stdout trace line has this shape:
-
-```text
-15:04:05 INF session.started command=commit
-```
-
-On-disk trace contents include:
-
-- session metadata: command, mode/range, repository summary, staged paths when
-  relevant
-- every Responses request sent to the provider, with API keys redacted
-- every provider response, including raw response JSON when available from the
-  SDK
-- every model-requested tool call
-- every tool output returned to the model
-- final generated artifacts and commit errors when relevant
-
-Trace files are diagnostic artifacts and live outside the repository. The
-legacy `/.git-agent/` path remains ignored by Git for projects that have not
-run migration yet.
 
 ## 4. Guidance resolution
 
@@ -1796,7 +1718,7 @@ Unit coverage should include:
 - truncation metadata
 - strict tool schemas
 - tool result envelopes
-- trace redaction and trace file creation
+- console and SSE event redaction
 
 ### Golden tests
 
@@ -1854,7 +1776,6 @@ Mitigation:
 - keep the SDK adapter thin
 - isolate provider translation and SDK type conversion in `internal/openai`
 - test against a fake server and at least one real provider
-- keep full JSON session traces for request/response debugging
 
 ### Release-note formatting regressions
 
@@ -1875,35 +1796,6 @@ Mitigation:
 - strict tool output caps
 - encourage narrow follow-up reads
 
-### Trace data sensitivity risk
-
-Session traces intentionally store prompts, provider responses, tool arguments,
-and tool outputs. They are useful for debugging but may include repository
-content. For `git-agent commit` and `git-agent commit --amend`, stdout streams
-summarized console trace events instead of writing an on-disk session under
-`~/.git-agent/<path-sha>/sessions/`. Console request events omit raw request
-fields such as `instructions`, but generated text and repository-derived
-summaries or previews may still appear in stdout; large string values are
-compacted inline with preview metadata.
-
-Detached review and simplification records are not trace sessions. Each
-contains producer metadata and the exact terminal `final` report or `error`
-event, which can include repository-derived output or provider error text.
-Records are retained indefinitely to support repeat retrieval.
-
-Mitigation:
-
-- redact API keys from request traces
-- store generation-only traces under `~/.git-agent/<path-sha>/`
-- create metadata directories and files with owner-only permissions, and tighten
-  permissions on existing metadata when it is opened
-- keep legacy `.git-agent/` ignored in Git until migration removes it
-- print trace directory only when `--debug` is enabled
-- document that commit-command stdout may contain repository context and should
-  be handled like trace data
-- store detached-task records and directories with owner-only permissions and
-  document their indefinite retention
-
 ## 9. Current acceptance criteria
 
 The in-repository implementation is complete when:
@@ -1918,7 +1810,7 @@ The in-repository implementation is complete when:
 - `git-agent commit` and `git-agent commit --amend` route through the same
   bounded SDK-backed commit-message loop except for normal submodule-only
   staged changes, stream human console trace lines to stdout for SDK-backed
-  generation, write no on-disk NDJSON session trace, create or amend the commit
+  generation, create or amend the commit
   through `git commit`, and print Git's raw commit summary after success
 - `git-agent pr-message` routes through the bounded SDK-backed agent loop,
   targets `origin/HEAD..HEAD`, and sends prepared branch context without
@@ -1932,9 +1824,6 @@ The in-repository implementation is complete when:
   guidance resolves against the final amended paths
 - tools are read-only and exposed as strict function tools
 - tool outputs use the stable JSON envelope
-- generation-only commands write a
-  `~/.git-agent/<path-sha>/sessions/<timestamp>-<command>/`
-  trace, except `release-note --out <file>`
 - generation-only stdout contains only the final generated artifact, except
   `release-note --out <file>` streams human console trace lines and writes the
   artifact to the requested file

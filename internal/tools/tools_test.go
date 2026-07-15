@@ -87,7 +87,7 @@ func TestRepositoryWalkToolsSkipInternalState(t *testing.T) {
 	dir := t.TempDir()
 	runGit(t, dir, "init")
 	mustWriteFile(t, filepath.Join(dir, "visible.txt"), "needle\n")
-	mustWriteFile(t, filepath.Join(dir, ".git-agent", "sessions", "trace.json"), "needle\n")
+	mustWriteFile(t, filepath.Join(dir, ".git-agent", "search", "cache.json"), "needle\n")
 	mustWriteFile(t, filepath.Join(dir, ".omx", "state.json"), "needle\n")
 	mustWriteFile(t, filepath.Join(dir, ".omx", "tracked.txt"), "tracked-needle\n")
 	runGit(t, dir, "add", "-f", ".omx/tracked.txt")
@@ -110,7 +110,7 @@ func TestRepositoryWalkToolsSkipInternalState(t *testing.T) {
 	if err := json.Unmarshal([]byte(listResult.Content), &listed); err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{".git-agent/sessions/trace.json", ".omx/state.json"} {
+	for _, forbidden := range []string{".git-agent/search/cache.json", ".omx/state.json"} {
 		for _, file := range listed.Data.Files {
 			if file == forbidden {
 				t.Fatalf("list_files exposed internal state %q: %#v", forbidden, listed.Data.Files)

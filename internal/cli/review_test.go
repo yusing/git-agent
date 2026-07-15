@@ -120,9 +120,6 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 			if !ok || storedReport["summary"] != expectedReport["summary"] {
 				t.Fatalf("stored final report = %#v", record.Terminal.Value["text"])
 			}
-			if _, err := os.Stat(filepath.Join(projectMetadataDir(t, repoDir), "sessions")); !os.IsNotExist(err) {
-				t.Fatalf("background command created trace sessions: %v", err)
-			}
 			var launch detachedLaunch
 			if err := json.Unmarshal(stderr.Bytes(), &launch); err != nil {
 				t.Fatalf("worker launch metadata is not JSON: %v\n%s", err, stderr.String())

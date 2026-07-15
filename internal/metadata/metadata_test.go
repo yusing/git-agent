@@ -13,10 +13,10 @@ func TestDirUsesHomePathSHAAndMigratesLegacyDirectory(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", home)
 
-	if err := os.MkdirAll(filepath.Join(root, dirName, "sessions", "old"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, dirName, "state", "old"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, dirName, "sessions", "old", "session.json"), []byte("{}\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, dirName, "state", "old", "record.json"), []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -28,7 +28,7 @@ func TestDirUsesHomePathSHAAndMigratesLegacyDirectory(t *testing.T) {
 	if dir != want {
 		t.Fatalf("dir = %q, want %q", dir, want)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "sessions", "old", "session.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "state", "old", "record.json")); err != nil {
 		t.Fatalf("migrated session missing: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, dirName)); !os.IsNotExist(err) {
@@ -42,10 +42,10 @@ func TestDirTightensExistingMetadataPermissions(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", home)
 	dir := filepath.Join(home, dirName, PathSHA(root))
-	if err := os.MkdirAll(filepath.Join(dir, "sessions"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "state"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "sessions", "trace.json"), []byte("secret\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "state", "cache.json"), []byte("secret\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -63,7 +63,7 @@ func TestSearchDirMigratesOnlySearchToOriginKey(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(legacy, "search", "fs", "index"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(legacy, "sessions", "session"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(legacy, "state", "record"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(legacy, "search", "fs", "index", "manifest.json"), []byte("{}\n"), 0o600); err != nil {
@@ -83,8 +83,8 @@ func TestSearchDirMigratesOnlySearchToOriginKey(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(legacy, "search")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("legacy search still exists: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(legacy, "sessions", "session")); err != nil {
-		t.Fatalf("legacy sessions removed: %v", err)
+	if _, err := os.Stat(filepath.Join(legacy, "state", "record")); err != nil {
+		t.Fatalf("legacy state removed: %v", err)
 	}
 }
 
@@ -117,30 +117,30 @@ func TestDirPreservesConflictingNewFilesDuringMigration(t *testing.T) {
 	t.Setenv("HOME", home)
 	dir := filepath.Join(home, dirName, PathSHA(root))
 
-	if err := os.MkdirAll(filepath.Join(root, dirName, "sessions", "same"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, dirName, "state", "same"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, dirName, "sessions", "same", "session.json"), []byte("legacy\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, dirName, "state", "same", "record.json"), []byte("legacy\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(dir, "sessions", "same"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "state", "same"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "sessions", "same", "session.json"), []byte("current\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "state", "same", "record.json"), []byte("current\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	if _, err := Dir(root); err != nil {
 		t.Fatal(err)
 	}
-	current, err := os.ReadFile(filepath.Join(dir, "sessions", "same", "session.json"))
+	current, err := os.ReadFile(filepath.Join(dir, "state", "same", "record.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(current) != "current\n" {
 		t.Fatalf("current file = %q, want preserved", current)
 	}
-	matches, err := filepath.Glob(filepath.Join(dir, "sessions", "same", "session.legacy-*.json"))
+	matches, err := filepath.Glob(filepath.Join(dir, "state", "same", "record.legacy-*.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

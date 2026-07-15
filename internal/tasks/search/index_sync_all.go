@@ -95,7 +95,7 @@ func inventorySyncTargets(metadataRoot, indexSyncRoot string) (targets []indexSy
 		if path == indexSyncRoot {
 			return filepath.SkipDir
 		}
-		if entry.IsDir() && (entry.Name() == ".git" || entry.Name() == "repo.git" || entry.Name() == "sessions" || entry.Name() == "query-locks") {
+		if entry.IsDir() && (entry.Name() == ".git" || entry.Name() == "repo.git" || entry.Name() == "query-locks") {
 			return filepath.SkipDir
 		}
 		if entry.IsDir() || entry.Name() != "manifest.json" || metadataDirForIndex(path) == "" {
