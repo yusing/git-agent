@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -215,6 +216,46 @@ func TestRunnerExecutesToolCallRoundTrip(t *testing.T) {
 	}
 	if strings.Contains(client.requests[0].Instructions, "Use skills_read") {
 		t.Fatalf("request instructions should not mention unavailable skills_read: %s", client.requests[0].Instructions)
+	}
+}
+
+func TestRunnerContinuesAfterDistinctCallsReturnEqualOutputs(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	repo, err := gitctx.Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeClient{responses: []openai.Response{
+		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "grep", Arguments: `{"pattern":"first-missing-pattern"}`}}},
+		{ToolCalls: []openai.ToolCall{{ID: "fc_2", CallID: "call_2", Name: "grep", Arguments: `{"pattern":"second-missing-pattern"}`}}},
+		{Text: "done"},
+	}}
+	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeCodebase, tools.ReviewScope{}, gitctx.ChangeFingerprint{})
+	runner := OpenAIRunner{
+		Config:    config.Config{Model: "test", MaxSteps: 4, MaxToolCalls: 3},
+		Client:    client,
+		Tools:     registry,
+		ToolSpecs: registry.Definitions([]string{"grep"}),
+	}
+
+	result, err := runner.Run(t.Context(), Request{UserPrompt: "review", MaxSteps: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "done" || result.ToolCalls != 2 || len(client.requests) != 3 {
+		t.Fatalf("result = %#v, requests = %d", result, len(client.requests))
+	}
+	var outputCallIDs []string
+	for _, item := range client.requests[2].Input {
+		if item.Type == "function_call_output" {
+			outputCallIDs = append(outputCallIDs, item.CallID)
+		}
+	}
+	if !slices.Equal(outputCallIDs, []string{"call_1", "call_2"}) {
+		t.Fatalf("final request output call IDs = %v", outputCallIDs)
 	}
 }
 

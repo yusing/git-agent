@@ -284,9 +284,10 @@ request estimate at or above that budget fails locally without contacting the
 provider. After a successful response, provider-reported input tokens take
 precedence over serialized-request estimates. At threshold, runner immediately
 makes one tool-free forced-finalization request so model reports all findings
-gathered so far. Exact repeated tool calls and already-seen tool outputs also
-force finalization because they add no evidence. These progress guards do not
-reduce configured model-step or tool-call ceilings.
+gathered so far. Exact repeated tool calls force finalization because they add
+no evidence. Distinct calls may return identical output and still continue
+because invocation identity, not result content, defines repeated work. These
+progress guards do not reduce configured model-step or tool-call ceilings.
 
 #### `git-agent search [flags] <query...>`
 

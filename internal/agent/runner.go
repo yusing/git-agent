@@ -2,8 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -156,7 +154,6 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 	maxToolCalls := r.Config.MaxToolCalls
 	started := time.Now()
 	seenCalls := map[string]struct{}{}
-	seenOutputs := map[string]struct{}{}
 	for step := 0; step < maxSteps; step++ {
 		req := r.providerRequest(
 			requestInstructions(instructions, toolSpecs, step+1, maxSteps, result.ToolCalls, maxToolCalls),
@@ -267,14 +264,6 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 				return Result{}, err
 			}
 			result.ToolCalls++
-			outputSignature := contentSignature(toolResult.Content)
-			if _, duplicate := seenOutputs[outputSignature]; duplicate {
-				return r.finalizeForGuard(ctx, instructions, messages, result, textFormat, BudgetStatus{
-					Kind: BudgetKindNoProgress, Used: result.ToolCalls, Step: step + 1,
-					MaxSteps: maxSteps, MaxToolCalls: maxToolCalls, RequestedTool: call.Name,
-				}, "repeated_tool_output")
-			}
-			seenOutputs[outputSignature] = struct{}{}
 			callID := call.CallID
 			if callID == "" {
 				callID = call.ID
@@ -377,11 +366,6 @@ func toolCallSignature(call openai.ToolCall) string {
 		}
 	}
 	return call.Name + "\x00" + arguments
-}
-
-func contentSignature(content string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(content)))
-	return hex.EncodeToString(sum[:])
 }
 
 func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions string, messages []openai.Item, current Result, textFormat *openai.TextFormat, status BudgetStatus) (Result, int, int, error) {
