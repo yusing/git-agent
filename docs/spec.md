@@ -1444,11 +1444,15 @@ Shared tools:
 
 `read_file` accepts repository-relative path, optional inclusive line range,
 and source `worktree`, `index`, or `head`. Source selection lets staged review
-inspect index content without leaking later worktree edits. `grep` implements
-bounded RE2 matching over repository text files with optional safe glob. `find`
-implements bounded file/directory discovery by safe glob. Both are implemented
-in Go, do not invoke shell commands, skip internal state directories and
-symlinks, and return explicit truncation state.
+inspect index content without leaking later worktree edits. Agent policy permits
+`read_file` only when its path is copied verbatim from prepared context or prior
+repository-tool output; package import paths, package names, types, and symbols
+do not imply filenames. Models must use available inventory or search tools to
+discover unknown paths first. `grep` implements bounded RE2 matching over
+repository text files with optional safe glob. `find` implements bounded
+file/directory discovery by safe glob. Both are implemented in Go, do not invoke
+shell commands, skip internal state directories and symlinks, and return
+explicit truncation state.
 
 ### Skill tools
 

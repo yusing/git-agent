@@ -525,10 +525,10 @@ This is model step %d of %d. You have %d of %d tool calls remaining.
 Use only listed read-only tools.
 Call tools only when they reduce material uncertainty; do not call tools just to repeat provided context.
 When a tool output has ok=false, correct the invocation or use different evidence and continue.
-%sPrefer narrow tool calls that target the missing evidence.
+%s%sPrefer narrow tool calls that target the missing evidence.
 Conclude before the remaining budget reaches zero.
 Do not ask the user for more evidence.
-Return only the final artifact when enough evidence has been gathered.`, step, maxSteps, remainingTools, maxTools, skillToolInstruction(toolSpecs))
+Return only the final artifact when enough evidence has been gathered.`, step, maxSteps, remainingTools, maxTools, skillToolInstruction(toolSpecs), readFileInstruction(toolSpecs))
 }
 
 func skillToolInstruction(toolSpecs []openai.ToolSpec) string {
@@ -536,6 +536,13 @@ func skillToolInstruction(toolSpecs []openai.ToolSpec) string {
 		return ""
 	}
 	return "Use " + tools.SkillReadToolName + " only after a listed skill is relevant, and only to read that skill's SKILL.md or text files under its references/ directory.\n"
+}
+
+func readFileInstruction(toolSpecs []openai.ToolSpec) string {
+	if !slices.ContainsFunc(toolSpecs, func(spec openai.ToolSpec) bool { return spec.Name == "read_file" }) {
+		return ""
+	}
+	return "Use read_file only with a repository path copied verbatim from prepared context or prior repository-tool output. Discover paths with available inventory or search tools first. Package import paths, package names, types, and symbols do not imply filenames.\n"
 }
 
 func finalArtifactInstructions(taskInstructions string) string {

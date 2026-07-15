@@ -25,6 +25,24 @@ type fakeClient struct {
 	streamEvents []openai.StreamEvent
 }
 
+func TestRequestInstructionsRequireReadFilePathProvenance(t *testing.T) {
+	t.Parallel()
+
+	instructions := requestInstructions("", []openai.ToolSpec{{Name: "read_file"}}, 1, 3, 0, 2)
+	if !containsAll(instructions,
+		"path copied verbatim from prepared context or prior repository-tool output",
+		"Discover paths with available inventory or search tools first",
+		"Package import paths, package names, types, and symbols do not imply filenames",
+	) {
+		t.Fatalf("read_file instructions missing path provenance contract: %s", instructions)
+	}
+
+	withoutReadFile := requestInstructions("", []openai.ToolSpec{{Name: "repo_summary"}}, 1, 3, 0, 2)
+	if strings.Contains(withoutReadFile, "do not imply filenames") {
+		t.Fatalf("instructions mention read_file contract without read_file: %s", withoutReadFile)
+	}
+}
+
 func (f *fakeClient) CreateResponse(_ context.Context, request openai.Request) (openai.Response, error) {
 	f.requests = append(f.requests, request)
 	for _, event := range f.streamEvents {
