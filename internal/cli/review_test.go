@@ -52,6 +52,10 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 			server := newScriptedResponsesServer(t, []func(string) string{
 				func(body string) string {
 					for _, want := range []string{
+						`"type":"web_search"`,
+						`"max_tool_calls":4`,
+						`"web_search_call.action.sources"`,
+						`"reasoning.encrypted_content"`,
 						`"type":"json_schema"`,
 						`"name":"` + test.command + `"`,
 						`"review_diff"`,
@@ -60,11 +64,18 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 						`"grep"`,
 						`"find"`,
 						`operator focus`,
+						`Never send secrets, source code, diffs, credentials, personal data`,
+						`up to five deduplicated material source URLs or local documentation locators`,
 						fmt.Sprintf(`<max_model_steps>%d</max_model_steps>`, map[string]int{"review": reviewDefaultMaxSteps, "simplify": simplifyDefaultSteps}[test.command]),
 						fmt.Sprintf(`<max_tool_calls>%d</max_tool_calls>`, map[string]int{"review": reviewDefaultMaxTools, "simplify": simplifyDefaultTools}[test.command]),
 					} {
 						if !strings.Contains(body, want) {
 							t.Fatalf("request missing %q:\n%s", want, body)
+						}
+					}
+					for _, unavailable := range []string{"go_doc", "rust_doc", "context7_library", "context7_docs", "go doc", "rustup doc --path", "Context7 library/docs"} {
+						if strings.Contains(body, unavailable) {
+							t.Fatalf("request advertises unavailable documentation tool %q:\n%s", unavailable, body)
 						}
 					}
 					if !strings.Contains(body, `"model":"`+test.model+`"`) {
@@ -90,6 +101,7 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 			t.Setenv("OPENAI_API_KEY", "test-key")
 			t.Setenv("OPENAI_BASE_URL", server.URL)
 			t.Setenv("OPENAI_MODEL", "")
+			t.Setenv("PATH", t.TempDir())
 			t.Setenv(detachedChildEnv, "1")
 			t.Setenv(detachedTaskIDEnv, cliWaitTaskID)
 
@@ -279,9 +291,20 @@ func TestReviewHelpDocumentsDefaultMode(t *testing.T) {
 		"--timeout <duration>",
 		"set request timeout (disabled by default)",
 		"override model (default gpt-5.6-sol)",
+		"--max-web-searches <n>",
+		"API-key default 4; ChatGPT auth uncapped",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("help missing %q:\n%s", want, err)
+		}
+	}
+}
+
+func TestReviewRejectsNonPositiveWebSearchCapBeforeDetach(t *testing.T) {
+	for _, value := range []string{"0", "-1"} {
+		err := New().Run(t.Context(), []string{"review", "--max-web-searches", value})
+		if err == nil || !strings.Contains(err.Error(), "--max-web-searches must be positive") {
+			t.Fatalf("value %s error = %v", value, err)
 		}
 	}
 }

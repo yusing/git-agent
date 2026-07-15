@@ -18,6 +18,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/go-git/go-git/v6/plumbing/format/index"
+	"github.com/yusing/git-agent/internal/doccmd"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/skills"
 	"github.com/yusing/git-agent/internal/textutil"
@@ -124,6 +125,11 @@ func NewReviewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Sto
 		})
 	}
 	registerSkillsRead(registry, skillStore)
+	root := "."
+	if repo != nil {
+		root = repo.RootPath
+	}
+	registerDocumentation(registry, doccmd.Discover(root))
 	return registry
 }
 
@@ -174,6 +180,12 @@ func registerSkillsRead(registry *Registry, skillStore *skills.Store) {
 	}
 	tool := skillsReadTool{store: skillStore}
 	registry.tools[tool.Definition().Name] = tool
+}
+
+func registerDocumentation(registry *Registry, commands *doccmd.Commands) {
+	for _, tool := range documentationTools(commands) {
+		registry.tools[tool.Definition().Name] = tool
+	}
 }
 
 func (r *Registry) Definitions(names []string) []Definition {
@@ -230,8 +242,11 @@ func CommitMessageToolNames() []string {
 	}
 }
 
-func ReviewToolNames(mode ReviewMode) []string {
-	names := []string{"repo_summary", "list_files", "read_file", "grep", "find"}
+func ReviewToolCandidates(mode ReviewMode) []string {
+	names := []string{
+		"repo_summary", "list_files", "read_file", "grep", "find",
+		string(doccmd.GoDoc), string(doccmd.RustDoc), string(doccmd.Context7Library), string(doccmd.Context7Docs),
+	}
 	if mode != ReviewModeCodebase {
 		names = append(names, "review_changes", "review_diff", "review_diff_for_paths")
 	}

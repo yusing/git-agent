@@ -15,14 +15,16 @@ import (
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/openai"
+	"github.com/yusing/git-agent/internal/provider"
 	"github.com/yusing/git-agent/internal/tools"
 	"github.com/yusing/git-agent/internal/trace"
 )
 
 type fakeClient struct {
-	responses    []openai.Response
-	requests     []openai.Request
-	streamEvents []openai.StreamEvent
+	responses      []openai.Response
+	responseErrors []error
+	requests       []openai.Request
+	streamEvents   []openai.StreamEvent
 }
 
 func TestRequestInstructionsRequireReadFilePathProvenance(t *testing.T) {
@@ -52,9 +54,122 @@ func (f *fakeClient) CreateResponse(_ context.Context, request openai.Request) (
 			}
 		}
 	}
+	if len(f.responseErrors) > 0 {
+		err := f.responseErrors[0]
+		f.responseErrors = f.responseErrors[1:]
+		if err != nil {
+			return openai.Response{}, err
+		}
+	}
 	resp := f.responses[0]
 	f.responses = f.responses[1:]
 	return resp, nil
+}
+
+func TestRunnerDisablesRejectedHostedCapabilityAndRetriesStepOnce(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	repo, err := gitctx.Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	longQuery := strings.Repeat("q", 700)
+	longSource := "https://example.test/" + strings.Repeat("s", 2200)
+	client := &fakeClient{
+		responseErrors: []error{
+			&provider.UnsupportedCapabilityError{Failure: provider.CapabilityFailure{Capability: provider.HostedCapabilityWebSearch, Reason: "raw upstream detail"}},
+			nil,
+			nil,
+		},
+		responses: []openai.Response{
+			{
+				Continuation: []openai.Item{
+					{Type: "reasoning", RawJSON: `{"id":"rs_1","type":"reasoning","summary":[],"encrypted_content":"cipher"}`},
+					{Type: "web_search_call", RawJSON: `{"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search"}}`},
+					{Type: "function_call", RawJSON: `{"id":"fc_1","type":"function_call","call_id":"call_1","name":"repo_summary","arguments":"{}"}`},
+				},
+				ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: `{}`}},
+				HostedToolCalls: []openai.HostedToolCall{{
+					ID: "ws_1", Type: "web_search", Status: "completed", Action: "search",
+					Queries: []string{longQuery}, Sources: []string{longSource},
+				}},
+			},
+			{Text: `{"summary":"done; hosted web lookup unavailable"}`},
+		},
+	}
+	registry := tools.NewRegistryWithSkills(repo, nil)
+	var events []trace.Event
+	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := OpenAIRunner{
+		Config: config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 2}, Client: client,
+		Tools: registry, ToolSpecs: registry.Definitions([]string{"repo_summary"}), Trace: recorder,
+		HostedCapabilities: []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch, MaxCalls: 4}},
+	}
+
+	result, err := runner.Run(t.Context(), Request{UserPrompt: "review", MaxSteps: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ToolCalls != 1 || len(client.requests) != 3 {
+		t.Fatalf("result=%#v requests=%d", result, len(client.requests))
+	}
+	if len(client.requests[0].HostedCapabilities) != 1 {
+		t.Fatalf("initial hosted capabilities = %#v", client.requests[0].HostedCapabilities)
+	}
+	for index := 1; index < len(client.requests); index++ {
+		if len(client.requests[index].HostedCapabilities) != 0 {
+			t.Fatalf("request %d re-enabled hosted capability: %#v", index, client.requests[index].HostedCapabilities)
+		}
+		if !strings.Contains(client.requests[index].Instructions, "hosted web lookup was unavailable") {
+			t.Fatalf("request %d missing disclosure instruction: %s", index, client.requests[index].Instructions)
+		}
+	}
+	lastInput := client.requests[2].Input
+	var continuationEnd, outputIndex int
+	for index, item := range lastInput {
+		if item.Type == "function_call" {
+			continuationEnd = index
+		}
+		if item.Type == "function_call_output" {
+			outputIndex = index
+		}
+	}
+	if continuationEnd == 0 || outputIndex <= continuationEnd {
+		t.Fatalf("continuation/output order = %#v", lastInput)
+	}
+	encodedEvents, err := json.Marshal(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encodedEvents), "raw upstream detail") || strings.Contains(string(encodedEvents), longQuery) || strings.Contains(string(encodedEvents), longSource) {
+		t.Fatalf("trace contains unsanitized capability or hosted metadata: %s", encodedEvents)
+	}
+	if !strings.Contains(string(encodedEvents), "provider_rejected_capability") || !strings.Contains(string(encodedEvents), "hosted-tool-call") {
+		t.Fatalf("trace missing hosted events: %s", encodedEvents)
+	}
+}
+
+func TestRunnerLeavesUnrelatedProviderErrorsTerminal(t *testing.T) {
+	t.Parallel()
+
+	upstream := errors.New("rate limited")
+	client := &fakeClient{responseErrors: []error{upstream}}
+	runner := OpenAIRunner{
+		Config: config.Config{Model: "test", MaxSteps: 2}, Client: client,
+		HostedCapabilities: []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch}},
+	}
+	_, err := runner.Run(t.Context(), Request{UserPrompt: "review", MaxSteps: 2})
+	if !errors.Is(err, upstream) || len(client.requests) != 1 {
+		t.Fatalf("error=%v requests=%d", err, len(client.requests))
+	}
 }
 
 func TestRunnerPublishesReasoningSummaryEvents(t *testing.T) {
@@ -527,6 +642,29 @@ func TestRunnerRejectsToolCallsOutsideAllowedSet(t *testing.T) {
 	}
 }
 
+func TestRunnerRejectsAllowedNameWithoutExposedDefinition(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeClient{responses: []openai.Response{
+		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "go_doc", Arguments: `{"target":"strings","symbol":"","flags":[]}`}}},
+	}}
+	runner := OpenAIRunner{
+		Config: config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1},
+		Client: client,
+		Tools:  tools.NewRegistryWithSkills(nil, nil),
+	}
+
+	_, err := runner.Run(t.Context(), Request{
+		SystemPrompt:     "system",
+		UserPrompt:       "user",
+		AllowedToolNames: []string{"go_doc"},
+		MaxSteps:         1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("expected unavailable tool rejection, got %v", err)
+	}
+}
+
 func TestRunnerFinalizesWhenStepBudgetRunsOut(t *testing.T) {
 	t.Parallel()
 
@@ -542,10 +680,11 @@ func TestRunnerFinalizesWhenStepBudgetRunsOut(t *testing.T) {
 	}}
 	registry := tools.NewRegistryWithSkills(repo, nil)
 	runner := OpenAIRunner{
-		Config:    config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1, MaxToolCalls: 2},
-		Client:    client,
-		Tools:     registry,
-		ToolSpecs: registry.Definitions([]string{"repo_summary"}),
+		Config:             config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1, MaxToolCalls: 2},
+		Client:             client,
+		Tools:              registry,
+		ToolSpecs:          registry.Definitions([]string{"repo_summary"}),
+		HostedCapabilities: []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch, MaxCalls: 4}},
 	}
 
 	result, err := runner.Run(context.Background(), Request{
@@ -574,6 +713,9 @@ func TestRunnerFinalizesWhenStepBudgetRunsOut(t *testing.T) {
 	}
 	if len(client.requests[1].Tools) != 0 {
 		t.Fatalf("expected forced finalization without tools, got %#v", client.requests[1].Tools)
+	}
+	if len(client.requests[0].HostedCapabilities) != 1 || len(client.requests[1].HostedCapabilities) != 0 {
+		t.Fatalf("forced finalization hosted capabilities: first=%#v final=%#v", client.requests[0].HostedCapabilities, client.requests[1].HostedCapabilities)
 	}
 	if client.requests[1].TextFormat == nil || client.requests[1].TextFormat.Name != "artifact" {
 		t.Fatalf("forced finalization dropped text format: %#v", client.requests[1].TextFormat)

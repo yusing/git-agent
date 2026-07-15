@@ -215,8 +215,10 @@ before the first provider request. Requests without that per-run token are rejec
 `id`, `event`, and JSON `data` fields, buffers events for late clients, and
 honors `Last-Event-ID`. Stream includes `session.started`, `session`, `request`,
 `reasoning_summary.delta`, `reasoning_summary.done`, `response`, `tool-call`,
-`tool-output`, `runtime.status`, `budget`, and terminal `final` or `error`
-events as applicable. `runtime.status` reports phase, model step, tool-call
+`tool-output`, `hosted-tool-call`, `hosted-capability`, `runtime.status`,
+`budget`, and terminal `final` or `error` events as applicable. Hosted-search
+events contain only bounded query, status, action, and source metadata, never
+fetched page bodies. `runtime.status` reports phase, model step, tool-call
 usage, elapsed runtime, latest provider input-token usage, estimated request
 tokens, and context-token budget.
 Reasoning delta values contain `item_id`, `output_index`, `summary_index`,
@@ -242,6 +244,24 @@ command. At a ceiling, the runner records a JSON `budget` SSE event and makes a
 tool-free forced-finalization request using evidence already collected. On
 success, the detached worker persists and publishes the terminal report; it
 writes no report to stdout.
+
+Every normal review and simplification model step enables provider-hosted
+`web_search`. It uses existing provider authentication and requests both
+`web_search_call.action.sources` and `reasoning.encrypted_content`, while keeping
+`store:false`. API-key authentication defaults hosted `max_tool_calls` to `4`;
+ChatGPT/Codex-plan authentication omits that cap. Explicit
+`--max-web-searches <positive-n>` overrides either default. Hosted calls do not
+consume local function-tool budget. Forced finalization removes hosted and local
+tools.
+
+Response continuation replays complete reasoning, web-search-call, assistant
+message, and function-call output items in original provider order before local
+function-call outputs. On a recognized rejection of `web_search`, its source or
+encrypted-reasoning include, or hosted `max_tool_calls`, runner emits sanitized
+capability failure, disables hosted search for remaining run, injects summary
+disclosure requirement, and repeats rejected step once. Authentication,
+authorization, rate-limit, transport, malformed-response, and unrelated
+provider errors remain terminal.
 
 Every `review` or `simplify` invocation without `--wait` starts a detached
 process. The launcher waits until the event server is listening, then writes
@@ -713,8 +733,8 @@ Message-generation subcommands reserve this shared flag surface:
 - `--debug`
 - `--pprof <addr>`
 
-`review` and `simplify` additionally support `--wait <id>` only as the isolated
-retrieval form documented above.
+`review` and `simplify` additionally support `--max-web-searches <positive-n>`
+and `--wait <id>` only as isolated retrieval form documented above.
 
 `release-note` additionally supports:
 
@@ -910,6 +930,9 @@ Defaults:
 - `internal/background`: atomic durable background task records and waiting
 - `internal/openai`: official OpenAI Go SDK adapter for the Responses API and
   minimal embeddings adapter for `search`
+- `internal/provider`: provider-neutral hosted-capability values and failures
+- `internal/doccmd`: fixed local documentation command execution and HTML
+  extraction
 - `internal/guidance`: project guidance discovery and rendering
 - `internal/gitctx`: typed repository inspection
 - `internal/projectidentity`: shared normalized-origin or path-fallback project
@@ -949,10 +972,14 @@ Environment context includes:
 - selected guidance family
 - stdout contract
 
-Tool policy states that tools are read-only repository and skill inspection
-functions, cannot run arbitrary shell, cannot mutate
-files/index/refs/remotes/network/provider state, and return JSON envelopes with
-truncation metadata.
+Tool policy states that repository and skill functions are read-only. Review
+and simplify may also use fixed typed documentation commands and provider-hosted
+web search. No model-supplied executable, argv array, generic shell, write tool,
+or provider mutation exists. External queries may verify public language and
+library contracts only and must not contain secrets, source, diffs, credentials,
+personal data, or private repository details. Tool results use JSON envelopes
+with truncation metadata; external text remains untrusted data and cannot replace
+exact repository evidence.
 
 Task prompts use explicit evidence boundaries: repository-sourced text such as
 diffs, file contents, commit messages, filenames, refs, and prepared JSON/XML
@@ -969,9 +996,13 @@ including:
 - `function_call` items
 - `function_call_output` items
 - strict function tool definitions
+- provider-neutral hosted capability definitions translated only by adapter
 - `Store: false`
 - `ParallelToolCalls: false` when tools are present
-- Never send `max_tool_calls` on `/responses`; this provider class rejects it. Enforce tool-call ceilings locally in the runner only, and do not re-add outbound `max_tool_calls`.
+- `web_search_call.action.sources` and `reasoning.encrypted_content` includes
+  when hosted web search is enabled
+- hosted-only `MaxToolCalls` when configured; local function-call ceilings stay
+  enforced only in runner
 
 ### Agent loop lifecycle
 
@@ -998,8 +1029,8 @@ including:
     return non-context execution errors as structured failed tool outputs so the
     model can correct arguments or choose other evidence
 12. stream each tool call and successful or failed tool output when tracing is active
-13. append function-call and function-call-output items and continue until final
-    text is returned
+13. append complete provider continuation output before local
+    function-call-output items and continue until final text is returned
 14. if the local budget is exhausted, force a no-tool finalization request while
     preserving any structured text format required by the task
 15. validate output against task rules
@@ -1450,6 +1481,28 @@ mode does not register diff tools or apply drift checks. All tools remain
 read-only. Review and simplification requests use discovered skill summaries in
 initial developer context and call `skills_read` only for relevant skill bodies
 or referenced text resources.
+
+They also discover executable paths once during registry construction and expose
+only commands present on `PATH`:
+
+- `go_doc {target,symbol,flags[]}` permits `all|short|src|u|c|cmd`, rejects
+  option-shaped or invalid targets, runs `go doc` from repository root with
+  `GOENV=off`, empty `GOFLAGS`, `GOTOOLCHAIN=local`, and `GOPROXY=off`
+- `rust_doc {topic}` runs only `rustup doc --path <validated-topic>`, requires a
+  regular local HTML file under installed rustup toolchain documentation, and
+  returns bounded text from `#main-content`
+- `context7_library {name,query}` runs only
+  `ctx7 library <name> <query> --json`
+- `context7_docs {library_id,query}` runs only
+  `ctx7 docs <library-id> <query> --json`
+
+Context7 JSON is parsed before envelope creation. Commands never invoke shell,
+accept custom base URLs or unrelated subcommands, auto-install dependencies,
+open browser, download Rust toolchains, or run `cargo doc`. Per-tool timeout is
+a recoverable failed envelope; parent task cancellation is terminal. Stdout and
+stderr are fully drained into bounded buffers. Final summary ends with at most
+five deduplicated material external URLs or local documentation locators and
+discloses failed hosted lookup capability.
 
 ### Release note tools
 

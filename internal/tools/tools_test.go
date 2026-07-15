@@ -40,6 +40,67 @@ func TestErrorResultUsesStableBoundedEnvelope(t *testing.T) {
 	}
 }
 
+func TestDocumentationToolsRegisterOnlyForReviewAndSimplifyRegistry(t *testing.T) {
+	bin := t.TempDir()
+	for _, name := range []string{"go", "rustup", "ctx7"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("fixture"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin)
+
+	names := []string{"go_doc", "rust_doc", "context7_library", "context7_docs"}
+	reviewRegistry := NewReviewRegistryWithSkills(nil, nil, ReviewModeCodebase, ReviewScope{}, gitctx.ChangeFingerprint{})
+	definitions := reviewRegistry.Definitions(names)
+	if len(definitions) != len(names) {
+		t.Fatalf("review documentation definitions = %#v", definitions)
+	}
+	for _, definition := range definitions {
+		if !definition.Strict || definition.Schema["additionalProperties"] != false {
+			t.Fatalf("definition is not strict: %#v", definition)
+		}
+	}
+
+	normalRegistry := NewRegistryWithSkills(nil, nil)
+	if definitions := normalRegistry.Definitions(names); len(definitions) != 0 {
+		t.Fatalf("non-review registry exposes documentation tools: %#v", definitions)
+	}
+}
+
+func TestDocumentationToolsOmitMissingExecutables(t *testing.T) {
+	tests := []struct {
+		name        string
+		executables []string
+		want        []string
+	}{
+		{name: "none"},
+		{name: "go", executables: []string{"go"}, want: []string{"go_doc"}},
+		{name: "rustup", executables: []string{"rustup"}, want: []string{"rust_doc"}},
+		{name: "ctx7", executables: []string{"ctx7"}, want: []string{"context7_library", "context7_docs"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			bin := t.TempDir()
+			for _, name := range test.executables {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte("fixture"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PATH", bin)
+
+			registry := NewReviewRegistryWithSkills(nil, nil, ReviewModeCodebase, ReviewScope{}, gitctx.ChangeFingerprint{})
+			definitions := registry.Definitions([]string{"go_doc", "rust_doc", "context7_library", "context7_docs"})
+			got := make([]string, 0, len(definitions))
+			for _, definition := range definitions {
+				got = append(got, definition.Name)
+			}
+			if !slices.Equal(got, test.want) {
+				t.Fatalf("documentation tools = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestToolDefinitionsAreStrictAndEnvelopeResults(t *testing.T) {
 	t.Parallel()
 

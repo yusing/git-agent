@@ -20,6 +20,7 @@ const (
 	DefaultTimeout        = 2 * time.Minute
 	DefaultMaxSteps       = 30
 	DefaultMaxTools       = 24
+	DefaultMaxWebSearches = 4
 	DefaultContextTokens  = 272_000 * 80 / 100
 	defaultCodexAuthPath  = ".codex/auth.json"
 )
@@ -51,6 +52,7 @@ type Config struct {
 	Timeout        time.Duration
 	MaxSteps       int
 	MaxToolCalls   int
+	MaxWebSearches int
 	ContextTokens  int
 	GuidanceFamily string
 	AppendPrompt   string
@@ -75,6 +77,7 @@ type Options struct {
 	XHigh          bool
 	Timeout        string
 	MaxSteps       int
+	MaxWebSearches int
 	GuidanceFamily string
 	AppendPrompt   string
 	Debug          bool
@@ -108,6 +111,11 @@ func ResolveFromLocal(opts Options, cfg Config) (Config, error) {
 	cfg.AuthAccountID = auth.accountID
 	cfg.BaseURL = resolveBaseURL(opts.BaseURL, auth)
 	cfg.Model = firstNonEmpty(opts.Model, os.Getenv("OPENAI_MODEL"), DefaultModel)
+	if opts.MaxWebSearches > 0 {
+		cfg.MaxWebSearches = opts.MaxWebSearches
+	} else if auth.mode == AuthModeAPIKey {
+		cfg.MaxWebSearches = DefaultMaxWebSearches
+	}
 	return cfg, nil
 }
 
@@ -130,6 +138,9 @@ func ResolveLocal(opts Options) (Config, error) {
 			return Config{}, errors.New("--max-steps must be positive")
 		}
 		maxSteps = opts.MaxSteps
+	}
+	if opts.MaxWebSearches < 0 {
+		return Config{}, errors.New("--max-web-searches must be positive")
 	}
 	thinkingModeFlags := 0
 	for _, enabled := range []bool{opts.Low, opts.Medium, opts.High, opts.XHigh} {

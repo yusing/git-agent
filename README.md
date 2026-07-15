@@ -134,6 +134,24 @@ path-specific diffs.
 Requests whose initial serialized estimate reaches the configured context budget
 fail before contacting the provider.
 
+Both commands offer provider-hosted web search on every normal model step using
+the existing OpenAI API-key or ChatGPT/Codex-plan login. API-key auth caps hosted
+searches at four per response by default; plan auth leaves provider default
+uncapped. `--max-web-searches <n>` overrides either default. No search-specific
+credential is needed. A provider that rejects hosted search is retried once
+without it, and report summary discloses lookup limitation. Wire behavior follows
+the [OpenAI web-search guide](https://developers.openai.com/api/docs/guides/tools-web-search).
+
+Installed `go`, `rustup`, and `ctx7` executables add typed `go_doc`, `rust_doc`,
+`context7_library`, and `context7_docs` tools. Missing commands are simply
+omitted. These tools run fixed documentation-only argument shapes without shell
+access or auto-installation. Context7 works logged out at lower service limits,
+as described by its [CLI documentation](https://github.com/upstash/context7/blob/master/docs/clients/cli.mdx).
+External queries must contain only public language/library questions—never
+secrets, source, diffs, credentials, personal data, or private repository
+details. Reports retain exact repository evidence and list up to five material
+external source URLs or local documentation locators in summary.
+
 The launch object's replayable local endpoint includes live reasoning-summary
 progress:
 
@@ -334,6 +352,7 @@ Common generation and inspection flags:
 | `--base-url <url>` | Override provider base URL |
 | `--timeout <duration>` | Set request timeout; `review`/`simplify` default to none |
 | `--max-steps <n>` | Bound agent loop steps |
+| `--max-web-searches <n>` | Review/simplify only: override hosted-search cap |
 | `--guidance-family auto\|agents\|claude\|codex\|none` | Force guidance family |
 | `--append-prompt <text>` | Add a bounded operator hint |
 | `--debug` | Print diagnostics |
@@ -492,6 +511,9 @@ config directory already exists.
   creating commits.
 - Message generation sends prepared repository context to the configured
   provider.
+- Review and simplify may send model-authored public documentation queries to
+  provider-hosted web search and optional Context7; prompts forbid repository
+  content and sensitive data in those queries.
 - Search sends indexed chunks and queries to the configured embedding provider.
 - API keys and bearer tokens are redacted from debug output and errors.
 - Repository tools do not follow symlinks outside the repository.

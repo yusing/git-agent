@@ -242,6 +242,24 @@ func TestUserPromptBoundsLargePreparedContext(t *testing.T) {
 	}
 }
 
+func TestReviewPromptsConstrainExternalDocumentation(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range []Kind{KindReview, KindSimplify} {
+		prompt := UserPrompt(kind, PreparedContext{Mode: ModeCodebase})
+		for _, required := range []string{
+			"External lookups verify public language or library contracts only",
+			"never replaces exact repository evidence",
+			"up to five deduplicated material source URLs or local documentation locators",
+			"Disclose concise lookup limitations",
+		} {
+			if !strings.Contains(prompt, required) {
+				t.Fatalf("%s prompt missing %q: %s", kind, required, prompt)
+			}
+		}
+	}
+}
+
 func containsError(errs []string, text string) bool {
 	for _, err := range errs {
 		if strings.Contains(err, text) {

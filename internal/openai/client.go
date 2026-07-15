@@ -3,6 +3,7 @@ package openai
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
+	"github.com/yusing/git-agent/internal/provider"
 	"github.com/yusing/git-agent/internal/trace"
 )
 
@@ -28,18 +30,19 @@ type EmbeddingClient interface {
 }
 
 type Request struct {
-	Model            string                  `json:"model"`
-	ServiceTier      string                  `json:"service_tier,omitempty"`
-	ThinkingMode     string                  `json:"thinking_mode,omitempty"`
-	ReasoningSummary string                  `json:"reasoning_summary,omitempty"`
-	BaseURL          string                  `json:"-"`
-	APIKey           string                  `json:"-"`
-	AuthAccountID    string                  `json:"-"`
-	Instructions     string                  `json:"instructions,omitempty"`
-	Input            []Item                  `json:"input"`
-	Tools            []ToolSpec              `json:"tools,omitempty"`
-	TextFormat       *TextFormat             `json:"text_format,omitempty"`
-	OnStreamEvent    func(StreamEvent) error `json:"-"`
+	Model              string                      `json:"model"`
+	ServiceTier        string                      `json:"service_tier,omitempty"`
+	ThinkingMode       string                      `json:"thinking_mode,omitempty"`
+	ReasoningSummary   string                      `json:"reasoning_summary,omitempty"`
+	BaseURL            string                      `json:"-"`
+	APIKey             string                      `json:"-"`
+	AuthAccountID      string                      `json:"-"`
+	Instructions       string                      `json:"instructions,omitempty"`
+	Input              []Item                      `json:"input"`
+	Tools              []ToolSpec                  `json:"tools,omitempty"`
+	HostedCapabilities []provider.HostedCapability `json:"hosted_capabilities,omitempty"`
+	TextFormat         *TextFormat                 `json:"text_format,omitempty"`
+	OnStreamEvent      func(StreamEvent) error     `json:"-"`
 }
 
 const ReasoningSummaryAuto = "auto"
@@ -84,6 +87,7 @@ type Item struct {
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
 	Output    string `json:"output,omitempty"`
+	RawJSON   string `json:"raw_json,omitempty"`
 }
 
 type ToolSpec struct {
@@ -94,11 +98,22 @@ type ToolSpec struct {
 }
 
 type Response struct {
-	ID         string     `json:"id,omitempty"`
-	Text       string     `json:"text,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	FinishKind string     `json:"finish_kind,omitempty"`
-	RawJSON    string     `json:"raw_json,omitempty"`
+	ID              string           `json:"id,omitempty"`
+	Text            string           `json:"text,omitempty"`
+	ToolCalls       []ToolCall       `json:"tool_calls,omitempty"`
+	Continuation    []Item           `json:"continuation,omitempty"`
+	HostedToolCalls []HostedToolCall `json:"hosted_tool_calls,omitempty"`
+	FinishKind      string           `json:"finish_kind,omitempty"`
+	RawJSON         string           `json:"raw_json,omitempty"`
+}
+
+type HostedToolCall struct {
+	ID      string   `json:"id"`
+	Type    string   `json:"type"`
+	Status  string   `json:"status"`
+	Action  string   `json:"action,omitempty"`
+	Queries []string `json:"queries,omitempty"`
+	Sources []string `json:"sources,omitempty"`
 }
 
 type ToolCall struct {
@@ -171,16 +186,16 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 		if shouldRetryWithoutStreaming(err) {
 			response, fallbackErr := fallbackWithoutStreaming(ctx, client, params, err)
 			if fallbackErr != nil {
-				return Response{}, upstreamError(fallbackErr)
+				return Response{}, responseError(fallbackErr)
 			}
 			return response, nil
 		}
-		return Response{}, upstreamError(err)
+		return Response{}, responseError(err)
 	}
 	if final == nil && !accum.hasContent() {
 		response, err := fallbackWithoutStreaming(ctx, client, params, fmt.Errorf("provider stream ended without response.completed event"))
 		if err != nil {
-			return Response{}, upstreamError(err)
+			return Response{}, responseError(err)
 		}
 		return response, nil
 	}
@@ -311,6 +326,37 @@ func upstreamError(err error) error {
 		return nil
 	}
 	return fmt.Errorf("upstream request failed: %w", err)
+}
+
+func responseError(err error) error {
+	if failure, ok := hostedCapabilityFailure(err); ok {
+		return &provider.UnsupportedCapabilityError{Failure: failure}
+	}
+	return upstreamError(err)
+}
+
+func hostedCapabilityFailure(err error) (provider.CapabilityFailure, bool) {
+	apiErr, ok := errors.AsType[*openaisdk.Error](err)
+	if !ok || apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden || apiErr.StatusCode == http.StatusTooManyRequests {
+		return provider.CapabilityFailure{}, false
+	}
+	if apiErr.StatusCode < 400 || apiErr.StatusCode >= 500 {
+		return provider.CapabilityFailure{}, false
+	}
+
+	param := strings.ToLower(apiErr.Param)
+	code := strings.ToLower(apiErr.Code)
+	message := strings.ToLower(apiErr.Message)
+	switch {
+	case strings.Contains(param, "web_search") || strings.Contains(code, "web_search") || strings.Contains(message, "web_search"):
+		return provider.CapabilityFailure{Capability: provider.HostedCapabilityWebSearch, Reason: "web_search rejected"}, true
+	case strings.HasPrefix(param, "include") && (strings.Contains(message, "source") || strings.Contains(message, "reasoning.encrypted_content")):
+		return provider.CapabilityFailure{Capability: provider.HostedCapabilityWebSearch, Reason: "web_search metadata include rejected"}, true
+	case param == "max_tool_calls" || strings.Contains(code, "max_tool_calls") || strings.Contains(message, "max_tool_calls"):
+		return provider.CapabilityFailure{Capability: provider.HostedCapabilityWebSearch, Reason: "hosted tool call limit rejected"}, true
+	default:
+		return provider.CapabilityFailure{}, false
+	}
 }
 
 type streamAccumulator struct {
@@ -486,16 +532,45 @@ func responseFromCompleted(final *responses.Response) Response {
 		RawJSON:    final.RawJSON(),
 	}
 	for _, item := range final.Output {
-		if item.Type != "function_call" {
-			continue
+		switch item.Type {
+		case "reasoning", "web_search_call", "message", "function_call":
+			result.Continuation = append(result.Continuation, Item{Type: item.Type, ID: item.ID, RawJSON: item.RawJSON()})
 		}
-		call := item.AsFunctionCall()
-		result.ToolCalls = append(result.ToolCalls, ToolCall{
-			ID:        call.ID,
-			CallID:    call.CallID,
-			Name:      call.Name,
-			Arguments: call.Arguments,
-		})
+		switch item.Type {
+		case "function_call":
+			call := item.AsFunctionCall()
+			result.ToolCalls = append(result.ToolCalls, ToolCall{
+				ID:        call.ID,
+				CallID:    call.CallID,
+				Name:      call.Name,
+				Arguments: call.Arguments,
+			})
+		case "web_search_call":
+			result.HostedToolCalls = append(result.HostedToolCalls, hostedToolCall(item.AsWebSearchCall()))
+		}
+	}
+	return result
+}
+
+func hostedToolCall(call responses.ResponseFunctionWebSearch) HostedToolCall {
+	result := HostedToolCall{
+		ID:     call.ID,
+		Type:   "web_search",
+		Status: string(call.Status),
+		Action: call.Action.Type,
+	}
+	result.Queries = append(result.Queries, call.Action.Queries...)
+	if call.Action.Query != "" {
+		result.Queries = append(result.Queries, call.Action.Query)
+	}
+	if call.Action.Pattern != "" {
+		result.Queries = append(result.Queries, call.Action.Pattern)
+	}
+	for _, source := range call.Action.Sources {
+		result.Sources = append(result.Sources, source.URL)
+	}
+	if call.Action.URL != "" {
+		result.Sources = append(result.Sources, call.Action.URL)
 	}
 	return result
 }
@@ -574,7 +649,7 @@ func mergeToolCalls(primary, streamed []ToolCall) []ToolCall {
 }
 
 func (r Request) toSDKParams() (responses.ResponseNewParams, error) {
-	tools := make([]responses.ToolUnionParam, 0, len(r.Tools))
+	tools := make([]responses.ToolUnionParam, 0, len(r.Tools)+len(r.HostedCapabilities))
 	for _, spec := range r.Tools {
 		tools = append(tools, responses.ToolUnionParam{
 			OfFunction: &responses.FunctionToolParam{
@@ -584,6 +659,16 @@ func (r Request) toSDKParams() (responses.ResponseNewParams, error) {
 				Strict:      openaisdk.Bool(spec.Strict),
 			},
 		})
+	}
+	var maxHostedCalls int
+	for _, capability := range r.HostedCapabilities {
+		switch capability.Kind {
+		case provider.HostedCapabilityWebSearch:
+			tools = append(tools, responses.ToolParamOfWebSearch(responses.WebSearchToolTypeWebSearch))
+			maxHostedCalls = max(maxHostedCalls, capability.MaxCalls)
+		default:
+			return responses.ResponseNewParams{}, fmt.Errorf("unsupported hosted capability %q", capability.Kind)
+		}
 	}
 
 	input := make(responses.ResponseInputParam, 0, len(r.Input))
@@ -601,6 +686,15 @@ func (r Request) toSDKParams() (responses.ResponseNewParams, error) {
 		Instructions: openaisdk.String(r.Instructions),
 		Tools:        tools,
 		Store:        openaisdk.Bool(false),
+	}
+	if len(r.HostedCapabilities) > 0 {
+		params.Include = []responses.ResponseIncludable{
+			responses.ResponseIncludableWebSearchCallActionSources,
+			responses.ResponseIncludableReasoningEncryptedContent,
+		}
+	}
+	if maxHostedCalls > 0 {
+		params.MaxToolCalls = openaisdk.Int(int64(maxHostedCalls))
 	}
 	if r.TextFormat != nil {
 		params.Text = responses.ResponseTextConfigParam{
@@ -629,6 +723,13 @@ func (r Request) toSDKParams() (responses.ResponseNewParams, error) {
 }
 
 func (i Item) toSDKParam() (responses.ResponseInputItemUnionParam, error) {
+	if i.RawJSON != "" {
+		var param responses.ResponseInputItemUnionParam
+		if err := json.Unmarshal([]byte(i.RawJSON), &param); err != nil {
+			return responses.ResponseInputItemUnionParam{}, fmt.Errorf("decode continuation item %q: %w", i.Type, err)
+		}
+		return param, nil
+	}
 	switch i.Type {
 	case "message":
 		if i.Role == "assistant" {
@@ -736,7 +837,9 @@ func sanitizeTraceRequestValue(value any) any {
 		if !ok {
 			continue
 		}
+		delete(message, "raw_json")
 		if message["type"] != "message" {
+			input[idx] = message
 			continue
 		}
 		text, ok := message["content"].(string)

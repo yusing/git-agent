@@ -7,9 +7,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	openaisdk "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/responses"
+	"github.com/yusing/git-agent/internal/provider"
 )
 
 func TestRequestConvertsToSDKStructuredInputAndTools(t *testing.T) {
@@ -64,6 +69,137 @@ func TestRequestConvertsToSDKStructuredInputAndTools(t *testing.T) {
 	}
 	if strings.Contains(got, `"max_tool_calls":`) {
 		t.Fatalf("SDK payload should omit max_tool_calls for provider compatibility: %s", got)
+	}
+}
+
+func TestRequestConvertsHostedWebSearchCapability(t *testing.T) {
+	t.Parallel()
+
+	params, err := Request{
+		Model: "test-model",
+		Input: []Item{NewMessage("user", "task")},
+		HostedCapabilities: []provider.HostedCapability{{
+			Kind: provider.HostedCapabilityWebSearch, MaxCalls: 4,
+		}},
+	}.toSDKParams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, want := range []string{
+		`"tools":[{"type":"web_search"}]`,
+		`"include":["web_search_call.action.sources","reasoning.encrypted_content"]`,
+		`"max_tool_calls":4`,
+		`"store":false`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("hosted request missing %s: %s", want, got)
+		}
+	}
+}
+
+func TestRequestOmitsHostedCallLimitWhenUncapped(t *testing.T) {
+	t.Parallel()
+
+	params, err := Request{
+		Model: "test-model", Input: []Item{NewMessage("user", "task")},
+		HostedCapabilities: []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch}},
+	}.toSDKParams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); strings.Contains(got, `"max_tool_calls"`) {
+		t.Fatalf("uncapped request contains max_tool_calls: %s", got)
+	}
+}
+
+func TestRequestReplaysRawContinuationItems(t *testing.T) {
+	t.Parallel()
+
+	params, err := Request{
+		Model: "test-model",
+		Input: []Item{
+			{Type: "reasoning", RawJSON: `{"id":"rs_1","type":"reasoning","summary":[],"encrypted_content":"cipher","status":"completed"}`},
+			{Type: "web_search_call", RawJSON: `{"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","queries":["Go API"]}}`},
+			{Type: "function_call", RawJSON: `{"id":"fc_1","type":"function_call","call_id":"call_1","name":"repo_summary","arguments":"{}","status":"completed"}`},
+			NewFunctionCallOutput("call_1", `{"ok":true}`),
+		},
+	}.toSDKParams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, want := range []string{`"encrypted_content":"cipher"`, `"type":"web_search_call"`, `"type":"function_call"`, `"type":"function_call_output"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("continuation payload missing %s: %s", want, got)
+		}
+	}
+}
+
+func TestResponsePreservesContinuationAndHostedMetadata(t *testing.T) {
+	t.Parallel()
+
+	var completed responses.Response
+	err := json.Unmarshal([]byte(`{
+		"id":"resp_1","status":"completed",
+		"output":[
+			{"id":"rs_1","type":"reasoning","summary":[],"encrypted_content":"cipher","status":"completed"},
+			{"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","queries":["Go 1.26 API"],"sources":[{"type":"url","url":"https://go.dev/doc/"}]}},
+			{"id":"fc_1","type":"function_call","call_id":"call_1","name":"repo_summary","arguments":"{}","status":"completed"}
+		]
+	}`), &completed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := responseFromCompleted(&completed)
+	if len(result.Continuation) != 3 {
+		t.Fatalf("continuation = %#v", result.Continuation)
+	}
+	if got := []string{result.Continuation[0].Type, result.Continuation[1].Type, result.Continuation[2].Type}; !slices.Equal(got, []string{"reasoning", "web_search_call", "function_call"}) {
+		t.Fatalf("continuation order = %v", got)
+	}
+	if len(result.ToolCalls) != 1 || result.ToolCalls[0].CallID != "call_1" {
+		t.Fatalf("tool calls = %#v", result.ToolCalls)
+	}
+	if len(result.HostedToolCalls) != 1 || !slices.Equal(result.HostedToolCalls[0].Queries, []string{"Go 1.26 API"}) || !slices.Equal(result.HostedToolCalls[0].Sources, []string{"https://go.dev/doc/"}) {
+		t.Fatalf("hosted calls = %#v", result.HostedToolCalls)
+	}
+}
+
+func TestHostedCapabilityFailureClassificationIsNarrow(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  *openaisdk.Error
+		want bool
+	}{
+		{"web search", &openaisdk.Error{StatusCode: 400, Param: "tools[0].type", Message: "web_search is not supported"}, true},
+		{"source include", &openaisdk.Error{StatusCode: 422, Param: "include", Message: "web search sources unsupported"}, true},
+		{"hosted limit", &openaisdk.Error{StatusCode: 400, Param: "max_tool_calls", Message: "unknown parameter"}, true},
+		{"unrelated bad request", &openaisdk.Error{StatusCode: 400, Param: "text.format", Message: "invalid schema"}, false},
+		{"auth", &openaisdk.Error{StatusCode: 401, Param: "tools", Message: "web_search unauthorized"}, false},
+		{"rate limit", &openaisdk.Error{StatusCode: 429, Param: "max_tool_calls", Message: "rate limit"}, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, got := hostedCapabilityFailure(test.err)
+			if got != test.want {
+				t.Fatalf("classified = %t, want %t", got, test.want)
+			}
+		})
 	}
 }
 

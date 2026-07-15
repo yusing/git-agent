@@ -53,6 +53,9 @@ func TestResolveFlagEnvDefaultOrder(t *testing.T) {
 	if cfg.MaxSteps != 2 {
 		t.Fatalf("MaxSteps = %d", cfg.MaxSteps)
 	}
+	if cfg.MaxWebSearches != DefaultMaxWebSearches {
+		t.Fatalf("MaxWebSearches = %d", cfg.MaxWebSearches)
+	}
 	if cfg.AppendPrompt != "prefer parser scope" {
 		t.Fatalf("AppendPrompt = %q", cfg.AppendPrompt)
 	}
@@ -117,6 +120,22 @@ func TestResolveUsesChatGPTAuthFileByDefault(t *testing.T) {
 	}
 	if cfg.BaseURL != DefaultChatGPTBaseURL {
 		t.Fatalf("BaseURL = %q", cfg.BaseURL)
+	}
+	if cfg.MaxWebSearches != 0 {
+		t.Fatalf("MaxWebSearches = %d, want uncapped", cfg.MaxWebSearches)
+	}
+}
+
+func TestResolveExplicitWebSearchCapOverridesAuthDefaults(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "api-key")
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := Resolve(Options{MaxWebSearches: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxWebSearches != 7 {
+		t.Fatalf("MaxWebSearches = %d", cfg.MaxWebSearches)
 	}
 }
 
