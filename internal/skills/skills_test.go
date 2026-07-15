@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -136,6 +137,118 @@ func TestDiscoverFindsUserCodexAdminAndPluginSkills(t *testing.T) {
 		if !got[name] {
 			t.Fatalf("missing %s in %#v", name, store.Skills())
 		}
+	}
+}
+
+func TestDiscoverRespectsCodexDisabledSkills(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	codexHome := filepath.Join(home, ".codex")
+	disabledPath := filepath.Join(codexHome, "plugins", "cache", "publisher", "plugin", "hash", "skills", "disabled", "SKILL.md")
+	mustWriteSkill(t, filepath.Dir(disabledPath), "disabled")
+	mustWriteSkill(t, filepath.Join(codexHome, "skills", "enabled"), "enabled")
+	mustWrite(t, filepath.Join(codexHome, "config.toml"), "[[skills.config]]\npath = "+fmt.Sprintf("%q", disabledPath)+"\nenabled = false\n")
+
+	store, err := Discover(Options{Home: home, CodexHome: codexHome})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := store.Len(), 1; got != want {
+		t.Fatalf("skills = %d, want %d: %#v", got, want, store.Skills())
+	}
+	if got, want := store.Skills()[0].Name, "enabled"; got != want {
+		t.Fatalf("skill = %q, want %q", got, want)
+	}
+}
+
+func TestDiscoverDoesNotReadDisabledSkill(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	codexHome := filepath.Join(root, ".codex")
+	disabledPath := filepath.Join(codexHome, "skills", "disabled", "SKILL.md")
+	if err := os.MkdirAll(disabledPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(codexHome, "config.toml"), fmt.Sprintf(`
+[[skills.config]]
+path = %q
+enabled = false
+`, disabledPath))
+
+	store, err := Discover(Options{CodexHome: codexHome})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.Len() != 0 {
+		t.Fatalf("skills = %#v, want none", store.Skills())
+	}
+}
+
+func TestDiscoverCodexSkillConfigLastEntryWins(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	codexHome := filepath.Join(root, ".codex")
+	skillPath := filepath.Join(codexHome, "skills", "enabled", "SKILL.md")
+	mustWriteSkill(t, filepath.Dir(skillPath), "enabled")
+	mustWrite(t, filepath.Join(codexHome, "config.toml"), fmt.Sprintf(`
+[[skills.config]]
+path = %q
+enabled = false
+
+[[skills.config]]
+path = %q
+enabled = true
+`, skillPath, skillPath))
+
+	store, err := Discover(Options{CodexHome: codexHome})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := store.Len(), 1; got != want {
+		t.Fatalf("skills = %d, want %d: %#v", got, want, store.Skills())
+	}
+}
+
+func TestDiscoverDisabledSkillDoesNotClaimDuplicateName(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	codexHome := filepath.Join(root, "codex")
+	userSkillPath := filepath.Join(home, ".agents", "skills", "disabled", "SKILL.md")
+	mustWriteSkill(t, filepath.Dir(userSkillPath), "same-name")
+	mustWriteSkill(t, filepath.Join(codexHome, "skills", "fallback"), "same-name")
+	mustWrite(t, filepath.Join(codexHome, "config.toml"), fmt.Sprintf(`
+[[skills.config]]
+path = %q
+enabled = false
+`, userSkillPath))
+
+	store, err := Discover(Options{Home: home, CodexHome: codexHome})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := store.Len(), 1; got != want {
+		t.Fatalf("skills = %d, want %d: %#v", got, want, store.Skills())
+	}
+	if got, want := store.Skills()[0].Scope, "codex"; got != want {
+		t.Fatalf("skill scope = %q, want %q", got, want)
+	}
+}
+
+func TestDiscoverRejectsMalformedCodexConfig(t *testing.T) {
+	t.Parallel()
+
+	codexHome := filepath.Join(t.TempDir(), ".codex")
+	mustWrite(t, filepath.Join(codexHome, "config.toml"), "[[skills.config]\n")
+
+	_, err := Discover(Options{CodexHome: codexHome})
+	if err == nil || !strings.Contains(err.Error(), "read Codex skill config") {
+		t.Fatalf("error = %v, want Codex skill config parse error", err)
 	}
 }
 

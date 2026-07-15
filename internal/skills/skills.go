@@ -3,6 +3,7 @@ package skills
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/BurntSushi/toml"
 	"github.com/goccy/go-yaml"
 	"github.com/yusing/git-agent/internal/textutil"
 )
@@ -46,9 +48,27 @@ type Store struct {
 	byLocator map[string]Skill
 }
 
+type discovery struct {
+	store         *Store
+	seenPaths     map[string]struct{}
+	seenNames     map[string]struct{}
+	disabledPaths map[string]struct{}
+}
+
 type frontmatter struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
+}
+
+type codexConfig struct {
+	Skills struct {
+		Config []skillConfig `toml:"config"`
+	} `toml:"skills"`
+}
+
+type skillConfig struct {
+	Path    string `toml:"path"`
+	Enabled *bool  `toml:"enabled"`
 }
 
 type sourceRoot struct {
@@ -70,6 +90,10 @@ func DefaultOptions(repoRoot, workDir string) Options {
 
 func Discover(options Options) (*Store, error) {
 	options = normalizeOptions(options)
+	disabledPaths, err := loadDisabledSkillPaths(options.CodexHome)
+	if err != nil {
+		return nil, err
+	}
 	var roots []sourceRoot
 	repoRoots, err := repoSkillRoots(options.RepoRoot, options.WorkDir)
 	if err != nil {
@@ -89,15 +113,19 @@ func Discover(options Options) (*Store, error) {
 	store := &Store{
 		byLocator: map[string]Skill{},
 	}
-	seenPaths := map[string]struct{}{}
-	seenNames := map[string]struct{}{}
+	state := discovery{
+		store:         store,
+		seenPaths:     map[string]struct{}{},
+		seenNames:     map[string]struct{}{},
+		disabledPaths: disabledPaths,
+	}
 	for _, root := range roots {
-		if err := discoverRoot(store, seenPaths, seenNames, root); err != nil {
+		if err := state.discoverRoot(root); err != nil {
 			return nil, err
 		}
 	}
 	if options.CodexHome != "" {
-		if err := discoverPluginCache(store, seenPaths, seenNames, filepath.Join(options.CodexHome, "plugins", "cache")); err != nil {
+		if err := state.discoverPluginCache(filepath.Join(options.CodexHome, "plugins", "cache")); err != nil {
 			return nil, err
 		}
 	}
@@ -181,6 +209,36 @@ func normalizeOptions(options Options) Options {
 	return options
 }
 
+func loadDisabledSkillPaths(codexHome string) (map[string]struct{}, error) {
+	if codexHome == "" {
+		return nil, nil
+	}
+	var config codexConfig
+	configPath := filepath.Join(codexHome, "config.toml")
+	if _, err := toml.DecodeFile(configPath, &config); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read Codex skill config %s: %w", configPath, err)
+	}
+	disabled := make(map[string]struct{})
+	for _, skill := range config.Skills.Config {
+		if skill.Path == "" || skill.Enabled == nil {
+			continue
+		}
+		path, err := filepath.EvalSymlinks(filepath.Clean(skill.Path))
+		if err != nil {
+			path = filepath.Clean(skill.Path)
+		}
+		if *skill.Enabled {
+			delete(disabled, path)
+		} else {
+			disabled[path] = struct{}{}
+		}
+	}
+	return disabled, nil
+}
+
 func repoSkillRoots(repoRoot, workDir string) ([]sourceRoot, error) {
 	if repoRoot == "" || workDir == "" {
 		return nil, nil
@@ -220,7 +278,7 @@ func repoSkillRoots(repoRoot, workDir string) ([]sourceRoot, error) {
 	return roots, nil
 }
 
-func discoverRoot(store *Store, seenPaths, seenNames map[string]struct{}, root sourceRoot) error {
+func (d *discovery) discoverRoot(root sourceRoot) error {
 	info, err := os.Stat(root.path)
 	if err != nil {
 		if os.IsNotExist(err) || os.IsPermission(err) {
@@ -231,10 +289,10 @@ func discoverRoot(store *Store, seenPaths, seenNames map[string]struct{}, root s
 	if !info.IsDir() {
 		return nil
 	}
-	return scanDirectSkillRoot(store, seenPaths, seenNames, root, root.includeSystem)
+	return d.scanDirectSkillRoot(root, root.includeSystem)
 }
 
-func scanDirectSkillRoot(store *Store, seenPaths, seenNames map[string]struct{}, root sourceRoot, includeSystem bool) error {
+func (d *discovery) scanDirectSkillRoot(root sourceRoot, includeSystem bool) error {
 	entries, err := os.ReadDir(root.path)
 	if err != nil {
 		if os.IsNotExist(err) || os.IsPermission(err) {
@@ -245,7 +303,7 @@ func scanDirectSkillRoot(store *Store, seenPaths, seenNames map[string]struct{},
 	for _, entry := range entries {
 		path := filepath.Join(root.path, entry.Name())
 		if entry.Name() == ".system" && includeSystem {
-			if err := scanSystemSkillRoot(store, seenPaths, seenNames, root, path); err != nil {
+			if err := d.scanSystemSkillRoot(root, path); err != nil {
 				return err
 			}
 			continue
@@ -253,14 +311,14 @@ func scanDirectSkillRoot(store *Store, seenPaths, seenNames map[string]struct{},
 		if !entryIsDir(entry, path) {
 			continue
 		}
-		if err := addSkill(store, seenPaths, seenNames, root, filepath.Join(path, "SKILL.md")); err != nil {
+		if err := d.addSkill(root, filepath.Join(path, "SKILL.md")); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func scanSystemSkillRoot(store *Store, seenPaths, seenNames map[string]struct{}, root sourceRoot, systemRoot string) error {
+func (d *discovery) scanSystemSkillRoot(root sourceRoot, systemRoot string) error {
 	entries, err := os.ReadDir(systemRoot)
 	if err != nil {
 		if os.IsNotExist(err) || os.IsPermission(err) {
@@ -273,14 +331,14 @@ func scanSystemSkillRoot(store *Store, seenPaths, seenNames map[string]struct{},
 		if !entryIsDir(entry, path) {
 			continue
 		}
-		if err := addSkill(store, seenPaths, seenNames, root, filepath.Join(path, "SKILL.md")); err != nil {
+		if err := d.addSkill(root, filepath.Join(path, "SKILL.md")); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func discoverPluginCache(store *Store, seenPaths, seenNames map[string]struct{}, root string) error {
+func (d *discovery) discoverPluginCache(root string) error {
 	info, err := os.Stat(root)
 	if err != nil {
 		if os.IsNotExist(err) || os.IsPermission(err) {
@@ -291,14 +349,14 @@ func discoverPluginCache(store *Store, seenPaths, seenNames map[string]struct{},
 	if !info.IsDir() {
 		return nil
 	}
-	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			if os.IsPermission(err) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if !d.IsDir() {
+		if !entry.IsDir() {
 			return nil
 		}
 		rel, err := filepath.Rel(root, path)
@@ -308,10 +366,10 @@ func discoverPluginCache(store *Store, seenPaths, seenNames map[string]struct{},
 		if rel != "." && pathDepth(rel) > pluginMaxDepth {
 			return filepath.SkipDir
 		}
-		if d.Name() != "skills" {
+		if entry.Name() != "skills" {
 			return nil
 		}
-		if err := scanDirectSkillRoot(store, seenPaths, seenNames, sourceRoot{path: path, scope: "plugin"}, false); err != nil {
+		if err := d.scanDirectSkillRoot(sourceRoot{path: path, scope: "plugin"}, false); err != nil {
 			return err
 		}
 		return filepath.SkipDir
@@ -329,27 +387,30 @@ func entryIsDir(entry os.DirEntry, path string) bool {
 	return err == nil && info.IsDir()
 }
 
-func addSkill(store *Store, seenPaths, seenNames map[string]struct{}, root sourceRoot, path string) error {
-	skill, ok, err := parseSkill(root, path)
-	if err != nil || !ok {
-		return err
-	}
-	resolved, err := filepath.EvalSymlinks(skill.Path)
+func (d *discovery) addSkill(root sourceRoot, path string) error {
+	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return nil
 	}
-	if _, exists := seenPaths[resolved]; exists {
+	if _, disabled := d.disabledPaths[resolved]; disabled {
 		return nil
 	}
-	if _, exists := seenNames[skill.Name]; exists {
+	skill, ok, err := parseSkill(root, resolved)
+	if err != nil || !ok {
+		return err
+	}
+	if _, exists := d.seenPaths[resolved]; exists {
+		return nil
+	}
+	if _, exists := d.seenNames[skill.Name]; exists {
 		return nil
 	}
 	skill.Path = resolved
 	skill.Root = filepath.Dir(resolved)
 	skill.Locator = opaqueLocator(resolved)
-	seenPaths[resolved] = struct{}{}
-	seenNames[skill.Name] = struct{}{}
-	store.skills = append(store.skills, skill)
+	d.seenPaths[resolved] = struct{}{}
+	d.seenNames[skill.Name] = struct{}{}
+	d.store.skills = append(d.store.skills, skill)
 	return nil
 }
 

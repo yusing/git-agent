@@ -5,10 +5,12 @@ go 1.26
 toolchain go1.26.3
 
 require (
+	github.com/BurntSushi/toml v1.6.0
 	github.com/bytedance/sonic v1.15.2
 	github.com/go-git/go-git/v6 v6.0.0-alpha.4
 	github.com/goccy/go-yaml v1.19.2
 	github.com/openai/openai-go/v3 v3.41.1
+	golang.org/x/crypto v0.54.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/sys v0.47.0
 )
@@ -33,6 +35,5 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	golang.org/x/arch v0.29.0 // indirect
-	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
 )

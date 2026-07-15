@@ -352,6 +352,10 @@ global. Displayed URLs redact URL credentials; sync uses same Git transport
 and authentication behavior as search `--remote`, without invoking `git`
 executable or interactive credential prompts.
 
+Skill discovery honors Codex `[[skills.config]]` entries in
+`$CODEX_HOME/config.toml` (default `~/.codex/config.toml`), including
+`enabled = false`.
+
 Default auth comes from:
 
 ```text

@@ -1341,6 +1341,13 @@ Discovery roots:
 - `/etc/codex/skills`
 - plugin cache skills under `$CODEX_HOME/plugins/cache/**/skills/*/SKILL.md`
 
+Before scanning these roots, discovery reads `$CODEX_HOME/config.toml`,
+defaulting to `$HOME/.codex/config.toml`. A `[[skills.config]]` entry with the
+skill's `SKILL.md` path and `enabled = false` omits that skill from discovery.
+Later entries for the same resolved path take precedence, so `enabled = true`
+re-enables it. A missing config file has no effect; an unreadable or malformed
+config fails discovery rather than silently enabling configured-off skills.
+
 The injected `## Skills` developer message lists only metadata and stable,
 opaque `skill:<hash>` source locators; absolute host paths stay out of initial
 context. The model must call `skills_read` before applying a listed skill.
