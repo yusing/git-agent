@@ -160,9 +160,12 @@ context pack, and bounded unified diff before the first provider request. The
 initial prompt contains a bounded view of context-pack groups, outliers, and
 artifacts plus the bounded diff; it does not duplicate the complete raw path,
 status, or stat lists. Truncation is explicit. Full scope remains authoritative
-for report validation and read-only repository tools. Diff preparation also
-records a launch fingerprint from complete base and authoritative target trees
-plus dirty-submodule state. Every diff-mode repository tool call and final
+for report validation and read-only repository tools. Moved submodule gitlinks
+include bounded commit summaries when referenced history is available in local
+checkout; unavailable history leaves ordinary gitlink diff unchanged. Prepared
+and tool-read diffs never traverse dirty submodule file content. Diff preparation
+also records a launch fingerprint from complete base and authoritative target
+trees plus dirty-submodule state. Every diff-mode repository tool call and final
 report validation recomputes that fingerprint; any worktree, index, `HEAD`, or
 dirty-submodule drift fails with an explicit rerun error. Codebase mode remains
 live and has no fingerprint guard. Empty diff scope fails before provider

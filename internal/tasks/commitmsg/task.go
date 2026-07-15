@@ -1051,13 +1051,7 @@ func prepareStagedSubmodules(repo *gitctx.Repository) ([]PreparedSubmodule, erro
 			submodules = append(submodules, submodule)
 			continue
 		}
-		subRepo, err := gitctx.Open(filepath.Join(repo.RootPath, change.Path))
-		if err != nil {
-			submodule.AvailabilityError = err.Error()
-			submodules = append(submodules, submodule)
-			continue
-		}
-		commits, err := subRepo.LogFrom(change.Old, change.New, 50)
+		commits, err := repo.SubmoduleCommits(change.Path, change.Old, change.New, 50)
 		if err != nil {
 			submodule.AvailabilityError = err.Error()
 			submodules = append(submodules, submodule)

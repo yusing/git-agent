@@ -241,7 +241,7 @@ func (r *Repository) StagedDiff(maxBytes, maxLines int) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	limited, truncated := textutil.Limit(diff.String(), maxBytes, maxLines)
+	limited, truncated := textutil.Limit(r.diffText(diff, nil), maxBytes, maxLines)
 	return limited, truncated, nil
 }
 
@@ -253,7 +253,7 @@ func (r *Repository) StagedDiffForPaths(paths []string, maxBytes, maxLines int) 
 	if err != nil {
 		return "", false, err
 	}
-	return limitedTreeDiffForPaths(diff, paths, maxBytes, maxLines)
+	return r.limitedTreeDiffForPaths(diff, paths, maxBytes, maxLines)
 }
 
 func (r *Repository) UncommittedDiff(maxBytes, maxLines int) (string, bool, error) {
@@ -261,7 +261,7 @@ func (r *Repository) UncommittedDiff(maxBytes, maxLines int) (string, bool, erro
 	if err != nil {
 		return "", false, err
 	}
-	limited, truncated := textutil.Limit(diff.String(), maxBytes, maxLines)
+	limited, truncated := textutil.Limit(r.diffText(diff, nil), maxBytes, maxLines)
 	return limited, truncated, nil
 }
 
@@ -273,7 +273,7 @@ func (r *Repository) UncommittedDiffForPaths(paths []string, maxBytes, maxLines 
 	if err != nil {
 		return "", false, err
 	}
-	return limitedTreeDiffForPaths(diff, paths, maxBytes, maxLines)
+	return r.limitedTreeDiffForPaths(diff, paths, maxBytes, maxLines)
 }
 
 func (r *Repository) StagedStat() ([]FileStat, error) {
@@ -293,7 +293,7 @@ func (r *Repository) StagedSnapshot(maxBytes, maxLines int) (ChangeSnapshot, err
 	if err != nil {
 		return ChangeSnapshot{}, err
 	}
-	return changeSnapshot(status, diff, changeFingerprint(baseTree, targetTree, diff.submodules), maxBytes, maxLines), nil
+	return r.changeSnapshot(status, diff, changeFingerprint(baseTree, targetTree, diff.submodules), maxBytes, maxLines), nil
 }
 
 func (r *Repository) UncommittedSnapshot(maxBytes, maxLines int) (ChangeSnapshot, error) {
@@ -305,7 +305,7 @@ func (r *Repository) UncommittedSnapshot(maxBytes, maxLines int) (ChangeSnapshot
 	if err != nil {
 		return ChangeSnapshot{}, err
 	}
-	return changeSnapshot(status, diff, changeFingerprint(baseTree, targetTree, diff.submodules), maxBytes, maxLines), nil
+	return r.changeSnapshot(status, diff, changeFingerprint(baseTree, targetTree, diff.submodules), maxBytes, maxLines), nil
 }
 
 func (r *Repository) StagedFingerprint() (ChangeFingerprint, error) {
@@ -360,7 +360,7 @@ func checkChangeFingerprint(want, got ChangeFingerprint, err error) error {
 	return nil
 }
 
-func changeSnapshot(status git.Status, diff *treeDiff, fingerprint ChangeFingerprint, maxBytes, maxLines int) ChangeSnapshot {
+func (r *Repository) changeSnapshot(status git.Status, diff *treeDiff, fingerprint ChangeFingerprint, maxBytes, maxLines int) ChangeSnapshot {
 	paths := diff.Paths()
 	changes := make([]PathChange, 0, len(paths))
 	for _, path := range paths {
@@ -371,7 +371,7 @@ func changeSnapshot(status git.Status, diff *treeDiff, fingerprint ChangeFingerp
 		}
 		changes = append(changes, PathChange{Path: path, Staging: string(file.Staging), Worktree: string(file.Worktree)})
 	}
-	diffText, truncated := textutil.Limit(diff.String(), maxBytes, maxLines)
+	diffText, truncated := textutil.Limit(r.diffText(diff, nil), maxBytes, maxLines)
 	return ChangeSnapshot{
 		Paths:         paths,
 		Status:        changes,
@@ -558,6 +558,48 @@ func submoduleDiffText(changes []SubmoduleChange) string {
 	return b.String()
 }
 
+func (r *Repository) diffText(diff *treeDiff, selected map[string]bool) string {
+	return r.prependSubmoduleHistory(diff.String(), diff.submodules, selected)
+}
+
+func (r *Repository) prependSubmoduleHistory(text string, changes []SubmoduleChange, selected map[string]bool) string {
+	summary := r.submoduleHistoryText(changes, selected)
+	if summary == "" {
+		return text
+	}
+	if text == "" {
+		return summary
+	}
+	return summary + strings.TrimLeft(text, "\n")
+}
+
+func (r *Repository) submoduleHistoryText(changes []SubmoduleChange, selected map[string]bool) string {
+	var summaries strings.Builder
+	for _, change := range changes {
+		if selected != nil && !selected[change.Path] || change.Old == "" || change.New == "" || change.Old == change.New {
+			continue
+		}
+		commits, err := r.SubmoduleCommits(change.Path, change.Old, change.New, 50)
+		if err != nil || len(commits) == 0 {
+			continue
+		}
+		fmt.Fprintf(&summaries, "Submodule commits %s (%s..%s):\n", change.Path, change.Old[:7], change.New[:7])
+		for _, commit := range commits {
+			fmt.Fprintf(&summaries, "  %.7s %s\n", commit.SHA, commit.Summary)
+		}
+	}
+	return summaries.String()
+}
+
+// SubmoduleCommits returns locally available commits between two gitlinks.
+func (r *Repository) SubmoduleCommits(path, base, head string, limit int) ([]CommitInfo, error) {
+	subRepo, err := Open(filepath.Join(r.RootPath, path))
+	if err != nil {
+		return nil, err
+	}
+	return subRepo.LogFrom(base, head, limit)
+}
+
 func (p filePatchSet) FilePatches() []fdiff.FilePatch {
 	return p.patches
 }
@@ -597,7 +639,7 @@ func patchForPaths(patch *object.Patch, paths []string) (string, error) {
 	return b.String(), nil
 }
 
-func limitedTreeDiffForPaths(diff *treeDiff, paths []string, maxBytes, maxLines int) (string, bool, error) {
+func (r *Repository) limitedTreeDiffForPaths(diff *treeDiff, paths []string, maxBytes, maxLines int) (string, bool, error) {
 	pathSet := make(map[string]bool, len(paths))
 	for _, path := range paths {
 		pathSet[filepath.ToSlash(path)] = true
@@ -610,7 +652,8 @@ func limitedTreeDiffForPaths(diff *treeDiff, paths []string, maxBytes, maxLines 
 	if base != "" && supplement != "" {
 		base = strings.TrimRight(base, "\n") + "\n"
 	}
-	limited, truncated := textutil.Limit(base+supplement, maxBytes, maxLines)
+	text := r.prependSubmoduleHistory(base+supplement, diff.submodules, pathSet)
+	limited, truncated := textutil.Limit(text, maxBytes, maxLines)
 	return limited, truncated, nil
 }
 

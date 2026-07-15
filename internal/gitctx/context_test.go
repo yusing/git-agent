@@ -206,6 +206,9 @@ func TestUncommittedDiffUsesCurrentSubmoduleRevision(t *testing.T) {
 	if !strings.Contains(diff, baseSHA) {
 		t.Fatalf("uncommitted submodule diff missing base revision:\n%s", diff)
 	}
+	if !strings.Contains(diff, "Submodule commits webui") || !strings.Contains(diff, " final") {
+		t.Fatalf("uncommitted submodule diff missing local commit summaries:\n%s", diff)
+	}
 	filtered, _, err := repo.UncommittedDiffForPaths([]string{"webui"}, 16*1024, 400)
 	if err != nil {
 		t.Fatal(err)
@@ -732,12 +735,25 @@ func TestStagedSubmoduleChangesDetectsMovedIndexPointers(t *testing.T) {
 	if !strings.Contains(diff, baseSHA) || !strings.Contains(diff, releaseSHA) {
 		t.Fatalf("staged submodule diff missing gitlink revisions:\n%s", diff)
 	}
+	if !strings.Contains(diff, "Submodule commits webui") || !strings.Contains(diff, "fix(webui): refresh login") {
+		t.Fatalf("staged submodule diff missing local commit summaries:\n%s", diff)
+	}
+	filtered, _, err := repo.StagedDiffForPaths([]string{"webui"}, 16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(filtered, "fix(webui): refresh login") {
+		t.Fatalf("filtered staged submodule diff missing local commit summaries:\n%s", filtered)
+	}
 	snapshot, err := repo.StagedSnapshot(16*1024, 400)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(snapshot.Paths) != 1 || snapshot.Paths[0] != "webui" {
 		t.Fatalf("snapshot paths = %#v, want [webui]", snapshot.Paths)
+	}
+	if !strings.Contains(snapshot.Diff, "fix(webui): refresh login") {
+		t.Fatalf("staged snapshot missing local commit summaries:\n%s", snapshot.Diff)
 	}
 }
 
