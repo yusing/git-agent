@@ -164,11 +164,14 @@ Mode flags are mutually exclusive. No mode flag means `--uncommitted`.
   500–1000 ms, keeping run observable for roughly 8–16 seconds.
 
 Diff modes prepare paths, staged/worktree status, line stats, generated-heavy
-context pack, and bounded unified diff before the first provider request. The
-initial prompt contains a bounded view of context-pack groups, outliers, and
-artifacts plus the bounded diff; it does not duplicate the complete raw path,
-status, or stat lists. Truncation is explicit. Full scope remains authoritative
-for report validation and read-only repository tools. Moved submodule gitlinks
+context pack, bounded unified diff, and a best-effort previous-`HEAD` context
+pack before the first provider request. The previous-`HEAD` pack summarizes
+`HEAD` versus its first parent for contrast only; it does not expand the
+authoritative review scope. The initial prompt contains bounded views of both
+packs' groups, outliers, and artifacts plus the bounded current diff; it does
+not duplicate the complete raw path, status, or stat lists. Truncation is
+explicit. Full current scope remains authoritative for report validation and
+read-only repository tools. Moved submodule gitlinks
 include bounded commit summaries when referenced history is available in local
 checkout; unavailable history leaves ordinary gitlink diff unchanged. Prepared
 and tool-read diffs never traverse dirty submodule file content. Diff preparation
@@ -220,7 +223,12 @@ guidance, skill, tool, validation-repair, SSE, and trailing-prompt contracts as
 `body`, `evidences`, and `proposed_change`; `aspect` is one of `reuse`,
 `clarity`, or `efficiency`. Evidence objects use same required location schema
 as review findings. Only confirmed behavior-preserving opportunities belong in
-output; empty opportunities is valid.
+output; empty opportunities is valid. Simplification explicitly audits for
+overengineering, including unnecessary abstractions and wrappers, premature
+generalization or extensibility, needless indirection or configuration,
+redundant state or concurrency, and architecture disproportionate to current
+requirements. Taste-only rewrites and speculative future simplifications are
+excluded.
 
 Both commands always bind an HTTP server to a private local Unix-domain socket
 after local validation. The launcher publishes its socket network, absolute
@@ -1538,8 +1546,8 @@ Context7 JSON is parsed before envelope creation. Commands never invoke shell,
 accept custom base URLs or unrelated subcommands, auto-install dependencies,
 open browser, download Rust toolchains, or run `cargo doc`. Per-tool timeout is
 a recoverable failed envelope; parent task cancellation is terminal. Stdout and
-stderr are fully drained into bounded buffers. Final summary ends with at most
-five deduplicated material external URLs or local documentation locators and
+stderr are fully drained into bounded buffers. Final summary ends with
+deduplicated material external URLs or local documentation locators and
 discloses failed hosted lookup capability.
 
 ### Release note tools

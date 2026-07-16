@@ -842,6 +842,14 @@ func (r *Repository) DiffAgainstParentStat() ([]FileStat, error) {
 	return fileStatsFromPatch(patch), nil
 }
 
+func (r *Repository) DiffAgainstParentChanges() ([]CommitFileChange, error) {
+	patch, err := r.patchHeadAgainstParent()
+	if err != nil {
+		return nil, err
+	}
+	return commitFileChangesFromPatch(patch), nil
+}
+
 func (r *Repository) AmendDelta(maxBytes, maxLines int) (string, bool, error) {
 	diff, err := r.diffIndexAgainstHead()
 	if err != nil {
@@ -890,8 +898,12 @@ func (r *Repository) ShowFileAtRev(rev, path string, maxBytes, maxLines int) (st
 		return "", false, err
 	}
 	defer reader.Close()
+	input := io.Reader(reader)
+	if maxBytes > 0 {
+		input = io.LimitReader(reader, int64(maxBytes)+1)
+	}
 	var b bytes.Buffer
-	if _, err := io.Copy(&b, reader); err != nil {
+	if _, err := io.Copy(&b, input); err != nil {
 		return "", false, err
 	}
 	limited, truncated := textutil.Limit(b.String(), maxBytes, maxLines)
@@ -2179,12 +2191,10 @@ func commitFileChangesFromPatch(patch *object.Patch) []CommitFileChange {
 	if patch == nil {
 		return nil
 	}
-	statsByPath := map[string]FileStat{}
-	for _, stat := range fileStatsFromPatch(patch) {
-		statsByPath[stat.Path] = stat
-	}
-	changes := make([]CommitFileChange, 0, len(patch.FilePatches()))
-	for _, filePatch := range patch.FilePatches() {
+	filePatches := patch.FilePatches()
+	stats := patch.Stats()
+	changes := make([]CommitFileChange, 0, len(filePatches))
+	for index, filePatch := range filePatches {
 		from, to := filePatch.Files()
 		path, oldPath := patchPath(from, to)
 		change := CommitFileChange{
@@ -2194,14 +2204,9 @@ func commitFileChangesFromPatch(patch *object.Patch) []CommitFileChange {
 			Binary:    filePatch.IsBinary(),
 			Submodule: patchHasSubmoduleMode(from, to),
 		}
-		if stat, ok := statsByPath[path]; ok {
-			change.Additions = stat.Adds
-			change.Deletions = stat.Deletes
-		} else if oldPath != "" {
-			if stat, ok := statsByPath[oldPath]; ok {
-				change.Additions = stat.Adds
-				change.Deletions = stat.Deletes
-			}
+		if index < len(stats) {
+			change.Additions = stats[index].Addition
+			change.Deletions = stats[index].Deletion
 		}
 		changes = append(changes, change)
 	}

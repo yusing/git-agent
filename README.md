@@ -132,6 +132,13 @@ JSON reports to stdout. They have no request deadline by default; `--timeout
 uses `gpt-5.6-sol` and `simplify` uses `gpt-5.6-terra`; both use provider-default
 reasoning effort unless an effort flag is supplied.
 
+Diff-based review and simplification preload a bounded current-change context
+and, when available, a previous-`HEAD` context pack for contrast. Current dirty
+or staged changes remain authoritative. Simplification also checks explicitly
+for behavior-preserving removal of overengineering such as unnecessary
+abstractions, premature generalization, needless indirection or configuration,
+redundant state or concurrency, and disproportionate architecture.
+
 `--orchestration-artifact <absolute-path>` enables helper-authorized evidence
 for review or simplify. Manifest and declared files must be owner-only regular
 files beneath manifest directory and match recorded size and SHA-256. Model can
@@ -165,7 +172,7 @@ access or auto-installation. Context7 works logged out at lower service limits,
 as described by its [CLI documentation](https://github.com/upstash/context7/blob/master/docs/clients/cli.mdx).
 External queries must contain only public language/library questions—never
 secrets, source, diffs, credentials, personal data, or private repository
-details. Reports retain exact repository evidence and list up to five material
+details. Reports retain exact repository evidence and list deduplicated material
 external source URLs or local documentation locators in summary.
 
 The launch object's replayable local endpoint includes live reasoning-summary

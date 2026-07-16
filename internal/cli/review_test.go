@@ -65,7 +65,7 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 						`"find"`,
 						`operator focus`,
 						`Never send secrets, source code, diffs, credentials, personal data`,
-						`up to five deduplicated material source URLs or local documentation locators`,
+						`deduplicated material source URLs or local documentation locators`,
 						fmt.Sprintf(`<max_model_steps>%d</max_model_steps>`, map[string]int{"review": reviewDefaultMaxSteps, "simplify": simplifyDefaultSteps}[test.command]),
 						fmt.Sprintf(`<max_tool_calls>%d</max_tool_calls>`, map[string]int{"review": reviewDefaultMaxTools, "simplify": simplifyDefaultTools}[test.command]),
 					} {
