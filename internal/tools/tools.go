@@ -564,23 +564,25 @@ func (t readFileTool) Definition() Definition {
 		sourceDescription = "File source. Empty means index; worktree is unavailable in staged mode."
 	}
 	return Definition{Name: "read_file", Description: "Read a UTF-8 repository file with byte and line caps.", Schema: schema(map[string]any{
-		"path":       stringProp("Repository-relative file path."),
-		"source":     enumStringProp(sourceDescription, "", "worktree", "index", "head"),
-		"line_start": intProp("Optional inclusive first line. Zero starts at line 1.", 0, 10000000),
-		"line_end":   intProp("Optional inclusive last line. Zero reads through EOF.", 0, 10000000),
-		"max_bytes":  intProp("Maximum bytes to return.", 1, 65536),
-		"max_lines":  intProp("Maximum lines to return.", 1, 2000),
+		"path":             stringProp("Repository-relative file path."),
+		"source":           enumStringProp(sourceDescription, "", "worktree", "index", "head"),
+		"line_start":       intProp("Optional inclusive first line. Zero starts at line 1.", 0, 10000000),
+		"line_end":         intProp("Optional inclusive last line. Zero reads through EOF.", 0, 10000000),
+		"with_line_number": map[string]any{"type": "boolean", "description": "Prepend original line numbers like nl -ba."},
+		"max_bytes":        intProp("Maximum bytes to return.", 1, 65536),
+		"max_lines":        intProp("Maximum lines to return.", 1, 2000),
 	}, "path"), Strict: true}
 }
 
 func (t readFileTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
 	args, err := parseArgs[struct {
-		Path      string `json:"path"`
-		Source    string `json:"source"`
-		LineStart int    `json:"line_start"`
-		LineEnd   int    `json:"line_end"`
-		MaxBytes  int    `json:"max_bytes"`
-		MaxLines  int    `json:"max_lines"`
+		Path           string `json:"path"`
+		Source         string `json:"source"`
+		LineStart      int    `json:"line_start"`
+		LineEnd        int    `json:"line_end"`
+		WithLineNumber bool   `json:"with_line_number"`
+		MaxBytes       int    `json:"max_bytes"`
+		MaxLines       int    `json:"max_lines"`
 	}](invocation.Arguments)
 	if err != nil {
 		return Result{}, err
@@ -612,7 +614,7 @@ func (t readFileTool) Execute(_ context.Context, invocation Invocation) (Result,
 	}
 	defer reader.Close()
 	maxBytes, maxLines := normalizeCaps(args.MaxBytes, args.MaxLines)
-	content, first, last, truncated, err := readLineRange(reader, args.LineStart, args.LineEnd, maxBytes, maxLines)
+	content, first, last, truncated, err := readLineRange(reader, args.LineStart, args.LineEnd, maxBytes, maxLines, args.WithLineNumber)
 	if err != nil {
 		return Result{}, err
 	}
@@ -633,7 +635,7 @@ func openRepositoryFile(repo *gitctx.Repository, path, source string) (io.ReadCl
 	return repo.OpenFile(gitctx.FileSource(source), path)
 }
 
-func readLineRange(reader io.Reader, start, end, maxBytes, maxLines int) (string, int, int, bool, error) {
+func readLineRange(reader io.Reader, start, end, maxBytes, maxLines int, withLineNumber bool) (string, int, int, bool, error) {
 	if start < 0 || end < 0 || (end > 0 && start > end) {
 		return "", 0, 0, false, fmt.Errorf("invalid line range %d:%d", start, end)
 	}
@@ -659,6 +661,15 @@ func readLineRange(reader io.Reader, start, end, maxBytes, maxLines int) (string
 					}
 					selectedLines++
 					lastSelected = currentLine
+					if withLineNumber {
+						prefix := fmt.Sprintf("%6d\t", currentLine)
+						remaining := maxBytes - output.Len()
+						if len(prefix) > remaining {
+							output.WriteString(prefix[:remaining])
+							return output.String(), start, lastSelected, true, nil
+						}
+						output.WriteString(prefix)
+					}
 				}
 				if output.Len() >= maxBytes {
 					return validUTF8Prefix(output.String()), start, lastSelected, true, nil

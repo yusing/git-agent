@@ -1429,7 +1429,8 @@ Shared tools:
 - `find`
 
 `read_file` accepts repository-relative path, optional inclusive line range,
-and source `worktree`, `index`, or `head`. Source selection lets staged review
+optional `with_line_number` output formatted like `nl -ba`, and source
+`worktree`, `index`, or `head`. Source selection lets staged review
 inspect index content without leaking later worktree edits. Agent policy permits
 `read_file` only when its path is copied verbatim from prepared context or prior
 repository-tool output; package import paths, package names, types, and symbols

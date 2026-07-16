@@ -180,7 +180,7 @@ func (t orchestrationArtifactTool) Execute(_ context.Context, invocation Invocat
 		}
 		defer file.Close()
 		maxBytes, maxLines := normalizeCaps(args.MaxBytes, args.MaxLines)
-		content, first, last, truncated, err := readLineRange(file, args.LineStart, args.LineEnd, maxBytes, maxLines)
+		content, first, last, truncated, err := readLineRange(file, args.LineStart, args.LineEnd, maxBytes, maxLines, false)
 		if err != nil {
 			return Result{}, err
 		}

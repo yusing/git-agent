@@ -123,6 +123,10 @@ func TestToolDefinitionsAreStrictAndEnvelopeResults(t *testing.T) {
 			t.Fatalf("%s schema = %#v", def.Name, def.Schema)
 		}
 	}
+	readFileProperties := defs[1].Schema["properties"].(map[string]any)
+	if readFileProperties["with_line_number"].(map[string]any)["type"] != "boolean" {
+		t.Fatalf("read_file with_line_number schema = %#v", readFileProperties["with_line_number"])
+	}
 
 	result, err := registry.Execute(context.Background(), Invocation{Name: "repo_summary", Arguments: "{}"})
 	if err != nil {
@@ -439,6 +443,13 @@ func TestReadFileSelectsSnapshotAndInclusiveLineRange(t *testing.T) {
 		if !strings.Contains(result.Content, `"line_start": 2`) || !strings.Contains(result.Content, `"line_end": 2`) {
 			t.Fatalf("source %s missing selected range: %s", source, result.Content)
 		}
+	}
+	result, err := registry.Execute(t.Context(), Invocation{Name: "read_file", Arguments: `{"path":"app.txt","source":"worktree","line_start":2,"line_end":3,"with_line_number":true}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, `"content": "     2\tworktree\n     3\tthree\n"`) {
+		t.Fatalf("numbered content = %s", result.Content)
 	}
 }
 
