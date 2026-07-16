@@ -114,6 +114,7 @@ func NewReviewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Sto
 		repoSummaryTool{repo: repo},
 		listFilesTool{repo: repo, mode: mode},
 		readFileTool{repo: repo, mode: mode},
+		inspectFileTool{repo: repo, mode: mode},
 		grepTool{repo: repo, mode: mode},
 		findTool{repo: repo, mode: mode},
 	})
@@ -142,6 +143,7 @@ func newRegistry(repo *gitctx.Repository, skillStore *skills.Store) *Registry {
 		repoSummaryTool{repo: repo},
 		listFilesTool{repo: repo},
 		readFileTool{repo: repo},
+		inspectFileTool{repo: repo},
 		grepTool{repo: repo},
 		findTool{repo: repo},
 		gitStagedPathsTool{repo: repo},
@@ -230,6 +232,7 @@ func CommitMessageToolNames() []string {
 		"repo_summary",
 		"list_files",
 		"read_file",
+		"inspect_file",
 		"grep",
 		"git_staged_paths",
 		"git_staged_status",
@@ -247,7 +250,7 @@ func CommitMessageToolNames() []string {
 
 func ReviewToolCandidates(mode ReviewMode) []string {
 	names := []string{
-		"repo_summary", "list_files", "read_file", "grep", "find", OrchestrationArtifactToolName,
+		"repo_summary", "list_files", "read_file", "inspect_file", "grep", "find", OrchestrationArtifactToolName,
 		string(doccmd.GoDoc), string(doccmd.RustDoc), string(doccmd.Context7Library), string(doccmd.Context7Docs),
 	}
 	if mode != ReviewModeCodebase {
@@ -559,19 +562,23 @@ type readFileTool struct {
 }
 
 func (t readFileTool) Definition() Definition {
-	sourceDescription := "File source. Empty means worktree."
-	if t.mode == ReviewModeStaged {
-		sourceDescription = "File source. Empty means index; worktree is unavailable in staged mode."
-	}
 	return Definition{Name: "read_file", Description: "Read a UTF-8 repository file with byte and line caps.", Schema: schema(map[string]any{
 		"path":             stringProp("Repository-relative file path."),
-		"source":           enumStringProp(sourceDescription, "", "worktree", "index", "head"),
+		"source":           fileSourceProp(t.mode),
 		"line_start":       intProp("Optional inclusive first line. Zero starts at line 1.", 0, 10000000),
 		"line_end":         intProp("Optional inclusive last line. Zero reads through EOF.", 0, 10000000),
 		"with_line_number": map[string]any{"type": "boolean", "description": "Prepend original line numbers like nl -ba."},
 		"max_bytes":        intProp("Maximum bytes to return.", 1, 65536),
 		"max_lines":        intProp("Maximum lines to return.", 1, 2000),
 	}, "path"), Strict: true}
+}
+
+func fileSourceProp(mode ReviewMode) map[string]any {
+	description := "File source. Empty means worktree."
+	if mode == ReviewModeStaged {
+		description = "File source. Empty means index; worktree is unavailable in staged mode."
+	}
+	return enumStringProp(description, "", "worktree", "index", "head")
 }
 
 func (t readFileTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
@@ -590,25 +597,7 @@ func (t readFileTool) Execute(_ context.Context, invocation Invocation) (Result,
 	if args.Path == "" {
 		return Result{}, fmt.Errorf("path is required")
 	}
-	path, err := cleanRepoPath(args.Path)
-	if err != nil {
-		return Result{}, err
-	}
-	source := args.Source
-	if t.mode == ReviewModeStaged {
-		if source == "worktree" {
-			return Result{}, fmt.Errorf("source worktree is unavailable in staged mode; use index or head")
-		}
-		if source == "" {
-			source = "index"
-		}
-	} else if source == "" {
-		source = "worktree"
-	}
-	if source != "worktree" && source != "index" && source != "head" {
-		return Result{}, fmt.Errorf("source must be worktree, index, or head")
-	}
-	reader, err := openRepositoryFile(t.repo, path, source)
+	reader, source, err := openInspectedFile(t.repo, t.mode, args.Path, args.Source)
 	if err != nil {
 		return Result{}, err
 	}
@@ -625,6 +614,28 @@ func (t readFileTool) Execute(_ context.Context, invocation Invocation) (Result,
 		"line_end":   last,
 		"content":    content,
 	}, truncated)
+}
+
+func openInspectedFile(repo *gitctx.Repository, mode ReviewMode, rawPath, source string) (io.ReadCloser, string, error) {
+	path, err := cleanRepoPath(rawPath)
+	if err != nil {
+		return nil, "", err
+	}
+	if mode == ReviewModeStaged {
+		if source == "worktree" {
+			return nil, "", fmt.Errorf("source worktree is unavailable in staged mode; use index or head")
+		}
+		if source == "" {
+			source = "index"
+		}
+	} else if source == "" {
+		source = "worktree"
+	}
+	if source != "worktree" && source != "index" && source != "head" {
+		return nil, "", fmt.Errorf("source must be worktree, index, or head")
+	}
+	reader, err := openRepositoryFile(repo, path, source)
+	return reader, source, err
 }
 
 func enumStringProp(description string, values ...string) map[string]any {

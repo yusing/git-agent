@@ -935,6 +935,14 @@ func (r *Repository) OpenFile(source FileSource, path string) (io.ReadCloser, er
 		if err != nil {
 			return nil, err
 		}
+		info, err := root.Lstat(filepath.FromSlash(path))
+		if err != nil || !info.Mode().IsRegular() {
+			closeErr := root.Close()
+			if err == nil {
+				err = fmt.Errorf("worktree path %q is not a regular file", path)
+			}
+			return nil, errors.Join(err, closeErr)
+		}
 		file, err := root.Open(filepath.FromSlash(path))
 		closeErr := root.Close()
 		if err != nil || closeErr != nil {

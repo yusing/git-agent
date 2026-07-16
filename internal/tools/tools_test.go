@@ -389,8 +389,13 @@ func TestRepositoryToolsDoNotFollowSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := NewRegistryWithSkills(repo, nil)
-	if _, err := registry.Execute(t.Context(), Invocation{Name: "read_file", Arguments: `{"path":"leak.txt"}`}); err == nil {
-		t.Fatal("read_file followed symlink outside repository")
+	for _, name := range []string{"read_file", "inspect_file"} {
+		if _, err := registry.Execute(t.Context(), Invocation{Name: name, Arguments: `{"path":"leak.txt"}`}); err == nil {
+			t.Fatalf("%s followed symlink outside repository", name)
+		}
+		if _, err := registry.Execute(t.Context(), Invocation{Name: name, Arguments: `{"path":"."}`}); err == nil {
+			t.Fatalf("%s accepted a directory", name)
+		}
 	}
 
 	listResult, err := registry.Execute(t.Context(), Invocation{Name: "list_files", Arguments: "{}"})
@@ -450,6 +455,97 @@ func TestReadFileSelectsSnapshotAndInclusiveLineRange(t *testing.T) {
 	}
 	if !strings.Contains(result.Content, `"content": "     2\tworktree\n     3\tthree\n"`) {
 		t.Fatalf("numbered content = %s", result.Content)
+	}
+}
+
+func TestInspectFileReportsMetadataAndUsesReadFilePolicy(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	mustWriteFile(t, filepath.Join(dir, "app.go"), "package app\n\ntype Service struct{}\n\nfunc (Service) Run() {}\n")
+	runGit(t, dir, "add", "app.go")
+	repo, err := gitctx.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := repo.StagedFingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewReviewRegistryWithSkills(repo, nil, ReviewModeStaged, ReviewScope{}, fingerprint)
+	result, err := registry.Execute(t.Context(), Invocation{Name: "inspect_file", Arguments: `{"path":"app.go"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"source": "index"`, `"size_bytes": 60`, `"lines": 5`, `"outline_kind": "code"`, `"kind": "type"`, `"name": "Service"`, `"name": "Service.Run"`} {
+		if !strings.Contains(result.Content, want) {
+			t.Fatalf("inspect_file missing %s: %s", want, result.Content)
+		}
+	}
+	if _, err := registry.Execute(t.Context(), Invocation{Name: "inspect_file", Arguments: `{"path":"app.go","source":"worktree"}`}); err == nil {
+		t.Fatal("inspect_file accepted worktree source in staged mode")
+	}
+}
+
+func TestInspectFileBoundsContentAndHandlesLongMarkdownLines(t *testing.T) {
+	t.Parallel()
+
+	content, size, lines, truncated, err := inspectContent(t.Context(), strings.NewReader(strings.Repeat("x", inspectMaxContent)+"\n# End\n\x00"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size != inspectMaxContent+8 || lines != 3 || !truncated || len(content) != inspectMaxContent {
+		t.Fatalf("inspectContent = size %d, lines %d, truncated %v, retained %d", size, lines, truncated, len(content))
+	}
+	outline, outlineTruncated := markdownOutline([]byte(strings.Repeat("x", 70_000) + "\n# End\n"))
+	if outlineTruncated || len(outline) != 1 || outline[0].Name != "End" || outline[0].Line != 2 {
+		t.Fatalf("markdown outline = %#v, truncated %v", outline, outlineTruncated)
+	}
+}
+
+func TestInspectFileOutlinesJSONAndUnsupportedFiles(t *testing.T) {
+	t.Parallel()
+
+	outline, truncated := jsonOutline([]byte(`{"items":[{"name":"x"}]}`))
+	if truncated || len(outline) != 3 || outline[0].Kind != "array" || outline[0].Name != "/items" || outline[1].Kind != "object" || outline[1].Name != "/items/0" || outline[2].Kind != "string" || outline[2].Name != "/items/0/name" {
+		t.Fatalf("json outline = %#v, truncated %v", outline, truncated)
+	}
+	outline, truncated = inspectOutline(fileOutlineKind("notes.txt"), "notes.txt", []byte("plain text\n"))
+	if truncated || len(outline) != 0 || fileOutlineKind("notes.txt") != "none" {
+		t.Fatalf("text outline = %#v, truncated %v", outline, truncated)
+	}
+}
+
+func TestInspectFileBoundsOutlineAndSkipsFencedMarkdown(t *testing.T) {
+	t.Parallel()
+
+	var document strings.Builder
+	for range 100 {
+		document.WriteString(`{"`)
+		document.WriteString(strings.Repeat("x", 1024))
+		document.WriteString(`":`)
+	}
+	document.WriteString(`null`)
+	document.WriteString(strings.Repeat("}", 100))
+	outline, truncated := jsonOutline([]byte(document.String()))
+	encoded, err := json.Marshal(outline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated || len(encoded) > inspectMaxOutlineBytes+10_000 {
+		t.Fatalf("JSON outline bytes = %d, entries = %d, truncated = %v", len(encoded), len(outline), truncated)
+	}
+
+	outline, truncated = markdownOutline([]byte("# Before\n```go\n# Example\n```\n~~~\n# Also example\n~~~\n# After\n"))
+	if truncated || len(outline) != 2 || outline[0].Name != "Before" || outline[1].Name != "After" {
+		t.Fatalf("Markdown outline = %#v, truncated = %v", outline, truncated)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, _, _, _, err := inspectContent(ctx, strings.NewReader("content"), true); !errors.Is(err, context.Canceled) {
+		t.Fatalf("inspectContent error = %v, want context cancellation", err)
 	}
 }
 

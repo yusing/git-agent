@@ -183,9 +183,10 @@ Positional text remaining after flag parsing is escaped and appended as
 lower-priority operator hint, using same precedence rules as `--append-prompt`.
 
 In staged mode, repository guidance is read from index blobs, repository-local
-worktree skills are omitted, and `list_files`, `read_file`, `grep`, and `find`
+worktree skills are omitted, and `list_files`, `read_file`, `inspect_file`, `grep`, and `find`
 use index state. User, Codex, admin, and plugin skills remain available.
-Explicit `read_file source=worktree` is rejected. In all modes, `read_file`
+Explicit `read_file source=worktree` and `inspect_file source=worktree` are
+rejected. In all modes, `read_file`
 streams the selected source and applies byte/line caps before materializing
 content. Report validation verifies every evidence path and inclusive line end
 against the authoritative worktree/index source, with HEAD fallback for deleted
@@ -1425,6 +1426,7 @@ Shared tools:
 - `repo_summary`
 - `list_files`
 - `read_file`
+- `inspect_file`
 - `grep`
 - `find`
 
@@ -1440,6 +1442,15 @@ repository text files with optional safe glob. `find` implements bounded
 file/directory discovery by safe glob. Both are implemented in Go, do not invoke
 shell commands, skip internal state directories and symlinks, and return
 explicit truncation state.
+
+`inspect_file` applies the same path, source, staged-mode, and symlink policy as
+`read_file`, but returns metadata instead of content: byte and line counts,
+`outline_kind`, and a bounded outline. Unsupported readable files return
+`outline_kind: none` with an empty outline. Supported outlines contain Go types
+and functions, Markdown headings, or JSON pointers with value kinds. Exact byte
+and line counts stream across the complete file; outline parsing retains at most
+the first 4 MiB, returns at most 200 entries and 64 KiB of entry data, and marks
+larger results truncated. Worktree file reads reject non-regular files.
 
 ### Skill tools
 

@@ -145,7 +145,8 @@ recursing into dirty submodule files. Full changed-path scope remains available
 to validation and read-only repository tools without duplicating every path,
 status, and stat in the initial request.
 The model can page through that complete inventory before requesting narrow
-path-specific diffs.
+path-specific diffs, and inspect bounded file outlines before selecting
+`read_file` ranges.
 Requests whose initial serialized estimate reaches the configured context budget
 fail before contacting the provider.
 
