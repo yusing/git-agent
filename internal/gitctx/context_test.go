@@ -248,6 +248,69 @@ func TestUncommittedDiffUsesCurrentSubmoduleRevision(t *testing.T) {
 	}
 }
 
+func TestUncommittedSnapshotUsesIndependentSubmoduleCheckout(t *testing.T) {
+	t.Parallel()
+
+	subDir := initTempRepo(t)
+	writeFile(t, filepath.Join(subDir, "tracked.txt"), "old checkout\n")
+	runGit(t, subDir, "add", "tracked.txt")
+	runGit(t, subDir, "commit", "-m", "old checkout")
+
+	repoDir := initTempRepo(t)
+	runGit(t, repoDir, "-c", "protocol.file.allow=always", "submodule", "add", subDir, "nested")
+	runGit(t, repoDir, "commit", "-m", "add submodule")
+	writeFile(t, filepath.Join(repoDir, ".git", "modules", "nested", "HEAD"), "ref: refs/heads/missing\n")
+
+	nestedDir := filepath.Join(repoDir, "nested")
+	if err := os.RemoveAll(nestedDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(nestedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, nestedDir, "init")
+	runGit(t, nestedDir, "config", "user.name", "Test User")
+	runGit(t, nestedDir, "config", "user.email", "test@example.com")
+	writeFile(t, filepath.Join(nestedDir, "tracked.txt"), "independent checkout\n")
+	runGit(t, nestedDir, "add", "tracked.txt")
+	runGit(t, nestedDir, "commit", "-m", "independent checkout")
+	writeFile(t, filepath.Join(nestedDir, "untracked.txt"), "dirty\n")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repo.UncommittedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Paths) != 1 || snapshot.Paths[0] != "nested" {
+		t.Fatalf("snapshot paths = %#v, want [nested]", snapshot.Paths)
+	}
+	if snapshot.Fingerprint.DirtySubmodules == "" {
+		t.Fatal("independent dirty submodule missing fingerprint")
+	}
+
+	if err := os.RemoveAll(nestedDir); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(subDir, "outside.txt"), "must not inspect\n")
+	if err := os.Symlink(subDir, nestedDir); err != nil {
+		t.Fatal(err)
+	}
+	headTree, err := repo.headTree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirtySubmodules, err := repo.dirtySubmoduleChanges(headTree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirtySubmodules) != 0 {
+		t.Fatalf("symlinked external repository included in dirty submodules: %#v", dirtySubmodules)
+	}
+}
+
 func TestLogMessagesFromIncludesFullCommitMessage(t *testing.T) {
 	t.Parallel()
 

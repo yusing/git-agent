@@ -1458,9 +1458,28 @@ func (r *Repository) dirtySubmoduleChanges(headTree *object.Tree) ([]SubmoduleCh
 	if err != nil {
 		return nil, err
 	}
+	rootPath, err := filepath.EvalSymlinks(r.RootPath)
+	if err != nil {
+		return nil, err
+	}
 	dirtySubmodules := make([]SubmoduleChange, 0, len(submodules))
 	for _, submodule := range submodules {
-		subRepo, err := submodule.Repository()
+		path := filepath.ToSlash(submodule.Config().Path)
+		nativePath := filepath.FromSlash(path)
+		if !filepath.IsLocal(nativePath) || slices.ContainsFunc(strings.Split(path, "/"), func(part string) bool {
+			return strings.EqualFold(part, ".git")
+		}) {
+			continue
+		}
+		subRoot, err := filepath.EvalSymlinks(filepath.Join(rootPath, nativePath))
+		if err != nil {
+			continue
+		}
+		rel, err := filepath.Rel(rootPath, subRoot)
+		if err != nil || rel == "." || !filepath.IsLocal(rel) {
+			continue
+		}
+		subRepo, err := git.PlainOpen(subRoot)
 		if err != nil {
 			continue
 		}
@@ -1471,10 +1490,9 @@ func (r *Repository) dirtySubmoduleChanges(headTree *object.Tree) ([]SubmoduleCh
 		}
 		subStatus, statusErr := subWorktree.Status()
 		head, headErr := subRepo.Head()
-		path := filepath.ToSlash(submodule.Config().Path)
 		dirtyState := ""
 		if statusErr == nil && !subStatus.IsClean() {
-			dirtyState, err = worktreeStatusFingerprint(filepath.Join(r.RootPath, filepath.FromSlash(path)), subStatus)
+			dirtyState, err = worktreeStatusFingerprint(subRoot, subStatus)
 		}
 		closeErr := subRepo.Close()
 		if err != nil {
