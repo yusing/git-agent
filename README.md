@@ -112,8 +112,14 @@ git-agent review --codebase
 git-agent simplify
 git-agent simplify --wait <id-from-launch-json>
 
+# Allow an orchestrator-owned manifest to expose immutable external evidence
+git-agent review --orchestration-artifact /absolute/run/manifest.json
+
 # Add lower-priority task focus after flags
 git-agent review --staged focus on cancellation and cleanup
+
+# Exercise launch, events, rendering, and wait without provider access
+git-agent review --dry-run
 ```
 
 Exactly one mode may be selected: `--codebase`, `--uncommitted`, or `--staged`.
@@ -125,6 +131,13 @@ JSON reports to stdout. They have no request deadline by default; `--timeout
 <duration>` adds one explicitly. Without `--model` or `OPENAI_MODEL`, `review`
 uses `gpt-5.6-sol` and `simplify` uses `gpt-5.6-terra`; both use provider-default
 reasoning effort unless an effort flag is supplied.
+
+`--orchestration-artifact <absolute-path>` enables helper-authorized evidence
+for review or simplify. Manifest and declared files must be owner-only regular
+files beneath manifest directory and match recorded size and SHA-256. Model can
+read only declared IDs through `read_orchestration_artifact`; repository
+`read_file` remains repository-confined. Final report adds trusted
+`orchestration_manifest_sha256`.
 
 Diff-mode prompts include a bounded context-pack view and bounded unified diff.
 Moved submodule pointers include locally available commit summaries without
@@ -358,6 +371,8 @@ Common generation and inspection flags:
 | `--timeout <duration>` | Set request timeout; `review`/`simplify` default to none |
 | `--max-steps <n>` | Bound agent loop steps |
 | `--max-web-searches <n>` | Review/simplify only: override hosted-search cap |
+| `--orchestration-artifact <path>` | Review/simplify only: authorize immutable helper artifact manifest |
+| `--dry-run` | Review/simplify only: emit deterministic events without provider access |
 | `--guidance-family auto\|agents\|claude\|codex\|none` | Force guidance family |
 | `--append-prompt <text>` | Add a bounded operator hint |
 | `--debug` | Print diagnostics |

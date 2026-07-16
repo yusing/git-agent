@@ -154,6 +154,14 @@ Mode flags are mutually exclusive. No mode flag means `--uncommitted`.
   names remain ordinary review scope.
 - `--staged` reviews index state against `HEAD` and ignores unstaged content.
 - `--codebase` audits full repository without preloaded diff scope.
+- `--orchestration-artifact <absolute-path>` validates an owner-only manifest
+  and its declared immutable files beneath manifest directory. It enables no
+  arbitrary filesystem access.
+- `--dry-run` preserves repository preparation, detached launch, authenticated
+  SSE, optional orchestration validation, and repeatable wait output while
+  replacing provider execution with deterministic schema-valid reasoning, tool,
+  and final events. Fifteen emitted events each wait an independent random
+  500–1000 ms, keeping run observable for roughly 8–16 seconds.
 
 Diff modes prepare paths, staged/worktree status, line stats, generated-heavy
 context pack, and bounded unified diff before the first provider request. The
@@ -199,6 +207,8 @@ Provider text format uses strict JSON Schema. Output object requires `summary`,
 repository-relative `path`, and positive inclusive `line_start`/`line_end`.
 Validator rejects unknown fields, missing evidence, invalid paths/ranges,
 severity-order violations, invalid style severity, and recommendation mismatch.
+When orchestration input is present, Git-agent adds its validated manifest
+SHA-256 to stored final report after model-schema validation.
 
 #### `git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 
@@ -285,6 +295,9 @@ process-context cancellation. A matching `final` event writes only its
 completion. A stored `error`, unknown or malformed ID, corrupt record, dead
 producer, or task created by the other command returns nonzero with empty
 stdout.
+
+`--dry-run` is valid only on initial review/simplify launch and is mutually
+exclusive with `--wait` through normal wait-flag conflict validation.
 
 The detached producer creates a versioned running record before publishing its
 launch JSON, refreshes its update timestamp with a heartbeat while running, then
@@ -1477,6 +1490,12 @@ skills are available. Diff modes additionally expose:
 - `review_changes`
 - `review_diff`
 - `review_diff_for_paths`
+
+With `--orchestration-artifact`, they additionally expose
+`read_orchestration_artifact`. Tool accepts only manifest-declared artifact ID
+and bounded line/byte window, revalidates file size and SHA-256 on every read,
+and never accepts filesystem path. Initial prompt receives compact ID/size/digest
+inventory, not artifact bodies.
 
 These names are stable across staged and uncommitted modes; registry binds them
 to selected authoritative scope. `review_changes` pages through the complete

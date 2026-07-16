@@ -105,7 +105,7 @@ func NewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Store) *R
 	return newRegistry(repo, skillStore)
 }
 
-func NewReviewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Store, mode ReviewMode, scope ReviewScope, fingerprint gitctx.ChangeFingerprint) *Registry {
+func NewReviewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Store, mode ReviewMode, scope ReviewScope, fingerprint gitctx.ChangeFingerprint, manifests ...*OrchestrationManifest) *Registry {
 	registry := &Registry{tools: map[string]Tool{}}
 	if repo != nil && mode != ReviewModeCodebase {
 		registry.reviewGuard = &reviewStateGuard{repo: repo, mode: mode, fingerprint: fingerprint}
@@ -125,6 +125,9 @@ func NewReviewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Sto
 		})
 	}
 	registerSkillsRead(registry, skillStore)
+	if len(manifests) == 1 && manifests[0] != nil {
+		register(registry, []Tool{orchestrationArtifactTool{manifest: manifests[0]}})
+	}
 	root := "."
 	if repo != nil {
 		root = repo.RootPath
@@ -244,7 +247,7 @@ func CommitMessageToolNames() []string {
 
 func ReviewToolCandidates(mode ReviewMode) []string {
 	names := []string{
-		"repo_summary", "list_files", "read_file", "grep", "find",
+		"repo_summary", "list_files", "read_file", "grep", "find", OrchestrationArtifactToolName,
 		string(doccmd.GoDoc), string(doccmd.RustDoc), string(doccmd.Context7Library), string(doccmd.Context7Docs),
 	}
 	if mode != ReviewModeCodebase {

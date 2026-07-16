@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	reviewtask "github.com/yusing/git-agent/internal/tasks/review"
 )
 
 func TestReviewTestStreamsDeterministicDetachedEvents(t *testing.T) {
@@ -66,5 +69,38 @@ func TestReviewTestRejectsArguments(t *testing.T) {
 	err := (&App{stdout: io.Discard, stderr: io.Discard}).Run(t.Context(), []string{reviewTestCommand, "extra"})
 	if err == nil || err.Error() != "usage: git-agent review-test" {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestDryRunEventsEndWithValidReportForEachKind(t *testing.T) {
+	for _, kind := range []reviewtask.Kind{reviewtask.KindReview, reviewtask.KindSimplify} {
+		events := dryRunEvents(kind, nil)
+		if len(events) != 15 {
+			t.Fatalf("%s dry-run event count = %d", kind, len(events))
+		}
+		seen := map[any]bool{}
+		for _, event := range events {
+			if event.Kind == "tool-call" {
+				seen[event.Value["name"]] = true
+			}
+		}
+		if len(seen) != 5 {
+			t.Fatalf("%s dry-run unique tools = %d", kind, len(seen))
+		}
+		data, err := json.Marshal(events[len(events)-1].Value["text"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if problems := reviewtask.Validate(kind, string(data)); len(problems) != 0 {
+			t.Fatalf("%s dry-run report invalid: %v", kind, problems)
+		}
+	}
+}
+
+func TestDryRunEventDelayIsProviderLike(t *testing.T) {
+	for range 100 {
+		if delay := dryRunEventDelay(); delay < 500*time.Millisecond || delay > time.Second {
+			t.Fatalf("dry-run delay = %s", delay)
+		}
 	}
 }
