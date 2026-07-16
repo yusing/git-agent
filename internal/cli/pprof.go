@@ -34,7 +34,7 @@ func (a *App) maybeStartPprof(ctx context.Context, opts config.Options) error {
 	}()
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			fmt.Fprintf(a.stderr, "pprof error: %v\n", err)
+			_, _ = fmt.Fprintf(a.stderr, "pprof error: %v\n", err)
 		}
 	}()
 	return nil
@@ -62,7 +62,7 @@ func pprofIndex(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(profiles, func(i, j int) bool { return profiles[i].Name() < profiles[j].Name() })
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	for _, profile := range profiles {
-		fmt.Fprintf(w, "%s\n", profile.Name())
+		_, _ = fmt.Fprintf(w, "%s\n", profile.Name())
 	}
 }
 
@@ -84,13 +84,13 @@ func pprofNamedProfile(w http.ResponseWriter, r *http.Request, name string) {
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, name))
 	}
 	if err := profile.WriteTo(w, debug); err != nil {
-		fmt.Fprintf(w, "write profile: %v\n", err)
+		_, _ = fmt.Fprintf(w, "write profile: %v\n", err)
 	}
 }
 
 func pprofCmdline(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprint(w, strings.Join(os.Args, "\x00"))
+	_, _ = fmt.Fprint(w, strings.Join(os.Args, "\x00"))
 }
 
 func pprofProfile(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +140,7 @@ func pprofSymbol(w http.ResponseWriter, r *http.Request) {
 	} else {
 		input = r.URL.RawQuery
 	}
-	fmt.Fprintln(w, "num_symbols: 1")
+	_, _ = fmt.Fprintln(w, "num_symbols: 1")
 	for pcText := range strings.SplitSeq(input, "+") {
 		pc, _ := strconv.ParseUint(pcText, 0, 64)
 		if pc == 0 {
@@ -148,7 +148,7 @@ func pprofSymbol(w http.ResponseWriter, r *http.Request) {
 		}
 		fn := runtime.FuncForPC(uintptr(pc))
 		if fn != nil {
-			fmt.Fprintf(w, "%#x %s\n", pc, fn.Name())
+			_, _ = fmt.Fprintf(w, "%#x %s\n", pc, fn.Name())
 		}
 	}
 }

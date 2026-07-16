@@ -572,7 +572,7 @@ func (s *Store) withRecordLock(id string, fn func(string) error) error {
 		_ = os.Remove(lockPath)
 		return fmt.Errorf("close background task %s lock: %w", id, closeErr)
 	}
-	defer os.Remove(lockPath)
+	defer func() { _ = os.Remove(lockPath) }()
 	return fn(filepath.Join(s.dir, id+".json"))
 }
 
@@ -582,7 +582,7 @@ func (s *Store) writeRecord(path string, record Record) error {
 		return fmt.Errorf("create background task temporary record: %w", err)
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer func() { _ = os.Remove(temporaryPath) }()
 	if err := temporary.Chmod(0o600); err != nil {
 		_ = temporary.Close()
 		return fmt.Errorf("secure background task temporary record: %w", err)

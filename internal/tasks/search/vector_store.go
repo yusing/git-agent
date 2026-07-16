@@ -184,13 +184,13 @@ func (store vectorStore) publishCatalog(catalog vectorStoreCatalog) error {
 		return err
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer func() { _ = os.Remove(temporaryPath) }()
 	if _, err := temporary.Write(data); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Close(); err != nil {
@@ -285,7 +285,7 @@ func writeSharedVectorIndex(ctx context.Context, metadataDir, indexDir string, r
 	var localOffset int64
 	for i, record := range records {
 		if record.Dimensions < 1 || len(record.Vector) != record.Dimensions {
-			local.Close()
+			_ = local.Close()
 			return fmt.Errorf("vector record %s dimensions mismatch", record.ChunkID)
 		}
 		entry := vectorIndexRecordFor(record)
@@ -293,7 +293,7 @@ func writeSharedVectorIndex(ctx context.Context, metadataDir, indexDir string, r
 			entry.VectorKey = vectorStoreKey(record.EmbeddingInputHash, record.EmbeddingModel, record.Dimensions)
 			stored, ok := storeEntries[entry.VectorKey]
 			if !ok {
-				local.Close()
+				_ = local.Close()
 				return fmt.Errorf("shared vector %s was not stored", record.ChunkID)
 			}
 			entry.Offset = stored.Offset
@@ -303,7 +303,7 @@ func writeSharedVectorIndex(ctx context.Context, metadataDir, indexDir string, r
 			entry.Offset = localOffset
 			entry.VectorChecksum = crc32.ChecksumIEEE(data)
 			if _, err := local.Write(data); err != nil {
-				local.Close()
+				_ = local.Close()
 				return err
 			}
 			localOffset += int64(len(data))
@@ -311,7 +311,7 @@ func writeSharedVectorIndex(ctx context.Context, metadataDir, indexDir string, r
 		index[i] = entry
 	}
 	if err := local.Sync(); err != nil {
-		local.Close()
+		_ = local.Close()
 		return err
 	}
 	if err := local.Close(); err != nil {

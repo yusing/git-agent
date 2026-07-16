@@ -2072,7 +2072,7 @@ func TestCorruptSharedVectorIsRebuilt(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := payload.WriteAt([]byte{0xff}, index[0].Offset); err != nil {
-		payload.Close()
+		_ = payload.Close()
 		t.Fatal(err)
 	}
 	if err := payload.Close(); err != nil {

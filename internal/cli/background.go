@@ -59,7 +59,7 @@ func startDetachedProcess(executable string, args, env []string) (detachedLaunch
 
 	null, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
-		writer.Close()
+		_ = writer.Close()
 		return detachedLaunch{}, fmt.Errorf("open null device: %w", err)
 	}
 	defer null.Close()
@@ -69,7 +69,7 @@ func startDetachedProcess(executable string, args, env []string) (detachedLaunch
 		Files: []*os.File{null, null, writer},
 		Sys:   detachedProcessAttributes(),
 	})
-	writer.Close()
+	_ = writer.Close()
 	if err != nil {
 		return detachedLaunch{}, fmt.Errorf("start detached task: %w", err)
 	}

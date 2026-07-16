@@ -710,17 +710,6 @@ func runGit(t *testing.T, dir string, args ...string) {
 	}
 }
 
-func gitHead(t *testing.T, dir string) string {
-	t.Helper()
-	cmd := exec.Command("git", "rev-parse", "HEAD")
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git rev-parse HEAD failed: %v\n%s", err, out)
-	}
-	return strings.TrimSpace(string(out))
-}
-
 func mustWriteFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

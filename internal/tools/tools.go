@@ -698,7 +698,7 @@ func readLineRange(reader io.Reader, start, end, maxBytes, maxLines int, withLin
 			if lineHasByte {
 				fileLines = currentLine
 			}
-			if start > fileLines && !(start == 1 && fileLines == 0) {
+			if start > fileLines && (start != 1 || fileLines != 0) {
 				return "", 0, 0, false, fmt.Errorf("line_start %d exceeds file length %d", start, fileLines)
 			}
 			if !utf8.ValidString(output.String()) {
@@ -779,11 +779,11 @@ func openSkillReadFile(skill skills.Skill, rel string) (*os.File, error) {
 	}
 	file, err := root.Open(openPath)
 	if err != nil {
-		root.Close()
+		_ = root.Close()
 		return nil, err
 	}
 	if err := root.Close(); err != nil {
-		file.Close()
+		_ = file.Close()
 		return nil, err
 	}
 	return file, nil

@@ -321,7 +321,7 @@ type historyEntry struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
-func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query string) (Output, error) {
+func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query string) (output Output, err error) {
 	opts.ProgressLog = serializeProgress(opts.ProgressLog)
 	started := time.Now()
 	phaseStarted := started
@@ -415,8 +415,11 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 			if err != nil {
 				return fail(err)
 			}
-			syncSession := activeSync
-			defer syncSession.close()
+			defer func() {
+				if activeSync != nil {
+					err = errors.Join(err, activeSync.close())
+				}
+			}()
 			if source.Mode == "filesystem" {
 				headOpts := opts
 				headOpts.Root = selection.repo.RootPath

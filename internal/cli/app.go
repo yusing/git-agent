@@ -937,9 +937,9 @@ func (a *App) writeSearchDebug(output searchtask.Output) {
 
 func (a *App) writeSearchProgress(progress searchtask.Progress) {
 	if progress.Status == searchtask.ProgressStatusFetching {
-		fmt.Fprint(a.stderr, "\r\x1b[2Ksearch: fetching remote")
+		_, _ = fmt.Fprint(a.stderr, "\r\x1b[2Ksearch: fetching remote")
 		if progress.Detail != "" {
-			fmt.Fprintf(a.stderr, ": %s", progress.Detail)
+			_, _ = fmt.Fprintf(a.stderr, ": %s", progress.Detail)
 		}
 		return
 	}
@@ -957,14 +957,14 @@ func (a *App) writeSearchProgress(progress searchtask.Progress) {
 	}
 	if done == 0 {
 		if reused > 0 {
-			fmt.Fprintf(a.stderr, "\r\x1b[2Ksearch: %s embeddings 0/%d chunks (%d reused)", action, total, reused)
+			_, _ = fmt.Fprintf(a.stderr, "\r\x1b[2Ksearch: %s embeddings 0/%d chunks (%d reused)", action, total, reused)
 			return
 		}
-		fmt.Fprintf(a.stderr, "\r\x1b[2Ksearch: %s embeddings 0/%d chunks", action, total)
+		_, _ = fmt.Fprintf(a.stderr, "\r\x1b[2Ksearch: %s embeddings 0/%d chunks", action, total)
 		return
 	}
 	percent := float64(done) / float64(total) * 100
-	fmt.Fprintf(a.stderr, "\r\x1b[2Ksearch: %s embeddings %d/%d chunks (%.1f%%, %s)", action, done, total, percent, progress.Elapsed.Round(time.Millisecond))
+	_, _ = fmt.Fprintf(a.stderr, "\r\x1b[2Ksearch: %s embeddings %d/%d chunks (%.1f%%, %s)", action, done, total, percent, progress.Elapsed.Round(time.Millisecond))
 }
 
 func (a *App) writeIndexSyncProgress(progress searchtask.Progress, interactive bool) error {
@@ -1000,7 +1000,7 @@ func (a *App) writeIndexSyncProgress(progress searchtask.Progress, interactive b
 }
 
 func (a *App) clearProgressLine() {
-	fmt.Fprint(a.stderr, "\r\x1b[2K")
+	_, _ = fmt.Fprint(a.stderr, "\r\x1b[2K")
 }
 
 func (a *App) writeDebugEvent(kind string, attrs ...slog.Attr) {

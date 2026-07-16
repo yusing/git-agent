@@ -31,7 +31,7 @@ func lockIndex(ctx context.Context, indexDir string) (*indexLock, error) {
 	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err == nil {
 		return &indexLock{file: file}, nil
 	} else if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
-		file.Close()
+		_ = file.Close()
 		return nil, fmt.Errorf("lock search index: %w", err)
 	}
 	ticker := time.NewTicker(indexLockPollInterval)
@@ -40,12 +40,12 @@ func lockIndex(ctx context.Context, indexDir string) (*indexLock, error) {
 		if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err == nil {
 			return &indexLock{file: file}, nil
 		} else if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
-			file.Close()
+			_ = file.Close()
 			return nil, fmt.Errorf("lock search index: %w", err)
 		}
 		select {
 		case <-ctx.Done():
-			file.Close()
+			_ = file.Close()
 			return nil, ctx.Err()
 		case <-ticker.C:
 		}
