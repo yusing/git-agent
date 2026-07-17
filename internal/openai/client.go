@@ -61,7 +61,9 @@ type EmbeddingRequest struct {
 	Dimensions int
 	BaseURL    string
 	APIKey     string
-	Inputs     []string
+	// Inputs are borrowed for the duration of CreateEmbeddings. Implementations
+	// that retain them after returning must clone the strings.
+	Inputs []string
 }
 
 type EmbeddingResponse struct {

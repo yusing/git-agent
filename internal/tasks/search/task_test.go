@@ -682,7 +682,9 @@ type recordingEmbedder struct {
 }
 
 func (e *recordingEmbedder) CreateEmbeddings(ctx context.Context, request openai.EmbeddingRequest) (openai.EmbeddingResponse, error) {
-	e.inputs = append(e.inputs, request.Inputs...)
+	for _, input := range request.Inputs {
+		e.inputs = append(e.inputs, strings.Clone(input))
+	}
 	return e.fakeEmbedder.CreateEmbeddings(ctx, request)
 }
 
@@ -3567,6 +3569,32 @@ func TestDiscoverFilesystemFilesClassifiesSkipReasons(t *testing.T) {
 	}
 }
 
+func BenchmarkDiscoverFilesystemFiles(b *testing.B) {
+	root := b.TempDir()
+	const fileCount = 16
+	content := strings.Repeat("searchable content\n", 4<<10)
+	for i := range fileCount {
+		writeFile(b, root, fmt.Sprintf("%02d.futuretext", i), content)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		visited := 0
+		_, _, err := discoverFilesystemFiles(root, nil, func(string, ...slog.Attr) {}, func(file fileContent) error {
+			visited++
+			runtime.KeepAlive(file.text)
+			return nil
+		})
+		if err != nil {
+			b.Fatal(err)
+		}
+		if visited != fileCount {
+			b.Fatalf("visited files = %d, want %d", visited, fileCount)
+		}
+	}
+}
+
 func TestFilesystemChunkingDoesNotRetainAcceptedBodies(t *testing.T) {
 	root := t.TempDir()
 	bodyStore, err := newChunkBodyStore()
@@ -3717,7 +3745,7 @@ func TestSearchChunkBuilderTransfersFileBodyOwnership(t *testing.T) {
 			if tt.wantChunks == 0 {
 				return
 			}
-			chunkText, err := loadChunkBody(built.chunks[0])
+			chunkText, err := loadChunkBodyForTest(built.chunks[0])
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -3769,7 +3797,7 @@ func TestChunkBodyStorePreservesChunkSnapshots(t *testing.T) {
 				if got[i].text != "" {
 					t.Fatalf("chunk %d retained %d body bytes in memory", i, len(got[i].text))
 				}
-				body, err := loadChunkBody(got[i])
+				body, err := loadChunkBodyForTest(got[i])
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -3811,7 +3839,7 @@ func TestChunkBodyStoreReadFailureIsReturned(t *testing.T) {
 	if err := bodyStore.close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadChunkBody(chunk); err == nil {
+	if _, err := loadChunkBodyForTest(chunk); err == nil {
 		t.Fatal("loadChunkBody succeeded after the snapshot store closed")
 	}
 }
@@ -3887,6 +3915,60 @@ func BenchmarkPreparedChunkEmbeddingPlanning(b *testing.B) {
 		}
 	}
 	runtime.KeepAlive(chunks)
+}
+
+func BenchmarkPrepareChunkEmbeddingMetadata(b *testing.B) {
+	line := strings.Repeat("x", maxEmbeddingLineChars+500)
+	chunks := chunksForFile(fileContent{
+		path:   "large.futuretext",
+		source: "filesystem",
+		text:   strings.Repeat(line+"\n", chunkLines+1),
+	})
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		for i := range chunks {
+			chunks[i].embeddingInputHash = ""
+			chunks[i].embeddingInputBytes = 0
+			chunks[i].embeddingMaxChars = 0
+		}
+		prepareChunkEmbeddingMetadata(chunks, DefaultEmbeddingMaxInputChars)
+	}
+	runtime.KeepAlive(chunks)
+}
+
+func BenchmarkChunkEmbeddingInputs(b *testing.B) {
+	bodyStore, err := newChunkBodyStore()
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() {
+		if err := bodyStore.close(); err != nil {
+			b.Error(err)
+		}
+	})
+	line := strings.Repeat("x", maxEmbeddingLineChars+500)
+	builder := newSearchChunkBuilder(Options{EmbeddingMaxInput: DefaultEmbeddingMaxInputChars}, false, bodyStore)
+	if err := builder.add(fileContent{
+		path:   "large.futuretext",
+		source: "filesystem",
+		text:   strings.Repeat(line+"\n", chunkLines+1),
+	}); err != nil {
+		b.Fatal(err)
+	}
+	chunks := builder.finish().chunks
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		inputs, err := chunkEmbeddingInputs(chunks, DefaultEmbeddingMaxInputChars)
+		if err != nil {
+			b.Fatal(err)
+		}
+		runtime.KeepAlive(inputs.texts)
+		inputs.release()
+	}
 }
 
 func TestDenseHandwrittenGoFilesKeepSymbolChunks(t *testing.T) {
@@ -4474,7 +4556,7 @@ func TestEmbeddingBatchTuning(t *testing.T) {
 	}
 }
 
-func writeFile(t *testing.T, root, name, content string) {
+func writeFile(t testing.TB, root, name, content string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(name))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

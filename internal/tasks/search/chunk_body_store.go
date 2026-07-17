@@ -105,24 +105,40 @@ func (s *chunkBodyStore) spill(fileText string, chunks []Chunk) error {
 	return nil
 }
 
-func loadChunkBody(chunk Chunk) (string, error) {
+type loadedChunkBody struct {
+	text   string
+	buffer []byte
+}
+
+func loadChunkBodyBuffer(chunk Chunk) (loadedChunkBody, error) {
 	if chunk.body.store == nil {
-		return chunk.text, nil
+		return loadedChunkBody{text: chunk.text}, nil
 	}
 	if chunk.body.length == 0 {
-		return "", nil
+		return loadedChunkBody{}, nil
 	}
-	var body strings.Builder
-	body.Grow(chunk.body.length)
+	body := recyclableBytes.GetAtLeast(chunk.body.length)
+	body = body[:chunk.body.length]
 	reader := io.NewSectionReader(chunk.body.store.file, chunk.body.offset, int64(chunk.body.length))
-	written, err := io.Copy(&body, reader)
+	written, err := io.ReadFull(reader, body)
 	if err != nil {
-		return "", fmt.Errorf("read temporary search chunk %s:%d-%d: %w", chunk.Path, chunk.StartLine, chunk.EndLine, err)
+		recyclableBytes.Put(body)
+		return loadedChunkBody{}, fmt.Errorf("read temporary search chunk %s:%d-%d: %w", chunk.Path, chunk.StartLine, chunk.EndLine, err)
 	}
-	if written != int64(chunk.body.length) {
-		return "", fmt.Errorf("read temporary search chunk %s:%d-%d: %w", chunk.Path, chunk.StartLine, chunk.EndLine, io.ErrUnexpectedEOF)
+	if written != chunk.body.length {
+		recyclableBytes.Put(body)
+		return loadedChunkBody{}, fmt.Errorf("read temporary search chunk %s:%d-%d: %w", chunk.Path, chunk.StartLine, chunk.EndLine, io.ErrUnexpectedEOF)
 	}
-	return body.String(), nil
+	return loadedChunkBody{text: readOnlyString(body), buffer: body}, nil
+}
+
+func (body *loadedChunkBody) release() {
+	if body == nil || body.buffer == nil {
+		return
+	}
+	body.text = ""
+	recyclableBytes.Put(body.buffer)
+	body.buffer = nil
 }
 
 func normalizeChunkBody(text string) string {

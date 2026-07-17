@@ -625,12 +625,13 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 				}
 				group.Go(func() error {
 					clientStarted := time.Now()
-					texts, err := chunkEmbeddingInputs(missing[batch.start:batch.end], opts.EmbeddingMaxInput)
+					inputs, err := chunkEmbeddingInputs(missing[batch.start:batch.end], opts.EmbeddingMaxInput)
 					var response openai.EmbeddingResponse
 					if err != nil {
 						err = fmt.Errorf("prepare embedding inputs: %w", err)
 					} else {
-						response, err = embedBatch(groupCtx, client, opts, texts)
+						response, err = embedBatch(groupCtx, client, opts, inputs.texts)
+						inputs.release()
 						if err != nil {
 							err = fmt.Errorf("embedding request failed: %w", err)
 						}
@@ -1045,12 +1046,19 @@ func discoverFilesystemFiles(root string, scope []string, debugLog func(string, 
 			skip(rel, "oversized")
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		buffer, err := readSearchFile(path, int(info.Size()))
 		if err != nil {
+			if errors.Is(err, errSearchFileOversized) {
+				skipped.Oversized++
+				skip(rel, "oversized")
+				return nil
+			}
 			skipped.Unreadable++
 			skip(rel, "unreadable")
 			return nil
 		}
+		defer buffer.release()
+		data := buffer.data
 		if isBinary(data) {
 			skipped.Binary++
 			skip(rel, "binary")
@@ -1342,11 +1350,12 @@ func prepareChunkEmbedding(chunk *Chunk, maxChars int) {
 	if chunk.embeddingInputHash != "" && chunk.embeddingMaxChars == maxChars {
 		return
 	}
-	input := cappedEmbeddingInput(chunkEmbeddingText(*chunk), maxChars)
-	sum := sha256.Sum256([]byte(input))
+	input := buildEmbeddingInput(*chunk, chunk.text, maxChars)
+	sum := sha256.Sum256(input)
 	chunk.embeddingInputHash = hex.EncodeToString(sum[:])
 	chunk.embeddingInputBytes = len(input)
 	chunk.embeddingMaxChars = maxChars
+	recyclableBytes.Put(input)
 }
 
 func hasDoNotEditHeading(file *ast.File) bool {
@@ -1364,31 +1373,10 @@ func hasDoNotEditHeading(file *ast.File) bool {
 }
 
 func embeddingText(chunk Chunk, text string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "path: %s\n", chunk.Path)
-	if chunk.Symbol != nil && chunk.Symbol.Name != "" {
-		fmt.Fprintf(&b, "symbol: %s %s\n", chunk.Symbol.Type, chunk.Symbol.Name)
-	}
-	if lang := languageForPath(chunk.Path); lang != "" {
-		fmt.Fprintf(&b, "language: %s\n", lang)
-	}
-	b.WriteString("\n")
-	b.WriteString(clampEmbeddingLines(text))
-	return b.String()
-}
-
-func clampEmbeddingLines(text string) string {
-	if text == "" {
-		return ""
-	}
-	var b strings.Builder
-	for i, line := range splitLines(text) {
-		if i > 0 {
-			b.WriteByte('\n')
-		}
-		b.WriteString(clampEmbeddingLine(line))
-	}
-	return b.String()
+	input := buildEmbeddingInput(chunk, text, int(^uint(0)>>1))
+	result := string(input)
+	recyclableBytes.Put(input)
+	return result
 }
 
 func clampEmbeddingLine(line string) string {
@@ -1977,11 +1965,12 @@ func indexRemoteFileStream(ctx context.Context, client openai.EmbeddingClient, f
 		if embedStarted.IsZero() {
 			embedStarted = time.Now()
 		}
-		texts, err := chunkEmbeddingInputs(batch, opts.EmbeddingMaxInput)
+		inputs, err := chunkEmbeddingInputs(batch, opts.EmbeddingMaxInput)
 		if err != nil {
 			return fmt.Errorf("prepare embedding inputs: %w", err)
 		}
-		batchVectors, dimensions, err := embedTexts(ctx, client, opts, texts)
+		batchVectors, dimensions, err := embedTexts(ctx, client, opts, inputs.texts)
+		inputs.release()
 		if err != nil {
 			return err
 		}
@@ -2200,16 +2189,22 @@ func embeddingConcurrency(opts Options) int {
 	return min(max(runtime.GOMAXPROCS(0), 1), 8)
 }
 
-func chunkEmbeddingInputs(chunks []Chunk, maxChars int) ([]string, error) {
-	texts := make([]string, len(chunks))
-	for i, chunk := range chunks {
-		body, err := loadChunkBody(chunk)
-		if err != nil {
-			return nil, err
-		}
-		texts[i] = cappedEmbeddingInput(embeddingText(chunk, body), maxChars)
+func chunkEmbeddingInputs(chunks []Chunk, maxChars int) (pooledEmbeddingInputs, error) {
+	inputs := pooledEmbeddingInputs{
+		texts:   make([]string, len(chunks)),
+		buffers: make([][]byte, len(chunks)),
 	}
-	return texts, nil
+	for i, chunk := range chunks {
+		body, err := loadChunkBodyBuffer(chunk)
+		if err != nil {
+			inputs.release()
+			return pooledEmbeddingInputs{}, err
+		}
+		inputs.buffers[i] = buildEmbeddingInput(chunk, body.text, maxChars)
+		body.release()
+		inputs.texts[i] = readOnlyString(inputs.buffers[i])
+	}
+	return inputs, nil
 }
 
 func totalChunkEmbeddingInputChars(chunks []Chunk, maxChars int) int {
@@ -2378,16 +2373,17 @@ func scoreChunks(chunks []Chunk, vectors map[string][]float64, queryVector []flo
 			scored = append(scored, item)
 			continue
 		}
-		body, err := loadChunkBody(chunk)
+		body, err := loadChunkBodyBuffer(chunk)
 		if err != nil {
 			return nil, err
 		}
-		textTerms := searchTerms(body)
+		textTerms := searchTerms(body.text)
 		candidates = append(candidates, scoreCandidate{
 			item:       item,
 			textTerms:  matchingTermCounts(textTerms, querySet),
 			textLength: len(textTerms),
 		})
+		body.release()
 	}
 	if len(queryTerms) == 0 {
 		return slices.DeleteFunc(scored, func(item scoredChunk) bool { return item.rank < minScore }), nil
@@ -2507,10 +2503,12 @@ func renderResults(scored []scoredChunk) ([]Result, error) {
 	results := make([]Result, len(scored))
 	for i, item := range scored {
 		chunk := item.chunk
-		body, err := loadChunkBody(chunk)
+		body, err := loadChunkBodyBuffer(chunk)
 		if err != nil {
 			return nil, err
 		}
+		excerpt := excerptText(chunk, body.text)
+		body.release()
 		results[i] = Result{
 			Relatedness: item.rank,
 			Range:       fmt.Sprintf("%s:%d-%d", chunk.Path, chunk.StartLine, chunk.EndLine),
@@ -2524,7 +2522,7 @@ func renderResults(scored []scoredChunk) ([]Result, error) {
 				Lexical:           item.lexicalScore,
 				Rank:              item.rank,
 			},
-			Excerpt:   excerptText(chunk, body),
+			Excerpt:   excerpt,
 			Path:      chunk.Path,
 			StartLine: chunk.StartLine,
 		}
