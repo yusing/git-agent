@@ -52,18 +52,18 @@ type remoteReadyResult struct {
 	SkippedFiles []SkippedFile
 }
 
-func discoverCachedRemoteFiles(repo *gitctx.Repository, rev string, scope []string) ([]fileContent, SkippedCounts, []SkippedFile, error) {
+func discoverCachedRemoteFiles(repo *gitctx.Repository, rev string, scope []string, visit func(fileContent)) (SkippedCounts, []SkippedFile, error) {
 	commit, err := repo.ResolveCommit(rev)
 	if err != nil {
-		return nil, SkippedCounts{}, nil, fmt.Errorf("resolve cached commit: %w", err)
+		return SkippedCounts{}, nil, fmt.Errorf("resolve cached commit: %w", err)
 	}
 	tree, err := commit.Tree()
 	if err != nil {
-		return nil, SkippedCounts{}, nil, fmt.Errorf("load cached tree: %w", err)
+		return SkippedCounts{}, nil, fmt.Errorf("load cached tree: %w", err)
 	}
 	entries, err := collectRemoteTreeEntries(repo.Repo.Storer, tree)
 	if err != nil {
-		return nil, SkippedCounts{}, nil, fmt.Errorf("walk cached tree: %w", err)
+		return SkippedCounts{}, nil, fmt.Errorf("walk cached tree: %w", err)
 	}
 	var ignoreFiles []revisionIgnoreFile
 	for _, entry := range entries {
@@ -79,12 +79,11 @@ func discoverCachedRemoteFiles(repo *gitctx.Repository, rev string, scope []stri
 		}
 		text, _, readErr := readRemoteBlob(repo.Repo.Storer, entry.hash)
 		if readErr != nil {
-			return nil, SkippedCounts{}, nil, fmt.Errorf("read cached ignore file %s: %w", entry.path, readErr)
+			return SkippedCounts{}, nil, fmt.Errorf("read cached ignore file %s: %w", entry.path, readErr)
 		}
 		ignoreFiles = append(ignoreFiles, revisionIgnoreFile{path: entry.path, dir: dir, name: filepath.Base(entry.path), text: text})
 	}
 	matcher := buildRevisionIgnoreMatcher(ignoreFiles)
-	var files []fileContent
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
 	for _, entry := range entries {
@@ -106,7 +105,7 @@ func discoverCachedRemoteFiles(repo *gitctx.Repository, rev string, scope []stri
 		case errors.Is(readErr, fs.ErrNotExist), errors.Is(readErr, plumbing.ErrObjectNotFound):
 			reason = "oversized"
 		case readErr != nil:
-			return nil, skipped, skippedFiles, fmt.Errorf("read cached file %s: %w", path, readErr)
+			return skipped, skippedFiles, fmt.Errorf("read cached file %s: %w", path, readErr)
 		case isBinary([]byte(text)):
 			reason = "binary"
 		case !isIndexableText(path, []byte(text)):
@@ -124,9 +123,9 @@ func discoverCachedRemoteFiles(repo *gitctx.Repository, rev string, scope []stri
 			skippedFiles = append(skippedFiles, SkippedFile{Path: path, Reason: reason})
 			continue
 		}
-		files = append(files, fileContent{path: path, blob: entry.hash.String(), source: "revision", text: text, size: size})
+		visit(fileContent{path: path, blob: entry.hash.String(), source: "revision", text: text, size: size})
 	}
-	return files, skipped, skippedFiles, nil
+	return skipped, skippedFiles, nil
 }
 
 func (ready *remoteReadyFiles) Cancel(err error) {

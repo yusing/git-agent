@@ -3212,7 +3212,10 @@ func TestCachedRemoteTreatsFilteredBlobAsOversized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	files, skipped, skippedFiles, err := discoverCachedRemoteFiles(wrapped, rev, nil)
+	var files []fileContent
+	skipped, skippedFiles, err := discoverCachedRemoteFiles(wrapped, rev, nil, func(file fileContent) {
+		files = append(files, file)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3513,7 +3516,10 @@ func TestDiscoverFilesystemFilesClassifiesSkipReasons(t *testing.T) {
 	writeFile(t, root, "manual.pdf", "%PDF-1.7\nrelease notes\n")
 	writeFile(t, root, "binary.dat", "release\x00notes\n")
 
-	files, skipped, skippedFiles, err := discoverFilesystemFiles(root, nil, func(string, ...slog.Attr) {})
+	var files []fileContent
+	skipped, skippedFiles, err := discoverFilesystemFiles(root, nil, func(string, ...slog.Attr) {}, func(file fileContent) {
+		files = append(files, file)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3541,7 +3547,45 @@ func TestDiscoverFilesystemFilesClassifiesSkipReasons(t *testing.T) {
 	}
 }
 
-func TestBuildSearchChunksTransfersFileBodyOwnership(t *testing.T) {
+func TestDiscoverFilesystemFilesDoesNotRetainAcceptedBodies(t *testing.T) {
+	root := t.TempDir()
+	const fileCount = 16
+	content := strings.Repeat("x", 900<<10)
+	for i := range fileCount {
+		writeFile(t, root, fmt.Sprintf("%02d.futuretext", i), content)
+	}
+	content = ""
+	runtime.GC()
+	var baseline runtime.MemStats
+	runtime.ReadMemStats(&baseline)
+
+	visited := 0
+	var maxRetained uint64
+	_, _, err := discoverFilesystemFiles(root, nil, func(string, ...slog.Attr) {}, func(file fileContent) {
+		wantPath := fmt.Sprintf("%02d.futuretext", visited)
+		if file.path != wantPath {
+			t.Fatalf("visited path = %q, want %q", file.path, wantPath)
+		}
+		visited++
+		runtime.GC()
+		var current runtime.MemStats
+		runtime.ReadMemStats(&current)
+		if current.HeapAlloc > baseline.HeapAlloc {
+			maxRetained = max(maxRetained, current.HeapAlloc-baseline.HeapAlloc)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if visited != fileCount {
+		t.Fatalf("visited files = %d, want %d", visited, fileCount)
+	}
+	if maxRetained > 6*MaxFileBytes {
+		t.Fatalf("discovery retained %d bytes across callbacks, want at most %d", maxRetained, 6*MaxFileBytes)
+	}
+}
+
+func TestSearchChunkBuilderTransfersFileBodyOwnership(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -3603,20 +3647,18 @@ func TestBuildSearchChunksTransfersFileBodyOwnership(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			files := []fileContent{{
+			file := fileContent{
 				path:   tt.path,
 				source: "filesystem",
 				text:   tt.text,
 				size:   int64(len(tt.text)),
-			}}
-			built := buildSearchChunks(files, Options{
+			}
+			builder := newSearchChunkBuilder(Options{
 				EmbeddingModel:      "test-model",
 				EmbeddingDimensions: 3,
 			}, tt.codeOnly)
-
-			if files[0].text != "" {
-				t.Fatalf("source body retained after chunking: %d bytes", len(files[0].text))
-			}
+			builder.add(file)
+			built := builder.finish()
 			if built.fileCount != tt.wantFiles {
 				t.Fatalf("selected files = %d, want %d", built.fileCount, tt.wantFiles)
 			}

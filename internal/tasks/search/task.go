@@ -447,7 +447,6 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		}
 	}
 
-	var files []fileContent
 	var currentKeys map[string]bool
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
@@ -458,7 +457,6 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	var dimensions int
 	var embeddedChunks int
 	var embeddedDone int
-	streamIndexed := false
 	if selection.remoteFiles != nil {
 		streamResult, streamErr := indexRemoteFileStream(selection.remoteFiles.ctx, client, selection.remoteFiles.Files, selection.metadataDir, selection.indexDir, opts, filters.Code)
 		if streamErr != nil {
@@ -478,39 +476,32 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		dimensions = streamResult.dimensions
 		embeddedChunks = streamResult.embedded
 		embeddedDone = streamResult.embedded
-		streamIndexed = true
 		readyResult, readyErr := selection.remoteFiles.filesResult()
 		if readyErr != nil {
 			return fail(fmt.Errorf("fetch remote %s: %s", source.Remote, sanitizeRemoteError(readyErr, opts.Remote, source.Remote)))
 		}
 		skipped = readyResult.Skipped
 		skippedFiles = readyResult.SkippedFiles
-	} else if source.Mode == "remote" {
-		files, skipped, skippedFiles, err = discoverCachedRemoteFiles(selection.repo, resolvedRev, scope)
-		if err != nil {
-			return fail(err)
-		}
-	} else if source.Mode == "revision" {
-		files, skipped, skippedFiles, err = discoverRevisionFiles(selection.repo, resolvedRev, scope, debugLog)
-		if err != nil {
-			return fail(err)
-		}
 	} else {
-		files, skipped, skippedFiles, err = discoverFilesystemFiles(root, scope, debugLog)
+		builder := newSearchChunkBuilder(opts, filters.Code)
+		if source.Mode == "remote" {
+			skipped, skippedFiles, err = discoverCachedRemoteFiles(selection.repo, resolvedRev, scope, builder.add)
+		} else if source.Mode == "revision" {
+			skipped, skippedFiles, err = discoverRevisionFiles(selection.repo, resolvedRev, scope, debugLog, builder.add)
+		} else {
+			skipped, skippedFiles, err = discoverFilesystemFiles(root, scope, debugLog, builder.add)
+		}
 		if err != nil {
 			return fail(err)
 		}
+		built := builder.finish()
+		diag.Files = built.fileCount
+		chunks = built.chunks
+		currentKeys = built.currentVectorKeys
 	}
 	diag.SkippedFiles = skippedFiles
 	mark("discover")
 
-	if !streamIndexed {
-		built := buildSearchChunks(files, opts, filters.Code)
-		diag.Files = built.fileCount
-		chunks = built.chunks
-		currentKeys = built.currentVectorKeys
-		files = nil
-	}
 	diag.Chunks = len(chunks)
 	diag.EmbeddedChunks = embeddedChunks
 	diag.EmbeddedDone = embeddedDone
@@ -535,7 +526,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}()
 	var oldVectors []vectorRecord
 	var exactVectors []vectorRecord
-	if !opts.Reindex && !streamIndexed {
+	if !opts.Reindex && selection.remoteFiles == nil {
 		if err := unlockIndex(); err != nil {
 			return fail(err)
 		}
@@ -554,7 +545,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	if opts.Reindex && indexBuiltSince(indexDir, started) {
 		reuseOpts.Reindex = false
 	}
-	if !streamIndexed {
+	if selection.remoteFiles == nil {
 		reusePool := make([]vectorRecord, 0, len(exactVectors)+len(oldVectors))
 		reusePool = append(reusePool, exactVectors...)
 		reusePool = append(reusePool, oldVectors...)
@@ -958,8 +949,7 @@ func selectedSyncTarget(opts Options, selection indexSelection) (indexSyncTarget
 	return target, true
 }
 
-func discoverFilesystemFiles(root string, scope []string, debugLog func(string, ...slog.Attr)) ([]fileContent, SkippedCounts, []SkippedFile, error) {
-	var files []fileContent
+func discoverFilesystemFiles(root string, scope []string, debugLog func(string, ...slog.Attr), visit func(fileContent)) (SkippedCounts, []SkippedFile, error) {
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
 	skip := func(path, reason string) {
@@ -1048,7 +1038,7 @@ func discoverFilesystemFiles(root string, scope []string, debugLog func(string, 
 			skip(rel, "non_text")
 			return nil
 		}
-		files = append(files, fileContent{
+		visit(fileContent{
 			path:   rel,
 			source: "filesystem",
 			text:   string(data),
@@ -1057,12 +1047,10 @@ func discoverFilesystemFiles(root string, scope []string, debugLog func(string, 
 		})
 		return nil
 	})
-	slices.SortFunc(files, func(a, b fileContent) int { return strings.Compare(a.path, b.path) })
-	return files, skipped, skippedFiles, err
+	return skipped, skippedFiles, err
 }
 
-func discoverRevisionFiles(repo *gitctx.Repository, rev string, scope []string, debugLog func(string, ...slog.Attr)) ([]fileContent, SkippedCounts, []SkippedFile, error) {
-	var files []fileContent
+func discoverRevisionFiles(repo *gitctx.Repository, rev string, scope []string, debugLog func(string, ...slog.Attr), visit func(fileContent)) (SkippedCounts, []SkippedFile, error) {
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
 	skip := func(path, reason string) {
@@ -1074,7 +1062,7 @@ func discoverRevisionFiles(repo *gitctx.Repository, rev string, scope []string, 
 	}
 	ignoreMatcher, err := revisionIgnoreMatcher(repo, rev, scope)
 	if err != nil {
-		return nil, skipped, nil, err
+		return skipped, nil, err
 	}
 	err = repo.WalkCommitTextFiles(rev, MaxFileBytes, func(path string) bool {
 		return pathInScope(path, scope)
@@ -1092,7 +1080,7 @@ func discoverRevisionFiles(repo *gitctx.Repository, rev string, scope []string, 
 			skip(filepath.ToSlash(file.Path), "non_text")
 			return nil
 		}
-		files = append(files, fileContent{
+		visit(fileContent{
 			path:   filepath.ToSlash(file.Path),
 			blob:   file.Blob,
 			source: "revision",
@@ -1122,8 +1110,7 @@ func discoverRevisionFiles(repo *gitctx.Repository, rev string, scope []string, 
 		}
 		return nil
 	})
-	slices.SortFunc(files, func(a, b fileContent) int { return strings.Compare(a.path, b.path) })
-	return files, skipped, skippedFiles, err
+	return skipped, skippedFiles, err
 }
 
 type searchChunkBuild struct {
@@ -1132,29 +1119,37 @@ type searchChunkBuild struct {
 	currentVectorKeys map[string]bool
 }
 
-func buildSearchChunks(files []fileContent, opts Options, codeOnly bool) searchChunkBuild {
-	var built searchChunkBuild
+type searchChunkBuilder struct {
+	built    searchChunkBuild
+	opts     Options
+	codeOnly bool
+}
+
+func newSearchChunkBuilder(opts Options, codeOnly bool) *searchChunkBuilder {
+	builder := &searchChunkBuilder{opts: opts, codeOnly: codeOnly}
 	if codeOnly {
-		built.currentVectorKeys = make(map[string]bool)
+		builder.built.currentVectorKeys = make(map[string]bool)
 	}
-	for i := range files {
-		fileChunks := chunksForFile(files[i])
-		prepareChunkEmbeddingMetadata(fileChunks, opts.EmbeddingMaxInput)
-		if codeOnly {
-			addCurrentVectorKeys(built.currentVectorKeys, fileChunks, opts)
-		}
-		if !codeOnly || isCodePath(files[i].path) {
-			built.fileCount++
-			built.chunks = append(built.chunks, fileChunks...)
-		}
-		// Chunks now own every retained body. Release discovery's raw-file
-		// reference before processing the next bounded file.
-		files[i].text = ""
+	return builder
+}
+
+func (b *searchChunkBuilder) add(file fileContent) {
+	fileChunks := chunksForFile(file)
+	prepareChunkEmbeddingMetadata(fileChunks, b.opts.EmbeddingMaxInput)
+	if b.codeOnly {
+		addCurrentVectorKeys(b.built.currentVectorKeys, fileChunks, b.opts)
 	}
-	for i := range built.chunks {
-		built.chunks[i].ID = fmt.Sprintf("c%06d", i+1)
+	if !b.codeOnly || isCodePath(file.path) {
+		b.built.fileCount++
+		b.built.chunks = append(b.built.chunks, fileChunks...)
 	}
-	return built
+}
+
+func (b *searchChunkBuilder) finish() searchChunkBuild {
+	for i := range b.built.chunks {
+		b.built.chunks[i].ID = fmt.Sprintf("c%06d", i+1)
+	}
+	return b.built
 }
 
 func chunksForFile(file fileContent) []Chunk {
