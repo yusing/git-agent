@@ -55,8 +55,8 @@ type indexSync struct {
 	progressLog func(Progress) error
 }
 
-func prepareIndexSync(ctx context.Context, remoteURL string, target indexSyncTarget) (*indexSync, error) {
-	sync, err := openIndexSync(ctx, remoteURL, nil)
+func prepareIndexSync(ctx context.Context, remoteURL string, target indexSyncTarget, progressLog func(Progress) error) (*indexSync, error) {
+	sync, err := openIndexSync(ctx, remoteURL, progressLog)
 	if err != nil {
 		return nil, err
 	}

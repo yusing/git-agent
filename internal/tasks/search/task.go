@@ -411,7 +411,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	if !opts.skipIndexSync && strings.TrimSpace(opts.IndexRemote) != "" {
 		if target, ok := selectedSyncTarget(opts, selection); ok {
 			syncTarget = target
-			activeSync, err = prepareIndexSync(ctx, opts.IndexRemote, syncTarget)
+			activeSync, err = prepareIndexSync(ctx, opts.IndexRemote, syncTarget, opts.ProgressLog)
 			if err != nil {
 				return fail(err)
 			}

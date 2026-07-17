@@ -134,7 +134,9 @@ reasoning effort unless an effort flag is supplied.
 
 Diff-based review and simplification preload a bounded current-change context
 and, when available, a previous-`HEAD` context pack for contrast. Current dirty
-or staged changes remain authoritative. Simplification also checks explicitly
+or staged changes remain authoritative. Uncommitted mode includes dirty changes
+from initialized submodules recursively; staged mode remains limited to the
+current repository index. Simplification also checks explicitly
 for behavior-preserving removal of overengineering such as unnecessary
 abstractions, premature generalization, needless indirection or configuration,
 redundant state or concurrency, and disproportionate architecture.
@@ -147,10 +149,9 @@ read only declared IDs through `read_orchestration_artifact`; repository
 `orchestration_manifest_sha256`.
 
 Diff-mode prompts include a bounded context-pack view and bounded unified diff.
-Moved submodule pointers include locally available commit summaries without
-recursing into dirty submodule files. Full changed-path scope remains available
-to validation and read-only repository tools without duplicating every path,
-status, and stat in the initial request.
+Moved submodule pointers include locally available commit summaries. Full
+changed-path scope remains available to validation and read-only repository
+tools without duplicating every path, status, and stat in the initial request.
 The model can page through that complete inventory before requesting narrow
 path-specific diffs, and inspect bounded file outlines before selecting
 `read_file` ranges.

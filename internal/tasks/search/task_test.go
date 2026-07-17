@@ -120,6 +120,42 @@ func TestIndexSyncSharesOnlyCurrentHEADRecords(t *testing.T) {
 	}
 }
 
+func TestSearchIndexSyncPreservesConfiguredProgressLog(t *testing.T) {
+	syncRemote := newEmptySyncRemote(t)
+	origin := "https://example.test/acme/widget.git"
+	root := t.TempDir()
+	writeFile(t, root, "app.go", "package app\n\nfunc Stable() {}\n")
+	commitSearchRepo(t, root)
+	setTestOrigin(t, root, origin)
+
+	var progress []Progress
+	_, err := Run(t.Context(), fakeEmbedder{}, Options{
+		Root:                root,
+		IndexRemote:         syncRemote,
+		IndexOnly:           true,
+		MinScore:            DefaultMinScore,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+		ProgressLog: func(update Progress) error {
+			progress = append(progress, update)
+			return nil
+		},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var phases []string
+	for _, update := range progress {
+		if update.Status != "" && update.Detail == "" {
+			phases = append(phases, update.Status)
+		}
+	}
+	if want := []string{ProgressStatusFetching, ProgressStatusPushing}; !slices.Equal(phases, want) {
+		t.Fatalf("index sync phases = %#v, want %#v; all progress = %#v", phases, want, progress)
+	}
+}
+
 func TestRemoteSearchPullsSelectedRevisionFromIndexSync(t *testing.T) {
 	sourceRemote := t.TempDir()
 	writeFile(t, sourceRemote, "remote.txt", "shared remote revision\n")
@@ -2828,6 +2864,57 @@ func TestRemoteProgressWriterWithoutCallbackIsNilWriter(t *testing.T) {
 	var output io.Writer = newRemoteProgressWriter(nil, "https://example.test/repo.git", ProgressStatusFetching)
 	if output != nil {
 		t.Fatalf("progress output = %#v, want nil", output)
+	}
+}
+
+func TestRemoteProgressWriterHandlesUntrustedTransportInput(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []byte
+		want  string
+	}{
+		{name: "positive", input: []byte("Receiving objects: 42%\r"), want: "Receiving objects: 42%"},
+		{name: "negative", input: []byte(" \t\x00\r\n"), want: ""},
+		{name: "malformed", input: []byte{'B', 'a', 'd', ':', ' ', 0xff, 0x00, 'x', '\r'}, want: "Bad: �x"},
+		{name: "unrelated-collision", input: []byte("Repository objects: repo.git mirror 8%\r"), want: "Repository objects: repo.git mirror 8%"},
+		{name: "unknown-future", input: []byte("Negotiating quantum deltas: 7 qubits\r"), want: "Negotiating quantum deltas: 7 qubits"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var updates []Progress
+			writer := newRemoteProgressWriter(func(update Progress) error {
+				updates = append(updates, update)
+				return nil
+			}, "https://example.test/repo.git", ProgressStatusFetching)
+			n, err := writer.Write(tt.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n != len(tt.input) {
+				t.Fatalf("bytes written = %d, want %d", n, len(tt.input))
+			}
+			if tt.want == "" {
+				if len(updates) != 0 {
+					t.Fatalf("updates = %#v, want none", updates)
+				}
+				return
+			}
+			want := []Progress{{Status: ProgressStatusFetching, Detail: tt.want}}
+			if !slices.Equal(updates, want) {
+				t.Fatalf("updates = %#v, want %#v", updates, want)
+			}
+		})
+	}
+}
+
+func TestRemoteProgressWriterReturnsConsumedBytesOnCallbackError(t *testing.T) {
+	progressErr := errors.New("progress sink failed")
+	writer := newRemoteProgressWriter(func(Progress) error {
+		return progressErr
+	}, "https://example.test/repo.git", ProgressStatusFetching)
+	n, err := writer.Write([]byte("ok\rnot consumed"))
+	if n != len("ok\r") || !errors.Is(err, progressErr) {
+		t.Fatalf("Write = %d, %v; want %d, %v", n, err, len("ok\r"), progressErr)
 	}
 }
 

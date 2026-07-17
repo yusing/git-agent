@@ -149,9 +149,18 @@ Mode flags are mutually exclusive. No mode flag means `--uncommitted`.
 
 - `--uncommitted` reviews final dirty worktree state against `HEAD`, including
   staged, unstaged, and untracked changes. A path changed in both index and
-  worktree appears once as final worktree content against `HEAD`. Untracked
-  `.git-agent/` and `.omx/` runtime state is excluded; tracked files under those
-  names remain ordinary review scope.
+  worktree appears once as final worktree content against `HEAD`. It recursively
+  expands initialized, registered submodules and their initialized descendants.
+  Nested changed-file inventory and evidence paths are relative to invocation
+  root; patch paths inside a labeled nested-repository diff section are relative
+  to section repository prefix. Each descendant compares superproject-recorded
+  base gitlink with current descendant worktree, so both committed gitlink ranges
+  and dirty files are reviewed. If recorded base object is unavailable locally,
+  gitlink evidence remains authoritative and locally dirty files are compared
+  with descendant checkout `HEAD`. Clean, uninitialized, unregistered,
+  malformed-path, and symlink-escaping repositories do not gain nested scope.
+  Untracked `.git-agent/` and `.omx/` runtime state is excluded; tracked files
+  under those names remain ordinary review scope.
 - `--staged` reviews index state against `HEAD` and ignores unstaged content.
 - `--codebase` audits full repository without preloaded diff scope.
 - `--orchestration-artifact <absolute-path>` validates an owner-only manifest
@@ -171,10 +180,11 @@ authoritative review scope. The initial prompt contains bounded views of both
 packs' groups, outliers, and artifacts plus the bounded current diff; it does
 not duplicate the complete raw path, status, or stat lists. Truncation is
 explicit. Full current scope remains authoritative for report validation and
-read-only repository tools. Moved submodule gitlinks
-include bounded commit summaries when referenced history is available in local
-checkout; unavailable history leaves ordinary gitlink diff unchanged. Prepared
-and tool-read diffs never traverse dirty submodule file content. Diff preparation
+read-only repository tools. Moved submodule gitlinks include bounded commit
+summaries when referenced history is available in local checkout; unavailable
+history leaves ordinary gitlink diff unchanged. In uncommitted mode, prepared
+and tool-read diffs also include recursively expanded dirty submodule file
+content under labeled repository prefixes. Diff preparation
 also records a launch fingerprint from complete base and authoritative target
 trees plus dirty-submodule state. Every diff-mode repository tool call and final
 report validation recomputes that fingerprint; any worktree, index, `HEAD`, or

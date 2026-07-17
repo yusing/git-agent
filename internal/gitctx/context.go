@@ -97,9 +97,10 @@ type ChangeSnapshot struct {
 }
 
 type ChangeFingerprint struct {
-	BaseTree        string `json:"base_tree"`
-	TargetTree      string `json:"target_tree"`
-	DirtySubmodules string `json:"dirty_submodules,omitempty"`
+	BaseTree           string `json:"base_tree"`
+	TargetTree         string `json:"target_tree"`
+	DirtySubmodules    string `json:"dirty_submodules,omitempty"`
+	NestedRepositories string `json:"nested_repositories,omitempty"`
 }
 
 var ErrChangeSnapshotStale = errors.New("authoritative repository state changed since launch; rerun command")
@@ -257,23 +258,22 @@ func (r *Repository) StagedDiffForPaths(paths []string, maxBytes, maxLines int) 
 }
 
 func (r *Repository) UncommittedDiff(maxBytes, maxLines int) (string, bool, error) {
-	diff, err := r.worktreeTreeDiff()
+	workspace, err := r.uncommittedWorkspace(true)
 	if err != nil {
 		return "", false, err
 	}
-	limited, truncated := textutil.Limit(r.diffText(diff, nil), maxBytes, maxLines)
-	return limited, truncated, nil
+	return workspace.diff(nil, maxBytes, maxLines)
 }
 
 func (r *Repository) UncommittedDiffForPaths(paths []string, maxBytes, maxLines int) (string, bool, error) {
 	if len(paths) == 0 {
 		return "", false, nil
 	}
-	diff, err := r.worktreeTreeDiff()
+	workspace, err := r.uncommittedWorkspace(true)
 	if err != nil {
 		return "", false, err
 	}
-	return r.limitedTreeDiffForPaths(diff, paths, maxBytes, maxLines)
+	return workspace.diff(paths, maxBytes, maxLines)
 }
 
 func (r *Repository) StagedStat() ([]FileStat, error) {
@@ -297,15 +297,11 @@ func (r *Repository) StagedSnapshot(maxBytes, maxLines int) (ChangeSnapshot, err
 }
 
 func (r *Repository) UncommittedSnapshot(maxBytes, maxLines int) (ChangeSnapshot, error) {
-	status, err := r.status()
+	workspace, err := r.uncommittedWorkspace(true)
 	if err != nil {
 		return ChangeSnapshot{}, err
 	}
-	baseTree, targetTree, diff, err := r.worktreeChangeState(status)
-	if err != nil {
-		return ChangeSnapshot{}, err
-	}
-	return r.changeSnapshot(status, diff, changeFingerprint(baseTree, targetTree, diff.submodules), maxBytes, maxLines), nil
+	return workspace.snapshot(maxBytes, maxLines)
 }
 
 func (r *Repository) StagedFingerprint() (ChangeFingerprint, error) {
@@ -321,23 +317,11 @@ func (r *Repository) StagedFingerprint() (ChangeFingerprint, error) {
 }
 
 func (r *Repository) UncommittedFingerprint() (ChangeFingerprint, error) {
-	status, err := r.status()
+	workspace, err := r.uncommittedWorkspace(false)
 	if err != nil {
 		return ChangeFingerprint{}, err
 	}
-	baseTree, err := r.headTree()
-	if err != nil {
-		return ChangeFingerprint{}, err
-	}
-	targetTree, err := r.worktreeTree(status)
-	if err != nil {
-		return ChangeFingerprint{}, err
-	}
-	dirtySubmodules, err := r.dirtySubmoduleChanges(baseTree)
-	if err != nil {
-		return ChangeFingerprint{}, err
-	}
-	return changeFingerprint(baseTree, targetTree, dirtySubmodules), nil
+	return workspace.fingerprint(), nil
 }
 
 func (r *Repository) CheckStagedFingerprint(want ChangeFingerprint) error {
@@ -1404,43 +1388,7 @@ func (r *Repository) stagedChangeState() (*object.Tree, *object.Tree, *treeDiff,
 	return headTree, indexTree, diff, err
 }
 
-func (r *Repository) worktreeTreeDiff() (*treeDiff, error) {
-	status, err := r.status()
-	if err != nil {
-		return nil, err
-	}
-	return r.worktreeTreeDiffStatus(status)
-}
-
-func (r *Repository) worktreeTreeDiffStatus(status git.Status) (*treeDiff, error) {
-	_, _, diff, err := r.worktreeChangeState(status)
-	return diff, err
-}
-
-func (r *Repository) worktreeChangeState(status git.Status) (*object.Tree, *object.Tree, *treeDiff, error) {
-	headTree, err := r.headTree()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	worktreeTree, err := r.worktreeTree(status)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	diff, err := newTreeDiff(headTree, worktreeTree)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	if err := r.addDirtySubmodules(diff, headTree); err != nil {
-		return nil, nil, nil, err
-	}
-	return headTree, worktreeTree, diff, nil
-}
-
-func (r *Repository) addDirtySubmodules(diff *treeDiff, headTree *object.Tree) error {
-	dirtySubmodules, err := r.dirtySubmoduleChanges(headTree)
-	if err != nil {
-		return err
-	}
+func mergeDirtySubmodules(diff *treeDiff, dirtySubmodules []SubmoduleChange) {
 	byPath := make(map[string]int, len(diff.submodules))
 	for i, change := range diff.submodules {
 		byPath[change.Path] = i
@@ -1454,7 +1402,6 @@ func (r *Repository) addDirtySubmodules(diff *treeDiff, headTree *object.Tree) e
 		diff.submodules = append(diff.submodules, change)
 	}
 	slices.SortFunc(diff.submodules, func(a, b SubmoduleChange) int { return cmp.Compare(a.Path, b.Path) })
-	return nil
 }
 
 func (r *Repository) dirtySubmoduleChanges(headTree *object.Tree) ([]SubmoduleChange, error) {

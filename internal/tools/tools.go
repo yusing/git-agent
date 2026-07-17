@@ -634,7 +634,12 @@ func openInspectedFile(repo *gitctx.Repository, mode ReviewMode, rawPath, source
 	if source != "worktree" && source != "index" && source != "head" {
 		return nil, "", fmt.Errorf("source must be worktree, index, or head")
 	}
-	reader, err := openRepositoryFile(repo, path, source)
+	var reader io.ReadCloser
+	if mode == ReviewModeUncommitted {
+		reader, err = repo.OpenUncommittedReviewFile(gitctx.FileSource(source), path)
+	} else {
+		reader, err = openRepositoryFile(repo, path, source)
+	}
 	return reader, source, err
 }
 

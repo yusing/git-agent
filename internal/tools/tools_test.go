@@ -266,6 +266,51 @@ func TestStagedReviewToolsNeverReadUnstagedWorktree(t *testing.T) {
 	}
 }
 
+func TestUncommittedReviewReadFileRoutesNestedHeadSource(t *testing.T) {
+	t.Parallel()
+
+	sub := t.TempDir()
+	runGit(t, sub, "init")
+	runGit(t, sub, "config", "user.name", "Test User")
+	runGit(t, sub, "config", "user.email", "test@example.com")
+	mustWriteFile(t, filepath.Join(sub, "removed.txt"), "nested base evidence\n")
+	runGit(t, sub, "add", "removed.txt")
+	runGit(t, sub, "commit", "-m", "base")
+
+	root := t.TempDir()
+	runGit(t, root, "init")
+	runGit(t, root, "config", "user.name", "Test User")
+	runGit(t, root, "config", "user.email", "test@example.com")
+	mustWriteFile(t, filepath.Join(root, "app.txt"), "root\n")
+	runGit(t, root, "add", "app.txt")
+	runGit(t, root, "commit", "-m", "root")
+	runGit(t, root, "-c", "protocol.file.allow=always", "submodule", "add", sub, "webui")
+	runGit(t, root, "commit", "-m", "add webui")
+	if err := os.Remove(filepath.Join(root, "webui", "removed.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	repo, err := gitctx.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := repo.UncommittedFingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewReviewRegistryWithSkills(repo, nil, ReviewModeUncommitted, ReviewScope{}, fingerprint)
+	result, err := registry.Execute(t.Context(), Invocation{Name: "read_file", Arguments: `{"path":"webui/removed.txt","source":"head"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, "nested base evidence") {
+		t.Fatalf("nested head read = %s", result.Content)
+	}
+	if _, err := registry.Execute(t.Context(), Invocation{Name: "read_file", Arguments: `{"path":"webui/removed.txt","source":"worktree"}`}); err == nil {
+		t.Fatal("deleted nested worktree file unexpectedly readable")
+	}
+}
+
 func TestReviewChangesPaginatesAuthoritativeScope(t *testing.T) {
 	t.Parallel()
 

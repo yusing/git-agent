@@ -3,7 +3,9 @@ package review
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -169,6 +171,121 @@ func TestParseModeDefaultsToUncommittedAndRejectsConflicts(t *testing.T) {
 	if _, err := ParseMode(true, false, true); err == nil {
 		t.Fatal("expected conflicting mode error")
 	}
+}
+
+func TestPrepareUncommittedIncludesDirtyRegisteredSubmodulesRecursively(t *testing.T) {
+	t.Parallel()
+
+	wikiSource := initReviewRepo(t)
+	writeReviewFile(t, filepath.Join(wikiSource, "wiki.txt"), "base\n")
+	runReviewGit(t, wikiSource, "add", "wiki.txt")
+	runReviewGit(t, wikiSource, "commit", "-m", "wiki base")
+
+	webuiSource := initReviewRepo(t)
+	writeReviewFile(t, filepath.Join(webuiSource, "ui.txt"), "base\n")
+	runReviewGit(t, webuiSource, "add", "ui.txt")
+	runReviewGit(t, webuiSource, "commit", "-m", "webui base")
+	runReviewGit(t, webuiSource, "-c", "protocol.file.allow=always", "submodule", "add", wikiSource, "wiki")
+	runReviewGit(t, webuiSource, "commit", "-m", "add wiki")
+
+	root := initReviewRepo(t)
+	writeReviewFile(t, filepath.Join(root, "backend.go"), "package backend\n")
+	runReviewGit(t, root, "add", "backend.go")
+	runReviewGit(t, root, "commit", "-m", "backend base")
+	runReviewGit(t, root, "-c", "protocol.file.allow=always", "submodule", "add", webuiSource, "webui")
+	runReviewGit(t, root, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive")
+	runReviewGit(t, root, "commit", "-m", "add webui")
+	runReviewGit(t, root, "config", "-f", ".gitmodules", "submodule.webui.futureReviewOption", "preserve")
+
+	writeReviewFile(t, filepath.Join(root, "backend.go"), "package backend\n\nconst changed = true\n")
+	writeReviewFile(t, filepath.Join(root, "webui", "ui.txt"), "changed\n")
+	writeReviewFile(t, filepath.Join(root, "webui", "wiki", "wiki.txt"), "changed\n")
+
+	repo, err := gitctx.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := Prepare(repo, ModeUncommitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"backend.go", "webui/ui.txt", "webui/wiki/wiki.txt"} {
+		if !slices.Contains(prepared.Paths, path) {
+			t.Errorf("prepared paths = %#v, missing %q", prepared.Paths, path)
+		}
+	}
+	for _, text := range []string{"a/backend.go", `Repository "webui"`, "a/ui.txt", `Repository "webui/wiki"`, "a/wiki.txt"} {
+		if !strings.Contains(prepared.Diff, text) {
+			t.Errorf("prepared diff missing %q:\n%s", text, prepared.Diff)
+		}
+	}
+	filtered, _, err := repo.UncommittedDiffForPaths([]string{"webui/wiki/wiki.txt"}, 16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(filtered, `Repository "webui/wiki"`) || !strings.Contains(filtered, "a/wiki.txt") {
+		t.Fatalf("filtered nested diff missing selected path:\n%s", filtered)
+	}
+	if strings.Contains(filtered, "backend.go") || strings.Contains(filtered, "a/ui.txt") {
+		t.Fatalf("filtered nested diff contains unrelated paths:\n%s", filtered)
+	}
+
+	writeReviewFile(t, filepath.Join(root, "webui", "wiki", "wiki.txt"), "changed again\n")
+	report := `{"summary":"clean","recommendation":"APPROVE","findings":[]}`
+	if errs := ValidateRepository(KindReview, report, repo, ModeUncommitted, prepared.Paths, prepared.Fingerprint); !containsError(errs, gitctx.ErrChangeSnapshotStale.Error()) {
+		t.Fatalf("nested drift errors = %v, want stale snapshot", errs)
+	}
+}
+
+func TestValidateRepositoryReadsDeletedNestedEvidenceFromComponentBase(t *testing.T) {
+	t.Parallel()
+
+	webuiSource := initReviewRepo(t)
+	writeReviewFile(t, filepath.Join(webuiSource, "removed.go"), "package webui\n\nfunc removed() {}\n")
+	runReviewGit(t, webuiSource, "add", "removed.go")
+	runReviewGit(t, webuiSource, "commit", "-m", "webui base")
+
+	root := initReviewRepo(t)
+	writeReviewFile(t, filepath.Join(root, "backend.go"), "package backend\n")
+	runReviewGit(t, root, "add", "backend.go")
+	runReviewGit(t, root, "commit", "-m", "backend base")
+	runReviewGit(t, root, "-c", "protocol.file.allow=always", "submodule", "add", webuiSource, "webui")
+	runReviewGit(t, root, "commit", "-m", "add webui")
+	if err := os.Remove(filepath.Join(root, "webui", "removed.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	repo, err := gitctx.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := Prepare(repo, ModeUncommitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := `{"summary":"one","recommendation":"COMMENT","findings":[{"severity":"MEDIUM","aspect":"correctness","title":"removed behavior","impact":"behavior is absent","evidences":[{"title":"deleted function","path":"webui/removed.go","line_start":3,"line_end":3}],"proposed_fix":"restore it"}]}`
+	if errs := ValidateRepository(KindReview, report, repo, ModeUncommitted, prepared.Paths, prepared.Fingerprint); len(errs) != 0 {
+		t.Fatalf("deleted nested evidence errors = %v", errs)
+	}
+}
+
+func TestRunReviewGitDisablesFixtureCommitAndTagSigning(t *testing.T) {
+	t.Parallel()
+
+	repo := initReviewRepo(t)
+	fakeGPG := filepath.Join(t.TempDir(), "fake-gpg")
+	if err := os.WriteFile(fakeGPG, []byte("#!/bin/sh\necho unexpected gpg invocation >&2\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runReviewGit(t, repo, "config", "gpg.program", fakeGPG)
+	runReviewGit(t, repo, "config", "commit.gpgSign", "true")
+	runReviewGit(t, repo, "config", "tag.gpgSign", "true")
+	runReviewGit(t, repo, "config", "tag.forceSignAnnotated", "true")
+	writeReviewFile(t, filepath.Join(repo, "fixture.txt"), "fixture\n")
+	runReviewGit(t, repo, "add", "fixture.txt")
+
+	runReviewGit(t, repo, "commit", "-m", "fixture")
+	runReviewGit(t, repo, "tag", "-m", "fixture", "fixture")
 }
 
 func TestStagedContextPackUsesIndexStatus(t *testing.T) {
@@ -364,4 +481,30 @@ func containsError(errs []string, text string) bool {
 		}
 	}
 	return false
+}
+
+func initReviewRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	runReviewGit(t, dir, "init")
+	runReviewGit(t, dir, "config", "user.name", "Test User")
+	runReviewGit(t, dir, "config", "user.email", "test@example.com")
+	return dir
+}
+
+func runReviewGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	gitArgs := append([]string{"-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false", "-c", "tag.forceSignAnnotated=false"}, args...)
+	cmd := exec.Command("git", gitArgs...)
+	cmd.Dir = dir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, output)
+	}
+}
+
+func writeReviewFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }

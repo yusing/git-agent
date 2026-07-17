@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -220,8 +221,12 @@ func TestUncommittedDiffUsesCurrentSubmoduleRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Paths) != 1 || snapshot.Paths[0] != "webui" {
-		t.Fatalf("snapshot paths = %#v, want [webui]", snapshot.Paths)
+	wantPaths := []string{"webui", "webui/ui.txt"}
+	if !slices.Equal(snapshot.Paths, wantPaths) {
+		t.Fatalf("snapshot paths = %#v, want %#v", snapshot.Paths, wantPaths)
+	}
+	if !strings.Contains(snapshot.Diff, `Repository "webui"`) || !strings.Contains(snapshot.Diff, "a/ui.txt") {
+		t.Fatalf("snapshot does not expand committed submodule range:\n%s", snapshot.Diff)
 	}
 
 	runGit(t, repoDir, "reset", "webui")
@@ -284,11 +289,15 @@ func TestUncommittedSnapshotUsesIndependentSubmoduleCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Paths) != 1 || snapshot.Paths[0] != "nested" {
-		t.Fatalf("snapshot paths = %#v, want [nested]", snapshot.Paths)
+	wantPaths := []string{"nested", "nested/untracked.txt"}
+	if !slices.Equal(snapshot.Paths, wantPaths) {
+		t.Fatalf("snapshot paths = %#v, want %#v", snapshot.Paths, wantPaths)
 	}
 	if snapshot.Fingerprint.DirtySubmodules == "" {
 		t.Fatal("independent dirty submodule missing fingerprint")
+	}
+	if !strings.Contains(snapshot.Diff, "is unavailable locally") || !strings.Contains(snapshot.Diff, "untracked.txt") {
+		t.Fatalf("snapshot did not preserve dirty fallback when expected base was unavailable:\n%s", snapshot.Diff)
 	}
 
 	if err := os.RemoveAll(nestedDir); err != nil {
@@ -308,6 +317,86 @@ func TestUncommittedSnapshotUsesIndependentSubmoduleCheckout(t *testing.T) {
 	}
 	if len(dirtySubmodules) != 0 {
 		t.Fatalf("symlinked external repository included in dirty submodules: %#v", dirtySubmodules)
+	}
+}
+
+func TestUncommittedSnapshotExcludesCleanRegisteredSubmodules(t *testing.T) {
+	t.Parallel()
+
+	subDir := initTempRepo(t)
+	writeFile(t, filepath.Join(subDir, "third_party.txt"), "clean\n")
+	runGit(t, subDir, "add", "third_party.txt")
+	runGit(t, subDir, "commit", "-m", "third party")
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "app.txt"), "base\n")
+	runGit(t, repoDir, "add", "app.txt")
+	runGit(t, repoDir, "commit", "-m", "base")
+	runGit(t, repoDir, "-c", "protocol.file.allow=always", "submodule", "add", subDir, "vendor/third-party")
+	runGit(t, repoDir, "commit", "-m", "add third party")
+	writeFile(t, filepath.Join(repoDir, "app.txt"), "changed\n")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repo.UncommittedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(snapshot.Paths, []string{"app.txt"}) {
+		t.Fatalf("snapshot paths = %#v, want only app.txt", snapshot.Paths)
+	}
+	if strings.Contains(snapshot.Diff, "third_party.txt") || strings.Contains(snapshot.Diff, `Repository "vendor/third-party"`) {
+		t.Fatalf("clean third-party submodule entered review scope:\n%s", snapshot.Diff)
+	}
+}
+
+func TestUncommittedSnapshotRejectsMalformedAndUnregisteredRepositoryExpansion(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "app.txt"), "base\n")
+	runGit(t, repoDir, "add", "app.txt")
+	runGit(t, repoDir, "commit", "-m", "base")
+
+	external := initTempRepo(t)
+	writeFile(t, filepath.Join(external, "external-secret.txt"), "must stay outside\n")
+	runGit(t, external, "add", "external-secret.txt")
+	runGit(t, external, "commit", "-m", "external")
+	writeFile(t, filepath.Join(repoDir, ".gitmodules"), "[submodule \"escape\"]\n\tpath = ../escape\n\turl = "+external+"\n[submodule \"decoy\"]\n\tpath = decoy\n\turl = "+external+"\n")
+	decoy := filepath.Join(repoDir, "decoy")
+	if err := os.Mkdir(decoy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, decoy, "init")
+	runGit(t, decoy, "config", "user.name", "Test User")
+	runGit(t, decoy, "config", "user.email", "test@example.com")
+	writeFile(t, filepath.Join(decoy, "decoy-secret.txt"), "unregistered configured-path secret\n")
+	runGit(t, decoy, "add", "decoy-secret.txt")
+	runGit(t, decoy, "commit", "-m", "decoy")
+
+	unregistered := filepath.Join(repoDir, "scratch")
+	if err := os.Mkdir(unregistered, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, unregistered, "init")
+	runGit(t, unregistered, "config", "user.name", "Test User")
+	runGit(t, unregistered, "config", "user.email", "test@example.com")
+	writeFile(t, filepath.Join(unregistered, "ordinary.txt"), "ordinary root-untracked content\n")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repo.UncommittedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(snapshot.Diff, "external-secret") || strings.Contains(snapshot.Diff, "decoy-secret") ||
+		strings.Contains(snapshot.Diff, `Repository "decoy"`) || strings.Contains(snapshot.Diff, `Repository "scratch"`) ||
+		slices.Contains(snapshot.Paths, "decoy/decoy-secret.txt") || snapshot.Fingerprint.NestedRepositories != "" {
+		t.Fatalf("malformed or unregistered repository gained nested scope:\n%s", snapshot.Diff)
 	}
 }
 
