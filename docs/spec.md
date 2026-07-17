@@ -434,13 +434,13 @@ Search does not run the Responses API, call model tools, generate explanations,
 or use lexical fallback. It frames and embeds the query
 as an implementation-location search when the configured embedding input cap can
 include the framing; otherwise it embeds the raw query so user query text is not
-truncated away. Search embeds local chunks, performs an exact cosine scan over
-the shared vector payload, with a legacy per-index payload fallback, filters
-candidates by vector relatedness, then
-ranks surviving candidates with a hybrid score that combines vector relatedness,
-normalized BM25-style body text overlap, path token overlap, and indexed symbol
-token overlap. Output and replay history keep the original query string, not the
-framed embedding input.
+truncated away. Search embeds local chunks and performs an exact cosine scan over
+the shared vector payload, with a legacy per-index payload fallback. For every
+chunk with an available vector, it computes vector relatedness plus normalized
+BM25-style body text, path token, and indexed symbol token components, combines
+them into the final hybrid score, and then applies `--min-score`. Surviving
+candidates are ordered by that same final score. Output and replay history keep
+the original query string, not the framed embedding input.
 
 When global `index.remote` is configured, search synchronizes selected revision
 records through that dedicated Git remote before checking local index freshness.
@@ -471,10 +471,12 @@ repositories are never exported.
 `--format json` is the default stdout contract. `--format brief` first writes a
 header line as `# mode=<filesystem|revision|remote> index=<fresh|refreshed|built|empty>`,
 then writes one result per line as `<score> <path>:<start-line> <summary>`, with
-the score rounded to two decimals. The score is the final hybrid rank; JSON
-results expose the vector relatedness, text, path, symbol, lexical, cosine, and
-rank components in `scores`. The summary is the indexed symbol name when
-available, otherwise the first excerpt line without its excerpt line-number
+final hybrid score rounded to two decimals. Search applies `--min-score` to that
+score after vector, text, path, and symbol components are computed. JSON
+`relatedness` is the same final hybrid score; JSON results expose cosine, vector
+relatedness, text, path, symbol, lexical, and final hybrid `rank` components in
+`scores`, where `scores.rank` equals `relatedness`. The summary is the indexed
+symbol name when available, otherwise the first excerpt line without its excerpt line-number
 prefix. Brief output suppresses low-information Go `package <name>` results when
 another result for the same file has an indexed symbol. `--index --format brief`
 writes only the header line because indexing skips scoring.
@@ -796,8 +798,8 @@ and `--wait <id>` only as isolated retrieval form documented above.
   querying
 - `--remote <url>`: search or inspect a cached remote Git repository URL
 - `--rev <rev>`: search a committed Git tree instead of current filesystem files
-- `--min-relatedness <score>`: minimum vector relatedness candidate threshold;
-  default `0.70`, valid `0 < score <= 1`
+- `--min-score <score>`: minimum final hybrid score threshold;
+  default `0.70`, valid finite `0 < score <= 1`
 - `--embedding-model <model>`: default `text-embedding-3-small`
 - `--embedding-dimensions <n>`: default `1024`, valid positive integer
 - `--base-url <url>`: override provider base URL

@@ -62,7 +62,7 @@ func TestSearchLsAndLsFiles(t *testing.T) {
 	if _, err := searchtask.Run(t.Context(), cliListFakeEmbedder{}, searchtask.Options{
 		Root:                root,
 		IndexOnly:           true,
-		MinRelatedness:      searchtask.DefaultMinRelatedness,
+		MinScore:            searchtask.DefaultMinScore,
 		Limit:               searchtask.DefaultLimit,
 		EmbeddingModel:      "test-model",
 		EmbeddingDimensions: 3,
@@ -291,7 +291,7 @@ func TestSearchHelpReturnsUsage(t *testing.T) {
 		"--reindex":                  "rebuild embeddings for the selected source",
 		"--remote <url>":             "search a cached remote Git repository URL",
 		"--rev <rev>":                "search a committed Git tree",
-		"--min-relatedness <score>":  "minimum vector relatedness candidate threshold",
+		"--min-score <score>":        "minimum final hybrid score threshold",
 		"--embedding-model <model>":  "embedding model",
 		"--embedding-dimensions <n>": "embedding dimensions",
 		"--base-url <url>":           "override provider base URL",
@@ -582,14 +582,16 @@ func TestSearchPrintsJSONAndUsesEmbeddingsOnly(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	app := &App{stdout: &stdout, stderr: &stderr}
-	if err := app.Run(t.Context(), []string{"search", "release", "notes"}); err != nil {
+	if err := app.Run(t.Context(), []string{"search", "--min-score", "0.9", "release", "notes"}); err != nil {
 		t.Fatal(err)
 	}
 	if stderr.String() != "" {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 	var out struct {
-		Source struct {
+		Query    string  `json:"query"`
+		MinScore float64 `json:"min_score"`
+		Source   struct {
 			Mode string `json:"mode"`
 			Root string `json:"root"`
 		} `json:"source"`
@@ -600,6 +602,9 @@ func TestSearchPrintsJSONAndUsesEmbeddingsOnly(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
 		t.Fatalf("stdout is not JSON: %q: %v", stdout.String(), err)
 	}
+	if out.Query != "release notes" || out.MinScore != 0.9 {
+		t.Fatalf("query = %q, min score = %v", out.Query, out.MinScore)
+	}
 	if out.Source.Mode != "filesystem" || out.Source.Root != root {
 		t.Fatalf("source = %#v", out.Source)
 	}
@@ -608,6 +613,21 @@ func TestSearchPrintsJSONAndUsesEmbeddingsOnly(t *testing.T) {
 	}
 	if len(paths) == 0 {
 		t.Fatal("expected embeddings request")
+	}
+}
+
+func TestSearchRejectsRemovedMinRelatednessFlag(t *testing.T) {
+	err := New().Run(t.Context(), []string{"search", "--min-relatedness", "0.7", "target"})
+	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined: -min-relatedness") {
+		t.Fatalf("err = %v, want removed flag rejection", err)
+	}
+}
+
+func TestSearchRejectsInvalidMinScoreBeforeEmbeddingConfig(t *testing.T) {
+	t.Setenv(config.EnvEmbeddingDimensions, "invalid")
+	err := New().Run(t.Context(), []string{"search", "--min-score", "NaN", "target"})
+	if err == nil || err.Error() != "--min-score must be finite, > 0, and <= 1" {
+		t.Fatalf("err = %v, want min-score validation", err)
 	}
 }
 
@@ -664,6 +684,7 @@ func TestSearchBriefSuppressesPackageResultWhenFileHasSymbol(t *testing.T) {
 				Range:       "foo.go:1-1",
 				Path:        "foo.go",
 				StartLine:   1,
+				Scores:      searchtask.ResultScores{Rank: 0.99},
 				Excerpt:     "1: package foo\n",
 			},
 			{
@@ -672,6 +693,7 @@ func TestSearchBriefSuppressesPackageResultWhenFileHasSymbol(t *testing.T) {
 				Path:        "foo.go",
 				StartLine:   3,
 				Symbol:      &searchtask.Symbol{Type: "function", Name: "Target"},
+				Scores:      searchtask.ResultScores{Rank: 0.98},
 				Excerpt:     "3: func Target() {}\n",
 			},
 			{
@@ -1408,7 +1430,7 @@ func TestSearchRevIgnoresCurrentFilesystem(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	app := &App{stdout: &stdout, stderr: &stderr}
-	if err := app.Run(t.Context(), []string{"search", "--rev", "HEAD", "--min-relatedness", "0.9", "committed"}); err != nil {
+	if err := app.Run(t.Context(), []string{"search", "--rev", "HEAD", "--min-score", "0.9", "committed"}); err != nil {
 		t.Fatal(err)
 	}
 	var out struct {
@@ -1840,6 +1862,21 @@ func TestCommitAmendPreservesOriginalAuthor(t *testing.T) {
 	if got != want {
 		t.Fatalf("author/committer = %q, want %q", got, want)
 	}
+}
+
+func TestRunGitDisablesFixtureCommitAndTagSigning(t *testing.T) {
+	repoDir := initRepo(t)
+	fakeGPG := filepath.Join(t.TempDir(), "fake-gpg")
+	if err := os.WriteFile(fakeGPG, []byte("#!/bin/sh\necho unexpected gpg invocation >&2\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "config", "gpg.program", fakeGPG)
+	runGit(t, repoDir, "config", "commit.gpgSign", "true")
+	runGit(t, repoDir, "config", "tag.gpgSign", "true")
+	runGit(t, repoDir, "config", "tag.forceSignAnnotated", "true")
+
+	runGit(t, repoDir, "commit", "-m", "fixture")
+	runGit(t, repoDir, "tag", "-m", "fixture", "fixture")
 }
 
 func TestCommitFailureReturnsGeneratedMessage(t *testing.T) {
@@ -2520,7 +2557,8 @@ func projectMetadataDir(t *testing.T, root string) string {
 
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	gitArgs := append([]string{"-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false", "-c", "tag.forceSignAnnotated=false"}, args...)
+	cmd := exec.Command("git", gitArgs...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err != nil {

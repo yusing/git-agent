@@ -497,7 +497,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	var opts config.Options
 	var rev string
 	var remote string
-	var minRelatedness float64
+	var minScore float64
 	var limit int
 	var indexOnly bool
 	var reindex bool
@@ -521,7 +521,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 	fs.StringVar(&opts.Pprof, "pprof", "", "serve pprof on address")
 	fs.StringVar(&remote, "remote", "", "search a cached remote Git repository URL")
 	fs.StringVar(&rev, "rev", "", "search a committed Git tree")
-	fs.Float64Var(&minRelatedness, "min-relatedness", searchtask.DefaultMinRelatedness, "minimum vector relatedness candidate threshold")
+	fs.Float64Var(&minScore, "min-score", searchtask.DefaultMinScore, "minimum final hybrid score threshold")
 	fs.IntVar(&limit, "limit", searchtask.DefaultLimit, "maximum results")
 	fs.BoolVar(&indexOnly, "index", false, "build embeddings for the selected source without searching")
 	fs.BoolVar(&reindex, "reindex", false, "rebuild embeddings for the selected source")
@@ -540,6 +540,9 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return searchUsageError(fs)
 		}
+		return err
+	}
+	if err := searchtask.ValidateMinScore(minScore); err != nil {
 		return err
 	}
 	visitedFlags := map[string]bool{}
@@ -653,7 +656,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 		Rev:                    rev,
 		Remote:                 remote,
 		IndexRemote:            fileCfg.Index.Remote,
-		MinRelatedness:         minRelatedness,
+		MinScore:               minScore,
 		Limit:                  limit,
 		IndexOnly:              indexOnly,
 		Reindex:                reindex,
@@ -2014,7 +2017,7 @@ func writeSearchFlags(b *strings.Builder, fs *flag.FlagSet) {
 		"embedding-model":      "<model>",
 		"format":               "json|brief; --ls: text|json; --ls-remotes: text|json|completion; --ls-files: tree|json",
 		"limit":                "<n>",
-		"min-relatedness":      "<score>",
+		"min-score":            "<score>",
 		"pprof":                "<addr>",
 		"remote":               "<url>",
 		"rev":                  "<rev>",
@@ -2035,7 +2038,7 @@ func writeSearchFlags(b *strings.Builder, fs *flag.FlagSet) {
 		"reindex",
 		"remote",
 		"rev",
-		"min-relatedness",
+		"min-score",
 		"embedding-model",
 		"embedding-dimensions",
 		"base-url",

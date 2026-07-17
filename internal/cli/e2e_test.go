@@ -50,7 +50,7 @@ func enforceBudget() {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_BASE_URL", server.URL)
 
-	first := runSearchE2E(t, []string{"search", "--min-relatedness", "0.70", "where are search flags parsed"})
+	first := runSearchE2E(t, []string{"search", "--min-score", "0.70", "where are search flags parsed"})
 	if first.Source.Root != root {
 		t.Fatalf("search root = %q, want %q", first.Source.Root, root)
 	}
@@ -65,7 +65,7 @@ func enforceBudget() {
 		t.Fatalf("first run embedding calls = %d, want chunks batch + query", got)
 	}
 
-	second := runSearchE2E(t, []string{"search", "--min-relatedness", "0.70", "where are search flags parsed"})
+	second := runSearchE2E(t, []string{"search", "--min-score", "0.70", "where are search flags parsed"})
 	assertSearchResult(t, second, "internal/cli/app.go:", "search parser target")
 	if second.Retrieval.Index != "hit" || second.Replay.Mode != "hit" {
 		t.Fatalf("second retrieval/replay = %#v %#v", second.Retrieval, second.Replay)
@@ -74,7 +74,7 @@ func enforceBudget() {
 		t.Fatalf("second exact query should reuse chunks and cached query embedding; calls = %d", got)
 	}
 
-	similar := runSearchE2E(t, []string{"search", "--min-relatedness", "0.70", "find the search flag parser"})
+	similar := runSearchE2E(t, []string{"search", "--min-score", "0.70", "find the search flag parser"})
 	assertSearchResult(t, similar, "internal/cli/app.go:", "search parser target")
 	if similar.Replay.Mode != "similar" || similar.Replay.From == nil || *similar.Replay.From != "where are search flags parsed" {
 		t.Fatalf("similar replay = %#v", similar.Replay)
@@ -87,7 +87,7 @@ func runSearch() {
 	_ = "fresh indexed marker"
 }
 `)
-	changed := runSearchE2E(t, []string{"search", "--min-relatedness", "0.70", "where are search flags parsed"})
+	changed := runSearchE2E(t, []string{"search", "--min-score", "0.70", "where are search flags parsed"})
 	assertSearchResult(t, changed, "internal/cli/app.go:", "fresh indexed marker")
 	if changed.Replay.Mode != "hit" {
 		t.Fatalf("changed replay = %#v", changed.Replay)
@@ -140,13 +140,13 @@ func TestSearchRealProviderEndToEndOnThisRepo(t *testing.T) {
 	t.Chdir(root)
 
 	query := "where is semantic search replay history vector cache and chunk ranking implemented"
-	first := runSearchE2E(t, []string{"search", "--reindex", "--min-relatedness", "0.55", "--limit", "5", query})
+	first := runSearchE2E(t, []string{"search", "--reindex", "--min-score", "0.55", "--limit", "5", query})
 	assertSearchHasRange(t, first, "internal/tasks/search/task.go:")
 	if first.Retrieval.Index != "miss" || first.Replay.Mode != "none" {
 		t.Fatalf("first retrieval/replay = %#v %#v", first.Retrieval, first.Replay)
 	}
 
-	second := runSearchE2E(t, []string{"search", "--min-relatedness", "0.55", "--limit", "5", query})
+	second := runSearchE2E(t, []string{"search", "--min-score", "0.55", "--limit", "5", query})
 	assertSearchHasRange(t, second, "internal/tasks/search/task.go:")
 	if second.Retrieval.Index != "hit" || second.Replay.Mode != "hit" {
 		t.Fatalf("second retrieval/replay = %#v %#v", second.Retrieval, second.Replay)

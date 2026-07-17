@@ -36,7 +36,7 @@ import (
 )
 
 const (
-	DefaultMinRelatedness         = 0.70
+	DefaultMinScore               = 0.70
 	DefaultLimit                  = 20
 	MaxLimit                      = 100
 	MaxFileBytes                  = 1 << 20
@@ -105,7 +105,7 @@ type Options struct {
 	Rev                    string
 	Remote                 string
 	IndexRemote            string
-	MinRelatedness         float64
+	MinScore               float64
 	Limit                  int
 	IndexOnly              bool
 	Reindex                bool
@@ -136,13 +136,13 @@ type Progress struct {
 }
 
 type Output struct {
-	Query          string      `json:"query"`
-	Source         Source      `json:"source"`
-	MinRelatedness float64     `json:"min_relatedness"`
-	Retrieval      Retrieval   `json:"retrieval"`
-	Results        []Result    `json:"results"`
-	Replay         Replay      `json:"replay"`
-	Diagnostics    Diagnostics `json:"-"`
+	Query       string      `json:"query"`
+	Source      Source      `json:"source"`
+	MinScore    float64     `json:"min_score"`
+	Retrieval   Retrieval   `json:"retrieval"`
+	Results     []Result    `json:"results"`
+	Replay      Replay      `json:"replay"`
+	Diagnostics Diagnostics `json:"-"`
 }
 
 type Diagnostics struct {
@@ -354,8 +354,8 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	if query == "" && !opts.IndexOnly {
 		return fail(errors.New("search query is empty"))
 	}
-	if opts.MinRelatedness <= 0 || opts.MinRelatedness > 1 {
-		return fail(errors.New("--min-relatedness must be > 0 and <= 1"))
+	if err := ValidateMinScore(opts.MinScore); err != nil {
+		return fail(err)
 	}
 	if opts.Limit < 1 || opts.Limit > MaxLimit {
 		return fail(fmt.Errorf("--limit must be between 1 and %d", MaxLimit))
@@ -781,9 +781,9 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 	if opts.IndexOnly {
 		return resultWithDiagnostics(Output{
-			Query:          query,
-			Source:         source,
-			MinRelatedness: opts.MinRelatedness,
+			Query:    query,
+			Source:   source,
+			MinScore: opts.MinScore,
 			Retrieval: Retrieval{
 				Mode:           "embeddings",
 				EmbeddingModel: opts.EmbeddingModel,
@@ -856,7 +856,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	if filters.NoTests {
 		skipScoreChunk = func(chunk Chunk) bool { return isTestPath(chunk.Path) }
 	}
-	scored := scoreChunks(chunks, vectors, queryVector, query, opts.MinRelatedness, skipScoreChunk)
+	scored := scoreChunks(chunks, vectors, queryVector, query, opts.MinScore, skipScoreChunk)
 	sortResults(scored)
 	if len(scored) > opts.Limit {
 		scored = scored[:opts.Limit]
@@ -894,9 +894,9 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	mark("replay")
 
 	return resultWithDiagnostics(Output{
-		Query:          query,
-		Source:         source,
-		MinRelatedness: opts.MinRelatedness,
+		Query:    query,
+		Source:   source,
+		MinScore: opts.MinScore,
 		Retrieval: Retrieval{
 			Mode:           "embeddings",
 			EmbeddingModel: opts.EmbeddingModel,
@@ -908,6 +908,13 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		Results: results,
 		Replay:  replay,
 	}), nil
+}
+
+func ValidateMinScore(score float64) error {
+	if math.IsNaN(score) || math.IsInf(score, 0) || score <= 0 || score > 1 {
+		return errors.New("--min-score must be finite, > 0, and <= 1")
+	}
+	return nil
 }
 
 func serializeProgress(progressLog func(Progress) error) func(Progress) error {
@@ -2253,7 +2260,7 @@ type scoreCandidate struct {
 	textLength int
 }
 
-func scoreChunks(chunks []Chunk, vectors map[string][]float64, queryVector []float64, query string, minRelatedness float64, skipChunk func(Chunk) bool) []scoredChunk {
+func scoreChunks(chunks []Chunk, vectors map[string][]float64, queryVector []float64, query string, minScore float64, skipChunk func(Chunk) bool) []scoredChunk {
 	queryTerms := uniqueSearchTerms(searchTerms(query))
 	querySet := searchTermSet(queryTerms)
 	candidates := make([]scoreCandidate, 0, len(chunks))
@@ -2268,9 +2275,6 @@ func scoreChunks(chunks []Chunk, vectors map[string][]float64, queryVector []flo
 		}
 		cosine := cosineSimilarity(queryVector, vector)
 		relatedness := math.Max(1e-9, min(1, max(0, (cosine+1)/2)))
-		if relatedness < minRelatedness {
-			continue
-		}
 		item := scoredChunk{
 			chunk:             chunk,
 			cosine:            cosine,
@@ -2289,12 +2293,14 @@ func scoreChunks(chunks []Chunk, vectors map[string][]float64, queryVector []flo
 		})
 	}
 	if len(queryTerms) == 0 {
-		return scored
+		return slices.DeleteFunc(scored, func(item scoredChunk) bool { return item.rank < minScore })
 	}
 	scoreLexicalCandidates(candidates, queryTerms)
-	scored = make([]scoredChunk, len(candidates))
-	for i, candidate := range candidates {
-		scored[i] = candidate.item
+	scored = make([]scoredChunk, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.item.rank >= minScore {
+			scored = append(scored, candidate.item)
+		}
 	}
 	return scored
 }

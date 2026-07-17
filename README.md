@@ -307,7 +307,7 @@ Useful flags:
 | `--remote <url>` | Search a cached remote Git repository URL |
 | `--code` | Include source-code files only |
 | `--no-tests` | Exclude common cross-language test filenames and test directories from results and `--ls-files` output |
-| `--min-relatedness <n>` | Set vector relatedness candidate threshold |
+| `--min-score <n>` | Set minimum final hybrid score |
 | `--limit <n>` | Limit result count |
 | `--format` | Use `json\|brief` for search, `text\|json` for `--ls`, `text\|json\|completion` for `--ls-remotes`, and `tree\|json` for `--ls-files` |
 | `--index` | Build missing embeddings without searching |

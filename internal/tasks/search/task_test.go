@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -59,7 +60,7 @@ func TestIndexSyncSharesOnlyCurrentHEADRecords(t *testing.T) {
 		Root:                firstRoot,
 		IndexRemote:         syncRemote,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "test-model",
 		EmbeddingDimensions: 3,
@@ -134,7 +135,7 @@ func TestRemoteSearchPullsSelectedRevisionFromIndexSync(t *testing.T) {
 		Rev:                 revision,
 		IndexRemote:         syncRemote,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "test-model",
 		EmbeddingDimensions: 3,
@@ -169,7 +170,7 @@ func TestLocalRevisionSearchPullsSelectedRevisionFromIndexSync(t *testing.T) {
 		Rev:                 firstRevision,
 		IndexRemote:         syncRemote,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "test-model",
 		EmbeddingDimensions: 3,
@@ -205,7 +206,7 @@ func TestSyncAllPublishesEveryCompletedRevisionOnly(t *testing.T) {
 	opts := Options{
 		Root:                root,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "test-model",
 		EmbeddingDimensions: 3,
@@ -228,7 +229,7 @@ func TestSyncAllPublishesEveryCompletedRevisionOnly(t *testing.T) {
 		Remote:              remoteSource,
 		Rev:                 remoteRevision,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "test-model",
 		EmbeddingDimensions: 3,
@@ -324,7 +325,7 @@ func TestIndexSyncFailsWhenRemoteIsUnreachable(t *testing.T) {
 		Root:                root,
 		IndexRemote:         filepath.Join(t.TempDir(), "missing.git"),
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "test-model",
 		EmbeddingDimensions: 3,
@@ -728,7 +729,7 @@ func TestFilesystemSearchDoesNotRequireGitAndIndexesCurrentFiles(t *testing.T) {
 
 	out, err := Run(t.Context(), fakeEmbedder{}, Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -812,7 +813,7 @@ func TestSearchUsesDefaultIgnorePatterns(t *testing.T) {
 
 			opts := Options{
 				Root:                root,
-				MinRelatedness:      0.70,
+				MinScore:            0.70,
 				Limit:               10,
 				EmbeddingModel:      "text-embedding-3-small",
 				EmbeddingDimensions: 3,
@@ -844,7 +845,7 @@ func TestFilesystemSearchScopeKeepsRootIgnoreRules(t *testing.T) {
 	out, err := Run(t.Context(), fakeEmbedder{}, Options{
 		Root:                root,
 		Scope:               []string{"foo/"},
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -862,7 +863,7 @@ func TestFilesystemSearchScopeKeepsRootIgnoreRules(t *testing.T) {
 	}
 	unscoped := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -888,7 +889,7 @@ func TestFilesystemSearchFromNestedGitDirectoryReusesRootIndex(t *testing.T) {
 	embedder := &countingEmbedder{}
 	opts := Options{
 		Root:                filepath.Join(root, "foo"),
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -942,7 +943,7 @@ func TestFilesystemSearchScopeIncludesHiddenDir(t *testing.T) {
 	out, err := Run(t.Context(), fakeEmbedder{}, Options{
 		Root:                root,
 		Scope:               []string{".foo"},
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -970,7 +971,7 @@ func TestFilesystemSearchScopeUsesIgnoreRulesInsideHiddenDir(t *testing.T) {
 	out, err := Run(t.Context(), fakeEmbedder{}, Options{
 		Root:                root,
 		Scope:               []string{".foo"},
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -993,7 +994,7 @@ func TestSearchFiltersByVectorThenSortsTiesByPath(t *testing.T) {
 
 	out, err := Run(t.Context(), fakeEmbedder{}, Options{
 		Root:                root,
-		MinRelatedness:      0.99,
+		MinScore:            0.99,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -1011,6 +1012,73 @@ func TestSearchFiltersByVectorThenSortsTiesByPath(t *testing.T) {
 	}
 }
 
+func TestScoreChunksFiltersFinalHybridScore(t *testing.T) {
+	chunks := []Chunk{
+		{ID: "positive", Path: "positive.txt", text: "target"},
+		{ID: "negative", Path: "negative.txt", text: "unrelated"},
+		{ID: "lexical-collision", Path: "target.txt", text: "target target target"},
+		{ID: "unknown-vector", Path: "future.txt", text: "target"},
+	}
+	vectors := map[string][]float64{
+		"positive":          {1, 0},
+		"negative":          {-1, 0},
+		"lexical-collision": {0, 1},
+	}
+
+	all := scoreChunks(chunks, vectors, []float64{1, 0}, "target", 1e-9, nil)
+	var lexicalCollision scoredChunk
+	for _, item := range all {
+		if item.chunk.ID == "lexical-collision" {
+			lexicalCollision = item
+			break
+		}
+	}
+	if lexicalCollision.chunk.ID == "" || lexicalCollision.rank <= lexicalCollision.vectorRelatedness {
+		t.Fatalf("lexical collision = %#v, want hybrid lift", lexicalCollision)
+	}
+
+	got := scoreChunks(chunks, vectors, []float64{1, 0}, "target", lexicalCollision.rank, nil)
+	if len(got) != 2 || got[0].chunk.ID != "positive" || got[1].chunk.ID != "lexical-collision" {
+		t.Fatalf("scored chunks = %#v, want positive and hybrid lexical matches", got)
+	}
+	if got[1].vectorRelatedness >= lexicalCollision.rank || got[1].rank < lexicalCollision.rank {
+		t.Fatalf("lexical collision vector = %v rank = %v, want post-rank threshold", got[1].vectorRelatedness, got[1].rank)
+	}
+}
+
+func TestRenderResultsUsesFinalHybridScore(t *testing.T) {
+	results := renderResults([]scoredChunk{{
+		chunk:             Chunk{Path: "target.txt", StartLine: 1, EndLine: 1},
+		vectorRelatedness: 0.76,
+		rank:              0.99,
+	}})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %#v", results)
+	}
+	if got := results[0].Relatedness; got != 0.99 {
+		t.Fatalf("relatedness = %v, want final hybrid score", got)
+	}
+	if got := results[0].Scores.Rank; got != 0.99 {
+		t.Fatalf("rank = %v, want hybrid rank", got)
+	}
+}
+
+func TestSearchRejectsInvalidMinScore(t *testing.T) {
+	for _, threshold := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), -0.1, 0, 1.1} {
+		_, err := Run(t.Context(), fakeEmbedder{}, Options{
+			Root:                t.TempDir(),
+			MinScore:            threshold,
+			Limit:               1,
+			EmbeddingModel:      "test-model",
+			EmbeddingDimensions: 3,
+		}, "target")
+		if err == nil || !strings.Contains(err.Error(), "--min-score") {
+			t.Fatalf("threshold %v error = %v, want min-score validation", threshold, err)
+		}
+	}
+}
+
 func TestSearchHybridRankingLiftsPathAndTextMatch(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "service.txt", "semantically plausible but unrelated\n")
@@ -1022,7 +1090,7 @@ func TestSearchHybridRankingLiftsPathAndTextMatch(t *testing.T) {
 		{contains: "path: editors/integration.md", vector: []float64{0.93, 0.07, 0}},
 	}, Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -1047,6 +1115,9 @@ func TestSearchHybridRankingLiftsPathAndTextMatch(t *testing.T) {
 	if out.Results[0].Scores.Rank != out.Results[0].Relatedness {
 		t.Fatalf("rank score = %v relatedness = %v", out.Results[0].Scores.Rank, out.Results[0].Relatedness)
 	}
+	if out.Results[0].Relatedness <= out.Results[0].Scores.VectorRelatedness {
+		t.Fatalf("hybrid score = %v, want lexical lift above vector %v", out.Results[0].Relatedness, out.Results[0].Scores.VectorRelatedness)
+	}
 	if out.Results[0].Scores.VectorRelatedness >= out.Results[1].Scores.VectorRelatedness {
 		t.Fatalf("vector relatedness scores = %#v then %#v, want top to have lower vector score", out.Results[0].Scores, out.Results[1].Scores)
 	}
@@ -1063,7 +1134,7 @@ func TestSearchHybridRankingLiftsSymbolMatch(t *testing.T) {
 		{contains: "path: server.go", vector: []float64{0.93, 0.07, 0}},
 	}, Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -1094,7 +1165,7 @@ func TestSearchCodeOnlyFiltersDocs(t *testing.T) {
 
 	out, err := Run(t.Context(), fakeEmbedder{}, Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		CodeOnly:            true,
 		EmbeddingModel:      "text-embedding-3-small",
@@ -1125,7 +1196,7 @@ func TestSearchFilteringOptionsShareIndexDir(t *testing.T) {
 	opts := Options{
 		Root:                root,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -1171,7 +1242,7 @@ func TestSearchCodeOnlySharesDefaultIndexAndKeepsReplayFiltered(t *testing.T) {
 	embedder := &recordingEmbedder{}
 	opts := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -1223,7 +1294,7 @@ func TestSearchCodeOnlySeedsSharedDefaultIndex(t *testing.T) {
 	embedder := &countingEmbedder{}
 	opts := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		IndexOnly:           true,
 		CodeOnly:            true,
@@ -1261,7 +1332,7 @@ func TestSearchCodeOnlyReindexPreservesSharedNonCodeVectors(t *testing.T) {
 	embedder := &countingEmbedder{}
 	opts := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		IndexOnly:           true,
 		EmbeddingModel:      "text-embedding-3-small",
@@ -1331,7 +1402,7 @@ func TestSearchCodeOnlyDropsStaleSharedNonCodeVectors(t *testing.T) {
 	embedder := &countingEmbedder{}
 	opts := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		IndexOnly:           true,
 		EmbeddingModel:      "text-embedding-3-small",
@@ -1375,7 +1446,7 @@ func TestSearchDropsStaleVectorsWhenFileRemovedWithoutMissingChunks(t *testing.T
 	embedder := &countingEmbedder{}
 	opts := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		IndexOnly:           true,
 		EmbeddingModel:      "text-embedding-3-small",
@@ -1419,7 +1490,7 @@ func TestSearchNoTestsStaleCleanupRetainsSharedTestVectors(t *testing.T) {
 	embedder := &countingEmbedder{}
 	opts := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		IndexOnly:           true,
 		EmbeddingModel:      "text-embedding-3-small",
@@ -1467,7 +1538,7 @@ func TestSearchScopeStaleCleanupRetainsSharedOutOfScopeVectors(t *testing.T) {
 	embedder := &countingEmbedder{}
 	opts := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		IndexOnly:           true,
 		EmbeddingModel:      "text-embedding-3-small",
@@ -1516,7 +1587,7 @@ func TestSearchReindexClearsIndexWhenAllFilesIgnored(t *testing.T) {
 	embedder := &countingEmbedder{}
 	opts := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		IndexOnly:           true,
 		EmbeddingModel:      "text-embedding-3-small",
@@ -1567,7 +1638,7 @@ func TestSearchReplaysLegacyScopedHistoryWithoutFilters(t *testing.T) {
 	embedder := &recordingEmbedder{}
 	opts := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		Scope:               []string{"pkg"},
 		EmbeddingModel:      "text-embedding-3-small",
@@ -1629,7 +1700,7 @@ func TestSearchFramesQueryForImplementationRetrieval(t *testing.T) {
 	embedder := &recordingEmbedder{}
 	opts := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -1680,7 +1751,7 @@ func TestSearchCachesQueryByFinalCappedEmbeddingInput(t *testing.T) {
 	embedder := &recordingEmbedder{}
 	opts := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingMaxInput:   24,
 		EmbeddingModel:      "text-embedding-3-small",
@@ -1735,7 +1806,7 @@ func TestSearchNoTestsFiltersCommonTestPaths(t *testing.T) {
 
 	out, err := Run(t.Context(), fakeEmbedder{}, Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               20,
 		NoTests:             true,
 		EmbeddingModel:      "text-embedding-3-small",
@@ -1811,7 +1882,7 @@ func TestSearchNoTestsWithCodeAndScope(t *testing.T) {
 
 	out, err := Run(t.Context(), fakeEmbedder{}, Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               20,
 		CodeOnly:            true,
 		NoTests:             true,
@@ -1841,7 +1912,7 @@ func TestRevisionSearchNoTestsFiltersCommittedTestPaths(t *testing.T) {
 	out, err := Run(t.Context(), fakeEmbedder{}, Options{
 		Root:                root,
 		Rev:                 rev,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		NoTests:             true,
 		EmbeddingModel:      "text-embedding-3-small",
@@ -1869,7 +1940,7 @@ func TestRevisionSearchReusesFilesystemEmbeddings(t *testing.T) {
 	opts := Options{
 		Root:                root,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -1913,7 +1984,7 @@ func TestFilesystemAndRevisionIndexesShareVectorPayload(t *testing.T) {
 	opts := Options{
 		Root:                root,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -1947,7 +2018,7 @@ func TestChangedRevisionAppendsOnlyNewSharedVectorPayload(t *testing.T) {
 		Root:                root,
 		Rev:                 firstRev,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -1976,7 +2047,7 @@ func TestLegacyLocalVectorIndexMigratesWithoutEmbedding(t *testing.T) {
 	opts := Options{
 		Root:                root,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -2049,7 +2120,7 @@ func TestCorruptSharedVectorIsRebuilt(t *testing.T) {
 	opts := Options{
 		Root:                root,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -2099,7 +2170,7 @@ func TestFailedIndexWriteInvalidatesSnapshot(t *testing.T) {
 	opts := Options{
 		Root:                root,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -2154,7 +2225,7 @@ func TestReindexAppendsSharedVectorWithoutChangingOtherSnapshot(t *testing.T) {
 		Root:                root,
 		Rev:                 rev,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -2280,7 +2351,7 @@ func TestRevisionSearchReusesUnchangedChunksFromAnotherRevision(t *testing.T) {
 		Root:                root,
 		Rev:                 firstRev,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -2314,7 +2385,7 @@ func TestParallelRevisionSearchesReuseSharedFilesystemIndex(t *testing.T) {
 	base := Options{
 		Root:                root,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -2369,7 +2440,7 @@ func TestSearchDoesNotReuseChunkEmbeddingAfterInputCapChanges(t *testing.T) {
 	opts := Options{
 		Root:                root,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingMaxInput:   200,
 		EmbeddingModel:      "text-embedding-3-small",
@@ -2435,7 +2506,7 @@ func TestSearchRebuildsLegacyVectorWithoutEmbeddingInputHash(t *testing.T) {
 	opts := Options{
 		Root:                root,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -2492,7 +2563,7 @@ func TestFilteredSearchPreservesLegacySharedRecords(t *testing.T) {
 			opts := Options{
 				Root:                root,
 				IndexOnly:           true,
-				MinRelatedness:      DefaultMinRelatedness,
+				MinScore:            DefaultMinScore,
 				Limit:               DefaultLimit,
 				EmbeddingModel:      "text-embedding-3-small",
 				EmbeddingDimensions: 3,
@@ -2541,7 +2612,7 @@ func TestRevisionReindexDoesNotReuseFilesystemEmbeddings(t *testing.T) {
 	opts := Options{
 		Root:                root,
 		IndexOnly:           true,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -2571,7 +2642,7 @@ func TestRemoteSearchUsesCachedCommittedTree(t *testing.T) {
 	out, err := Run(t.Context(), fakeEmbedder{}, Options{
 		Root:                root,
 		Remote:              remote,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "test-model",
 		EmbeddingDimensions: 3,
@@ -2671,7 +2742,7 @@ func TestRemoteEmbeddingFailurePublishesNoMetadataOrIndex(t *testing.T) {
 	}
 	_, err = Run(t.Context(), failOnPathEmbedder("fail.go"), Options{
 		Root: t.TempDir(), Remote: remote, IndexOnly: true,
-		MinRelatedness: DefaultMinRelatedness, Limit: DefaultLimit,
+		MinScore: DefaultMinScore, Limit: DefaultLimit,
 		EmbeddingModel: "test-model", EmbeddingDimensions: 3,
 	}, "")
 	if err == nil {
@@ -2783,7 +2854,7 @@ func TestRemoteSearchReindexFetchesUpdatedHead(t *testing.T) {
 	opts := Options{
 		Root:                root,
 		Remote:              remote,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "test-model",
 		EmbeddingDimensions: 3,
@@ -2822,7 +2893,7 @@ func TestRemoteSearchExplicitRevCanResolveParent(t *testing.T) {
 		Root:                t.TempDir(),
 		Remote:              remote,
 		Rev:                 "HEAD~1",
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "test-model",
 		EmbeddingDimensions: 3,
@@ -2848,7 +2919,7 @@ func TestRemoteSearchCanResolveParentAfterShallowHeadCache(t *testing.T) {
 	baseOpts := Options{
 		Root:                root,
 		Remote:              remote,
-		MinRelatedness:      DefaultMinRelatedness,
+		MinScore:            DefaultMinScore,
 		Limit:               DefaultLimit,
 		EmbeddingModel:      "test-model",
 		EmbeddingDimensions: 3,
@@ -2898,7 +2969,7 @@ func TestRevisionSearchUsesIgnoreFilesFromResolvedCommit(t *testing.T) {
 	out, err := Run(t.Context(), fakeEmbedder{}, Options{
 		Root:                root,
 		Rev:                 rev,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -2961,7 +3032,7 @@ func TestRemoteStreamAppliesTargetTreeFilters(t *testing.T) {
 
 	out, err := Run(t.Context(), fakeEmbedder{}, Options{
 		Root: t.TempDir(), Remote: remote, CodeOnly: true, NoTests: true,
-		IndexOnly: true, MinRelatedness: DefaultMinRelatedness, Limit: DefaultLimit,
+		IndexOnly: true, MinScore: DefaultMinScore, Limit: DefaultLimit,
 		EmbeddingModel: "test-model", EmbeddingDimensions: 3,
 	}, "")
 	if err != nil {
@@ -2983,7 +3054,7 @@ func TestRemoteStreamAppliesTargetTreeFilters(t *testing.T) {
 
 	cached, err := Run(t.Context(), &countingEmbedder{}, Options{
 		Root: t.TempDir(), Remote: remote, CodeOnly: true, NoTests: true,
-		IndexOnly: true, MinRelatedness: DefaultMinRelatedness, Limit: DefaultLimit,
+		IndexOnly: true, MinScore: DefaultMinScore, Limit: DefaultLimit,
 		EmbeddingModel: "test-model", EmbeddingDimensions: 3,
 	}, "")
 	if err != nil {
@@ -3121,7 +3192,7 @@ func TestRevisionSearchScopeKeepsRootIgnoreRules(t *testing.T) {
 		Root:                root,
 		Rev:                 rev,
 		Scope:               []string{"foo"},
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -3147,7 +3218,7 @@ func TestRevisionSearchScopeIncludesHiddenDir(t *testing.T) {
 		Root:                root,
 		Rev:                 rev,
 		Scope:               []string{".foo"},
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -3174,7 +3245,7 @@ func TestRevisionSearchScopeUsesIgnoreRulesInsideHiddenDir(t *testing.T) {
 		Root:                root,
 		Rev:                 rev,
 		Scope:               []string{".foo"},
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -3235,7 +3306,7 @@ func TestRevisionSearchScopeSkipsOutOfScopeBlobsBeforeLoading(t *testing.T) {
 		Root:                root,
 		Rev:                 rev,
 		Scope:               []string{"foo"},
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -3520,7 +3591,7 @@ func TestReindexIgnoresExistingVectors(t *testing.T) {
 
 	opts := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -3558,7 +3629,7 @@ func TestSearchIgnoresStaleIndexVersion(t *testing.T) {
 	embedder := &countingEmbedder{}
 	opts := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -3601,7 +3672,7 @@ func TestSearchPersistsIndexAfterAllEmbeddingsSucceed(t *testing.T) {
 
 	opts := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		IndexOnly:           true,
 		EmbeddingModel:      "text-embedding-3-small",
@@ -3645,7 +3716,7 @@ func TestParallelSearchWaitsForIndexWriterAndReusesIndex(t *testing.T) {
 			embedder := newBlockingEmbedder()
 			opts := Options{
 				Root:                root,
-				MinRelatedness:      0.70,
+				MinScore:            0.70,
 				Limit:               10,
 				IndexOnly:           true,
 				Reindex:             tt.reindex,
@@ -3707,7 +3778,7 @@ func TestParallelSearchWaitsForQueryEmbeddingAndReusesHistory(t *testing.T) {
 
 	opts := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		IndexOnly:           true,
 		EmbeddingModel:      "text-embedding-3-small",
@@ -3774,7 +3845,7 @@ func TestSearchBatchesIndexEmbeddingsAndCachesExactQueryEmbedding(t *testing.T) 
 	embedder := &countingEmbedder{}
 	opts := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -3821,7 +3892,7 @@ func TestSearchReportsProgressWhenIndexNeedsUpdate(t *testing.T) {
 	writeFile(t, root, "first.txt", "alpha\n")
 	opts := Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -3858,7 +3929,7 @@ func TestSearchProgressErrorStopsBeforeEmbedding(t *testing.T) {
 
 	_, err := Run(t.Context(), embedder, Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -3885,7 +3956,7 @@ func TestSearchSplitsRejectedEmbeddingBatches(t *testing.T) {
 	embedder := &splittingEmbedder{}
 	out, err := Run(t.Context(), embedder, Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
@@ -3909,7 +3980,7 @@ func TestSearchTruncatesEmbeddingInputs(t *testing.T) {
 
 	out, err := Run(t.Context(), lengthLimitEmbedder{max: 32}, Options{
 		Root:                root,
-		MinRelatedness:      0.70,
+		MinScore:            0.70,
 		Limit:               10,
 		EmbeddingModel:      "text-embedding-3-small",
 		EmbeddingDimensions: 3,
