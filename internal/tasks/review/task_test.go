@@ -111,6 +111,39 @@ func TestValidateRejectsMissingOrNullReportArrays(t *testing.T) {
 	}
 }
 
+func TestStrictJSONBoundaryRejectsExtensionsAndTrailingValues(t *testing.T) {
+	t.Parallel()
+
+	type envelope struct {
+		Summary string `json:"summary"`
+	}
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{name: "positive", input: `{"summary":"ok"}`, want: "ok"},
+		{name: "compatible case collision", input: `{"SUMMARY":"ok"}`, want: "ok"},
+		{name: "negative unknown future field", input: `{"summary":"ok","future":true}`, wantErr: true},
+		{name: "malformed", input: `{"summary":`, wantErr: true},
+		{name: "trailing value", input: `{"summary":"ok"} {}`, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got envelope
+			err := decodeStrict(tt.input, &got)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("decode error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err == nil && got.Summary != tt.want {
+				t.Fatalf("summary = %q, want %q", got.Summary, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateRepositoryRejectsMissingAndOutOfRangeEvidence(t *testing.T) {
 	t.Parallel()
 

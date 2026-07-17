@@ -45,6 +45,30 @@ func TestRequestInstructionsRequireReadFilePathProvenance(t *testing.T) {
 	}
 }
 
+func TestProviderUsageJSONBoundaryRemainsForwardCompatible(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{name: "positive usage", raw: `{"usage":{"input_tokens":42}}`, want: 42},
+		{name: "unknown future fields", raw: `{"future_top":true,"usage":{"input_tokens":42,"future_nested":"ok"}}`, want: 42},
+		{name: "unrelated key collision", raw: `{"usage":{"input_tokens_backup":99}}`},
+		{name: "negative wrong type", raw: `{"usage":{"input_tokens":"42"}}`},
+		{name: "malformed", raw: `{"usage":`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := responseInputTokens(openai.Response{RawJSON: tt.raw}); got != tt.want {
+				t.Fatalf("input tokens = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func (f *fakeClient) CreateResponse(_ context.Context, request openai.Request) (openai.Response, error) {
 	f.requests = append(f.requests, request)
 	for _, event := range f.streamEvents {

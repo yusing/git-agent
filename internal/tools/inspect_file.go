@@ -3,7 +3,6 @@ package tools
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -15,6 +14,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/bytedance/sonic"
 	"github.com/yusing/git-agent/internal/gitctx"
 )
 
@@ -251,7 +251,7 @@ func jsonOutline(content []byte) ([]fileOutlineEntry, bool) {
 		return nil, false
 	}
 	var value any
-	if err := json.Unmarshal(content, &value); err != nil {
+	if err := sonic.ConfigStd.Unmarshal(content, &value); err != nil {
 		return nil, false
 	}
 	var outline outlineBuilder

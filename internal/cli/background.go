@@ -2,13 +2,13 @@ package cli
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
+	"github.com/bytedance/sonic"
 	backgroundtask "github.com/yusing/git-agent/internal/background"
 )
 
@@ -90,7 +90,7 @@ func startDetachedProcess(executable string, args, env []string) (detachedLaunch
 }
 
 func writeDetachedLaunch(writer io.Writer, launch detachedLaunch) error {
-	if err := json.NewEncoder(writer).Encode(launch); err != nil {
+	if err := sonic.ConfigStd.NewEncoder(writer).Encode(launch); err != nil {
 		return fmt.Errorf("encode detached task launch metadata: %w", err)
 	}
 	return nil
@@ -109,7 +109,7 @@ func readDetachedLaunch(reader io.Reader) (detachedLaunch, error) {
 	if len(trimmed) > 0 && trimmed[0] != '{' {
 		return detachedLaunch{}, fmt.Errorf("detached task startup: %q", string(trimmed))
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder := sonic.ConfigStd.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var launch detachedLaunch
 	if err := decoder.Decode(&launch); err != nil {

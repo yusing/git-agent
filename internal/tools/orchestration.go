@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +13,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/bytedance/sonic"
 )
 
 const OrchestrationArtifactToolName = "read_orchestration_artifact"
@@ -41,7 +42,7 @@ func LoadOrchestrationManifest(path string) (*OrchestrationManifest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read orchestration artifact manifest: %w", err)
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder := sonic.ConfigStd.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var manifest OrchestrationManifest
 	if err := decoder.Decode(&manifest); err != nil {
@@ -87,7 +88,7 @@ func (m *OrchestrationManifest) Inventory() string {
 	for i, artifact := range m.Artifacts {
 		artifacts[i] = inventoryArtifact{artifact.ID, artifact.Size, artifact.SHA256}
 	}
-	data, _ := json.Marshal(struct {
+	data, _ := sonic.ConfigStd.Marshal(struct {
 		Digest    string              `json:"manifest_sha256"`
 		Artifacts []inventoryArtifact `json:"artifacts"`
 	}{m.Digest, artifacts})

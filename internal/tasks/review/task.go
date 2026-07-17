@@ -1,7 +1,6 @@
 package review
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"maps"
@@ -494,7 +493,7 @@ func readerHasLine(reader io.Reader, wanted int) (bool, error) {
 }
 
 func decodeStrict(text string, target any) error {
-	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder := sonic.ConfigStd.NewDecoder(strings.NewReader(text))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return fmt.Errorf("invalid report JSON: %w", err)

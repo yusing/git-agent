@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -10,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/bytedance/sonic"
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/openai"
@@ -362,7 +362,7 @@ func (r *OpenAIRunner) writeRuntimeStatus(phase string, step, maxSteps, toolCall
 }
 
 func estimateRequestTokens(request openai.Request) int {
-	data, _ := json.Marshal(struct {
+	data, _ := sonic.ConfigStd.Marshal(struct {
 		Instructions       string                      `json:"instructions"`
 		Input              []openai.Item               `json:"input"`
 		Tools              []openai.ToolSpec           `json:"tools"`
@@ -381,7 +381,7 @@ func responseInputTokens(response openai.Response) int {
 			InputTokens int `json:"input_tokens"`
 		} `json:"usage"`
 	}
-	if json.Unmarshal([]byte(response.RawJSON), &payload) != nil {
+	if sonic.ConfigStd.UnmarshalFromString(response.RawJSON, &payload) != nil {
 		return 0
 	}
 	return payload.Usage.InputTokens
@@ -390,8 +390,8 @@ func responseInputTokens(response openai.Response) int {
 func toolCallSignature(call openai.ToolCall) string {
 	arguments := strings.TrimSpace(call.Arguments)
 	var value any
-	if json.Unmarshal([]byte(arguments), &value) == nil {
-		if canonical, err := json.Marshal(value); err == nil {
+	if sonic.ConfigStd.UnmarshalFromString(arguments, &value) == nil {
+		if canonical, err := sonic.ConfigStd.Marshal(value); err == nil {
 			arguments = string(canonical)
 		}
 	}

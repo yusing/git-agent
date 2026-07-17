@@ -4,7 +4,6 @@ package doccmd
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +14,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/bytedance/sonic"
 )
 
 const (
@@ -342,7 +343,7 @@ func (c *Commands) runContext7(ctx context.Context, args []string) (Output, erro
 		return Output{}, err
 	}
 	var data any
-	decoder := json.NewDecoder(strings.NewReader(result.Stdout))
+	decoder := sonic.ConfigStd.NewDecoder(strings.NewReader(result.Stdout))
 	decoder.UseNumber()
 	if err := decoder.Decode(&data); err != nil {
 		return Output{}, fmt.Errorf("Context7 returned malformed JSON: %w", err)

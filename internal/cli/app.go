@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -349,7 +348,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		return errors.Join(err, traceErr)
 	}
 	var report map[string]any
-	decoder := json.NewDecoder(strings.NewReader(result.Text))
+	decoder := sonic.ConfigStd.NewDecoder(strings.NewReader(result.Text))
 	decoder.UseNumber()
 	if err := decoder.Decode(&report); err != nil {
 		return fmt.Errorf("decode validated review report: %w", err)

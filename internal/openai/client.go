@@ -3,7 +3,6 @@ package openai
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -728,7 +727,7 @@ func (r Request) toSDKParams() (responses.ResponseNewParams, error) {
 func (i Item) toSDKParam() (responses.ResponseInputItemUnionParam, error) {
 	if i.RawJSON != "" {
 		var param responses.ResponseInputItemUnionParam
-		if err := json.Unmarshal([]byte(i.RawJSON), &param); err != nil {
+		if err := sonic.ConfigStd.UnmarshalFromString(i.RawJSON, &param); err != nil {
 			return responses.ResponseInputItemUnionParam{}, fmt.Errorf("decode continuation item %q: %w", i.Type, err)
 		}
 		return param, nil

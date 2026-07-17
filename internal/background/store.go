@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bytedance/sonic"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/textutil"
 	"github.com/yusing/git-agent/internal/trace"
@@ -163,7 +163,7 @@ func diagnosticObject(value any) (map[string]any, bool) {
 		return nil, false
 	}
 	var mapped map[string]any
-	if json.Unmarshal([]byte(text), &mapped) != nil {
+	if sonic.ConfigStd.UnmarshalFromString(text, &mapped) != nil {
 		return nil, false
 	}
 	return mapped, true
@@ -173,7 +173,7 @@ func diagnosticJSON(value any) []byte {
 	if text, ok := value.(string); ok {
 		return []byte(text)
 	}
-	data, _ := json.Marshal(value)
+	data, _ := sonic.ConfigStd.Marshal(value)
 	return data
 }
 
@@ -183,7 +183,7 @@ func diagnosticPayloadIdentity(raw []byte) map[string]any {
 }
 
 func marshalDiagnosticSummary(summary map[string]any) (string, bool) {
-	data, err := json.Marshal(summary)
+	data, err := sonic.ConfigStd.Marshal(summary)
 	if err != nil {
 		return "", true
 	}
@@ -462,7 +462,7 @@ func (s *Store) readPath(path, id string) (Record, error) {
 		return Record{}, fmt.Errorf("open background task %s: %w", id, err)
 	}
 	defer file.Close()
-	decoder := json.NewDecoder(io.LimitReader(file, maxRecordBytes))
+	decoder := sonic.ConfigStd.NewDecoder(io.LimitReader(file, maxRecordBytes))
 	decoder.UseNumber()
 	decoder.DisallowUnknownFields()
 	var record Record
@@ -587,7 +587,7 @@ func (s *Store) writeRecord(path string, record Record) error {
 		_ = temporary.Close()
 		return fmt.Errorf("secure background task temporary record: %w", err)
 	}
-	encoder := json.NewEncoder(temporary)
+	encoder := sonic.ConfigStd.NewEncoder(temporary)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(record); err != nil {
 		_ = temporary.Close()
