@@ -1666,8 +1666,10 @@ Output rules:
 - no fences
 - no explanations
 - the model is not asked to hard-wrap body paragraphs; output shaping treats
-  nonblank body lines inside the same paragraph as soft wraps, reflows them to
-  the target width (72 characters), and preserves blank lines between paragraphs
+  nonblank body lines inside the same paragraph as soft wraps, reflows prose to
+  the target width (72 characters), preserves blank lines between paragraphs,
+  and locally wraps list items, blockquotes, and Git trailers with their
+  structural prefixes intact
 - long unbreakable tokens such as URLs may exceed the limit only when they
   cannot be wrapped safely
 

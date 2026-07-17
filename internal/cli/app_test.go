@@ -23,6 +23,7 @@ import (
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/metadata"
 	"github.com/yusing/git-agent/internal/openai"
+	"github.com/yusing/git-agent/internal/tasks/commitmsg"
 	searchtask "github.com/yusing/git-agent/internal/tasks/search"
 )
 
@@ -1686,6 +1687,45 @@ func TestCommitStreamsTraceThenPrintsGitSummary(t *testing.T) {
 	}
 	if got := gitOutputString(t, repoDir, "log", "-1", "--pretty=%s"); strings.TrimSpace(got) != "feat: add app" {
 		t.Fatalf("commit subject = %q", got)
+	}
+}
+
+func TestCommitShapesLongBodyListsWithoutProviderRepair(t *testing.T) {
+	repoDir := initRepo(t)
+	t.Chdir(repoDir)
+	message := `feat(review): add previous HEAD context to diff prompts
+
+- Include a best-effort HEAD-versus-parent context pack for diff-mode reviews while keeping current changes authoritative.
+- Broaden simplify guidance to audit confirmed overengineering and remove the five-source limit from external lookup summaries.
+- Align patch statistics with file changes, bound diff reads, and add coverage for previous-HEAD context and simplification prompts.`
+	server := commitMessageServer(t, message)
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "test-model")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"commit"}); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+
+	events, _ := decodeCommitOutput(t, stdout.Bytes())
+	final := eventValue(t, events, "final")
+	if got := final["repair_calls"]; got != "0" {
+		t.Fatalf("repair calls = %#v, want 0", got)
+	}
+	shaped := strings.TrimSpace(gitOutputString(t, repoDir, "log", "-1", "--pretty=%B"))
+	if errs := commitmsg.Validate(commitmsg.ModeNormal, shaped); len(errs) > 0 {
+		t.Fatalf("final text failed validation: %v\n%s", errs, shaped)
+	}
+	if shaped == message {
+		t.Fatalf("committed message was not locally wrapped:\n%s", shaped)
 	}
 }
 

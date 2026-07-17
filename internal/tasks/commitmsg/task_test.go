@@ -631,6 +631,26 @@ Verify configured providers before persisting the response.
 	}
 }
 
+func TestShapeWrapsLongBodyListsBeforeValidation(t *testing.T) {
+	t.Parallel()
+
+	output := `feat(review): add previous HEAD context to diff prompts
+
+- Include a best-effort HEAD-versus-parent context pack for diff-mode reviews while keeping current changes authoritative.
+- Broaden simplify guidance to audit confirmed overengineering and remove the five-source limit from external lookup summaries.
+- Align patch statistics with file changes, bound diff reads, and add coverage for previous-HEAD context and simplification prompts.`
+
+	got := Shape(output)
+	if errs := Validate(ModeNormal, got); len(errs) > 0 {
+		t.Fatalf("locally shapeable body required validation repair: %v\n%s", errs, got)
+	}
+	for i, line := range strings.Split(got, "\n")[2:] {
+		if len(line) > 72 {
+			t.Fatalf("body line %d is %d bytes, want <= 72: %q", i+1, len(line), line)
+		}
+	}
+}
+
 func TestShapeRepairsWrappedSubjectContinuation(t *testing.T) {
 	t.Parallel()
 
