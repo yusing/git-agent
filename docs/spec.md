@@ -372,6 +372,12 @@ matching `*.lock`, `*.lockfile`, `bun.lock`, `bun.lockb`,
 `Pipfile.lock`, `pixi.lock`, `Podfile.lock`, `poetry.lock`, `pnpm-lock.yaml`,
 `pubspec.lock`, `renv.lock`, `shard.lock`, `stack.yaml.lock`, `uv.lock`,
 `yarn.lock`, `*.bazel`, `*.sha256`, `LICENSE`, `COPYING`, or `NOTICE`.
+Accepted chunk bodies are snapshotted in an owner-only operating-system
+temporary file for the duration of the search. Embedding batches, hybrid body
+scoring, and final excerpts read from that immutable snapshot rather than
+rereading possibly changed source files or retaining the complete body corpus
+in the Go heap. The snapshot is removed when the search ends and can require
+temporary disk space proportional to the accepted source text.
 `.gitagentignore` uses the same pattern syntax and per-directory base behavior
 as `.gitignore`, but only affects `git-agent search` discovery.
 `--scope` accepts comma-separated file or directory paths relative to the

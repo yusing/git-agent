@@ -52,7 +52,7 @@ type remoteReadyResult struct {
 	SkippedFiles []SkippedFile
 }
 
-func discoverCachedRemoteFiles(repo *gitctx.Repository, rev string, scope []string, visit func(fileContent)) (SkippedCounts, []SkippedFile, error) {
+func discoverCachedRemoteFiles(repo *gitctx.Repository, rev string, scope []string, visit func(fileContent) error) (SkippedCounts, []SkippedFile, error) {
 	commit, err := repo.ResolveCommit(rev)
 	if err != nil {
 		return SkippedCounts{}, nil, fmt.Errorf("resolve cached commit: %w", err)
@@ -123,7 +123,9 @@ func discoverCachedRemoteFiles(repo *gitctx.Repository, rev string, scope []stri
 			skippedFiles = append(skippedFiles, SkippedFile{Path: path, Reason: reason})
 			continue
 		}
-		visit(fileContent{path: path, blob: entry.hash.String(), source: "revision", text: text, size: size})
+		if err := visit(fileContent{path: path, blob: entry.hash.String(), source: "revision", text: text, size: size}); err != nil {
+			return skipped, skippedFiles, err
+		}
 	}
 	return skipped, skippedFiles, nil
 }

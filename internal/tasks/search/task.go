@@ -246,6 +246,8 @@ type Chunk struct {
 	embeddingInputHash  string
 	embeddingInputBytes int
 	embeddingMaxChars   int
+	body                chunkBodyRef
+	pathOnly            bool
 }
 
 type fileContent struct {
@@ -447,6 +449,14 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		}
 	}
 
+	chunkBodies, err := newChunkBodyStore()
+	if err != nil {
+		return fail(err)
+	}
+	defer func() {
+		err = errors.Join(err, chunkBodies.close())
+	}()
+
 	var currentKeys map[string]bool
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
@@ -458,7 +468,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	var embeddedChunks int
 	var embeddedDone int
 	if selection.remoteFiles != nil {
-		streamResult, streamErr := indexRemoteFileStream(selection.remoteFiles.ctx, client, selection.remoteFiles.Files, selection.metadataDir, selection.indexDir, opts, filters.Code)
+		streamResult, streamErr := indexRemoteFileStream(selection.remoteFiles.ctx, client, selection.remoteFiles.Files, selection.metadataDir, selection.indexDir, opts, filters.Code, chunkBodies)
 		if streamErr != nil {
 			if selection.remoteFiles.ctx.Err() != nil {
 				if _, readyErr := selection.remoteFiles.Wait(); readyErr != nil {
@@ -483,7 +493,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		skipped = readyResult.Skipped
 		skippedFiles = readyResult.SkippedFiles
 	} else {
-		builder := newSearchChunkBuilder(opts, filters.Code)
+		builder := newSearchChunkBuilder(opts, filters.Code, chunkBodies)
 		if source.Mode == "remote" {
 			skipped, skippedFiles, err = discoverCachedRemoteFiles(selection.repo, resolvedRev, scope, builder.add)
 		} else if source.Mode == "revision" {
@@ -615,12 +625,17 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 				}
 				group.Go(func() error {
 					clientStarted := time.Now()
-					texts := chunkEmbeddingInputs(missing[batch.start:batch.end], opts.EmbeddingMaxInput)
-					response, err := embedBatch(groupCtx, client, opts, texts)
-					clientElapsed := time.Since(clientStarted)
+					texts, err := chunkEmbeddingInputs(missing[batch.start:batch.end], opts.EmbeddingMaxInput)
+					var response openai.EmbeddingResponse
 					if err != nil {
-						err = fmt.Errorf("embedding request failed: %w", err)
+						err = fmt.Errorf("prepare embedding inputs: %w", err)
+					} else {
+						response, err = embedBatch(groupCtx, client, opts, texts)
+						if err != nil {
+							err = fmt.Errorf("embedding request failed: %w", err)
+						}
 					}
+					clientElapsed := time.Since(clientStarted)
 					results <- embeddingBatchResult{embeddingBatch: batch, response: response, clientElapsed: clientElapsed, err: err}
 					return err
 				})
@@ -846,12 +861,20 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	if filters.NoTests {
 		skipScoreChunk = func(chunk Chunk) bool { return isTestPath(chunk.Path) }
 	}
-	scored := scoreChunks(chunks, vectors, queryVector, query, opts.MinScore, skipScoreChunk)
+	scored, err := scoreChunks(chunks, vectors, queryVector, query, opts.MinScore, skipScoreChunk)
+	if err != nil {
+		mark("score")
+		return fail(err)
+	}
 	sortResults(scored)
 	if len(scored) > opts.Limit {
 		scored = scored[:opts.Limit]
 	}
-	results := renderResults(scored)
+	results, err := renderResults(scored)
+	if err != nil {
+		mark("score")
+		return fail(err)
+	}
 	mark("score")
 
 	replay := Replay{Mode: "none"}
@@ -949,7 +972,7 @@ func selectedSyncTarget(opts Options, selection indexSelection) (indexSyncTarget
 	return target, true
 }
 
-func discoverFilesystemFiles(root string, scope []string, debugLog func(string, ...slog.Attr), visit func(fileContent)) (SkippedCounts, []SkippedFile, error) {
+func discoverFilesystemFiles(root string, scope []string, debugLog func(string, ...slog.Attr), visit func(fileContent) error) (SkippedCounts, []SkippedFile, error) {
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
 	skip := func(path, reason string) {
@@ -1038,19 +1061,18 @@ func discoverFilesystemFiles(root string, scope []string, debugLog func(string, 
 			skip(rel, "non_text")
 			return nil
 		}
-		visit(fileContent{
+		return visit(fileContent{
 			path:   rel,
 			source: "filesystem",
 			text:   string(data),
 			size:   info.Size(),
 			mtime:  info.ModTime(),
 		})
-		return nil
 	})
 	return skipped, skippedFiles, err
 }
 
-func discoverRevisionFiles(repo *gitctx.Repository, rev string, scope []string, debugLog func(string, ...slog.Attr), visit func(fileContent)) (SkippedCounts, []SkippedFile, error) {
+func discoverRevisionFiles(repo *gitctx.Repository, rev string, scope []string, debugLog func(string, ...slog.Attr), visit func(fileContent) error) (SkippedCounts, []SkippedFile, error) {
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
 	skip := func(path, reason string) {
@@ -1080,14 +1102,13 @@ func discoverRevisionFiles(repo *gitctx.Repository, rev string, scope []string, 
 			skip(filepath.ToSlash(file.Path), "non_text")
 			return nil
 		}
-		visit(fileContent{
+		return visit(fileContent{
 			path:   filepath.ToSlash(file.Path),
 			blob:   file.Blob,
 			source: "revision",
 			text:   file.Text,
 			size:   file.Size,
 		})
-		return nil
 	}, func(file gitctx.CommitFileSkip) error {
 		if !pathInScope(file.Path, scope) {
 			return nil
@@ -1120,29 +1141,35 @@ type searchChunkBuild struct {
 }
 
 type searchChunkBuilder struct {
-	built    searchChunkBuild
-	opts     Options
-	codeOnly bool
+	built     searchChunkBuild
+	opts      Options
+	codeOnly  bool
+	bodyStore *chunkBodyStore
 }
 
-func newSearchChunkBuilder(opts Options, codeOnly bool) *searchChunkBuilder {
-	builder := &searchChunkBuilder{opts: opts, codeOnly: codeOnly}
+func newSearchChunkBuilder(opts Options, codeOnly bool, bodyStore *chunkBodyStore) *searchChunkBuilder {
+	builder := &searchChunkBuilder{opts: opts, codeOnly: codeOnly, bodyStore: bodyStore}
 	if codeOnly {
 		builder.built.currentVectorKeys = make(map[string]bool)
 	}
 	return builder
 }
 
-func (b *searchChunkBuilder) add(file fileContent) {
+func (b *searchChunkBuilder) add(file fileContent) error {
 	fileChunks := chunksForFile(file)
-	prepareChunkEmbeddingMetadata(fileChunks, b.opts.EmbeddingMaxInput)
 	if b.codeOnly {
 		addCurrentVectorKeys(b.built.currentVectorKeys, fileChunks, b.opts)
+	} else {
+		prepareChunkEmbeddingMetadata(fileChunks, b.opts.EmbeddingMaxInput)
 	}
 	if !b.codeOnly || isCodePath(file.path) {
+		if err := b.bodyStore.spill(file.text, fileChunks); err != nil {
+			return err
+		}
 		b.built.fileCount++
 		b.built.chunks = append(b.built.chunks, fileChunks...)
 	}
+	return nil
 }
 
 func (b *searchChunkBuilder) finish() searchChunkBuild {
@@ -1295,6 +1322,7 @@ func newPathOnlyChunk(file fileContent) Chunk {
 		ContentHash:   hex.EncodeToString(hash[:]),
 		MTimeUnixNano: 0,
 		text:          "",
+		pathOnly:      true,
 	}
 	return chunk
 }
@@ -1893,7 +1921,7 @@ type remoteStreamIndexResult struct {
 	dimensions        int
 }
 
-func indexRemoteFileStream(ctx context.Context, client openai.EmbeddingClient, files <-chan fileContent, metadataDir, indexDir string, opts Options, codeOnly bool) (remoteStreamIndexResult, error) {
+func indexRemoteFileStream(ctx context.Context, client openai.EmbeddingClient, files <-chan fileContent, metadataDir, indexDir string, opts Options, codeOnly bool, bodyStore *chunkBodyStore) (remoteStreamIndexResult, error) {
 	result := remoteStreamIndexResult{vectors: make(map[string][]float64)}
 	if codeOnly {
 		result.currentVectorKeys = make(map[string]bool)
@@ -1949,7 +1977,11 @@ func indexRemoteFileStream(ctx context.Context, client openai.EmbeddingClient, f
 		if embedStarted.IsZero() {
 			embedStarted = time.Now()
 		}
-		batchVectors, dimensions, err := embedTexts(ctx, client, opts, chunkEmbeddingInputs(batch, opts.EmbeddingMaxInput))
+		texts, err := chunkEmbeddingInputs(batch, opts.EmbeddingMaxInput)
+		if err != nil {
+			return fmt.Errorf("prepare embedding inputs: %w", err)
+		}
+		batchVectors, dimensions, err := embedTexts(ctx, client, opts, texts)
 		if err != nil {
 			return err
 		}
@@ -1994,7 +2026,7 @@ func indexRemoteFileStream(ctx context.Context, client openai.EmbeddingClient, f
 			return nil
 		}
 		if err := embed(pending[:end]); err != nil {
-			return fmt.Errorf("embedding request failed: %w", err)
+			return err
 		}
 		pending = slices.Delete(pending, 0, end)
 		return nil
@@ -2002,12 +2034,16 @@ func indexRemoteFileStream(ctx context.Context, client openai.EmbeddingClient, f
 
 	for file := range files {
 		fileChunks := chunksForFile(file)
-		prepareChunkEmbeddingMetadata(fileChunks, opts.EmbeddingMaxInput)
 		if codeOnly {
 			addCurrentVectorKeys(result.currentVectorKeys, fileChunks, opts)
+		} else {
+			prepareChunkEmbeddingMetadata(fileChunks, opts.EmbeddingMaxInput)
 		}
 		if codeOnly && !isCodePath(file.path) {
 			continue
+		}
+		if err := bodyStore.spill(file.text, fileChunks); err != nil {
+			return result, err
 		}
 		result.fileCount++
 		for i := range fileChunks {
@@ -2164,12 +2200,16 @@ func embeddingConcurrency(opts Options) int {
 	return min(max(runtime.GOMAXPROCS(0), 1), 8)
 }
 
-func chunkEmbeddingInputs(chunks []Chunk, maxChars int) []string {
+func chunkEmbeddingInputs(chunks []Chunk, maxChars int) ([]string, error) {
 	texts := make([]string, len(chunks))
 	for i, chunk := range chunks {
-		texts[i] = cappedEmbeddingInput(chunkEmbeddingText(chunk), maxChars)
+		body, err := loadChunkBody(chunk)
+		if err != nil {
+			return nil, err
+		}
+		texts[i] = cappedEmbeddingInput(embeddingText(chunk, body), maxChars)
 	}
-	return texts
+	return texts, nil
 }
 
 func totalChunkEmbeddingInputChars(chunks []Chunk, maxChars int) int {
@@ -2313,7 +2353,7 @@ type scoreCandidate struct {
 	textLength int
 }
 
-func scoreChunks(chunks []Chunk, vectors map[string][]float64, queryVector []float64, query string, minScore float64, skipChunk func(Chunk) bool) []scoredChunk {
+func scoreChunks(chunks []Chunk, vectors map[string][]float64, queryVector []float64, query string, minScore float64, skipChunk func(Chunk) bool) ([]scoredChunk, error) {
 	queryTerms := uniqueSearchTerms(searchTerms(query))
 	querySet := searchTermSet(queryTerms)
 	candidates := make([]scoreCandidate, 0, len(chunks))
@@ -2338,7 +2378,11 @@ func scoreChunks(chunks []Chunk, vectors map[string][]float64, queryVector []flo
 			scored = append(scored, item)
 			continue
 		}
-		textTerms := searchTerms(chunk.text)
+		body, err := loadChunkBody(chunk)
+		if err != nil {
+			return nil, err
+		}
+		textTerms := searchTerms(body)
 		candidates = append(candidates, scoreCandidate{
 			item:       item,
 			textTerms:  matchingTermCounts(textTerms, querySet),
@@ -2346,7 +2390,7 @@ func scoreChunks(chunks []Chunk, vectors map[string][]float64, queryVector []flo
 		})
 	}
 	if len(queryTerms) == 0 {
-		return slices.DeleteFunc(scored, func(item scoredChunk) bool { return item.rank < minScore })
+		return slices.DeleteFunc(scored, func(item scoredChunk) bool { return item.rank < minScore }), nil
 	}
 	scoreLexicalCandidates(candidates, queryTerms)
 	scored = make([]scoredChunk, 0, len(candidates))
@@ -2355,7 +2399,7 @@ func scoreChunks(chunks []Chunk, vectors map[string][]float64, queryVector []flo
 			scored = append(scored, candidate.item)
 		}
 	}
-	return scored
+	return scored, nil
 }
 
 func scoreLexicalCandidates(candidates []scoreCandidate, queryTerms []string) {
@@ -2459,10 +2503,14 @@ func sortResults(results []scoredChunk) {
 	})
 }
 
-func renderResults(scored []scoredChunk) []Result {
+func renderResults(scored []scoredChunk) ([]Result, error) {
 	results := make([]Result, len(scored))
 	for i, item := range scored {
 		chunk := item.chunk
+		body, err := loadChunkBody(chunk)
+		if err != nil {
+			return nil, err
+		}
 		results[i] = Result{
 			Relatedness: item.rank,
 			Range:       fmt.Sprintf("%s:%d-%d", chunk.Path, chunk.StartLine, chunk.EndLine),
@@ -2476,12 +2524,12 @@ func renderResults(scored []scoredChunk) []Result {
 				Lexical:           item.lexicalScore,
 				Rank:              item.rank,
 			},
-			Excerpt:   excerpt(chunk),
+			Excerpt:   excerptText(chunk, body),
 			Path:      chunk.Path,
 			StartLine: chunk.StartLine,
 		}
 	}
-	return results
+	return results, nil
 }
 
 func replayFor(dir, normalized, queryTextHash string, queryVector []float64, model string, dimensions int, source Source, root, resolvedRev string, filters Filters) Replay {
@@ -2588,11 +2636,11 @@ func resultIDs(results []scoredChunk) []string {
 	return ids
 }
 
-func excerpt(chunk Chunk) string {
-	if chunk.text == "" {
+func excerptText(chunk Chunk, text string) string {
+	if text == "" {
 		return ""
 	}
-	lines := splitLines(chunk.text)
+	lines := splitLines(text)
 	if len(lines) > maxExcerptLines {
 		lines = lines[:maxExcerptLines]
 	}
@@ -2614,8 +2662,7 @@ func excerpt(chunk Chunk) string {
 }
 
 func splitLines(text string) []string {
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.TrimSuffix(text, "\n")
+	text = normalizeChunkBody(text)
 	if text == "" {
 		return []string{""}
 	}

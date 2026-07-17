@@ -1061,7 +1061,10 @@ func TestScoreChunksFiltersFinalHybridScore(t *testing.T) {
 		"lexical-collision": {0, 1},
 	}
 
-	all := scoreChunks(chunks, vectors, []float64{1, 0}, "target", 1e-9, nil)
+	all, err := scoreChunks(chunks, vectors, []float64{1, 0}, "target", 1e-9, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var lexicalCollision scoredChunk
 	for _, item := range all {
 		if item.chunk.ID == "lexical-collision" {
@@ -1073,7 +1076,10 @@ func TestScoreChunksFiltersFinalHybridScore(t *testing.T) {
 		t.Fatalf("lexical collision = %#v, want hybrid lift", lexicalCollision)
 	}
 
-	got := scoreChunks(chunks, vectors, []float64{1, 0}, "target", lexicalCollision.rank, nil)
+	got, err := scoreChunks(chunks, vectors, []float64{1, 0}, "target", lexicalCollision.rank, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(got) != 2 || got[0].chunk.ID != "positive" || got[1].chunk.ID != "lexical-collision" {
 		t.Fatalf("scored chunks = %#v, want positive and hybrid lexical matches", got)
 	}
@@ -1083,11 +1089,14 @@ func TestScoreChunksFiltersFinalHybridScore(t *testing.T) {
 }
 
 func TestRenderResultsUsesFinalHybridScore(t *testing.T) {
-	results := renderResults([]scoredChunk{{
+	results, err := renderResults([]scoredChunk{{
 		chunk:             Chunk{Path: "target.txt", StartLine: 1, EndLine: 1},
 		vectorRelatedness: 0.76,
 		rank:              0.99,
 	}})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if len(results) != 1 {
 		t.Fatalf("results = %#v", results)
@@ -3161,11 +3170,20 @@ func TestRemoteStreamEmbeddingStartsBeforePackCompletes(t *testing.T) {
 	done := make(chan error, 1)
 	metadataDir := t.TempDir()
 	indexDir := filepath.Join(t.TempDir(), "index")
+	bodyStore, err := newChunkBodyStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := bodyStore.close(); err != nil {
+			t.Error(err)
+		}
+	})
 	go func() {
 		_, err := indexRemoteFileStream(t.Context(), embedder, files, metadataDir, indexDir, Options{
 			Reindex: true, EmbeddingModel: "test-model", EmbeddingDimensions: 3,
 			EmbeddingBatchInputs: 1, EmbeddingConcurrency: 1,
-		}, false)
+		}, false, bodyStore)
 		done <- err
 	}()
 	go func() {
@@ -3213,8 +3231,9 @@ func TestCachedRemoteTreatsFilteredBlobAsOversized(t *testing.T) {
 		t.Fatal(err)
 	}
 	var files []fileContent
-	skipped, skippedFiles, err := discoverCachedRemoteFiles(wrapped, rev, nil, func(file fileContent) {
+	skipped, skippedFiles, err := discoverCachedRemoteFiles(wrapped, rev, nil, func(file fileContent) error {
 		files = append(files, file)
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -3517,8 +3536,9 @@ func TestDiscoverFilesystemFilesClassifiesSkipReasons(t *testing.T) {
 	writeFile(t, root, "binary.dat", "release\x00notes\n")
 
 	var files []fileContent
-	skipped, skippedFiles, err := discoverFilesystemFiles(root, nil, func(string, ...slog.Attr) {}, func(file fileContent) {
+	skipped, skippedFiles, err := discoverFilesystemFiles(root, nil, func(string, ...slog.Attr) {}, func(file fileContent) error {
 		files = append(files, file)
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -3547,8 +3567,18 @@ func TestDiscoverFilesystemFilesClassifiesSkipReasons(t *testing.T) {
 	}
 }
 
-func TestDiscoverFilesystemFilesDoesNotRetainAcceptedBodies(t *testing.T) {
+func TestFilesystemChunkingDoesNotRetainAcceptedBodies(t *testing.T) {
 	root := t.TempDir()
+	bodyStore, err := newChunkBodyStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := bodyStore.close(); err != nil {
+			t.Error(err)
+		}
+	})
+	builder := newSearchChunkBuilder(Options{}, false, bodyStore)
 	const fileCount = 16
 	content := strings.Repeat("x", 900<<10)
 	for i := range fileCount {
@@ -3561,7 +3591,7 @@ func TestDiscoverFilesystemFilesDoesNotRetainAcceptedBodies(t *testing.T) {
 
 	visited := 0
 	var maxRetained uint64
-	_, _, err := discoverFilesystemFiles(root, nil, func(string, ...slog.Attr) {}, func(file fileContent) {
+	_, _, err = discoverFilesystemFiles(root, nil, func(string, ...slog.Attr) {}, func(file fileContent) error {
 		wantPath := fmt.Sprintf("%02d.futuretext", visited)
 		if file.path != wantPath {
 			t.Fatalf("visited path = %q, want %q", file.path, wantPath)
@@ -3573,12 +3603,17 @@ func TestDiscoverFilesystemFilesDoesNotRetainAcceptedBodies(t *testing.T) {
 		if current.HeapAlloc > baseline.HeapAlloc {
 			maxRetained = max(maxRetained, current.HeapAlloc-baseline.HeapAlloc)
 		}
+		return builder.add(file)
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if visited != fileCount {
 		t.Fatalf("visited files = %d, want %d", visited, fileCount)
+	}
+	built := builder.finish()
+	if len(built.chunks) != fileCount {
+		t.Fatalf("retained chunks = %d, want %d", len(built.chunks), fileCount)
 	}
 	if maxRetained > 6*MaxFileBytes {
 		t.Fatalf("discovery retained %d bytes across callbacks, want at most %d", maxRetained, 6*MaxFileBytes)
@@ -3647,6 +3682,15 @@ func TestSearchChunkBuilderTransfersFileBodyOwnership(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			bodyStore, err := newChunkBodyStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := bodyStore.close(); err != nil {
+					t.Error(err)
+				}
+			})
 			file := fileContent{
 				path:   tt.path,
 				source: "filesystem",
@@ -3656,8 +3700,10 @@ func TestSearchChunkBuilderTransfersFileBodyOwnership(t *testing.T) {
 			builder := newSearchChunkBuilder(Options{
 				EmbeddingModel:      "test-model",
 				EmbeddingDimensions: 3,
-			}, tt.codeOnly)
-			builder.add(file)
+			}, tt.codeOnly, bodyStore)
+			if err := builder.add(file); err != nil {
+				t.Fatal(err)
+			}
 			built := builder.finish()
 			if built.fileCount != tt.wantFiles {
 				t.Fatalf("selected files = %d, want %d", built.fileCount, tt.wantFiles)
@@ -3671,14 +3717,132 @@ func TestSearchChunkBuilderTransfersFileBodyOwnership(t *testing.T) {
 			if tt.wantChunks == 0 {
 				return
 			}
-			if tt.wantChunkText != "" && built.chunks[0].text != tt.wantChunkText {
-				t.Fatalf("chunk text = %q, want %q", built.chunks[0].text, tt.wantChunkText)
+			chunkText, err := loadChunkBody(built.chunks[0])
+			if err != nil {
+				t.Fatal(err)
 			}
-			embeddingInput := chunkEmbeddingText(built.chunks[0])
+			if tt.wantChunkText != "" && chunkText != tt.wantChunkText {
+				t.Fatalf("chunk text = %q, want %q", chunkText, tt.wantChunkText)
+			}
+			embeddingInput := embeddingText(built.chunks[0], chunkText)
 			if !strings.Contains(embeddingInput, tt.wantEmbeddingSub) {
 				t.Fatalf("embedding input %q does not contain %q", embeddingInput, tt.wantEmbeddingSub)
 			}
 		})
+	}
+}
+
+func TestChunkBodyStorePreservesChunkSnapshots(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		text string
+	}{
+		{name: "normalized newlines", path: "notes.txt", text: "first\r\nsecond\r\n"},
+		{name: "overlapping chunks", path: "large.futuretext", text: strings.Repeat("line\n", chunkLines+20)},
+		{name: "empty body", path: "empty.txt", text: "\n"},
+		{name: "generated path only", path: "generated.go", text: "// Code generated. DO NOT EDIT.\npackage generated\n\nvar Secret = 1\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := fileContent{path: tt.path, source: "filesystem", text: tt.text, size: int64(len(tt.text))}
+			want := chunksForFile(file)
+			bodyStore, err := newChunkBodyStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := bodyStore.close(); err != nil {
+					t.Error(err)
+				}
+			})
+			builder := newSearchChunkBuilder(Options{}, false, bodyStore)
+			if err := builder.add(file); err != nil {
+				t.Fatal(err)
+			}
+			got := builder.finish().chunks
+			if len(got) != len(want) {
+				t.Fatalf("chunks = %d, want %d", len(got), len(want))
+			}
+			for i := range got {
+				if got[i].text != "" {
+					t.Fatalf("chunk %d retained %d body bytes in memory", i, len(got[i].text))
+				}
+				body, err := loadChunkBody(got[i])
+				if err != nil {
+					t.Fatal(err)
+				}
+				if body != want[i].text {
+					t.Fatalf("chunk %d body = %q, want %q", i, body, want[i].text)
+				}
+				if got[i].ContentHash != want[i].ContentHash {
+					t.Fatalf("chunk %d content hash = %q, want %q", i, got[i].ContentHash, want[i].ContentHash)
+				}
+				if gotHash, wantHash := chunkEmbeddingInputHash(got[i], 0), chunkEmbeddingInputHash(want[i], 0); gotHash != wantHash {
+					t.Fatalf("chunk %d embedding hash = %q, want %q", i, gotHash, wantHash)
+				}
+			}
+			wantStoreSize := int64(len(normalizeChunkBody(tt.text)))
+			hasBody := false
+			for i := range got {
+				hasBody = hasBody || !got[i].pathOnly
+			}
+			if !hasBody {
+				wantStoreSize = 0
+			}
+			if bodyStore.size != wantStoreSize {
+				t.Fatalf("snapshot bytes = %d, want %d", bodyStore.size, wantStoreSize)
+			}
+		})
+	}
+}
+
+func TestChunkBodyStoreReadFailureIsReturned(t *testing.T) {
+	bodyStore, err := newChunkBodyStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	builder := newSearchChunkBuilder(Options{}, false, bodyStore)
+	if err := builder.add(fileContent{path: "future.txt", source: "filesystem", text: "future body"}); err != nil {
+		t.Fatal(err)
+	}
+	chunk := builder.finish().chunks[0]
+	if err := bodyStore.close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadChunkBody(chunk); err == nil {
+		t.Fatal("loadChunkBody succeeded after the snapshot store closed")
+	}
+}
+
+func TestRemoteIndexLabelsChunkSnapshotReadFailure(t *testing.T) {
+	bodyStore, err := newChunkBodyStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := make(chan fileContent, 1)
+	files <- fileContent{path: "future.txt", source: "revision", text: "future body", size: 11}
+	close(files)
+	_, err = indexRemoteFileStream(t.Context(), &countingEmbedder{}, files, t.TempDir(), filepath.Join(t.TempDir(), "index"), Options{
+		Reindex:                true,
+		EmbeddingModel:         "test-model",
+		EmbeddingDimensions:    3,
+		EmbeddingBatchInputs:   1,
+		EmbeddingConcurrency:   1,
+		EmbeddingBatchMaxChars: DefaultEmbeddingBatchMaxChars,
+		ProgressLog: func(Progress) error {
+			return bodyStore.close()
+		},
+	}, false, bodyStore)
+	if err == nil {
+		t.Fatal("indexRemoteFileStream succeeded after the snapshot store closed")
+	}
+	if !strings.Contains(err.Error(), "prepare embedding inputs") {
+		t.Fatalf("error = %q, want local input preparation label", err)
+	}
+	if strings.Contains(err.Error(), "embedding request failed") {
+		t.Fatalf("error = %q, local snapshot failure mislabeled as provider failure", err)
 	}
 }
 
@@ -3799,8 +3963,8 @@ func TestGeneratedGoFilesUsePathOnlyChunks(t *testing.T) {
 		t.Fatalf("chunks = %d, want one path-only chunk", len(chunks))
 	}
 	chunk := chunks[0]
-	if chunk.text != "" || excerpt(chunk) != "" {
-		t.Fatalf("generated content leaked into chunk text/excerpt: text=%q excerpt=%q", chunk.text, excerpt(chunk))
+	if chunk.text != "" || excerptText(chunk, chunk.text) != "" {
+		t.Fatalf("generated content leaked into chunk text/excerpt: text=%q excerpt=%q", chunk.text, excerptText(chunk, chunk.text))
 	}
 	embeddingInput := chunkEmbeddingText(chunk)
 	if !strings.Contains(embeddingInput, "path: internal/web/uc/types/user_profile.go") {
