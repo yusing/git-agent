@@ -239,11 +239,13 @@ type Chunk struct {
 	EndLine       int     `json:"end_line"`
 	Symbol        *Symbol `json:"symbol"`
 	ContentHash   string  `json:"content_hash"`
-	EmbeddingText string  `json:"embedding_text"`
 	Size          int64   `json:"size,omitempty"`
 	MTimeUnixNano int64   `json:"mtime_unix_nano,omitempty"`
 
-	text string
+	text                string
+	embeddingInputHash  string
+	embeddingInputBytes int
+	embeddingMaxChars   int
 }
 
 type fileContent struct {
@@ -446,7 +448,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 
 	var files []fileContent
-	var discoveredFiles []fileContent
+	var currentKeys map[string]bool
 	var skipped SkippedCounts
 	var skippedFiles []SkippedFile
 	var chunks []Chunk
@@ -467,8 +469,8 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 			}
 			return fail(streamErr)
 		}
-		files = streamResult.files
-		discoveredFiles = streamResult.discoveredFiles
+		diag.Files = streamResult.fileCount
+		currentKeys = streamResult.currentVectorKeys
 		chunks = streamResult.chunks
 		vectors = streamResult.vectors
 		records = streamResult.records
@@ -488,29 +490,26 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		if err != nil {
 			return fail(err)
 		}
-		discoveredFiles = files
 	} else if source.Mode == "revision" {
 		files, skipped, skippedFiles, err = discoverRevisionFiles(selection.repo, resolvedRev, scope, debugLog)
 		if err != nil {
 			return fail(err)
 		}
-		discoveredFiles = files
 	} else {
 		files, skipped, skippedFiles, err = discoverFilesystemFiles(root, scope, debugLog)
 		if err != nil {
 			return fail(err)
 		}
-		discoveredFiles = files
 	}
 	diag.SkippedFiles = skippedFiles
-	if filters.Code && !streamIndexed {
-		files = filterCodeFiles(files)
-	}
-	diag.Files = len(files)
 	mark("discover")
 
 	if !streamIndexed {
-		chunks = buildChunks(files)
+		built := buildSearchChunks(files, opts, filters.Code)
+		diag.Files = built.fileCount
+		chunks = built.chunks
+		currentKeys = built.currentVectorKeys
+		files = nil
 	}
 	diag.Chunks = len(chunks)
 	diag.EmbeddedChunks = embeddedChunks
@@ -580,7 +579,6 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		batchInputs := embeddingBatchInputs(opts)
 		batchMaxChars := embeddingBatchMaxChars(opts)
 		concurrency := embeddingConcurrency(opts)
-		texts := cappedEmbeddingInputs(missingEmbeddingTexts(missing), opts.EmbeddingMaxInput)
 		type embeddingBatch struct {
 			start int
 			end   int
@@ -593,7 +591,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		}
 		var batches []embeddingBatch
 		for start := 0; start < len(missing); {
-			end := embeddingBatchEnd(texts, start, batchInputs, batchMaxChars)
+			end := chunkEmbeddingBatchEnd(missing, start, batchInputs, batchMaxChars, opts.EmbeddingMaxInput)
 			batches = append(batches, embeddingBatch{start: start, end: end})
 			start = end
 		}
@@ -626,7 +624,8 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 				}
 				group.Go(func() error {
 					clientStarted := time.Now()
-					response, err := embedBatch(groupCtx, client, opts, texts[batch.start:batch.end])
+					texts := chunkEmbeddingInputs(missing[batch.start:batch.end], opts.EmbeddingMaxInput)
+					response, err := embedBatch(groupCtx, client, opts, texts)
 					clientElapsed := time.Since(clientStarted)
 					if err != nil {
 						err = fmt.Errorf("embedding request failed: %w", err)
@@ -727,7 +726,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		}
 	}
 	if filters.Code {
-		records = preserveSharedFilteredRecords(records, oldVectors, discoveredFiles, opts)
+		records = preserveSharedFilteredRecords(records, oldVectors, currentKeys, opts)
 	}
 	shouldSave := len(missing) > 0 || embeddedChunks > 0 || reuseOpts.Reindex
 	if !shouldSave {
@@ -1127,25 +1126,35 @@ func discoverRevisionFiles(repo *gitctx.Repository, rev string, scope []string, 
 	return files, skipped, skippedFiles, err
 }
 
-func filterCodeFiles(files []fileContent) []fileContent {
-	filtered := make([]fileContent, 0, len(files))
-	for _, file := range files {
-		if isCodePath(file.path) {
-			filtered = append(filtered, file)
-		}
-	}
-	return filtered
+type searchChunkBuild struct {
+	chunks            []Chunk
+	fileCount         int
+	currentVectorKeys map[string]bool
 }
 
-func buildChunks(files []fileContent) []Chunk {
-	var chunks []Chunk
-	for _, file := range files {
-		chunks = append(chunks, chunksForFile(file)...)
+func buildSearchChunks(files []fileContent, opts Options, codeOnly bool) searchChunkBuild {
+	var built searchChunkBuild
+	if codeOnly {
+		built.currentVectorKeys = make(map[string]bool)
 	}
-	for i := range chunks {
-		chunks[i].ID = fmt.Sprintf("c%06d", i+1)
+	for i := range files {
+		fileChunks := chunksForFile(files[i])
+		prepareChunkEmbeddingMetadata(fileChunks, opts.EmbeddingMaxInput)
+		if codeOnly {
+			addCurrentVectorKeys(built.currentVectorKeys, fileChunks, opts)
+		}
+		if !codeOnly || isCodePath(files[i].path) {
+			built.fileCount++
+			built.chunks = append(built.chunks, fileChunks...)
+		}
+		// Chunks now own every retained body. Release discovery's raw-file
+		// reference before processing the next bounded file.
+		files[i].text = ""
 	}
-	return chunks
+	for i := range built.chunks {
+		built.chunks[i].ID = fmt.Sprintf("c%06d", i+1)
+	}
+	return built
 }
 
 func chunksForFile(file fileContent) []Chunk {
@@ -1278,7 +1287,6 @@ func newChunk(file fileContent, lines []string, start, end int, symbol *Symbol) 
 		MTimeUnixNano: file.mtime.UnixNano(),
 		text:          text,
 	}
-	chunk.EmbeddingText = embeddingText(chunk, text)
 	return chunk
 }
 
@@ -1293,8 +1301,29 @@ func newPathOnlyChunk(file fileContent) Chunk {
 		MTimeUnixNano: 0,
 		text:          "",
 	}
-	chunk.EmbeddingText = embeddingText(chunk, "")
 	return chunk
+}
+
+func chunkEmbeddingText(chunk Chunk) string {
+	return embeddingText(chunk, chunk.text)
+}
+
+func prepareChunkEmbeddingMetadata(chunks []Chunk, maxChars int) {
+	for i := range chunks {
+		prepareChunkEmbedding(&chunks[i], maxChars)
+	}
+}
+
+func prepareChunkEmbedding(chunk *Chunk, maxChars int) {
+	maxChars = normalizedEmbeddingMaxChars(maxChars)
+	if chunk.embeddingInputHash != "" && chunk.embeddingMaxChars == maxChars {
+		return
+	}
+	input := cappedEmbeddingInput(chunkEmbeddingText(*chunk), maxChars)
+	sum := sha256.Sum256([]byte(input))
+	chunk.embeddingInputHash = hex.EncodeToString(sum[:])
+	chunk.embeddingInputBytes = len(input)
+	chunk.embeddingMaxChars = maxChars
 }
 
 func hasDoNotEditHeading(file *ast.File) bool {
@@ -1549,7 +1578,7 @@ func loadExactReuseVectors(ctx context.Context, metadataDir, targetDir string, c
 	}
 	targetHashes := make(map[string]bool, len(chunks))
 	for _, chunk := range chunks {
-		targetHashes[embeddingInputHash(chunk.EmbeddingText, opts.EmbeddingMaxInput)] = true
+		targetHashes[chunkEmbeddingInputHash(chunk, opts.EmbeddingMaxInput)] = true
 	}
 	byHash := make(map[string]vectorRecord, len(targetHashes))
 	sharedHashes := make(map[string]bool, len(targetHashes))
@@ -1673,7 +1702,7 @@ func reuseVectors(chunks []Chunk, old []vectorRecord, opts Options) (map[string]
 	}
 	var records []vectorRecord
 	for _, chunk := range chunks {
-		record, ok := byKey[embeddingInputHash(chunk.EmbeddingText, opts.EmbeddingMaxInput)]
+		record, ok := byKey[chunkEmbeddingInputHash(chunk, opts.EmbeddingMaxInput)]
 		if !ok {
 			continue
 		}
@@ -1693,7 +1722,7 @@ func preservableVectorRecord(record vectorRecord, opts Options) bool {
 		len(record.Vector) == record.Dimensions
 }
 
-func preserveSharedFilteredRecords(records, old []vectorRecord, files []fileContent, opts Options) []vectorRecord {
+func preserveSharedFilteredRecords(records, old []vectorRecord, current map[string]bool, opts Options) []vectorRecord {
 	if len(old) == 0 {
 		return records
 	}
@@ -1703,7 +1732,6 @@ func preserveSharedFilteredRecords(records, old []vectorRecord, files []fileCont
 	for _, record := range records {
 		existingLocations[cacheRecordLocationKey(record)] = true
 	}
-	var current map[string]bool
 	for _, record := range old {
 		if !preservableVectorRecord(record, opts) {
 			continue
@@ -1713,9 +1741,6 @@ func preserveSharedFilteredRecords(records, old []vectorRecord, files []fileCont
 			continue
 		}
 		key := cacheRecordKey(record)
-		if current == nil {
-			current = currentVectorKeys(files, opts)
-		}
 		if !current[key] {
 			continue
 		}
@@ -1744,15 +1769,12 @@ func scopedRecordsChanged(records, old []vectorRecord, scope []string, opts Opti
 	return oldScoped != len(records)
 }
 
-func currentVectorKeys(files []fileContent, opts Options) map[string]bool {
-	keys := map[string]bool{}
-	for _, file := range files {
-		for _, chunk := range chunksForFile(file) {
-			keys[chunkCacheRecordKey(chunk, opts)] = true
-			keys[legacyChunkCacheRecordKey(chunk, opts)] = true
-		}
+func addCurrentVectorKeys(keys map[string]bool, chunks []Chunk, opts Options) {
+	prepareChunkEmbeddingMetadata(chunks, opts.EmbeddingMaxInput)
+	for _, chunk := range chunks {
+		keys[chunkCacheRecordKey(chunk, opts)] = true
+		keys[legacyChunkCacheRecordKey(chunk, opts)] = true
 	}
-	return keys
 }
 
 func preserveOutOfScopeRevisionRecords(records, old []vectorRecord, scope []string, opts Options) []vectorRecord {
@@ -1843,13 +1865,16 @@ func currentFilesystemVectorKeys(root string, ignoreMatcher gitignore.Matcher, r
 	if err != nil || isBinary(data) || !isIndexableText(path, data) {
 		return nil
 	}
-	return currentVectorKeys([]fileContent{{
+	chunks := chunksForFile(fileContent{
 		path:   path,
 		source: "filesystem",
 		text:   string(data),
 		size:   info.Size(),
 		mtime:  info.ModTime(),
-	}}, opts)
+	})
+	keys := map[string]bool{}
+	addCurrentVectorKeys(keys, chunks, opts)
+	return keys
 }
 
 func missingChunks(chunks []Chunk, vectors map[string][]float64) []Chunk {
@@ -1862,27 +1887,22 @@ func missingChunks(chunks []Chunk, vectors map[string][]float64) []Chunk {
 	return missing
 }
 
-func missingEmbeddingTexts(chunks []Chunk) []string {
-	texts := make([]string, len(chunks))
-	for i, chunk := range chunks {
-		texts[i] = chunk.EmbeddingText
-	}
-	return texts
-}
-
 type remoteStreamIndexResult struct {
-	files           []fileContent
-	discoveredFiles []fileContent
-	chunks          []Chunk
-	vectors         map[string][]float64
-	records         []vectorRecord
-	reused          int
-	embedded        int
-	dimensions      int
+	fileCount         int
+	currentVectorKeys map[string]bool
+	chunks            []Chunk
+	vectors           map[string][]float64
+	records           []vectorRecord
+	reused            int
+	embedded          int
+	dimensions        int
 }
 
 func indexRemoteFileStream(ctx context.Context, client openai.EmbeddingClient, files <-chan fileContent, metadataDir, indexDir string, opts Options, codeOnly bool) (remoteStreamIndexResult, error) {
 	result := remoteStreamIndexResult{vectors: make(map[string][]float64)}
+	if codeOnly {
+		result.currentVectorKeys = make(map[string]bool)
+	}
 	var current []vectorRecord
 	if !opts.Reindex {
 		if err := withIndexLock(ctx, indexDir, func() error {
@@ -1934,7 +1954,7 @@ func indexRemoteFileStream(ctx context.Context, client openai.EmbeddingClient, f
 		if embedStarted.IsZero() {
 			embedStarted = time.Now()
 		}
-		batchVectors, dimensions, err := embedTexts(ctx, client, opts, missingEmbeddingTexts(batch))
+		batchVectors, dimensions, err := embedTexts(ctx, client, opts, chunkEmbeddingInputs(batch, opts.EmbeddingMaxInput))
 		if err != nil {
 			return err
 		}
@@ -1965,11 +1985,11 @@ func indexRemoteFileStream(ctx context.Context, client openai.EmbeddingClient, f
 		if len(pending) == 0 {
 			return nil
 		}
-		texts := cappedEmbeddingInputs(missingEmbeddingTexts(pending), opts.EmbeddingMaxInput)
 		end := 0
 		for end < len(pending) {
-			next := embeddingBatchEnd(texts, end, batchInputs, batchChars)
-			complete := final || next < len(pending) || next-end == batchInputs || totalTextChars(texts[end:next]) >= batchChars
+			next := chunkEmbeddingBatchEnd(pending, end, batchInputs, batchChars, opts.EmbeddingMaxInput)
+			complete := final || next < len(pending) || next-end == batchInputs ||
+				totalChunkEmbeddingInputChars(pending[end:next], opts.EmbeddingMaxInput) >= batchChars
 			if !complete {
 				break
 			}
@@ -1986,19 +2006,22 @@ func indexRemoteFileStream(ctx context.Context, client openai.EmbeddingClient, f
 	}
 
 	for file := range files {
-		result.discoveredFiles = append(result.discoveredFiles, file)
+		fileChunks := chunksForFile(file)
+		prepareChunkEmbeddingMetadata(fileChunks, opts.EmbeddingMaxInput)
+		if codeOnly {
+			addCurrentVectorKeys(result.currentVectorKeys, fileChunks, opts)
+		}
 		if codeOnly && !isCodePath(file.path) {
 			continue
 		}
-		result.files = append(result.files, file)
-		fileChunks := chunksForFile(file)
+		result.fileCount++
 		for i := range fileChunks {
 			fileChunks[i].ID = fmt.Sprintf("c%06d", len(result.chunks)+i+1)
 		}
 		result.chunks = append(result.chunks, fileChunks...)
 		candidates = append(candidates, fileChunks...)
-		candidateTexts := cappedEmbeddingInputs(missingEmbeddingTexts(candidates), opts.EmbeddingMaxInput)
-		if !earlyWindowSent && (len(candidates) >= batchWindow || totalTextChars(candidateTexts) >= batchChars*embeddingConcurrency(opts)) {
+		if !earlyWindowSent && (len(candidates) >= batchWindow ||
+			totalChunkEmbeddingInputChars(candidates, opts.EmbeddingMaxInput) >= batchChars*embeddingConcurrency(opts)) {
 			embeddedBefore := result.embedded
 			if err := reuseCandidates(); err != nil {
 				return result, err
@@ -2027,7 +2050,6 @@ func totalTextChars(texts []string) int {
 }
 
 func embedTexts(ctx context.Context, client openai.EmbeddingClient, opts Options, texts []string) ([][]float64, int, error) {
-	texts = cappedEmbeddingInputs(texts, opts.EmbeddingMaxInput)
 	type batch struct {
 		start int
 		end   int
@@ -2077,18 +2099,8 @@ func embedTexts(ctx context.Context, client openai.EmbeddingClient, opts Options
 	return vectors, dimensions, nil
 }
 
-func cappedEmbeddingInputs(texts []string, maxChars int) []string {
-	inputs := make([]string, len(texts))
-	for i, text := range texts {
-		inputs[i] = cappedEmbeddingInput(text, maxChars)
-	}
-	return inputs
-}
-
 func cappedEmbeddingInput(text string, maxChars int) string {
-	if maxChars == 0 {
-		maxChars = DefaultEmbeddingMaxInputChars
-	}
+	maxChars = normalizedEmbeddingMaxChars(maxChars)
 	chars := 0
 	for i := range text {
 		if chars == maxChars {
@@ -2097,6 +2109,13 @@ func cappedEmbeddingInput(text string, maxChars int) string {
 		chars++
 	}
 	return text
+}
+
+func normalizedEmbeddingMaxChars(maxChars int) int {
+	if maxChars == 0 {
+		return DefaultEmbeddingMaxInputChars
+	}
+	return maxChars
 }
 
 func embedBatch(ctx context.Context, client openai.EmbeddingClient, opts Options, texts []string) (openai.EmbeddingResponse, error) {
@@ -2148,6 +2167,45 @@ func embeddingConcurrency(opts Options) int {
 		return opts.EmbeddingConcurrency
 	}
 	return min(max(runtime.GOMAXPROCS(0), 1), 8)
+}
+
+func chunkEmbeddingInputs(chunks []Chunk, maxChars int) []string {
+	texts := make([]string, len(chunks))
+	for i, chunk := range chunks {
+		texts[i] = cappedEmbeddingInput(chunkEmbeddingText(chunk), maxChars)
+	}
+	return texts
+}
+
+func totalChunkEmbeddingInputChars(chunks []Chunk, maxChars int) int {
+	total := 0
+	for _, chunk := range chunks {
+		total += chunkEmbeddingInputBytes(chunk, maxChars)
+	}
+	return total
+}
+
+func chunkEmbeddingBatchEnd(chunks []Chunk, start, maxInputs, maxChars, maxInputChars int) int {
+	if maxInputs < 1 {
+		maxInputs = DefaultEmbeddingBatchInputs
+	}
+	if maxChars < 1 {
+		maxChars = DefaultEmbeddingBatchMaxChars
+	}
+	end := start
+	chars := 0
+	for end < len(chunks) && end-start < maxInputs {
+		nextChars := chunkEmbeddingInputBytes(chunks[end], maxInputChars)
+		if end > start && chars+nextChars > maxChars {
+			break
+		}
+		chars += nextChars
+		end++
+	}
+	if end == start {
+		return start + 1
+	}
+	return end
 }
 
 func embeddingBatchEnd(texts []string, start, maxInputs, maxChars int) int {
@@ -2974,7 +3032,7 @@ func vectorRecordForChunk(chunk Chunk, vector []float64, opts Options) vectorRec
 		StartLine:          chunk.StartLine,
 		EndLine:            chunk.EndLine,
 		ContentHash:        chunk.ContentHash,
-		EmbeddingInputHash: embeddingInputHash(chunk.EmbeddingText, opts.EmbeddingMaxInput),
+		EmbeddingInputHash: chunkEmbeddingInputHash(chunk, opts.EmbeddingMaxInput),
 		EmbeddingModel:     opts.EmbeddingModel,
 		Dimensions:         len(vector),
 		Size:               chunk.Size,
@@ -2988,8 +3046,22 @@ func embeddingInputHash(text string, maxChars int) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func chunkEmbeddingInputHash(chunk Chunk, maxChars int) string {
+	if chunk.embeddingInputHash != "" && chunk.embeddingMaxChars == normalizedEmbeddingMaxChars(maxChars) {
+		return chunk.embeddingInputHash
+	}
+	return embeddingInputHash(chunkEmbeddingText(chunk), maxChars)
+}
+
+func chunkEmbeddingInputBytes(chunk Chunk, maxChars int) int {
+	if chunk.embeddingInputHash != "" && chunk.embeddingMaxChars == normalizedEmbeddingMaxChars(maxChars) {
+		return chunk.embeddingInputBytes
+	}
+	return len(cappedEmbeddingInput(chunkEmbeddingText(chunk), maxChars))
+}
+
 func chunkCacheRecordKey(chunk Chunk, opts Options) string {
-	return chunkCacheRecordKeyWithHash(chunk, opts, embeddingInputHash(chunk.EmbeddingText, opts.EmbeddingMaxInput))
+	return chunkCacheRecordKeyWithHash(chunk, opts, chunkEmbeddingInputHash(chunk, opts.EmbeddingMaxInput))
 }
 
 func legacyChunkCacheRecordKey(chunk Chunk, opts Options) string {

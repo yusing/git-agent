@@ -2502,14 +2502,14 @@ func TestReuseVectorsKeepsDistinctTargetChunkMetadata(t *testing.T) {
 		EmbeddingDimensions: 3,
 	}
 	first := Chunk{
-		ID:            "c000001",
-		Path:          "repeat.txt",
-		Source:        "revision",
-		Blob:          "first-blob",
-		StartLine:     1,
-		EndLine:       1,
-		ContentHash:   "same-content",
-		EmbeddingText: "path: repeat.txt\n\nrepeated text",
+		ID:          "c000001",
+		Path:        "repeat.txt",
+		Source:      "revision",
+		Blob:        "first-blob",
+		StartLine:   1,
+		EndLine:     1,
+		ContentHash: "same-content",
+		text:        "repeated text",
 	}
 	second := first
 	second.ID = "c000002"
@@ -3233,7 +3233,7 @@ func TestExactReuseStopsAfterAllInputsResolve(t *testing.T) {
 		t.Fatal(err)
 	}
 	chunk := chunksForFile(fileContent{path: "ready.go", source: "revision", text: "package ready\n", size: 14})[0]
-	inputHash := embeddingInputHash(chunk.EmbeddingText, 0)
+	inputHash := chunkEmbeddingInputHash(chunk, 0)
 	if err := writeJSON(filepath.Join(firstDir, "manifest.json"), manifest{
 		Version: legacyIndexVersion, EmbeddingModel: "test-model", Dimensions: 3,
 	}); err != nil {
@@ -3541,6 +3541,148 @@ func TestDiscoverFilesystemFilesClassifiesSkipReasons(t *testing.T) {
 	}
 }
 
+func TestBuildSearchChunksTransfersFileBodyOwnership(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		path             string
+		text             string
+		codeOnly         bool
+		wantFiles        int
+		wantChunks       int
+		wantCurrentKeys  bool
+		wantChunkText    string
+		wantEmbeddingSub string
+	}{
+		{
+			name:             "positive selected source",
+			path:             "main.go",
+			text:             "package main\n\nfunc main() {}\n",
+			codeOnly:         true,
+			wantFiles:        1,
+			wantChunks:       2,
+			wantCurrentKeys:  true,
+			wantEmbeddingSub: "path: main.go",
+		},
+		{
+			name:            "negative filtered text retains identity only",
+			path:            "notes.txt",
+			text:            "context compaction instructions\n",
+			codeOnly:        true,
+			wantCurrentKeys: true,
+		},
+		{
+			name:             "malformed go falls back to line chunks",
+			path:             "broken.go",
+			text:             "package broken\nfunc (\n",
+			codeOnly:         true,
+			wantFiles:        1,
+			wantChunks:       1,
+			wantCurrentKeys:  true,
+			wantChunkText:    "package broken\nfunc (",
+			wantEmbeddingSub: "package broken",
+		},
+		{
+			name:            "unrelated extension collision stays filtered",
+			path:            "archive.go.backup",
+			text:            "package collision\n",
+			codeOnly:        true,
+			wantCurrentKeys: true,
+		},
+		{
+			name:             "unknown future text type follows default ownership",
+			path:             "contract.futuretext",
+			text:             "future context format\n",
+			wantFiles:        1,
+			wantChunks:       1,
+			wantChunkText:    "future context format",
+			wantEmbeddingSub: "future context format",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			files := []fileContent{{
+				path:   tt.path,
+				source: "filesystem",
+				text:   tt.text,
+				size:   int64(len(tt.text)),
+			}}
+			built := buildSearchChunks(files, Options{
+				EmbeddingModel:      "test-model",
+				EmbeddingDimensions: 3,
+			}, tt.codeOnly)
+
+			if files[0].text != "" {
+				t.Fatalf("source body retained after chunking: %d bytes", len(files[0].text))
+			}
+			if built.fileCount != tt.wantFiles {
+				t.Fatalf("selected files = %d, want %d", built.fileCount, tt.wantFiles)
+			}
+			if len(built.chunks) != tt.wantChunks {
+				t.Fatalf("chunks = %d, want %d", len(built.chunks), tt.wantChunks)
+			}
+			if got := len(built.currentVectorKeys) > 0; got != tt.wantCurrentKeys {
+				t.Fatalf("current vector keys present = %v, want %v", got, tt.wantCurrentKeys)
+			}
+			if tt.wantChunks == 0 {
+				return
+			}
+			if tt.wantChunkText != "" && built.chunks[0].text != tt.wantChunkText {
+				t.Fatalf("chunk text = %q, want %q", built.chunks[0].text, tt.wantChunkText)
+			}
+			embeddingInput := chunkEmbeddingText(built.chunks[0])
+			if !strings.Contains(embeddingInput, tt.wantEmbeddingSub) {
+				t.Fatalf("embedding input %q does not contain %q", embeddingInput, tt.wantEmbeddingSub)
+			}
+		})
+	}
+}
+
+func TestPreparedChunkEmbeddingPlanningDoesNotAllocate(t *testing.T) {
+	line := strings.Repeat("x", maxEmbeddingLineChars+500)
+	chunks := chunksForFile(fileContent{
+		path:   "large.futuretext",
+		source: "filesystem",
+		text:   strings.Repeat(line+"\n", chunkLines+1),
+	})
+	prepareChunkEmbeddingMetadata(chunks, DefaultEmbeddingMaxInputChars)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		_ = totalChunkEmbeddingInputChars(chunks, DefaultEmbeddingMaxInputChars)
+		_ = chunkEmbeddingBatchEnd(chunks, 0, DefaultEmbeddingBatchInputs, DefaultEmbeddingBatchMaxChars, DefaultEmbeddingMaxInputChars)
+		for _, chunk := range chunks {
+			_ = chunkEmbeddingInputHash(chunk, DefaultEmbeddingMaxInputChars)
+		}
+		runtime.KeepAlive(chunks)
+	})
+	if allocs != 0 {
+		t.Fatalf("prepared embedding planning allocated %.2f objects per run", allocs)
+	}
+}
+
+func BenchmarkPreparedChunkEmbeddingPlanning(b *testing.B) {
+	line := strings.Repeat("x", maxEmbeddingLineChars+500)
+	chunks := chunksForFile(fileContent{
+		path:   "large.futuretext",
+		source: "filesystem",
+		text:   strings.Repeat(line+"\n", chunkLines+1),
+	})
+	prepareChunkEmbeddingMetadata(chunks, DefaultEmbeddingMaxInputChars)
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		_ = totalChunkEmbeddingInputChars(chunks, DefaultEmbeddingMaxInputChars)
+		_ = chunkEmbeddingBatchEnd(chunks, 0, DefaultEmbeddingBatchInputs, DefaultEmbeddingBatchMaxChars, DefaultEmbeddingMaxInputChars)
+		for _, chunk := range chunks {
+			_ = chunkEmbeddingInputHash(chunk, DefaultEmbeddingMaxInputChars)
+		}
+	}
+	runtime.KeepAlive(chunks)
+}
+
 func TestDenseHandwrittenGoFilesKeepSymbolChunks(t *testing.T) {
 	var b strings.Builder
 	b.WriteString("package handwritten\n\n")
@@ -3618,11 +3760,12 @@ func TestGeneratedGoFilesUsePathOnlyChunks(t *testing.T) {
 	if chunk.text != "" || excerpt(chunk) != "" {
 		t.Fatalf("generated content leaked into chunk text/excerpt: text=%q excerpt=%q", chunk.text, excerpt(chunk))
 	}
-	if !strings.Contains(chunk.EmbeddingText, "path: internal/web/uc/types/user_profile.go") {
-		t.Fatalf("embedding text missing path: %q", chunk.EmbeddingText)
+	embeddingInput := chunkEmbeddingText(chunk)
+	if !strings.Contains(embeddingInput, "path: internal/web/uc/types/user_profile.go") {
+		t.Fatalf("embedding text missing path: %q", embeddingInput)
 	}
-	if strings.Contains(chunk.EmbeddingText, "SecretGeneratedField") || strings.Contains(chunk.EmbeddingText, "UserProfile struct") {
-		t.Fatalf("generated content leaked into embedding text: %q", chunk.EmbeddingText)
+	if strings.Contains(embeddingInput, "SecretGeneratedField") || strings.Contains(embeddingInput, "UserProfile struct") {
+		t.Fatalf("generated content leaked into embedding text: %q", embeddingInput)
 	}
 
 	changed := file
@@ -3646,9 +3789,10 @@ func TestEmbeddingTextClampsLongLines(t *testing.T) {
 	if got := chunks[0].text; got != longLine {
 		t.Fatal("chunk text was clamped")
 	}
-	_, body, ok := strings.Cut(chunks[0].EmbeddingText, "\n\n")
+	embeddingInput := chunkEmbeddingText(chunks[0])
+	_, body, ok := strings.Cut(embeddingInput, "\n\n")
 	if !ok {
-		t.Fatalf("embedding text missing metadata separator: %q", chunks[0].EmbeddingText)
+		t.Fatalf("embedding text missing metadata separator: %q", embeddingInput)
 	}
 	if got := len([]rune(body)); got != maxEmbeddingLineChars {
 		t.Fatalf("embedding body chars = %d, want %d", got, maxEmbeddingLineChars)
