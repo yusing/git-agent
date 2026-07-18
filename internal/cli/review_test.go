@@ -301,10 +301,46 @@ func TestReviewHelpDocumentsDefaultMode(t *testing.T) {
 		"select automatic inspection depth: fast, balanced, or thorough (default balanced)",
 		"--max-web-searches <n>",
 		"API-key default 4; ChatGPT auth uncapped",
+		"--help-agent",
+		"show help limited to agent-facing flags",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("help missing %q:\n%s", want, err)
 		}
+	}
+}
+
+func TestCodeReviewAgentHelpOnlyDocumentsAgentFacingFlags(t *testing.T) {
+	for _, command := range []string{"review", "simplify"} {
+		t.Run(command, func(t *testing.T) {
+			err := New().Run(t.Context(), []string{command, "--help-agent"})
+			if err == nil {
+				t.Fatal("expected help error")
+			}
+			help := err.Error()
+			for _, want := range []string{
+				"Usage: git-agent " + command,
+				"--uncommitted  inspect all dirty changes (default)",
+				"--staged       inspect staged changes only",
+				"--codebase     inspect the full codebase",
+				"--depth <fast|balanced|thorough>",
+				"select automatic inspection depth: fast, balanced, or thorough (default balanced)",
+				"--low | --medium | --high | --xhigh",
+				"set reasoning effort (mutually exclusive)",
+			} {
+				if !strings.Contains(help, want) {
+					t.Fatalf("agent help missing %q:\n%s", want, help)
+				}
+			}
+			for _, unwanted := range []string{
+				"--wait", "--model", "--fast", "--max-steps", "--max-web-searches", "--append-prompt",
+				"--dry-run", "--orchestration-artifact", "--debug", "--pprof", "--help-agent",
+			} {
+				if strings.Contains(help, unwanted) {
+					t.Fatalf("agent help unexpectedly contains %q:\n%s", unwanted, help)
+				}
+			}
+		})
 	}
 }
 

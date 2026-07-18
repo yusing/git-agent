@@ -266,6 +266,12 @@ func fishCompletionCases(refs, remotes, paths []string) []fishCompletionCase {
 
 	add("review prompt stops flags", "git-agent review inspect-this --", nil)
 	add("simplify prompt stops flags", "git-agent simplify simplify-this --", nil)
+	for _, command := range []string{"review", "simplify"} {
+		add(command+" user help is discoverable", "git-agent "+command+" --he", []string{"--help"})
+		add(command+" user help is terminal", "git-agent "+command+" --help ", nil)
+		add(command+" agent help is hidden", "git-agent "+command+" --help-", nil)
+		add(command+" explicit agent help is terminal", "git-agent "+command+" --help-agent ", nil)
+	}
 	add("commit rejects positional flag continuation", "git-agent commit unexpected --", nil)
 	add("pr message rejects positional flag continuation", "git-agent pr-message unexpected --", nil)
 	add("invalid guidance value", "git-agent commit --guidance-family future --", nil)
@@ -303,7 +309,9 @@ func fishCompletionCases(refs, remotes, paths []string) []fishCompletionCase {
 	add("search list modes conflict", "git-agent search --ls --ls-files --", nil)
 
 	add("unrelated command collision", "git-agent help search --", nil)
+	add("unrelated review collision", "git-agent help review --he", nil)
 	add("unknown nested collision", "git-agent future review --", nil)
+	add("unknown command help collision", "git-agent future review --he", nil)
 
 	return cases
 }
@@ -336,6 +344,7 @@ func fishCompletionCommands(refs, remotes, paths []string) []fishCompletionComma
 		fishCompletionOption{name: "depth", takesValue: true, value: "balanced", valueCandidates: []string{"balanced", "fast", "thorough"}},
 		fishCompletionOption{name: "max-web-searches", takesValue: true, value: "4"},
 		fishCompletionOption{name: "dry-run"},
+		fishCompletionOption{name: "help"},
 		fishCompletionOption{name: "orchestration-artifact", takesValue: true, value: "artifact.json", valueCandidates: slices.Clone(paths)},
 	)
 	search := []fishCompletionOption{
@@ -385,6 +394,9 @@ func expectedOptionCandidates(command fishCompletionCommand, used []fishCompleti
 		return nil
 	}
 	if command.name == "review" || command.name == "simplify" {
+		if _, help := seen["help"]; help && len(seen) != 1 {
+			return nil
+		}
 		if countEnabledOptions(seen, "codebase", "uncommitted", "staged") > 1 {
 			return nil
 		}
@@ -419,6 +431,12 @@ func completionOptionCompatible(command, candidate string, seen map[string]fishC
 		return false
 	}
 	if command == "review" || command == "simplify" {
+		if _, help := seen["help"]; help {
+			return false
+		}
+		if candidate == "help" {
+			return len(seen) == 0
+		}
 		if _, wait := seen["wait"]; wait {
 			return false
 		}

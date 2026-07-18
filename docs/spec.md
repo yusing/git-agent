@@ -175,6 +175,12 @@ Mode flags are mutually exclusive. No mode flag means `--uncommitted`.
   replacing provider execution with deterministic schema-valid reasoning, tool,
   and final events. Fifteen emitted events each wait an independent random
   500–1000 ms, keeping run observable for roughly 8–16 seconds.
+- `--help-agent` returns help for automated coding agents: the launch synopsis,
+  the three scope modes, `--depth`, and the mutually exclusive reasoning-effort
+  flags `--low`, `--medium`, `--high`, and `--xhigh` rendered on one line. It
+  omits operator, provider, retrieval, diagnostic, budget-override, dry-run, and
+  orchestration flags. Like `--help`, it exits without launching a detached
+  task.
 
 Diff modes prepare paths, staged/worktree status, line stats, generated-heavy
 context pack, bounded unified diff, and a best-effort previous-`HEAD` context
@@ -903,6 +909,9 @@ Message-generation subcommands reserve this shared flag surface:
 
 `review` and `simplify` additionally support
 `--depth fast|balanced|thorough` and `--max-web-searches <positive-n>`.
+They also support `--help-agent`, which prints only the launch syntax, scope
+modes, `--depth`, and reasoning-effort flags intended for automated coding
+agents.
 `--wait <id>` is valid only as the isolated retrieval form documented above.
 `--depth` and `--max-steps` are mutually exclusive.
 

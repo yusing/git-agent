@@ -110,6 +110,9 @@ git-agent review --staged
 git-agent review --depth fast
 git-agent review --depth thorough
 
+# Show only the scope, depth, and reasoning options intended for coding agents
+git-agent review --help-agent
+
 # Audit the full repository
 git-agent review --codebase
 
@@ -418,6 +421,7 @@ Common generation and inspection flags:
 | `--max-web-searches <n>` | Review/simplify only: override hosted-search cap |
 | `--orchestration-artifact <path>` | Review/simplify only: authorize immutable helper artifact manifest |
 | `--dry-run` | Review/simplify only: emit deterministic events without provider access |
+| `--help-agent` | Review/simplify only: show scope, depth, and reasoning help intended for coding agents |
 | `--guidance-family auto\|agents\|claude\|codex\|none` | Force guidance family |
 | `--append-prompt <text>` | Add a bounded operator hint |
 | `--debug` | Print diagnostics |

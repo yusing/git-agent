@@ -100,6 +100,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	var orchestrationArtifact string
 	var depthValue string
 	var dryRun bool
+	var helpAgent bool
 	fs.BoolVar(&codebase, "codebase", false, "inspect the full codebase")
 	fs.BoolVar(&uncommitted, "uncommitted", false, "inspect all dirty worktree changes")
 	fs.BoolVar(&staged, "staged", false, "inspect staged changes only")
@@ -107,6 +108,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	fs.StringVar(&orchestrationArtifact, "orchestration-artifact", "", "read helper-authorized orchestration artifacts from manifest")
 	fs.StringVar(&depthValue, "depth", "", "select automatic inspection depth: fast, balanced, or thorough (default balanced)")
 	fs.BoolVar(&dryRun, "dry-run", false, "emit deterministic provider events without a provider request")
+	fs.BoolVar(&helpAgent, "help-agent", false, "show help limited to agent-facing flags")
 	registerSharedFlags(fs, &opts)
 	fs.IntVar(&opts.MaxWebSearches, "max-web-searches", 0, "cap provider-hosted web searches (API-key default 4; ChatGPT auth uncapped)")
 	fs.Lookup("timeout").Usage = "set request timeout (disabled by default)"
@@ -121,6 +123,9 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 			return codeReviewUsageError(command, fs)
 		}
 		return err
+	}
+	if helpAgent {
+		return codeReviewAgentUsageError(command, fs)
 	}
 	waitRequested := false
 	waitConflict := false
@@ -2098,6 +2103,7 @@ func codeReviewUsageError(command string, fs *flag.FlagSet) error {
 		"dry-run":                "",
 		"depth":                  "fast|balanced|thorough",
 		"guidance-family":        "family",
+		"help-agent":             "",
 		"max-web-searches":       "n",
 		"max-steps":              "n",
 		"model":                  "model",
@@ -2116,6 +2122,22 @@ func codeReviewUsageError(command string, fs *flag.FlagSet) error {
 		}
 		fmt.Fprintf(&b, "\n      %s\n", f.Usage)
 	})
+	return errors.New(b.String())
+}
+
+func codeReviewAgentUsageError(command string, fs *flag.FlagSet) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Usage: git-agent %s [--codebase|--uncommitted|--staged] [--depth fast|balanced|thorough] [prompt...]\n\n", command)
+	b.WriteString("Modes:\n")
+	b.WriteString("  --uncommitted  inspect all dirty changes (default)\n")
+	b.WriteString("  --staged       inspect staged changes only\n")
+	b.WriteString("  --codebase     inspect the full codebase\n\n")
+	b.WriteString("Flags:\n")
+	depth := fs.Lookup("depth")
+	b.WriteString("  --depth <fast|balanced|thorough>\n")
+	fmt.Fprintf(&b, "      %s\n", depth.Usage)
+	b.WriteString("  --low | --medium | --high | --xhigh\n")
+	b.WriteString("      set reasoning effort (mutually exclusive)\n")
 	return errors.New(b.String())
 }
 
