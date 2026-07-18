@@ -164,7 +164,10 @@ Mode flags are mutually exclusive. No mode flag means `--uncommitted`.
 - `--staged` reviews index state against `HEAD` and ignores unstaged content.
 - `--codebase` audits full repository without preloaded diff scope.
 - `--depth fast|balanced|thorough` selects the lower bound, midpoint, or upper
-  bound of the automatic inspection budget. Omission means `balanced`.
+  bound of the automatic inspection budget and the command-specific default
+  reasoning effort. Omission means `balanced`. Review defaults are
+  `fast=low`, `balanced=medium`, and `thorough=high`; simplify defaults are
+  `fast=low`, `balanced=low`, and `thorough=medium`.
 - `--max-steps <positive-n>` is an exact expert override and is mutually
   exclusive with `--depth`.
 - `--orchestration-artifact <absolute-path>` validates an owner-only manifest
@@ -277,8 +280,10 @@ and the complete agent loop.
 Model precedence is `--model`, then `OPENAI_MODEL`, then the command default.
 Both commands request `reasoning.summary=auto` so summaries can stream as live
 agent progress. `review` defaults to `gpt-5.6-sol`; `simplify` defaults to
-`gpt-5.6-terra`. Both omit reasoning effort so provider default applies; an
-explicit reasoning flag overrides that default.
+`gpt-5.6-terra`. Review reasoning defaults by depth are `fast=low`,
+`balanced=medium`, and `thorough=high`; simplify defaults are `fast=low`,
+`balanced=low`, and `thorough=medium`. An explicit reasoning flag overrides
+the depth-derived default.
 
 Diff-based review and simplify calculate deterministic lower and upper model-step
 bounds after preparing the authoritative snapshot, discovering skills, and
@@ -969,7 +974,9 @@ Flag behavior:
   guidance, and authoritative repository evidence.
 - `--pprof <addr>`: bind the requested address and serve `/debug/pprof/`
   endpoints until the command exits
-- default: omit both `service_tier` and `reasoning`
+- default: omit `service_tier`; omit `reasoning` for commands other than
+  `review` and `simplify`; for those inspection commands, use the
+  depth-derived reasoning defaults documented above
 
 `commit-msg` and `commit` additionally support:
 

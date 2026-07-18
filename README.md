@@ -137,8 +137,10 @@ one strict launch JSON object to stdout. It contains `command`, durable task
 nothing to stderr. Matching `--wait <id>` forms write strict, evidence-located
 JSON reports to stdout. They have no request deadline by default; `--timeout
 <duration>` adds one explicitly. Without `--model` or `OPENAI_MODEL`, `review`
-uses `gpt-5.6-sol` and `simplify` uses `gpt-5.6-terra`; both use provider-default
-reasoning effort unless an effort flag is supplied.
+uses `gpt-5.6-sol` and `simplify` uses `gpt-5.6-terra`. Reasoning defaults track
+inspection depth: review uses `low`, `medium`, and `high` for
+`fast`, `balanced`, and `thorough`; simplify uses `low`, `low`, and `medium`.
+An explicit effort flag overrides these defaults.
 
 Diff-based runs calculate a bounded step range from effective changed lines,
 changed files, top-level scope dispersion, concrete repository-tool capability
@@ -416,7 +418,7 @@ Common generation and inspection flags:
 | `--low`, `--medium`, `--high`, `--xhigh` | Set reasoning effort |
 | `--base-url <url>` | Override provider base URL |
 | `--timeout <duration>` | Set request timeout; `review`/`simplify` default to none |
-| `--depth fast\|balanced\|thorough` | Review/simplify only: select calculated inspection depth |
+| `--depth fast\|balanced\|thorough` | Review/simplify only: select calculated inspection depth and its command-specific reasoning default |
 | `--max-steps <n>` | Bound agent loop steps; overrides and conflicts with `--depth` |
 | `--max-web-searches <n>` | Review/simplify only: override hosted-search cap |
 | `--orchestration-artifact <path>` | Review/simplify only: authorize immutable helper artifact manifest |
@@ -500,8 +502,11 @@ unchanged.
 Behavior defaults:
 
 - `service_tier` is omitted unless `--fast` is set.
-- Reasoning effort is omitted unless `--low`, `--medium`, `--high`, or
-  `--xhigh` is set.
+- Review reasoning defaults by depth are `fast=low`, `balanced=medium`, and
+  `thorough=high`; simplify defaults are `fast=low`, `balanced=low`, and
+  `thorough=medium`. Explicit reasoning flags override these defaults.
+- Other message-generation commands omit reasoning effort unless `--low`,
+  `--medium`, `--high`, or `--xhigh` is set.
 - `--append-prompt` can steer style or emphasis only when consistent with the
   task contract and repository evidence.
 
