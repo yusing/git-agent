@@ -3569,6 +3569,102 @@ func TestDiscoverFilesystemFilesClassifiesSkipReasons(t *testing.T) {
 	}
 }
 
+func TestDiscoverFilesystemFilesHonorsAllowlistIgnoreRules(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".gitignore", "*\n!.gitignore\n!allowed/\n!allowed/wanted.txt   \n!allowed/space\\ \n!plain\n!plain/wanted.txt\n")
+	writeFile(t, root, "allowed/wanted.txt", "wanted\n")
+	writeFile(t, root, "allowed/space ", "wanted\n")
+	writeFile(t, root, "allowed/ignored.txt", "ignored\n")
+	writeFile(t, root, "ignored/deep.txt", "ignored\n")
+	writeFile(t, root, "plain/wanted.txt", "wanted\n")
+	writeFile(t, root, "plain/ignored.txt", "ignored\n")
+	writeFile(t, root, "plain/plain", "wanted\n")
+
+	var paths []string
+	_, _, err := discoverFilesystemFiles(root, nil, func(string, ...slog.Attr) {}, func(file fileContent) error {
+		paths = append(paths, file.path)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"allowed/space ", "allowed/wanted.txt", "plain/plain", "plain/wanted.txt"}; !slices.Equal(paths, want) {
+		t.Fatalf("paths = %#v, want %#v", paths, want)
+	}
+}
+
+func TestDiscoverRevisionFilesHonorsAllowlistIgnoreRules(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".gitignore", "*\n!.gitignore\n!allowed/\n!allowed/wanted.txt   \n!allowed/space\\ \n!plain\n!plain/wanted.txt\n")
+	writeFile(t, root, "allowed/wanted.txt", "wanted\n")
+	writeFile(t, root, "allowed/space ", "wanted\n")
+	writeFile(t, root, "allowed/ignored.txt", "ignored\n")
+	writeFile(t, root, "ignored/deep.txt", "ignored\n")
+	writeFile(t, root, "plain/wanted.txt", "wanted\n")
+	writeFile(t, root, "plain/ignored.txt", "ignored\n")
+	writeFile(t, root, "plain/plain", "wanted\n")
+	rev := commitSearchRepo(t, root)
+
+	var paths []string
+	repo, err := gitctx.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = discoverRevisionFiles(repo, rev, nil, func(string, ...slog.Attr) {}, func(file fileContent) error {
+		paths = append(paths, file.path)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"allowed/space ", "allowed/wanted.txt", "plain/plain", "plain/wanted.txt"}; !slices.Equal(paths, want) {
+		t.Fatalf("paths = %#v, want %#v", paths, want)
+	}
+}
+
+func TestDiscoverFilesystemFilesRestoresReincludedDirectory(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".gitignore", "restored/\n!restored/\n")
+	writeFile(t, root, "restored/file.txt", "restored\n")
+	writeFile(t, root, "restored/nested/file.txt", "restored\n")
+
+	var paths []string
+	_, _, err := discoverFilesystemFiles(root, nil, func(string, ...slog.Attr) {}, func(file fileContent) error {
+		paths = append(paths, file.path)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"restored/file.txt", "restored/nested/file.txt"}; !slices.Equal(paths, want) {
+		t.Fatalf("paths = %#v, want %#v", paths, want)
+	}
+}
+
+func TestDiscoverRevisionFilesRestoresReincludedDirectory(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".gitignore", "restored/\n!restored/\n")
+	writeFile(t, root, "restored/file.txt", "restored\n")
+	writeFile(t, root, "restored/nested/file.txt", "restored\n")
+	rev := commitSearchRepo(t, root)
+
+	var paths []string
+	repo, err := gitctx.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = discoverRevisionFiles(repo, rev, nil, func(string, ...slog.Attr) {}, func(file fileContent) error {
+		paths = append(paths, file.path)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"restored/file.txt", "restored/nested/file.txt"}; !slices.Equal(paths, want) {
+		t.Fatalf("paths = %#v, want %#v", paths, want)
+	}
+}
+
 func BenchmarkDiscoverFilesystemFiles(b *testing.B) {
 	root := b.TempDir()
 	const fileCount = 16
