@@ -2,8 +2,6 @@ package search
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -23,7 +21,7 @@ import (
 	"github.com/yusing/git-agent/internal/metadata"
 )
 
-const indexSyncVersion = 1
+const indexSyncVersion = indexSyncSchemaV1
 
 type syncedIndex struct {
 	Version    int            `json:"version"`
@@ -46,13 +44,16 @@ type indexSyncTarget struct {
 }
 
 type indexSync struct {
-	remoteURL   string
-	dir         string
-	branch      plumbing.ReferenceName
-	repo        *git.Repository
-	worktree    *git.Worktree
-	lock        *indexLock
-	progressLog func(Progress) error
+	remoteURL        string
+	dir              string
+	branch           plumbing.ReferenceName
+	repo             *git.Repository
+	worktree         *git.Worktree
+	lock             *indexLock
+	progressLog      func(Progress) error
+	schema           int
+	packCatalog      vectorPackCatalog
+	packCatalogDirty bool
 }
 
 func prepareIndexSync(ctx context.Context, remoteURL string, target indexSyncTarget, progressLog func(Progress) error) (*indexSync, error) {
@@ -92,9 +93,6 @@ func openIndexSync(ctx context.Context, remoteURL string, progressLog func(Progr
 	if err != nil {
 		return nil, fmt.Errorf("open index sync repository: %w", err)
 	}
-	if err := validateSyncTree(dir); err != nil {
-		return nil, err
-	}
 	if err := setSyncRemote(repo, remoteURL); err != nil {
 		return nil, err
 	}
@@ -127,8 +125,23 @@ func setSyncRemote(repo *git.Repository, remoteURL string) error {
 }
 
 func (sync *indexSync) reconcile(ctx context.Context) error {
-	if err := sync.commitPending("Save local index records before sync"); err != nil {
+	uninitialized := false
+	if _, err := readIndexSyncSchema(sync.dir); errors.Is(err, fs.ErrNotExist) {
+		hasData, dataErr := syncTreeHasData(sync.dir)
+		if dataErr != nil {
+			return dataErr
+		}
+		uninitialized = !hasData
+	} else if err != nil {
 		return err
+	}
+	if !uninitialized {
+		if err := sync.ensureSchema(); err != nil {
+			return err
+		}
+		if err := sync.commitPending("Save local index records before sync"); err != nil {
+			return err
+		}
 	}
 	remote, err := sync.repo.Remote("origin")
 	if err != nil {
@@ -260,14 +273,37 @@ func (sync *indexSync) rebaseOnto(ctx context.Context, remoteHash plumbing.Hash)
 		}
 		return sync.push(ctx)
 	}
-	localSnapshots, err := sync.readSnapshots()
-	if err != nil {
-		return err
+	localSchema := sync.schema
+	var localSnapshots map[string]syncedIndex
+	var localV2 v2ReconcileState
+	if localSchema == indexSyncSchemaV2 {
+		localV2, err = sync.captureV2ReconcileState()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = os.RemoveAll(localV2.dir) }()
+	} else {
+		localSnapshots, err = sync.readSnapshots()
+		if err != nil {
+			return err
+		}
 	}
 	if err := sync.checkoutBranch(remoteHash); err != nil {
 		return err
 	}
-	if err := sync.mergeSnapshots(localSnapshots); err != nil {
+	if sync.schema != localSchema {
+		return fmt.Errorf("cannot reconcile index sync schema v%d with v%d", localSchema, sync.schema)
+	}
+	if localSchema == indexSyncSchemaV2 {
+		if err := sync.restoreV2Packs(localV2); err != nil {
+			_ = sync.checkoutBranch(remoteHash)
+			return err
+		}
+		if err := sync.mergeV2Snapshots(localV2); err != nil {
+			_ = sync.checkoutBranch(remoteHash)
+			return err
+		}
+	} else if err := sync.mergeSnapshots(localSnapshots); err != nil {
 		return err
 	}
 	if err := sync.commitPending("Rebase and merge compatible index records"); err != nil {
@@ -286,25 +322,47 @@ func (sync *indexSync) checkoutBranch(hash plumbing.Hash) error {
 	if err := sync.worktree.Reset(&git.ResetOptions{Commit: hash, Mode: git.HardReset}); err != nil {
 		return err
 	}
-	return validateSyncTree(sync.dir)
+	sync.packCatalog = nil
+	sync.packCatalogDirty = false
+	if err := sync.ensureSchema(); err != nil {
+		return err
+	}
+	return validateSyncTreeForSchema(sync.dir, sync.schema)
 }
 
 func (sync *indexSync) ensureSchema() error {
-	path := filepath.Join(sync.dir, "schema.json")
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	schema, err := readIndexSyncSchema(sync.dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		hasData, dataErr := syncTreeHasData(sync.dir)
+		if dataErr != nil {
+			return dataErr
+		}
+		if hasData {
+			return errors.New("index sync repository has data but no schema.json")
+		}
+		if err := writeIndexSyncSchema(sync.dir, indexSyncSchemaV1); err != nil {
+			return err
+		}
+		schema.Version = indexSyncSchemaV1
+	} else if err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte("{\"version\":1}\n"), 0o600)
+	if err := validateSyncTreeForSchema(sync.dir, schema.Version); err != nil {
+		return err
+	}
+	sync.schema = schema.Version
+	return nil
 }
 
 func (sync *indexSync) snapshotPath(target indexSyncTarget) (string, error) {
 	if err := validateSyncTarget(target); err != nil {
 		return "", err
 	}
-	modelKey := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d", target.model, target.dimensions)))
-	return filepath.Join(sync.dir, "indexes", metadata.IdentitySHA(target.origin), target.revision, hex.EncodeToString(modelKey[:])[:16]+".json"), nil
+	encodedModelKey := digestHex(syncModelKey(target.model, target.dimensions))
+	if sync.schema == indexSyncSchemaV2 {
+		return filepath.Join(sync.dir, "indexes", metadata.IdentitySHA(target.origin), target.revision, encodedModelKey+".json"), nil
+	}
+	return filepath.Join(sync.dir, "indexes", metadata.IdentitySHA(target.origin), target.revision, encodedModelKey[:16]+".json"), nil
 }
 
 func (sync *indexSync) importIndex(ctx context.Context, target indexSyncTarget) error {
@@ -319,16 +377,28 @@ func (sync *indexSync) importIndex(ctx context.Context, target indexSyncTarget) 
 	if err != nil {
 		return err
 	}
-	var snapshot syncedIndex
-	if err := sonic.Unmarshal(data, &snapshot); err != nil {
-		return fmt.Errorf("parse synced index: %w", err)
-	}
-	if err := validateSnapshot(snapshot, target); err != nil {
-		return err
+	var remoteRecords []vectorRecord
+	if sync.schema == indexSyncSchemaV2 {
+		remoteRecords, err = sync.decodeV2Snapshot(data, target)
+		if err != nil {
+			return err
+		}
+	} else {
+		var snapshot syncedIndex
+		if err := decodeStrictJSON(data, &snapshot); err != nil {
+			return fmt.Errorf("parse synced index: %w", err)
+		}
+		if err := validateSnapshot(snapshot, target); err != nil {
+			return err
+		}
+		remoteRecords = snapshot.Records
 	}
 	return withIndexLock(ctx, target.indexDir, func() error {
 		local, _ := loadVectors(target.indexDir)
-		records := mergeCompatibleRecords(local, snapshot.Records, target.model, target.dimensions)
+		records, err := mergeCompatibleRecordsStrict(local, remoteRecords, target.model, target.dimensions)
+		if err != nil {
+			return err
+		}
 		if len(records) == len(local) {
 			return nil
 		}
@@ -368,6 +438,9 @@ func (sync *indexSync) exportIndexLocked(target indexSyncTarget) (int, error) {
 }
 
 func (sync *indexSync) writeSnapshot(target indexSyncTarget, compatible []vectorRecord) (int, error) {
+	if sync.schema == indexSyncSchemaV2 {
+		return sync.writeSnapshotV2(target, compatible)
+	}
 	if err := validateSyncTree(sync.dir); err != nil {
 		return 0, err
 	}
@@ -385,8 +458,15 @@ func (sync *indexSync) writeSnapshot(target indexSyncTarget, compatible []vector
 	}
 	if existing, err := os.ReadFile(path); err == nil {
 		var remote syncedIndex
-		if sonic.Unmarshal(existing, &remote) == nil && validateSnapshot(remote, target) == nil {
-			snapshot.Records = mergeCompatibleRecords(remote.Records, snapshot.Records, target.model, target.dimensions)
+		if err := decodeStrictJSON(existing, &remote); err != nil {
+			return 0, fmt.Errorf("parse existing synced index: %w", err)
+		}
+		if err := validateSnapshot(remote, target); err != nil {
+			return 0, err
+		}
+		snapshot.Records, err = mergeCompatibleRecordsStrict(remote.Records, snapshot.Records, target.model, target.dimensions)
+		if err != nil {
+			return 0, err
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return 0, err
@@ -495,8 +575,22 @@ func (sync *indexSync) readSnapshots() (map[string]syncedIndex, error) {
 			return err
 		}
 		var snapshot syncedIndex
-		if sonic.Unmarshal(data, &snapshot) != nil || snapshot.Version != indexSyncVersion {
-			return nil
+		if err := decodeStrictJSON(data, &snapshot); err != nil {
+			return fmt.Errorf("parse synced index %s: %w", path, err)
+		}
+		target := indexSyncTarget{origin: snapshot.Origin, revision: snapshot.Revision, model: snapshot.Model, dimensions: snapshot.Dimensions}
+		if err := validateSnapshot(snapshot, target); err != nil {
+			return err
+		}
+		expected, err := sync.snapshotPath(target)
+		if err != nil {
+			return err
+		}
+		if expected != path {
+			return fmt.Errorf("synced index metadata does not match path %s", path)
+		}
+		if _, ok := compatibleIndexRecords(snapshot.Records, snapshot.Model, snapshot.Dimensions); !ok {
+			return fmt.Errorf("synced index %s contains incompatible records", path)
 		}
 		rel, err := filepath.Rel(sync.dir, path)
 		if err != nil {
@@ -516,10 +610,17 @@ func (sync *indexSync) mergeSnapshots(local map[string]syncedIndex) error {
 		path := filepath.Join(sync.dir, rel)
 		if data, err := os.ReadFile(path); err == nil {
 			var remote syncedIndex
-			if sonic.Unmarshal(data, &remote) == nil && compatibleSnapshots(remote, snapshot) {
-				remote.Records = mergeCompatibleRecords(remote.Records, snapshot.Records, remote.Model, remote.Dimensions)
-				snapshot = remote
+			if err := decodeStrictJSON(data, &remote); err != nil {
+				return fmt.Errorf("parse synced index %s: %w", path, err)
 			}
+			if !compatibleSnapshots(remote, snapshot) {
+				return fmt.Errorf("synced index metadata conflict at %s", path)
+			}
+			remote.Records, err = mergeCompatibleRecordsStrict(remote.Records, snapshot.Records, remote.Model, remote.Dimensions)
+			if err != nil {
+				return err
+			}
+			snapshot = remote
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
@@ -542,6 +643,9 @@ func compatibleSnapshots(a, b syncedIndex) bool {
 }
 
 func (sync *indexSync) commitPending(message string) error {
+	if err := sync.ensureSchema(); err != nil {
+		return err
+	}
 	if err := sync.worktree.AddWithOptions(&git.AddOptions{All: true}); err != nil {
 		return err
 	}
@@ -554,8 +658,14 @@ func (sync *indexSync) commitPending(message string) error {
 	}
 	now := time.Now()
 	signature := &object.Signature{Name: "git-agent", Email: "git-agent@localhost", When: now}
-	_, err = sync.worktree.Commit(message, &git.CommitOptions{Author: signature, Committer: signature})
-	return err
+	hash, err := sync.worktree.Commit(message, &git.CommitOptions{Author: signature, Committer: signature})
+	if err != nil {
+		return err
+	}
+	if sync.schema == indexSyncSchemaV2 {
+		return sync.persistVectorPackCatalog(hash)
+	}
+	return nil
 }
 
 func (sync *indexSync) pushWithRetry(ctx context.Context) error {
@@ -575,6 +685,9 @@ func (sync *indexSync) pushWithRetry(ctx context.Context) error {
 }
 
 func (sync *indexSync) push(ctx context.Context) error {
+	if err := sync.ensureSchema(); err != nil {
+		return err
+	}
 	if err := reportProgress(sync.progressLog, Progress{Status: ProgressStatusPushing}); err != nil {
 		return err
 	}
@@ -613,9 +726,13 @@ func (sync *indexSync) close() error {
 }
 
 func validateSyncTree(root string) error {
-	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	schema, err := readIndexSyncSchema(root)
+	if err == nil {
+		return validateSyncTreeForSchema(root, schema.Version)
+	}
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
 			return fmt.Errorf("index sync repository contains symlink %s", path)
@@ -638,30 +755,6 @@ func validateSyncTree(root string) error {
 }
 
 func validSyncTreeEntry(rel string, directory bool) bool {
-	if rel == "." {
-		return directory
-	}
-	if rel == "schema.json" {
-		return !directory
-	}
-	parts := strings.Split(filepath.ToSlash(rel), "/")
-	if parts[0] != "indexes" {
-		return false
-	}
-	if len(parts) == 1 {
-		return directory
-	}
-	if !canonicalLowerHex(parts[1], 64) {
-		return false
-	}
-	if len(parts) == 2 {
-		return directory
-	}
-	if !canonicalObjectID(parts[2]) {
-		return false
-	}
-	if len(parts) == 3 {
-		return directory
-	}
-	return len(parts) == 4 && !directory && strings.HasSuffix(parts[3], ".json") && canonicalLowerHex(strings.TrimSuffix(parts[3], ".json"), 16)
+	return validSyncTreeEntryForSchema(rel, directory, indexSyncSchemaV1) ||
+		validSyncTreeEntryForSchema(rel, directory, indexSyncSchemaV2)
 }

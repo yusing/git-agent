@@ -15,6 +15,16 @@ function __git_agent_using_command
     test (count $words) -gt 1; and test $words[2] = $argv[1]
 end
 
+function __git_agent_needs_index_subcommand
+    set -l words (commandline -opc)
+    test (count $words) -eq 2; and test $words[2] = index
+end
+
+function __git_agent_using_index_command
+    set -l words (commandline -opc)
+    test (count $words) -gt 2; and test $words[2] = index; and test $words[3] = $argv[1]
+end
+
 function __git_agent_git_refs
     command git for-each-ref --format='%(refname:short)' refs/heads refs/remotes refs/tags 2>/dev/null
     command git rev-parse --short HEAD 2>/dev/null
@@ -45,7 +55,10 @@ complete -c git-agent -n '__git_agent_no_subcommand' -a help -d 'Show usage'
 
 complete -c git-agent -n '__git_agent_using_command config' -a index.remote -d 'Dedicated Git remote for synchronized revision indexes'
 complete -c git-agent -n '__git_agent_using_command config' -l unset -d 'Remove a configuration value'
-complete -c git-agent -n '__git_agent_using_command index' -a sync -d 'Push all completed local revision indexes'
+complete -c git-agent -n '__git_agent_needs_index_subcommand' -a sync -d 'Push all completed local revision indexes'
+complete -c git-agent -n '__git_agent_needs_index_subcommand' -a migrate -d 'Migrate synchronized indexes to a newer schema'
+complete -c git-agent -n '__git_agent_using_index_command migrate' -l to -r -a v2 -d 'Target index schema version'
+complete -c git-agent -n '__git_agent_using_index_command migrate' -l dry-run -d 'Report migration size without changing the remote'
 
 complete -c git-agent -n '__git_agent_using_command commit' -l amend -d 'Generate an amended commit message and amend HEAD'
 complete -c git-agent -n '__git_agent_using_command commit-msg' -l amend -d 'Generate an amended commit message'

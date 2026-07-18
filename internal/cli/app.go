@@ -429,8 +429,19 @@ func applyCodeReviewDefaults(kind reviewtask.Kind, opts config.Options, cfg *con
 }
 
 func (a *App) runIndex(ctx context.Context, args []string) error {
-	if len(args) != 1 || args[0] != "sync" {
-		return errors.New("usage: git-agent index sync")
+	migrate := false
+	dryRun := false
+	if len(args) == 1 && args[0] == "sync" {
+		// Valid sync command.
+	} else if len(args) > 0 && args[0] == "migrate" {
+		var err error
+		dryRun, err = parseIndexMigrationArgs(args[1:])
+		if err != nil {
+			return err
+		}
+		migrate = true
+	} else {
+		return errors.New("usage: git-agent index sync\n       git-agent index migrate --to v2 [--dry-run]")
 	}
 	cfg, err := config.LoadFile()
 	if err != nil {
@@ -438,6 +449,9 @@ func (a *App) runIndex(ctx context.Context, args []string) error {
 	}
 	if cfg.Index.Remote == "" {
 		return errors.New("index.remote is not configured; configure it with git-agent config index.remote <git-url>")
+	}
+	if migrate {
+		return a.runIndexMigrate(ctx, cfg.Index.Remote, dryRun)
 	}
 	interactive := isInteractiveFile(a.stderr)
 	progressStarted := false
@@ -454,6 +468,62 @@ func (a *App) runIndex(ctx context.Context, args []string) error {
 		return err
 	}
 	_, err = fmt.Fprintf(a.stdout, "synced indexes=%d records=%d skipped=%d\n", summary.Indexes, summary.Records, summary.Skipped)
+	return err
+}
+
+func parseIndexMigrationArgs(args []string) (bool, error) {
+	dryRun := false
+	toV2 := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--dry-run":
+			if dryRun {
+				return false, errors.New("--dry-run specified more than once")
+			}
+			dryRun = true
+		case "--to":
+			if toV2 || i+1 >= len(args) || args[i+1] != "v2" {
+				return false, errors.New("usage: git-agent index migrate --to v2 [--dry-run]")
+			}
+			toV2 = true
+			i++
+		default:
+			return false, errors.New("usage: git-agent index migrate --to v2 [--dry-run]")
+		}
+	}
+	if !toV2 {
+		return false, errors.New("usage: git-agent index migrate --to v2 [--dry-run]")
+	}
+	return dryRun, nil
+}
+
+func (a *App) runIndexMigrate(ctx context.Context, remoteURL string, dryRun bool) error {
+	interactive := isInteractiveFile(a.stderr)
+	progressStarted := false
+	summary, err := searchtask.MigrateIndex(ctx, remoteURL, searchtask.IndexMigrationOptions{
+		DryRun: dryRun,
+		ProgressLog: func(progress searchtask.Progress) error {
+			progressStarted = true
+			return a.writeIndexMigrationProgress(progress, interactive)
+		},
+	})
+	if interactive && progressStarted {
+		a.clearProgressLine()
+	}
+	if err != nil {
+		return err
+	}
+	saved := summary.CurrentBytes - summary.ProjectedBytes
+	if dryRun {
+		_, err = fmt.Fprintf(a.stdout,
+			"migration from=%d to=%d indexes=%d records=%d unique_vectors=%d packs=%d current_bytes=%d projected_bytes=%d saved_bytes=%d dry_run=true\n",
+			summary.From, summary.To, summary.Indexes, summary.Records, summary.UniqueVectors, summary.Packs,
+			summary.CurrentBytes, summary.ProjectedBytes, saved)
+		return err
+	}
+	_, err = fmt.Fprintf(a.stdout,
+		"migrated from=%d to=%d indexes=%d records=%d unique_vectors=%d packs=%d bytes=%d\n",
+		summary.From, summary.To, summary.Indexes, summary.Records, summary.UniqueVectors, summary.Packs, summary.ProjectedBytes)
 	return err
 }
 
@@ -987,6 +1057,40 @@ func (a *App) writeIndexSyncProgress(progress searchtask.Progress, interactive b
 		}
 	case searchtask.ProgressStatusPushing:
 		message = "index sync: pushing remote"
+		if progress.Detail != "" {
+			message += " [" + progress.Detail + "]"
+		}
+	default:
+		return nil
+	}
+	if interactive {
+		_, err := fmt.Fprintf(a.stderr, "\r\x1b[2K%s", message)
+		return err
+	}
+	_, err := fmt.Fprintln(a.stderr, message)
+	return err
+}
+
+func (a *App) writeIndexMigrationProgress(progress searchtask.Progress, interactive bool) error {
+	var message string
+	switch progress.Status {
+	case searchtask.ProgressStatusFetching:
+		message = "index migrate: fetching remote"
+		if progress.Detail != "" {
+			message += " [" + progress.Detail + "]"
+		}
+	case searchtask.ProgressStatusScanning:
+		message = "index migrate: scanning v1 snapshots"
+	case searchtask.ProgressStatusBuilding:
+		message = fmt.Sprintf("index migrate: building indexes %d/%d", progress.Done, progress.Total)
+		if progress.Done > 0 && progress.Total > 0 {
+			percent := float64(progress.Done) / float64(progress.Total) * 100
+			message += fmt.Sprintf(" (%.1f%%, %s)", percent, progress.Elapsed.Round(time.Millisecond))
+		}
+	case searchtask.ProgressStatusInstalling:
+		message = "index migrate: installing schema v2"
+	case searchtask.ProgressStatusPushing:
+		message = "index migrate: pushing remote"
 		if progress.Detail != "" {
 			message += " [" + progress.Detail + "]"
 		}
@@ -1946,6 +2050,7 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent commit [--amend] [flags]\n")
 	b.WriteString("  git-agent config [--unset] index.remote [<git-url>]\n")
 	b.WriteString("  git-agent index sync\n")
+	b.WriteString("  git-agent index migrate --to v2 [--dry-run]\n")
 	b.WriteString("  git-agent commit-msg [--amend] [flags]\n")
 	b.WriteString("  git-agent pr-message [flags]\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")

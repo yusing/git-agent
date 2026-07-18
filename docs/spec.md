@@ -747,6 +747,56 @@ Generated index-store commits are unsigned: each dedicated local sync
 repository persists `commit.gpgSign=false` before committing, overriding wider
 Git configuration without changing source repositories or remote-search caches.
 
+The dedicated repository contains a mandatory `schema.json`. Clients parse the
+complete schema document before reading, committing, or pushing index data and
+reject malformed, unknown, or future versions. Schema v1 stores complete vector
+records in per-revision JSON snapshots. While the repository remains v1,
+clients continue writing v1.
+
+Schema v2 stores vectors as canonical little-endian float32 payloads in
+immutable, content-addressed packs under
+`packs/<model-key>/<pack-sha256>.pack`. Both keys are full lowercase SHA-256
+values. Pack entries contain the embedding identity, exact payload SHA-256, and
+CRC32 checksum; revision manifests under
+`indexes/<origin-sha256>/<revision-sha1>/<model-key>.json` contain metadata and
+pack/slot references. Import validates the pack path, complete pack digest,
+header version, model, dimensions, slot, embedding identity, payload digest,
+and checksum before publishing a local index. A derived pack catalog may be
+cached only below the sync repository's `.git` directory and is never
+committed.
+
+Concurrent schema-v2 writers merge pack files by content-addressed path and
+merge manifests by cache-record identity. Identical payloads choose the
+lexicographically smallest pack/slot reference. Different payload digests for
+the same record fail reconciliation rather than silently selecting one. Normal
+sync is additive and does not remove unreferenced packs or revision manifests.
+
+#### `git-agent index migrate --to v2 [--dry-run]`
+
+Perform the explicit schema-v1 to schema-v2 transition while holding the sync
+repository lock. `--dry-run` clones and validates authoritative remote state in
+temporary storage, constructs the prospective packs and manifests, and writes
+exactly one stdout summary without committing or pushing:
+`migration from=1 to=2 indexes=<n> records=<n> unique_vectors=<n> packs=<n>
+current_bytes=<n> projected_bytes=<n> saved_bytes=<n> dry_run=true`. The normal
+form validates every v1 snapshot, builds and revalidates a complete v2 tree,
+publishes schema v2, commits once, pushes through normal reconciliation, and
+writes `migrated from=1 to=2 indexes=<n> records=<n> unique_vectors=<n>
+packs=<n> bytes=<n>` to stdout. Repeating migration on a v2 repository is a
+successful no-op. Migration changes only the current tree; history rewriting,
+retention, pruning, and pack compaction are not performed.
+
+Migration progress uses the same stderr rules as index sync. It reports
+`index migrate: fetching remote`, `index migrate: scanning v1 snapshots`, and
+`index migrate: building indexes <done>/<total>` for both forms. A non-dry-run
+migration additionally reports `index migrate: installing schema v2` and
+`index migrate: pushing remote`. Building updates include percentage and
+elapsed time once at least one index is complete. Fetch and push transport
+details use the same bracketed suffix as index sync. Interactive stderr
+rewrites and clears one transient line; non-interactive stderr emits each
+update as a newline. Progress callback failures abort the operation. Progress
+does not change either command's exact stdout summary.
+
 With `--debug`, search writes live human console diagnostic events to stderr
 using the same renderer as streamed traces. It writes one `search_skip` event per
 file or directory skipped by git-agent's own safety rules, including dot paths,

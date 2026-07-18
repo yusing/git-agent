@@ -393,7 +393,7 @@ func TestIndexSyncDisablesCommitSigning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sync := &indexSync{repo: repo, worktree: worktree}
+	sync := &indexSync{dir: root, repo: repo, worktree: worktree}
 	if err := sync.commitPending("unsigned index commit"); err != nil {
 		t.Fatalf("index commit inherited commit.gpgSign: %v", err)
 	}

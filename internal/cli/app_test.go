@@ -50,6 +50,9 @@ func TestRunWithoutArgsReturnsUsage(t *testing.T) {
 	if !strings.Contains(err.Error(), "git-agent index sync") {
 		t.Fatalf("usage missing index sync synopsis:\n%s", err)
 	}
+	if !strings.Contains(err.Error(), "git-agent index migrate --to v2") {
+		t.Fatalf("usage missing index migration synopsis:\n%s", err)
+	}
 }
 
 func TestSearchLsAndLsFiles(t *testing.T) {
@@ -354,8 +357,107 @@ func TestIndexSyncRequiresConfiguredRemote(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 	err = New().Run(t.Context(), []string{"index", "unknown"})
-	if err == nil || err.Error() != "usage: git-agent index sync" {
+	if err == nil || !strings.Contains(err.Error(), "git-agent index migrate --to v2") {
 		t.Fatalf("usage error = %v", err)
+	}
+}
+
+func TestParseIndexMigrationArgs(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		args    []string
+		wantDry bool
+		wantErr bool
+	}{
+		{name: "migrate", args: []string{"--to", "v2"}},
+		{name: "dry run before target", args: []string{"--dry-run", "--to", "v2"}, wantDry: true},
+		{name: "dry run after target", args: []string{"--to", "v2", "--dry-run"}, wantDry: true},
+		{name: "missing target", args: []string{"--dry-run"}, wantErr: true},
+		{name: "future target", args: []string{"--to", "v3"}, wantErr: true},
+		{name: "duplicate target", args: []string{"--to", "v2", "--to", "v2"}, wantErr: true},
+		{name: "duplicate dry run", args: []string{"--to", "v2", "--dry-run", "--dry-run"}, wantErr: true},
+		{name: "unrelated flag", args: []string{"--to", "v2", "--force"}, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dryRun, err := parseIndexMigrationArgs(test.args)
+			if (err != nil) != test.wantErr || dryRun != test.wantDry {
+				t.Fatalf("parseIndexMigrationArgs(%q) = %v, %v", test.args, dryRun, err)
+			}
+		})
+	}
+}
+
+func TestIndexMigrationReportsProgress(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		interactive bool
+		wantStderr  string
+	}{
+		{
+			name: "non-interactive",
+			wantStderr: "index migrate: fetching remote\n" +
+				"index migrate: scanning v1 snapshots\n" +
+				"index migrate: building indexes 0/0\n",
+		},
+		{
+			name:        "interactive",
+			interactive: true,
+			wantStderr: "\r\x1b[2Kindex migrate: fetching remote" +
+				"\r\x1b[2Kindex migrate: scanning v1 snapshots" +
+				"\r\x1b[2Kindex migrate: building indexes 0/0" +
+				"\r\x1b[2K",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			remote := filepath.Join(t.TempDir(), "indexes.git")
+			if err := os.Mkdir(remote, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			runGit(t, remote, "init", "--bare")
+			if err := config.SaveFile(config.File{Index: config.IndexConfig{Remote: remote}}); err != nil {
+				t.Fatal(err)
+			}
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			var stderrWriter io.Writer = &stderr
+			if test.interactive {
+				info, err := os.Stat("/dev/null")
+				if err != nil {
+					t.Fatal(err)
+				}
+				stderrWriter = &interactiveBuffer{Buffer: stderr, info: info}
+			}
+			app := &App{stdout: &stdout, stderr: stderrWriter}
+			if err := app.Run(t.Context(), []string{"index", "migrate", "--to", "v2", "--dry-run"}); err != nil {
+				t.Fatal(err)
+			}
+			if interactive, ok := stderrWriter.(*interactiveBuffer); ok {
+				stderr = interactive.Buffer
+			}
+			if got := stderr.String(); got != test.wantStderr {
+				t.Fatalf("stderr = %q, want %q", got, test.wantStderr)
+			}
+			if got := stdout.String(); !strings.HasPrefix(got, "migration from=1 to=2 ") {
+				t.Fatalf("stdout = %q", got)
+			}
+		})
+	}
+}
+
+func TestIndexMigrationProgressIgnoresUnrelatedStatuses(t *testing.T) {
+	var stderr bytes.Buffer
+	app := &App{stderr: &stderr}
+	for _, status := range []string{searchtask.ProgressStatusSyncing, "future-migration-phase"} {
+		if err := app.writeIndexMigrationProgress(searchtask.Progress{Status: status}, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("unrelated progress rendered as migration progress: %q", stderr.String())
 	}
 }
 

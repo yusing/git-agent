@@ -1,6 +1,7 @@
 package search
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -58,6 +59,7 @@ func vectorStoreKey(inputHash, model string, dimensions int) string {
 
 func (store vectorStore) put(ctx context.Context, records []vectorRecord, forceKeys map[string]bool) (keys map[string]vectorStoreEntry, err error) {
 	keys = make(map[string]vectorStoreEntry, len(records))
+	keyData := make(map[string][]byte, len(records))
 	if err := os.MkdirAll(store.dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -92,17 +94,24 @@ func (store vectorStore) put(ctx context.Context, records []vectorRecord, forceK
 			return nil, fmt.Errorf("vector record %s dimensions mismatch", record.ChunkID)
 		}
 		key := vectorStoreKey(record.EmbeddingInputHash, record.EmbeddingModel, record.Dimensions)
-		if _, ok := keys[key]; ok {
+		data := encodeVector(record.Vector)
+		if previous, ok := keyData[key]; ok {
+			if !bytes.Equal(previous, data) {
+				return nil, fmt.Errorf("vector records for embedding key %s contain conflicting payloads", key)
+			}
 			continue
 		}
+		keyData[key] = data
 		if !forceKeys[key] {
-			if entry, ok := catalog.Entries[key]; ok && entry.Dimensions == record.Dimensions && storedVectorValid(payload, entry) {
-				keys[key] = entry
-				continue
+			if entry, ok := catalog.Entries[key]; ok && entry.Dimensions == record.Dimensions {
+				stored, readErr := readStoredVectorData(payload, entry)
+				if readErr == nil && bytes.Equal(stored, data) {
+					keys[key] = entry
+					continue
+				}
 			}
 		}
 
-		data := encodeVector(record.Vector)
 		entry := vectorStoreEntry{
 			Offset:     offset,
 			Dimensions: record.Dimensions,
@@ -236,11 +245,6 @@ func vectorStoreCatalogGeneration(name string) (uint64, bool) {
 	}
 	generation, err := strconv.ParseUint(value, 10, 64)
 	return generation, err == nil
-}
-
-func storedVectorValid(payload *os.File, entry vectorStoreEntry) bool {
-	_, err := readStoredVectorData(payload, entry)
-	return err == nil
 }
 
 func readStoredVector(payload io.ReaderAt, entry vectorStoreEntry) ([]float64, error) {

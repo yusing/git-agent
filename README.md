@@ -53,6 +53,7 @@ directory is on `PATH`.
 | Agent context search | `git-agent search --agent <query...>` | Brief results, plus progress endpoint when indexing |
 | Configure index sync | `git-agent config index.remote <git-url>` | Save a dedicated Git remote for shared revision indexes |
 | Push local indexes | `git-agent index sync` | Additively publish all completed local revision indexes |
+| Migrate index storage | `git-agent index migrate --to v2` | Deduplicate vectors into immutable content-addressed packs |
 | List search indexes | `git-agent search --ls` | Local index summaries for the current project |
 | List indexed files | `git-agent search --ls-files` | Tree of files stored in the selected index |
 
@@ -262,6 +263,8 @@ Search indexes can be synchronized through a dedicated Git repository:
 git-agent config index.remote git@example.com:team/git-agent-indexes.git
 git-agent config index.remote
 git-agent index sync
+git-agent index migrate --to v2 --dry-run
+git-agent index migrate --to v2
 git-agent config --unset index.remote
 ```
 
@@ -277,6 +280,19 @@ fetch/push object-transfer progress, while final summary remains on stdout. See
 Generated index-store commits are always unsigned. This is enforced only in
 the dedicated local index-sync repository and does not change signing settings
 for source repositories or `search --remote` caches.
+
+Index repositories begin with schema v1. Upgrade all machines to a client that
+validates both schemas, inspect the projected size with `git-agent index migrate
+--to v2 --dry-run`, then run `git-agent index migrate --to v2`. Schema v2 stores
+canonical float32 vectors once in immutable, content-addressed packs and keeps
+small per-revision manifests containing pack references. Migration rewrites the
+current index tree but preserves prior v1 data in Git history; it does not
+rewrite history, prune revisions, or delete historical Git objects.
+Migration progress is reported on stderr while fetching, scanning v1
+snapshots, building v2 indexes, installing the migrated tree, and pushing.
+Interactive terminals update one transient progress line; redirected stderr
+receives newline-delimited phase updates. Dry-run reports only fetch, scan, and
+build phases because it never installs or pushes.
 
 SSH remotes try available agent identities first, then unencrypted default
 keys in `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`, and `id_dsa`. Encrypted keys
@@ -365,6 +381,7 @@ git-agent simplify --wait <id>
 git-agent config index.remote [<git-url>]
 git-agent config --unset index.remote
 git-agent index sync
+git-agent index migrate --to v2 [--dry-run]
 ```
 
 Common generation and inspection flags:
