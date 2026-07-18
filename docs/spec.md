@@ -265,13 +265,26 @@ honors `Last-Event-ID`. Stream includes `session.started`, `session`, `request`,
 events contain only bounded query, status, action, and source metadata, never
 fetched page bodies. `runtime.status` reports phase, model step, tool-call
 usage, elapsed runtime, latest provider input-token usage, estimated request
-tokens, and context-token budget.
+tokens, and context-token budget. Before a provider retry it uses phase
+`retrying_provider` and additionally reports one-based `retry_attempt`,
+`max_retry_attempts`, `abandoned_provider_attempt`, the next
+`provider_attempt`, and bounded `retry_reason` without including the raw
+provider error. That status event marks all reasoning-summary progress from the
+abandoned attempt as superseded.
 Reasoning delta values contain `item_id`, `output_index`, `summary_index`,
-provider `sequence_number`, and `delta`; done values contain the same identity
-fields and complete `text`. Terminal event closes streams, then server shuts
-down. A truncated provider stream or HTTP/2 `INTERNAL_ERROR` or
-`REFUSED_STREAM` receives one non-streaming retry of that model step. Other
-provider stream failures remain terminal.
+one-based `provider_attempt`, provider `sequence_number`, and `delta`; done
+values contain the same identity fields and complete `text`. Terminal event
+closes streams, then server shuts down. A truncated provider stream or HTTP/2
+`INTERNAL_ERROR` or
+`REFUSED_STREAM` received from the peer receives one semantically equivalent
+streaming retry of that model step with a fresh accumulator. A stream that ends
+without `response.completed` is truncated even when it contained partial text
+or tool calls; partial first-attempt response text and tool calls are discarded,
+while already-published reasoning progress remains identifiable by provider
+attempt and is superseded by the retry status. Cancellation or
+deadline prevents or aborts the retry. Other, local, unrelated, and unknown
+provider stream failures remain terminal. If the retry fails, the terminal
+error preserves both attempt failures.
 
 Neither command has a request or overall task deadline by default. Explicit
 `--timeout <duration>` applies that deadline to both the provider HTTP client
@@ -1209,8 +1222,11 @@ including:
    prepared paths define the target scope
 8. build task-specific instructions, developer context, and initial user prompt,
    appending any `--append-prompt` hint as lower-priority escaped prompt data
-9. send request to the Responses API through the official OpenAI Go SDK
-10. stream each request and response when console or SSE tracing is active
+9. send a streaming request to the Responses API through the official OpenAI
+   Go SDK
+10. stream each request and response when console or SSE tracing is active;
+    publish retry progress and repeat a retryable interrupted stream once
+    without changing request semantics
 11. if the model requests tools, execute only registered read-only tools;
     return recoverable non-context execution errors as structured failed tool
     outputs so the model can correct arguments or choose other evidence, but
@@ -2014,7 +2030,11 @@ Use a local fake OpenAI-compatible server to test:
 - tool-call round trips
 - finish states
 - validation repair pass behavior
-- malformed provider responses
+- malformed and missing-terminal provider streams
+- equivalent streaming retry wire shape, bounded progress, cancellation, and
+  one-retry enforcement
+- retry classification for positive, negative, unrelated-collision, and
+  unknown/future transport failures
 - official SDK request compatibility
 - stdout-only artifact behavior
 

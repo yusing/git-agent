@@ -25,6 +25,7 @@ type fakeClient struct {
 	responseErrors []error
 	requests       []openai.Request
 	streamEvents   []openai.StreamEvent
+	retryEvents    []openai.RetryEvent
 }
 
 func TestRequestInstructionsRequireReadFilePathProvenance(t *testing.T) {
@@ -74,6 +75,13 @@ func (f *fakeClient) CreateResponse(_ context.Context, request openai.Request) (
 	for _, event := range f.streamEvents {
 		if request.OnStreamEvent != nil {
 			if err := request.OnStreamEvent(event); err != nil {
+				return openai.Response{}, err
+			}
+		}
+	}
+	for _, event := range f.retryEvents {
+		if request.OnRetry != nil {
+			if err := request.OnRetry(event); err != nil {
 				return openai.Response{}, err
 			}
 		}
@@ -202,8 +210,8 @@ func TestRunnerPublishesReasoningSummaryEvents(t *testing.T) {
 	client := &fakeClient{
 		responses: []openai.Response{{Text: "done"}},
 		streamEvents: []openai.StreamEvent{
-			{Kind: "reasoning_summary.delta", ItemID: "rs_1", Delta: "Inspecting "},
-			{Kind: "reasoning_summary.done", ItemID: "rs_1", Text: "Inspecting changed files"},
+			{Kind: "reasoning_summary.delta", ProviderAttempt: 1, ItemID: "rs_1", Delta: "Inspecting "},
+			{Kind: "reasoning_summary.done", ProviderAttempt: 1, ItemID: "rs_1", Text: "Inspecting changed files"},
 		},
 	}
 	var events []trace.Event
@@ -230,6 +238,51 @@ func TestRunnerPublishesReasoningSummaryEvents(t *testing.T) {
 	if !hasEvent(events, "reasoning_summary.done", "text", "Inspecting changed files") {
 		t.Fatalf("trace missing reasoning done: %#v", events)
 	}
+	for _, event := range events {
+		if event.Kind == "reasoning_summary.delta" && fmt.Sprint(event.Value["provider_attempt"]) != "1" {
+			t.Fatalf("reasoning provider attempt = %#v", event)
+		}
+	}
+}
+
+func TestRunnerPublishesProviderRetryRuntimeStatus(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeClient{
+		responses:   []openai.Response{{Text: "done"}},
+		retryEvents: []openai.RetryEvent{{Attempt: 1, MaxAttempts: 1, Reason: openai.RetryReasonPeerStreamReset}},
+	}
+	var events []trace.Event
+	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := OpenAIRunner{
+		Config: config.Config{Model: "test", MaxSteps: 1, MaxToolCalls: 2, ContextTokens: 217600},
+		Client: client,
+		Trace:  recorder,
+	}
+
+	if _, err := runner.Run(t.Context(), Request{UserPrompt: "review", MaxSteps: 1}); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Kind != "runtime.status" || event.Value["phase"] != "retrying_provider" {
+			continue
+		}
+		if fmt.Sprint(event.Value["step"]) != "1" || fmt.Sprint(event.Value["max_steps"]) != "1" ||
+			fmt.Sprint(event.Value["tool_calls"]) != "0" || fmt.Sprint(event.Value["max_tool_calls"]) != "2" ||
+			fmt.Sprint(event.Value["retry_attempt"]) != "1" || fmt.Sprint(event.Value["max_retry_attempts"]) != "1" ||
+			fmt.Sprint(event.Value["abandoned_provider_attempt"]) != "1" || fmt.Sprint(event.Value["provider_attempt"]) != "2" ||
+			event.Value["retry_reason"] != string(openai.RetryReasonPeerStreamReset) {
+			t.Fatalf("retry runtime status = %#v", event)
+		}
+		return
+	}
+	t.Fatalf("trace missing retry runtime status: %#v", events)
 }
 
 func TestRunnerRepairsInvalidOutputOnce(t *testing.T) {

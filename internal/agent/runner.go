@@ -174,6 +174,7 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 			textFormat,
 		)
 		estimatedTokens := estimateRequestTokens(req)
+		r.attachRetryStatus(&req, step+1, maxSteps, result.ToolCalls, maxToolCalls, estimatedTokens, started)
 		if err := r.writeRuntimeStatus("requesting", step+1, maxSteps, result.ToolCalls, maxToolCalls, estimatedTokens, 0, started); err != nil {
 			return Result{}, err
 		}
@@ -219,7 +220,7 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 			return r.finalizeForGuard(ctx, effectiveInstructions, messages, result, textFormat, BudgetStatus{
 				Kind: BudgetKindContext, Used: inputTokens, Step: step + 1,
 				Limit: r.Config.ContextTokens, MaxSteps: maxSteps, MaxToolCalls: maxToolCalls,
-			}, "context_budget_exhausted")
+			}, "context_budget_exhausted", started)
 		}
 		if len(response.ToolCalls) == 0 {
 			if response.Text == "" {
@@ -244,7 +245,7 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 				return r.finalizeForGuard(ctx, effectiveInstructions, messages, result, textFormat, BudgetStatus{
 					Kind: BudgetKindNoProgress, Used: result.ToolCalls, Step: step + 1,
 					MaxSteps: maxSteps, MaxToolCalls: maxToolCalls, RequestedTool: call.Name,
-				}, "repeated_tool_call")
+				}, "repeated_tool_call", started)
 			}
 			seenCalls[callSignature] = struct{}{}
 			if maxToolCalls > 0 && result.ToolCalls >= maxToolCalls {
@@ -256,7 +257,7 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 					MaxSteps:      maxSteps,
 					MaxToolCalls:  maxToolCalls,
 					RequestedTool: call.Name,
-				})
+				}, started)
 				if err != nil {
 					return Result{}, err
 				}
@@ -306,7 +307,7 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 				return r.finalizeForGuard(ctx, effectiveInstructions, messages, result, textFormat, BudgetStatus{
 					Kind: BudgetKindContext, Used: nextTokens, Step: step + 1,
 					Limit: r.Config.ContextTokens, MaxSteps: maxSteps, MaxToolCalls: maxToolCalls,
-				}, "context_budget_exhausted")
+				}, "context_budget_exhausted", started)
 			}
 		}
 		if step == maxSteps-1 {
@@ -317,7 +318,7 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 				Step:         step + 1,
 				MaxSteps:     maxSteps,
 				MaxToolCalls: maxToolCalls,
-			})
+			}, started)
 			if err != nil {
 				return Result{}, err
 			}
@@ -331,8 +332,8 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 	return Result{}, fmt.Errorf("agent exceeded maximum model steps (%d)", maxSteps)
 }
 
-func (r *OpenAIRunner) finalizeForGuard(ctx context.Context, instructions string, messages []openai.Item, current Result, textFormat *openai.TextFormat, status BudgetStatus, reason string) (Result, error) {
-	finalized, err := r.finalizeWithoutTools(ctx, instructions, messages, textFormat, status)
+func (r *OpenAIRunner) finalizeForGuard(ctx context.Context, instructions string, messages []openai.Item, current Result, textFormat *openai.TextFormat, status BudgetStatus, reason string, started time.Time) (Result, error) {
+	finalized, err := r.finalizeWithoutTools(ctx, instructions, messages, textFormat, status, current.ToolCalls, started)
 	if err != nil {
 		return Result{}, err
 	}
@@ -352,13 +353,32 @@ func (r *OpenAIRunner) writeRuntimeStatus(phase string, step, maxSteps, toolCall
 	if r.Trace == nil {
 		return nil
 	}
-	return r.Trace.Write("runtime.status", map[string]any{
+	return r.Trace.Write("runtime.status", r.runtimeStatusValue(phase, step, maxSteps, toolCalls, maxToolCalls, estimatedTokens, inputTokens, started))
+}
+
+func (r *OpenAIRunner) attachRetryStatus(request *openai.Request, step, maxSteps, toolCalls, maxToolCalls, estimatedTokens int, started time.Time) {
+	if r.Trace == nil {
+		return
+	}
+	request.OnRetry = func(event openai.RetryEvent) error {
+		value := r.runtimeStatusValue("retrying_provider", step, maxSteps, toolCalls, maxToolCalls, estimatedTokens, 0, started)
+		value["retry_attempt"] = event.Attempt
+		value["max_retry_attempts"] = event.MaxAttempts
+		value["retry_reason"] = event.Reason
+		value["abandoned_provider_attempt"] = event.Attempt
+		value["provider_attempt"] = event.Attempt + 1
+		return r.Trace.Write("runtime.status", value)
+	}
+}
+
+func (r *OpenAIRunner) runtimeStatusValue(phase string, step, maxSteps, toolCalls, maxToolCalls, estimatedTokens, inputTokens int, started time.Time) map[string]any {
+	return map[string]any{
 		"phase": phase, "step": step, "max_steps": maxSteps,
 		"tool_calls": toolCalls, "max_tool_calls": maxToolCalls,
 		"elapsed_ms":               time.Since(started).Milliseconds(),
 		"estimated_context_tokens": estimatedTokens, "input_tokens": inputTokens,
 		"context_budget_tokens": r.Config.ContextTokens,
-	})
+	}
 }
 
 func estimateRequestTokens(request openai.Request) int {
@@ -398,7 +418,7 @@ func toolCallSignature(call openai.ToolCall) string {
 	return call.Name + "\x00" + arguments
 }
 
-func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions string, messages []openai.Item, current Result, textFormat *openai.TextFormat, status BudgetStatus) (Result, int, int, error) {
+func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions string, messages []openai.Item, current Result, textFormat *openai.TextFormat, status BudgetStatus, started time.Time) (Result, int, int, error) {
 	if r.Budget != nil {
 		decision, err := r.Budget(ctx, status)
 		if err != nil {
@@ -424,7 +444,7 @@ func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions
 		}
 	}
 
-	finalized, err := r.finalizeWithoutTools(ctx, instructions, messages, textFormat, status)
+	finalized, err := r.finalizeWithoutTools(ctx, instructions, messages, textFormat, status, current.ToolCalls, started)
 	if err != nil {
 		return Result{}, 0, 0, err
 	}
@@ -442,9 +462,10 @@ func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions
 	return finalized, status.MaxSteps, status.MaxToolCalls, nil
 }
 
-func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions string, messages []openai.Item, textFormat *openai.TextFormat, status BudgetStatus) (Result, error) {
+func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions string, messages []openai.Item, textFormat *openai.TextFormat, status BudgetStatus, toolCalls int, started time.Time) (Result, error) {
 	finalMessages := append(slices.Clone(messages), openai.NewMessage("developer", finalizationNotice(status)))
 	req := r.providerRequest(finalArtifactInstructions(instructions), finalMessages, nil, nil, textFormat)
+	r.attachRetryStatus(&req, status.Step, status.MaxSteps, toolCalls, status.MaxToolCalls, estimateRequestTokens(req), started)
 	if err := writeTraceRequest(r.Trace, req); err != nil {
 		return Result{}, err
 	}

@@ -216,7 +216,12 @@ or wrong-command tasks fail with empty stdout; signals cancel an active wait.
 Invalid tool arguments and missing evidence paths are returned to the model as
 structured errors so it can correct the request instead of aborting the task;
 an authoritative repository-state change aborts immediately. Retryable HTTP/2
-stream resets and truncated provider streams receive one non-streaming retry.
+stream resets and truncated provider streams receive one equivalent streaming
+retry. The event stream publishes `runtime.status` with
+`phase=retrying_provider`, the retry attempt, and a bounded reason before that
+retry; it marks the preceding attempt's live reasoning progress as superseded,
+and subsequent reasoning events carry the new provider-attempt number. Strict
+report stdout remains unchanged.
 
 See [docs/spec.md](docs/spec.md) for exact mode, schema, tool, and SSE contracts.
 

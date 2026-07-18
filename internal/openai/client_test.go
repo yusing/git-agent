@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -804,10 +805,10 @@ func TestCreateResponseStreamsReasoningSummaries(t *testing.T) {
 	if len(events) != 2 {
 		t.Fatalf("stream events = %#v", events)
 	}
-	if events[0].Kind != "reasoning_summary.delta" || events[0].Delta != "Inspecting " {
+	if events[0].Kind != "reasoning_summary.delta" || events[0].ProviderAttempt != 1 || events[0].Delta != "Inspecting " {
 		t.Fatalf("delta event = %#v", events[0])
 	}
-	if events[1].Kind != "reasoning_summary.done" || events[1].Text != "Inspecting changed files" {
+	if events[1].Kind != "reasoning_summary.done" || events[1].ProviderAttempt != 1 || events[1].Text != "Inspecting changed files" {
 		t.Fatalf("done event = %#v", events[1])
 	}
 }
@@ -1002,43 +1003,31 @@ func TestCreateResponseRepairsIncompleteCompletedToolCallsFromStream(t *testing.
 	}
 }
 
-func TestCreateResponseFallsBackToNonStreamingOnMalformedStreamJSON(t *testing.T) {
+func TestCreateResponseRetriesStreamingOnMalformedStreamJSON(t *testing.T) {
 	t.Parallel()
 
 	var requests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
+		assertStreamingRequest(t, r)
 		if requests == 1 {
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprint(w, "data: {")
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, marshalJSON(map[string]any{
-			"id":         "resp_fallback",
-			"object":     "response",
-			"created_at": 0,
-			"status":     "completed",
-			"model":      "test-model",
-			"output": []map[string]any{{
-				"id":     "msg_1",
-				"type":   "message",
-				"status": "completed",
-				"role":   "assistant",
-				"content": []map[string]any{{
-					"type":        "output_text",
-					"text":        "fallback text",
-					"annotations": []any{},
-				}},
-			}},
-		}))
+		writeCompletedSSE(t, w, "resp_retry", "retry text")
 	}))
 	defer server.Close()
 
+	var retryEvents []RetryEvent
 	resp, err := NewHTTPClient(server.Client()).CreateResponse(context.Background(), Request{
 		Model:   "test-model",
 		BaseURL: server.URL,
 		APIKey:  "test-key",
+		OnRetry: func(event RetryEvent) error {
+			retryEvents = append(retryEvents, event)
+			return nil
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1046,31 +1035,335 @@ func TestCreateResponseFallsBackToNonStreamingOnMalformedStreamJSON(t *testing.T
 	if requests != 2 {
 		t.Fatalf("requests = %d, want 2", requests)
 	}
-	if resp.Text != "fallback text" {
+	if resp.Text != "retry text" {
 		t.Fatalf("text = %q", resp.Text)
+	}
+	if len(retryEvents) != 1 || retryEvents[0].Attempt != 1 || retryEvents[0].MaxAttempts != 1 || retryEvents[0].Reason != RetryReasonMalformedStream {
+		t.Fatalf("retry events = %#v", retryEvents)
 	}
 }
 
-func TestRetryWithoutStreamingForTransientHTTP2StreamErrors(t *testing.T) {
+func TestCreateResponseRetriesStreamingAfterPeerHTTP2Reset(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		assertStreamingRequest(t, request)
+		body := io.ReadCloser(&readErrorCloser{err: errors.New("stream error: stream ID 15; INTERNAL_ERROR; received from peer")})
+		if requests == 2 {
+			body = io.NopCloser(strings.NewReader(completedSSE("resp_retry", "recovered")))
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       body,
+			Request:    request,
+		}, nil
+	})
+	var retryEvents []RetryEvent
+	response, err := NewHTTPClient(&http.Client{Transport: transport}).CreateResponse(t.Context(), Request{
+		Model:   "test-model",
+		BaseURL: "http://provider.test",
+		APIKey:  "test-key",
+		OnRetry: func(event RetryEvent) error {
+			retryEvents = append(retryEvents, event)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 || response.Text != "recovered" {
+		t.Fatalf("requests = %d, response = %#v", requests, response)
+	}
+	if len(retryEvents) != 1 || retryEvents[0].Reason != RetryReasonPeerStreamReset {
+		t.Fatalf("retry events = %#v", retryEvents)
+	}
+}
+
+func TestCreateResponseRetriesStreamWithoutCompletedEvent(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		assertStreamingRequest(t, r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests == 1 {
+			fmt.Fprintf(w, "data: %s\n\n", marshalJSON(map[string]any{
+				"type": "response.reasoning_summary_text.delta", "sequence_number": 1,
+				"output_index": 0, "item_id": "rs_abandoned", "summary_index": 0,
+				"delta": "abandoned reasoning",
+			}))
+			fmt.Fprintf(w, "data: %s\n\n", marshalJSON(map[string]any{
+				"type": "response.output_text.delta", "sequence_number": 2,
+				"output_index": 0, "item_id": "msg_partial", "content_index": 0,
+				"delta": "discarded partial text", "logprobs": []any{},
+			}))
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", marshalJSON(map[string]any{
+			"type": "response.reasoning_summary_text.delta", "sequence_number": 1,
+			"output_index": 0, "item_id": "rs_retry", "summary_index": 0,
+			"delta": "retry reasoning",
+		}))
+		fmt.Fprint(w, completedSSE("resp_retry", "complete retry"))
+	}))
+	defer server.Close()
+
+	var timeline []string
+	response, err := NewHTTPClient(server.Client()).CreateResponse(t.Context(), Request{
+		Model: "test-model", BaseURL: server.URL, APIKey: "test-key",
+		OnStreamEvent: func(event StreamEvent) error {
+			timeline = append(timeline, fmt.Sprintf("stream:%d:%s", event.ProviderAttempt, event.Delta))
+			return nil
+		},
+		OnRetry: func(event RetryEvent) error {
+			timeline = append(timeline, fmt.Sprintf("retry:%d", event.Attempt))
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 || response.Text != "complete retry" {
+		t.Fatalf("requests = %d, response = %#v", requests, response)
+	}
+	wantTimeline := []string{"stream:1:abandoned reasoning", "retry:1", "stream:2:retry reasoning"}
+	if !slices.Equal(timeline, wantTimeline) {
+		t.Fatalf("timeline = %#v, want %#v", timeline, wantTimeline)
+	}
+}
+
+func TestCreateResponseStopsAfterOneStreamingRetry(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		assertStreamingRequest(t, request)
+		attempt := "retry attempt"
+		if requests == 1 {
+			attempt = "first attempt"
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       &readErrorCloser{err: fmt.Errorf("unexpected EOF during %s", attempt)},
+			Request:    request,
+		}, nil
+	})
+
+	_, err := NewHTTPClient(&http.Client{Transport: transport}).CreateResponse(t.Context(), Request{
+		Model: "test-model", BaseURL: "http://provider.test", APIKey: "test-key",
+	})
+	if err == nil || !strings.Contains(err.Error(), "first attempt") || !strings.Contains(err.Error(), "retry attempt") {
+		t.Fatalf("error = %v, want both attempt failures", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+}
+
+func TestCreateResponseDoesNotRetryLocalStreamEventFailure(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		assertStreamingRequest(t, r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: %s\n\n", marshalJSON(map[string]any{
+			"type": "response.reasoning_summary_text.delta", "sequence_number": 1,
+			"output_index": 0, "item_id": "rs_1", "summary_index": 0, "delta": "working",
+		}))
+	}))
+	defer server.Close()
+
+	publishErr := errors.New("unexpected EOF in local trace sink")
+	_, err := NewHTTPClient(server.Client()).CreateResponse(t.Context(), Request{
+		Model: "test-model", BaseURL: server.URL, APIKey: "test-key",
+		OnStreamEvent: func(StreamEvent) error {
+			return publishErr
+		},
+	})
+	if !errors.Is(err, publishErr) {
+		t.Fatalf("error = %v, want local trace failure", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+}
+
+func TestCreateResponsePreservesInitialFailureWhenRetryStreamEventFails(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		assertStreamingRequest(t, r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests == 1 {
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", marshalJSON(map[string]any{
+			"type": "response.reasoning_summary_text.delta", "sequence_number": 1,
+			"output_index": 0, "item_id": "rs_retry", "summary_index": 0, "delta": "working",
+		}))
+	}))
+	defer server.Close()
+
+	publishErr := errors.New("retry trace sink failed")
+	_, err := NewHTTPClient(server.Client()).CreateResponse(t.Context(), Request{
+		Model: "test-model", BaseURL: server.URL, APIKey: "test-key",
+		OnStreamEvent: func(StreamEvent) error {
+			return publishErr
+		},
+	})
+	if !errors.Is(err, errIncompleteProviderStream) || !errors.Is(err, publishErr) {
+		t.Fatalf("error = %v, want initial stream and retry publication failures", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+}
+
+func TestCreateResponseDoesNotRetryWhenRetryProgressFails(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		assertStreamingRequest(t, r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {")
+	}))
+	defer server.Close()
+
+	publishErr := errors.New("retry progress sink failed")
+	_, err := NewHTTPClient(server.Client()).CreateResponse(t.Context(), Request{
+		Model: "test-model", BaseURL: server.URL, APIKey: "test-key",
+		OnRetry: func(RetryEvent) error {
+			return publishErr
+		},
+	})
+	if !errors.Is(err, publishErr) {
+		t.Fatalf("error = %v, want retry progress failure", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+}
+
+func TestCreateResponseCancellationPreventsStreamingRetry(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		assertStreamingRequest(t, r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {")
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	_, err := NewHTTPClient(server.Client()).CreateResponse(ctx, Request{
+		Model: "test-model", BaseURL: server.URL, APIKey: "test-key",
+		OnRetry: func(RetryEvent) error {
+			cancel()
+			return nil
+		},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context cancellation", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+}
+
+func TestStreamRetryClassificationIsNarrow(t *testing.T) {
 	t.Parallel()
 
 	for _, test := range []struct {
-		name    string
-		message string
-		want    bool
+		name       string
+		err        error
+		wantReason RetryReason
+		want       bool
 	}{
-		{name: "internal", message: "stream error: stream ID 55; INTERNAL_ERROR; received from peer", want: true},
-		{name: "refused stream", message: "stream error: stream ID 55; REFUSED_STREAM; received from peer", want: true},
-		{name: "cancel", message: "stream error: stream ID 55; CANCEL; received from peer", want: false},
-		{name: "local internal", message: "stream error: stream ID 55; INTERNAL_ERROR", want: false},
+		{name: "unexpected EOF identity", err: io.ErrUnexpectedEOF, wantReason: RetryReasonMalformedStream, want: true},
+		{name: "malformed JSON", err: errors.New("unexpected end of JSON input"), wantReason: RetryReasonMalformedStream, want: true},
+		{name: "wrapped unexpected EOF", err: fmt.Errorf("decode stream: %w", errors.New("unexpected EOF")), wantReason: RetryReasonMalformedStream, want: true},
+		{name: "peer internal", err: errors.New("stream error: stream ID 55; INTERNAL_ERROR; received from peer"), wantReason: RetryReasonPeerStreamReset, want: true},
+		{name: "wrapped peer refused", err: fmt.Errorf("provider stream: %w", errors.New("stream error: stream ID 57; REFUSED_STREAM; received from peer")), wantReason: RetryReasonPeerStreamReset, want: true},
+		{name: "cancel", err: errors.New("stream error: stream ID 55; CANCEL; received from peer")},
+		{name: "local internal", err: errors.New("stream error: stream ID 55; INTERNAL_ERROR")},
+		{name: "unrelated collision", err: errors.New("not a stream error: stream ID 55; INTERNAL_ERROR; received from peer")},
+		{name: "malformed stream id collision", err: errors.New("stream error: stream ID backup; INTERNAL_ERROR; received from peer")},
+		{name: "unknown future code", err: errors.New("stream error: stream ID 59; ENHANCE_YOUR_CALM; received from peer")},
+		{name: "provider error text collision", err: &openaisdk.Error{StatusCode: 400, Message: "unexpected EOF"}},
+		{name: "nil"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			err := fmt.Errorf("provider stream: %w", errors.New(test.message))
-			if got := shouldRetryWithoutStreaming(err); got != test.want {
-				t.Fatalf("shouldRetryWithoutStreaming() = %v, want %v", got, test.want)
+			reason, got := streamRetryReason(test.err)
+			if got != test.want || reason != test.wantReason {
+				t.Fatalf("streamRetryReason() = (%q, %v), want (%q, %v)", reason, got, test.wantReason, test.want)
 			}
 		})
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+type readErrorCloser struct {
+	err error
+}
+
+func (r *readErrorCloser) Read([]byte) (int, error) { return 0, r.err }
+func (r *readErrorCloser) Close() error             { return nil }
+
+func assertStreamingRequest(t *testing.T, request *http.Request) {
+	t.Helper()
+	var payload struct {
+		Stream bool `json:"stream"`
+	}
+	if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Stream {
+		t.Fatal("Responses retry omitted stream=true")
+	}
+}
+
+func writeCompletedSSE(t *testing.T, writer http.ResponseWriter, responseID, text string) {
+	t.Helper()
+	writer.Header().Set("Content-Type", "text/event-stream")
+	fmt.Fprint(writer, completedSSE(responseID, text))
+}
+
+func completedSSE(responseID, text string) string {
+	event := map[string]any{
+		"type": "response.completed", "sequence_number": 1,
+		"response": map[string]any{
+			"id": responseID, "object": "response", "created_at": 0,
+			"status": "completed", "model": "test-model",
+			"output": []map[string]any{{
+				"id": "msg_1", "type": "message", "status": "completed", "role": "assistant",
+				"content": []map[string]any{{"type": "output_text", "text": text, "annotations": []any{}}},
+			}},
+		},
+	}
+	return fmt.Sprintf("data: %s\n\ndata: [DONE]\n\n", marshalJSON(event))
 }
 
 func marshalJSON(v any) string {

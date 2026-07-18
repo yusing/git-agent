@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,18 +43,34 @@ type Request struct {
 	HostedCapabilities []provider.HostedCapability `json:"hosted_capabilities,omitempty"`
 	TextFormat         *TextFormat                 `json:"text_format,omitempty"`
 	OnStreamEvent      func(StreamEvent) error     `json:"-"`
+	OnRetry            func(RetryEvent) error      `json:"-"`
 }
 
 const ReasoningSummaryAuto = "auto"
 
 type StreamEvent struct {
-	Kind           string `json:"-"`
-	ItemID         string `json:"item_id"`
-	OutputIndex    int64  `json:"output_index"`
-	SummaryIndex   int64  `json:"summary_index"`
-	SequenceNumber int64  `json:"sequence_number"`
-	Delta          string `json:"delta,omitempty"`
-	Text           string `json:"text,omitempty"`
+	Kind            string `json:"-"`
+	ProviderAttempt int    `json:"provider_attempt"`
+	ItemID          string `json:"item_id"`
+	OutputIndex     int64  `json:"output_index"`
+	SummaryIndex    int64  `json:"summary_index"`
+	SequenceNumber  int64  `json:"sequence_number"`
+	Delta           string `json:"delta,omitempty"`
+	Text            string `json:"text,omitempty"`
+}
+
+type RetryReason string
+
+const (
+	RetryReasonMalformedStream RetryReason = "malformed_stream"
+	RetryReasonPeerStreamReset RetryReason = "peer_stream_reset"
+	maxStreamRetryAttempts                 = 1
+)
+
+type RetryEvent struct {
+	Attempt     int         `json:"attempt"`
+	MaxAttempts int         `json:"max_attempts"`
+	Reason      RetryReason `json:"reason"`
 }
 
 type EmbeddingRequest struct {
@@ -163,6 +180,47 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 	if err != nil {
 		return Response{}, err
 	}
+	response, streamErr := createStreamingResponse(ctx, client, params, 1, request.OnStreamEvent)
+	if streamErr == nil {
+		return response, nil
+	}
+	if _, localPublishFailure := errors.AsType[*streamEventPublishError](streamErr); localPublishFailure {
+		return Response{}, streamErr
+	}
+	reason, retry := streamRetryReason(streamErr)
+	if !retry {
+		return Response{}, responseError(streamErr)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return Response{}, responseError(errors.Join(streamErr, ctxErr))
+	}
+	if request.OnRetry != nil {
+		if err := request.OnRetry(RetryEvent{Attempt: 1, MaxAttempts: maxStreamRetryAttempts, Reason: reason}); err != nil {
+			return Response{}, fmt.Errorf("publishing provider retry event: %w", err)
+		}
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return Response{}, responseError(errors.Join(streamErr, ctxErr))
+	}
+	retried, retryErr := createStreamingResponse(ctx, client, params, 2, request.OnStreamEvent)
+	if retryErr != nil {
+		return Response{}, responseError(errors.Join(streamErr, retryErr))
+	}
+	return retried, nil
+}
+
+var errIncompleteProviderStream = errors.New("provider stream ended without response.completed event")
+
+type streamEventPublishError struct {
+	err error
+}
+
+func (e *streamEventPublishError) Error() string {
+	return fmt.Sprintf("publishing provider stream event: %v", e.err)
+}
+func (e *streamEventPublishError) Unwrap() error { return e.err }
+
+func createStreamingResponse(ctx context.Context, client openaisdk.Client, params responses.ResponseNewParams, providerAttempt int, onStreamEvent func(StreamEvent) error) (Response, error) {
 	stream := client.Responses.NewStreaming(ctx, params)
 	defer stream.Close()
 	var final *responses.Response
@@ -170,11 +228,12 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 	for stream.Next() {
 		event := stream.Current()
 		accum.apply(event)
-		if request.OnStreamEvent != nil {
+		if onStreamEvent != nil {
 			streamEvent, ok := reasoningSummaryStreamEvent(event)
 			if ok {
-				if err := request.OnStreamEvent(streamEvent); err != nil {
-					return Response{}, fmt.Errorf("publishing provider stream event: %w", err)
+				streamEvent.ProviderAttempt = providerAttempt
+				if err := onStreamEvent(streamEvent); err != nil {
+					return Response{}, &streamEventPublishError{err: err}
 				}
 			}
 		}
@@ -184,31 +243,17 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 		}
 	}
 	if err := stream.Err(); err != nil {
-		if shouldRetryWithoutStreaming(err) {
-			response, fallbackErr := fallbackWithoutStreaming(ctx, client, params, err)
-			if fallbackErr != nil {
-				return Response{}, responseError(fallbackErr)
-			}
-			return response, nil
-		}
-		return Response{}, responseError(err)
+		return Response{}, err
 	}
-	if final == nil && !accum.hasContent() {
-		response, err := fallbackWithoutStreaming(ctx, client, params, fmt.Errorf("provider stream ended without response.completed event"))
-		if err != nil {
-			return Response{}, responseError(err)
-		}
-		return response, nil
+	if final == nil {
+		return Response{}, errIncompleteProviderStream
 	}
 
-	result := accum.response()
-	if final != nil {
-		result = responseFromCompleted(final)
-		if result.Text == "" {
-			result.Text = accum.text()
-		}
-		result.ToolCalls = mergeToolCalls(result.ToolCalls, accum.toolCalls())
+	result := responseFromCompleted(final)
+	if result.Text == "" {
+		result.Text = accum.text()
 	}
+	result.ToolCalls = mergeToolCalls(result.ToolCalls, accum.toolCalls())
 	return result, nil
 }
 
@@ -361,8 +406,6 @@ func hostedCapabilityFailure(err error) (provider.CapabilityFailure, bool) {
 }
 
 type streamAccumulator struct {
-	responseID string
-	finishKind string
 	callsByID  map[string]*ToolCall
 	callsByIdx map[int64]*ToolCall
 	callOrder  []string
@@ -407,10 +450,6 @@ func (a *streamAccumulator) apply(event responses.ResponseStreamEventUnion) {
 			key := textPartKey(done.ItemID, done.ContentIndex)
 			a.setTextPart(key, done.Text)
 		}
-	case "response.completed":
-		completed := event.AsResponseCompleted()
-		a.responseID = completed.Response.ID
-		a.finishKind = string(completed.Response.Status)
 	}
 }
 
@@ -481,19 +520,6 @@ func (a *streamAccumulator) toolCalls() []ToolCall {
 		calls = append(calls, call)
 	}
 	return calls
-}
-
-func (a *streamAccumulator) hasContent() bool {
-	return strings.TrimSpace(a.text()) != "" || len(a.callOrder) > 0
-}
-
-func (a *streamAccumulator) response() Response {
-	return Response{
-		ID:         a.responseID,
-		Text:       a.text(),
-		ToolCalls:  a.toolCalls(),
-		FinishKind: a.finishKind,
-	}
 }
 
 func (a *streamAccumulator) appendTextPart(key, delta string) {
@@ -576,27 +602,50 @@ func hostedToolCall(call responses.ResponseFunctionWebSearch) HostedToolCall {
 	return result
 }
 
-func shouldRetryWithoutStreaming(err error) bool {
+func streamRetryReason(err error) (RetryReason, bool) {
 	if err == nil {
-		return false
+		return "", false
 	}
-	if errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
+	if _, apiFailure := errors.AsType[*openaisdk.Error](err); apiFailure {
+		return "", false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, errIncompleteProviderStream) {
+		return RetryReasonMalformedStream, true
 	}
 	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "unexpected end of json input") ||
-		strings.Contains(message, "unexpected eof") ||
-		strings.Contains(message, "stream error:") &&
-			strings.Contains(message, "received from peer") &&
-			(strings.Contains(message, "internal_error") || strings.Contains(message, "refused_stream"))
+	if strings.Contains(message, "unexpected end of json input") || strings.Contains(message, "unexpected eof") {
+		return RetryReasonMalformedStream, true
+	}
+	if isRetryablePeerStreamReset(message) {
+		return RetryReasonPeerStreamReset, true
+	}
+	return "", false
 }
 
-func fallbackWithoutStreaming(ctx context.Context, client openaisdk.Client, params responses.ResponseNewParams, streamErr error) (Response, error) {
-	fallback, fallbackErr := client.Responses.New(ctx, params)
-	if fallbackErr == nil {
-		return responseFromCompleted(fallback), nil
+func isRetryablePeerStreamReset(message string) bool {
+	const marker = "stream error: stream id "
+	for line := range strings.Lines(message) {
+		line = strings.TrimSpace(line)
+		index := strings.Index(line, marker)
+		if index < 0 {
+			continue
+		}
+		prefix := line[:index]
+		if prefix != "" && !strings.HasSuffix(prefix, ": ") {
+			continue
+		}
+		parts := strings.Split(line[index+len(marker):], "; ")
+		if len(parts) != 3 || parts[2] != "received from peer" {
+			continue
+		}
+		if _, err := strconv.ParseUint(parts[0], 10, 64); err != nil {
+			continue
+		}
+		if parts[1] == "internal_error" || parts[1] == "refused_stream" {
+			return true
+		}
 	}
-	return Response{}, errors.Join(streamErr, fallbackErr)
+	return false
 }
 
 func mergeToolCalls(primary, streamed []ToolCall) []ToolCall {
