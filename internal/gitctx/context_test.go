@@ -45,6 +45,126 @@ func TestOpenAndInspectStagedChanges(t *testing.T) {
 	}
 }
 
+func TestStagedInspectionDoesNotRequireWorktreeAccess(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "staged.txt"), "base\n")
+	runGit(t, repoDir, "add", "staged.txt")
+	runGit(t, repoDir, "commit", "-m", "base")
+	writeFile(t, filepath.Join(repoDir, "staged.txt"), "staged\n")
+	runGit(t, repoDir, "add", "staged.txt")
+
+	repo, err := OpenGitDir(filepath.Join(repoDir, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := repo.StagedPaths()
+	if err != nil {
+		t.Fatalf("StagedPaths required worktree access: %v", err)
+	}
+	if !slices.Equal(paths, []string{"staged.txt"}) {
+		t.Fatalf("paths = %#v, want [staged.txt]", paths)
+	}
+	status, err := repo.StagedStatus()
+	if err != nil {
+		t.Fatalf("StagedStatus required worktree access: %v", err)
+	}
+	if len(status) != 1 || status[0].Path != "staged.txt" {
+		t.Fatalf("status = %#v, want staged.txt only", status)
+	}
+	if _, err := repo.StagedSnapshot(16*1024, 400); err != nil {
+		t.Fatalf("StagedSnapshot required worktree access: %v", err)
+	}
+}
+
+func TestStagedStatusComesFromHeadAndIndex(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	for _, path := range []string{"deleted.txt", "modified.txt", "old-name.txt"} {
+		writeFile(t, filepath.Join(repoDir, path), "base\n")
+	}
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-m", "base")
+	writeFile(t, filepath.Join(repoDir, "added.txt"), "added\n")
+	writeFile(t, filepath.Join(repoDir, "modified.txt"), "modified\n")
+	runGit(t, repoDir, "add", "added.txt", "modified.txt")
+	runGit(t, repoDir, "rm", "deleted.txt")
+	runGit(t, repoDir, "mv", "old-name.txt", "new-name.txt")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := repo.StagedStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []PathChange{
+		{Path: "added.txt", Staging: "A"},
+		{Path: "deleted.txt", Staging: "D"},
+		{Path: "modified.txt", Staging: "M"},
+		{Path: "new-name.txt", Staging: "A"},
+		{Path: "old-name.txt", Staging: "D"},
+	}
+	if !slices.Equal(status, want) {
+		t.Fatalf("status = %#v, want %#v", status, want)
+	}
+}
+
+func TestStagedInspectionIgnoresUnrelatedWorktreeCollisionsAndUnknownIgnoreFiles(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "left", "shared.txt"), "base\n")
+	writeFile(t, filepath.Join(repoDir, "right", "shared.txt"), "base\n")
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-m", "base")
+	writeFile(t, filepath.Join(repoDir, "left", "shared.txt"), "staged\n")
+	runGit(t, repoDir, "add", "left/shared.txt")
+	writeFile(t, filepath.Join(repoDir, "right", "shared.txt"), "unstaged collision\n")
+	writeBinaryFile(t, filepath.Join(repoDir, ".gitignore.future"), []byte{'[', 0, ']'})
+	writeFile(t, filepath.Join(repoDir, "unknown-ignore-format", "untracked.txt"), "unrelated\n")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := repo.StagedPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(paths, []string{"left/shared.txt"}) {
+		t.Fatalf("paths = %#v, want [left/shared.txt]", paths)
+	}
+	status, err := repo.StagedStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(status, []PathChange{{Path: "left/shared.txt", Staging: "M"}}) {
+		t.Fatalf("status = %#v, want only staged collision path", status)
+	}
+}
+
+func TestStagedInspectionRejectsMalformedIndex(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "staged.txt"), "staged\n")
+	runGit(t, repoDir, "add", "staged.txt")
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, ".git", "index"), []byte("not a git index"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.StagedPaths(); err == nil {
+		t.Fatal("StagedPaths accepted malformed index")
+	}
+}
+
 func TestUncommittedDiffUsesFinalWorktreeAcrossStagedAndUnstagedChanges(t *testing.T) {
 	t.Parallel()
 

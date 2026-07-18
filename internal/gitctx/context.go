@@ -196,45 +196,19 @@ func (r *Repository) Summary() map[string]any {
 }
 
 func (r *Repository) StagedPaths() ([]string, error) {
-	status, err := r.status()
+	diff, err := r.stagedTreeDiff()
 	if err != nil {
 		return nil, err
 	}
-
-	var paths []string
-	for path, file := range status {
-		if file.Staging != git.Unmodified && file.Staging != git.Untracked {
-			paths = append(paths, path)
-		}
-	}
-	slices.Sort(paths)
-	return paths, nil
+	return diff.Paths(), nil
 }
 
 func (r *Repository) StagedStatus() ([]PathChange, error) {
-	status, err := r.status()
+	diff, err := r.stagedTreeDiff()
 	if err != nil {
 		return nil, err
 	}
-	paths := make([]string, 0, len(status))
-	for path := range status {
-		paths = append(paths, path)
-	}
-	slices.Sort(paths)
-
-	changes := make([]PathChange, 0, len(paths))
-	for _, path := range paths {
-		file := status[path]
-		if file.Staging == git.Unmodified || file.Staging == git.Untracked {
-			continue
-		}
-		changes = append(changes, PathChange{
-			Path:     path,
-			Staging:  string(file.Staging),
-			Worktree: string(file.Worktree),
-		})
-	}
-	return changes, nil
+	return diff.Status(), nil
 }
 
 func (r *Repository) StagedDiff(maxBytes, maxLines int) (string, bool, error) {
@@ -285,15 +259,19 @@ func (r *Repository) StagedStat() ([]FileStat, error) {
 }
 
 func (r *Repository) StagedSnapshot(maxBytes, maxLines int) (ChangeSnapshot, error) {
-	status, err := r.status()
-	if err != nil {
-		return ChangeSnapshot{}, err
-	}
 	baseTree, targetTree, diff, err := r.stagedChangeState()
 	if err != nil {
 		return ChangeSnapshot{}, err
 	}
-	return r.changeSnapshot(status, diff, changeFingerprint(baseTree, targetTree, diff.submodules), maxBytes, maxLines), nil
+	diffText, truncated := textutil.Limit(r.diffText(diff, nil), maxBytes, maxLines)
+	return ChangeSnapshot{
+		Paths:         diff.Paths(),
+		Status:        diff.Status(),
+		Stats:         diff.Stats(),
+		Diff:          diffText,
+		DiffTruncated: truncated,
+		Fingerprint:   changeFingerprint(baseTree, targetTree, diff.submodules),
+	}, nil
 }
 
 func (r *Repository) UncommittedSnapshot(maxBytes, maxLines int) (ChangeSnapshot, error) {
@@ -342,28 +320,6 @@ func checkChangeFingerprint(want, got ChangeFingerprint, err error) error {
 		return ErrChangeSnapshotStale
 	}
 	return nil
-}
-
-func (r *Repository) changeSnapshot(status git.Status, diff *treeDiff, fingerprint ChangeFingerprint, maxBytes, maxLines int) ChangeSnapshot {
-	paths := diff.Paths()
-	changes := make([]PathChange, 0, len(paths))
-	for _, path := range paths {
-		file := status[path]
-		if file == nil {
-			changes = append(changes, PathChange{Path: path})
-			continue
-		}
-		changes = append(changes, PathChange{Path: path, Staging: string(file.Staging), Worktree: string(file.Worktree)})
-	}
-	diffText, truncated := textutil.Limit(r.diffText(diff, nil), maxBytes, maxLines)
-	return ChangeSnapshot{
-		Paths:         paths,
-		Status:        changes,
-		Stats:         diff.Stats(),
-		Diff:          diffText,
-		DiffTruncated: truncated,
-		Fingerprint:   fingerprint,
-	}
 }
 
 func changeFingerprint(baseTree, targetTree *object.Tree, submodules []SubmoduleChange) ChangeFingerprint {
@@ -477,6 +433,46 @@ func (d *treeDiff) Stats() []FileStat {
 	}
 	slices.SortFunc(stats, func(a, b FileStat) int { return cmp.Compare(a.Path, b.Path) })
 	return stats
+}
+
+func (d *treeDiff) Status() []PathChange {
+	if d == nil {
+		return nil
+	}
+	status := make(map[string]git.StatusCode)
+	for _, patch := range d.patch.FilePatches() {
+		from, to := patch.Files()
+		switch {
+		case from == nil && to != nil:
+			status[to.Path()] = git.Added
+		case from != nil && to == nil:
+			status[from.Path()] = git.Deleted
+		case from != nil && to != nil && from.Path() != to.Path():
+			status[from.Path()] = git.Deleted
+			status[to.Path()] = git.Added
+		case to != nil:
+			status[to.Path()] = git.Modified
+		}
+	}
+	for _, change := range d.submodules {
+		if _, ok := status[change.Path]; ok {
+			continue
+		}
+		switch {
+		case change.Old == "":
+			status[change.Path] = git.Added
+		case change.New == "":
+			status[change.Path] = git.Deleted
+		default:
+			status[change.Path] = git.Modified
+		}
+	}
+	paths := slices.Sorted(maps.Keys(status))
+	changes := make([]PathChange, 0, len(paths))
+	for _, path := range paths {
+		changes = append(changes, PathChange{Path: path, Staging: string(status[path])})
+	}
+	return changes
 }
 
 func (d *treeDiff) unrepresentedSubmodules(selected map[string]bool) []SubmoduleChange {

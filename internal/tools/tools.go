@@ -1249,7 +1249,7 @@ func (t gitStagedPathsTool) Execute(context.Context, Invocation) (Result, error)
 type gitStagedStatusTool repoTool
 
 func (t gitStagedStatusTool) Definition() Definition {
-	return Definition{Name: "git_staged_status", Description: "Return staged and worktree status for changed paths.", Schema: emptySchema(), Strict: true}
+	return Definition{Name: "git_staged_status", Description: "Return index status for paths changed versus HEAD.", Schema: emptySchema(), Strict: true}
 }
 
 func (t gitStagedStatusTool) Execute(context.Context, Invocation) (Result, error) {
