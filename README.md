@@ -175,7 +175,10 @@ changed-path scope remains available to validation and read-only repository
 tools without duplicating every path, status, and stat in the initial request.
 The model can page through that complete inventory before requesting narrow
 path-specific diffs, and inspect bounded file outlines before selecting
-`read_file` ranges.
+`read_file` ranges. Every review and simplification mode also exposes an
+in-process `jq` tool that retrieves one field from repository JSON through an
+RFC 6901 JSON Pointer. It follows the same worktree/index/HEAD source isolation
+as file reads and does not execute an external `jq` command or general filters.
 Requests whose initial serialized estimate reaches the configured context budget
 fail before contacting the provider.
 

@@ -115,6 +115,7 @@ func NewReviewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Sto
 		listFilesTool{repo: repo, mode: mode},
 		readFileTool{repo: repo, mode: mode},
 		inspectFileTool{repo: repo, mode: mode},
+		jqTool{repo: repo, mode: mode},
 		grepTool{repo: repo, mode: mode},
 		findTool{repo: repo, mode: mode},
 	})
@@ -250,7 +251,7 @@ func CommitMessageToolNames() []string {
 
 func ReviewToolCandidates(mode ReviewMode) []string {
 	names := []string{
-		"repo_summary", "list_files", "read_file", "inspect_file", "grep", "find", OrchestrationArtifactToolName,
+		"repo_summary", "list_files", "read_file", "inspect_file", jqToolName, "grep", "find", OrchestrationArtifactToolName,
 		string(doccmd.GoDoc), string(doccmd.RustDoc), string(doccmd.Context7Library), string(doccmd.Context7Docs),
 	}
 	if mode != ReviewModeCodebase {

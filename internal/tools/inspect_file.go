@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -308,7 +309,7 @@ func jsonValueKind(value any) string {
 		return "null"
 	case bool:
 		return "boolean"
-	case float64:
+	case float64, json.Number:
 		return "number"
 	case string:
 		return "string"

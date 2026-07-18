@@ -209,14 +209,14 @@ Positional text remaining after flag parsing is escaped and appended as
 lower-priority operator hint, using same precedence rules as `--append-prompt`.
 
 In staged mode, repository guidance is read from index blobs, repository-local
-worktree skills are omitted, and `list_files`, `read_file`, `inspect_file`, `grep`, and `find`
-use index state. User, Codex, admin, and plugin skills remain available.
-Explicit `read_file source=worktree` and `inspect_file source=worktree` are
-rejected. In all modes, `read_file`
-streams the selected source and applies byte/line caps before materializing
-content. Report validation verifies every evidence path and inclusive line end
-against the authoritative worktree/index source, with HEAD fallback for deleted
-diff evidence and one-line synthetic evidence for changed gitlinks.
+worktree skills are omitted, and `list_files`, `read_file`, `inspect_file`,
+`jq`, `grep`, and `find` use index state. User, Codex, admin, and plugin skills
+remain available. Explicit worktree-source requests for `read_file`,
+`inspect_file`, and `jq` are rejected. In all modes, `read_file` streams the
+selected source and applies byte/line caps before materializing content. Report
+validation verifies every evidence path and inclusive line end against the
+authoritative worktree/index source, with HEAD fallback for deleted diff
+evidence and one-line synthetic evidence for changed gitlinks.
 
 Review examines correctness, security, reliability, performance,
 maintainability, tests, and style. Style findings are preserved alongside other
@@ -1662,8 +1662,20 @@ a bounded full diff in Go before the first provider call.
 
 ### Review and simplification tools
 
-Both inspection commands expose shared repository tools plus `skills_read` when
-skills are available. Diff modes additionally expose:
+Both inspection commands expose shared repository tools, `jq`, plus
+`skills_read` when skills are available. `jq` accepts `path`, `source`,
+`pointer`, `max_bytes`, and `max_lines`; it parses at most 16 MiB from the
+selected repository JSON source and retrieves one value through a plain RFC
+6901 JSON Pointer. An empty pointer selects the document root. It implements
+object-key unescaping and canonical array indices, but not jq filter syntax or
+an external executable. It preserves the selected JSON type. Values within the
+requested caps are returned as `value`; larger values return a bounded
+`value_preview`, exact standalone formatted size metadata, and
+`truncated:true`, so the model can request a narrower pointer. Source selection,
+repository confinement, symlink rejection, staged-mode isolation, and
+diff-snapshot drift checks match `read_file`.
+
+Diff modes additionally expose:
 
 - `review_changes`
 - `review_diff`
