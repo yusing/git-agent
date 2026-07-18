@@ -45,4 +45,11 @@
   errors.
 - Prefer tests that use temporary repositories and fake servers over tests that
   depend on local Git configuration, network access, or real provider calls.
-- DO NOT PRODUCE ANY ARTIFACT TO THE REPO, ESPECIALLY BUILT BINARY HANGING IN THE PROJECT ROOT
+
+## UX
+
+For long running process, MUST INTEGRATE PROGRESS REPORTING. E.g.:
+
+- (Re)Indexing
+- Git sync
+- Migration
