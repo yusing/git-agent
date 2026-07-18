@@ -292,7 +292,10 @@ Migration progress is reported on stderr while fetching, scanning v1
 snapshots, building v2 indexes, installing the migrated tree, and pushing.
 Interactive terminals update one transient progress line; redirected stderr
 receives newline-delimited phase updates. Dry-run reports only fetch, scan, and
-build phases because it never installs or pushes.
+build phases because it never installs or pushes. Re-running migration also
+repairs interrupted or mixed v2 trees automatically: validated legacy v1
+manifests are merged into v2, removed from the current tree, and the removals
+are pushed with the repaired v2 data.
 
 SSH remotes try available agent identities first, then unencrypted default
 keys in `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`, and `id_dsa`. Encrypted keys

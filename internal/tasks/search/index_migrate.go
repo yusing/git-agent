@@ -47,12 +47,13 @@ func MigrateIndex(ctx context.Context, remoteURL string, opts IndexMigrationOpti
 	if strings.TrimSpace(remoteURL) == "" {
 		return summary, errors.New("index.remote is not configured")
 	}
+	repair := newIndexMigrationRepair(ctx, opts.DryRun, opts.ProgressLog)
 	var sync *indexSync
 	var cleanup func() error
 	if opts.DryRun {
-		sync, cleanup, err = cloneIndexSyncReadOnly(ctx, remoteURL, opts.ProgressLog)
+		sync, cleanup, err = cloneIndexSyncReadOnly(ctx, remoteURL, opts.ProgressLog, repair)
 	} else {
-		sync, err = openIndexSync(ctx, remoteURL, opts.ProgressLog)
+		sync, err = openIndexSyncWithMigration(ctx, remoteURL, opts.ProgressLog, repair)
 		if err == nil {
 			cleanup = sync.close
 		}
@@ -66,7 +67,7 @@ func MigrateIndex(ctx context.Context, remoteURL string, opts IndexMigrationOpti
 	}
 	for attempt := range 3 {
 		summary, err = sync.prepareIndexMigration(false)
-		if err != nil || sync.schema == indexSyncSchemaV2 && summary.From == indexSyncSchemaV2 {
+		if err != nil || sync.schema == indexSyncSchemaV2 && summary.From == indexSyncSchemaV2 && !repair.changed {
 			return summary, err
 		}
 		err = sync.push(ctx)
@@ -87,6 +88,14 @@ func (sync *indexSync) prepareIndexMigration(dryRun bool) (summary IndexMigratio
 	summary.From = sync.schema
 	summary.To = indexSyncSchemaV2
 	if sync.schema == indexSyncSchemaV2 {
+		if sync.migrationRepair != nil {
+			summary = sync.migrationRepair.result()
+			if !dryRun && sync.migrationRepair.changed {
+				if err := sync.commitPending("Repair mixed schema v2 index store"); err != nil {
+					return summary, err
+				}
+			}
+		}
 		return summary, nil
 	}
 	if err := reportProgress(sync.progressLog, Progress{Status: ProgressStatusScanning}); err != nil {
@@ -131,12 +140,10 @@ func (sync *indexSync) prepareIndexMigration(dryRun bool) (summary IndexMigratio
 	}); err != nil {
 		return summary, err
 	}
-	if err := validateSyncTreeForSchema(temporary, indexSyncSchemaV2); err != nil {
+	if err := targetSync.validateV2TreeContents(); err != nil {
 		return summary, err
 	}
-	for _, byDigest := range targetSync.packCatalog {
-		summary.UniqueVectors += len(byDigest)
-	}
+	summary.UniqueVectors = vectorPackCatalogEntries(targetSync.packCatalog)
 	generatedStats, err := readTrackedTreeStats(temporary)
 	summary.ProjectedBytes = generatedStats.Bytes
 	summary.Packs = generatedStats.Packs
@@ -194,7 +201,7 @@ func (sync *indexSync) checkoutRemoteForMigration(ctx context.Context) error {
 	return sync.checkoutBranch(remoteHash)
 }
 
-func cloneIndexSyncReadOnly(ctx context.Context, remoteURL string, progressLog func(Progress) error) (*indexSync, func() error, error) {
+func cloneIndexSyncReadOnly(ctx context.Context, remoteURL string, progressLog func(Progress) error, repair *indexMigrationRepair) (*indexSync, func() error, error) {
 	dir, err := os.MkdirTemp("", "git-agent-index-migration-*")
 	if err != nil {
 		return nil, nil, err
@@ -223,7 +230,7 @@ func cloneIndexSyncReadOnly(ctx context.Context, remoteURL string, progressLog f
 		_ = cleanup()
 		return nil, nil, err
 	}
-	sync := &indexSync{remoteURL: remoteURL, dir: dir, repo: repo, worktree: worktree, progressLog: progressLog}
+	sync := &indexSync{remoteURL: remoteURL, dir: dir, repo: repo, worktree: worktree, progressLog: progressLog, migrationRepair: repair}
 	if err := sync.ensureSchema(); err != nil {
 		_ = cleanup()
 		return nil, nil, err
@@ -248,35 +255,43 @@ func (sync *indexSync) walkV1MigrationSnapshots(visit func(v1MigrationSnapshot) 
 		if entry.IsDir() || filepath.Ext(path) != ".json" {
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		snapshot, err := readV1MigrationSnapshot(sync.dir, path)
 		if err != nil {
 			return err
 		}
-		var snapshot syncedIndex
-		if err := decodeStrictJSON(data, &snapshot); err != nil {
-			return fmt.Errorf("parse synced index v1 %s: %w", path, err)
-		}
-		target := indexSyncTarget{origin: snapshot.Origin, revision: snapshot.Revision, model: snapshot.Model, dimensions: snapshot.Dimensions}
-		if err := validateSnapshot(snapshot, target); err != nil {
-			return err
-		}
-		expected, err := sync.snapshotPath(target)
-		if err != nil {
-			return err
-		}
-		if expected != path {
-			return fmt.Errorf("synced index v1 metadata does not match path %s", path)
-		}
-		records, ok := compatibleIndexRecords(snapshot.Records, snapshot.Model, snapshot.Dimensions)
-		if !ok {
-			return fmt.Errorf("synced index v1 %s contains incompatible records", path)
-		}
-		return visit(v1MigrationSnapshot{target: target, records: records})
+		return visit(snapshot)
 	})
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	return err
+}
+
+func readV1MigrationSnapshot(root, path string) (v1MigrationSnapshot, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return v1MigrationSnapshot{}, err
+	}
+	var snapshot syncedIndex
+	if err := decodeStrictJSON(data, &snapshot); err != nil {
+		return v1MigrationSnapshot{}, fmt.Errorf("parse synced index v1 %s: %w", path, err)
+	}
+	target := indexSyncTarget{origin: snapshot.Origin, revision: snapshot.Revision, model: snapshot.Model, dimensions: snapshot.Dimensions}
+	if err := validateSnapshot(snapshot, target); err != nil {
+		return v1MigrationSnapshot{}, err
+	}
+	expected, err := snapshotPathForSchema(root, target, indexSyncSchemaV1)
+	if err != nil {
+		return v1MigrationSnapshot{}, err
+	}
+	if expected != path {
+		return v1MigrationSnapshot{}, fmt.Errorf("synced index v1 metadata does not match path %s", path)
+	}
+	records, ok := compatibleIndexRecords(snapshot.Records, snapshot.Model, snapshot.Dimensions)
+	if !ok {
+		return v1MigrationSnapshot{}, fmt.Errorf("synced index v1 %s contains incompatible records", path)
+	}
+	return v1MigrationSnapshot{target: target, records: records}, nil
 }
 
 type trackedTreeStats struct {
@@ -316,48 +331,13 @@ func readTrackedTreeStats(root string) (trackedTreeStats, error) {
 	return result, err
 }
 
-func installMigratedTree(root, generated string) (err error) {
-	backupRoot, err := os.MkdirTemp(filepath.Join(root, ".git", "git-agent"), "migration-backup-*")
+func installMigratedTree(root, generated string) error {
+	if err := writeIndexSyncSchema(root, indexSyncSchemaV2); err != nil {
+		return err
+	}
+	legacyPaths, err := legacyV1ManifestPaths(root)
 	if err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, os.RemoveAll(backupRoot)) }()
-	oldIndexes := filepath.Join(root, "indexes")
-	backupIndexes := filepath.Join(backupRoot, "indexes")
-	if err := os.Rename(oldIndexes, backupIndexes); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	installedIndexes := false
-	installedPacks := false
-	rollback := func() {
-		if installedIndexes {
-			_ = os.RemoveAll(filepath.Join(root, "indexes"))
-		}
-		if installedPacks {
-			_ = os.RemoveAll(filepath.Join(root, "packs"))
-		}
-		_ = os.Rename(backupIndexes, oldIndexes)
-		_ = writeIndexSyncSchema(root, indexSyncSchemaV1)
-	}
-	if err := os.Rename(filepath.Join(generated, "indexes"), filepath.Join(root, "indexes")); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		rollback()
-		return err
-	} else if err == nil {
-		installedIndexes = true
-	}
-	if err := os.Rename(filepath.Join(generated, "packs"), filepath.Join(root, "packs")); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		rollback()
-		return err
-	} else if err == nil {
-		installedPacks = true
-	}
-	if err := writeIndexSyncSchema(root, indexSyncSchemaV2); err != nil {
-		rollback()
-		return err
-	}
-	if err := validateSyncTreeForSchema(root, indexSyncSchemaV2); err != nil {
-		rollback()
-		return err
-	}
-	return syncDirectory(root)
+	return installRepairedV2Tree(root, generated, legacyPaths)
 }

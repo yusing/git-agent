@@ -128,7 +128,27 @@ func writeIndexSyncSchema(root string, version int) error {
 	if version != indexSyncSchemaV1 && version != indexSyncSchemaV2 {
 		return fmt.Errorf("unsupported index sync schema version %d", version)
 	}
-	return os.WriteFile(filepath.Join(root, "schema.json"), []byte(fmt.Sprintf("{\"version\":%d}\n", version)), 0o600)
+	temporary, err := os.CreateTemp(root, ".schema-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer func() { _ = os.Remove(temporaryPath) }()
+	if _, err := fmt.Fprintf(temporary, "{\"version\":%d}\n", version); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, filepath.Join(root, "schema.json")); err != nil {
+		return err
+	}
+	return syncDirectory(root)
 }
 
 func syncTreeHasData(root string) (bool, error) {
@@ -145,6 +165,15 @@ func syncTreeHasData(root string) (bool, error) {
 }
 
 func validateSyncTreeForSchema(root string, version int) error {
+	return walkSafeSyncTree(root, func(path, rel string, directory bool) error {
+		if validSyncTreeEntryForSchema(rel, directory, version) {
+			return nil
+		}
+		return fmt.Errorf("index sync repository contains unsafe path %s", path)
+	})
+}
+
+func walkSafeSyncTree(root string, visit func(path, rel string, directory bool) error) error {
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -162,10 +191,7 @@ func validateSyncTreeForSchema(root string, version int) error {
 		if !entry.IsDir() && !entry.Type().IsRegular() {
 			return fmt.Errorf("index sync repository contains non-regular file %s", path)
 		}
-		if validSyncTreeEntryForSchema(rel, entry.IsDir(), version) {
-			return nil
-		}
-		return fmt.Errorf("index sync repository contains unsafe path %s", path)
+		return visit(path, rel, entry.IsDir())
 	})
 }
 

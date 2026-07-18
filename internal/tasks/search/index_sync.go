@@ -54,6 +54,8 @@ type indexSync struct {
 	schema           int
 	packCatalog      vectorPackCatalog
 	packCatalogDirty bool
+	migrationRepair  *indexMigrationRepair
+	fetchingReported bool
 }
 
 func prepareIndexSync(ctx context.Context, remoteURL string, target indexSyncTarget, progressLog func(Progress) error) (*indexSync, error) {
@@ -69,6 +71,10 @@ func prepareIndexSync(ctx context.Context, remoteURL string, target indexSyncTar
 }
 
 func openIndexSync(ctx context.Context, remoteURL string, progressLog func(Progress) error) (result *indexSync, err error) {
+	return openIndexSyncWithMigration(ctx, remoteURL, progressLog, nil)
+}
+
+func openIndexSyncWithMigration(ctx context.Context, remoteURL string, progressLog func(Progress) error, repair *indexMigrationRepair) (result *indexSync, err error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -101,12 +107,19 @@ func openIndexSync(ctx context.Context, remoteURL string, progressLog func(Progr
 		return nil, err
 	}
 	sync := &indexSync{
-		remoteURL:   remoteURL,
-		dir:         dir,
-		repo:        repo,
-		worktree:    worktree,
-		lock:        lock,
-		progressLog: progressLog,
+		remoteURL:       remoteURL,
+		dir:             dir,
+		repo:            repo,
+		worktree:        worktree,
+		lock:            lock,
+		progressLog:     progressLog,
+		migrationRepair: repair,
+	}
+	if repair != nil {
+		if err := reportProgress(progressLog, Progress{Status: ProgressStatusFetching}); err != nil {
+			return nil, err
+		}
+		sync.fetchingReported = true
 	}
 	if err := sync.reconcile(ctx); err != nil {
 		return nil, err
@@ -147,9 +160,12 @@ func (sync *indexSync) reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := reportProgress(sync.progressLog, Progress{Status: ProgressStatusFetching}); err != nil {
-		return err
+	if !sync.fetchingReported {
+		if err := reportProgress(sync.progressLog, Progress{Status: ProgressStatusFetching}); err != nil {
+			return err
+		}
 	}
+	sync.fetchingReported = false
 	refs, err := remote.ListContext(ctx, &git.ListOptions{ClientOptions: remoteClientOptions()})
 	if errors.Is(err, transport.ErrEmptyRemoteRepository) {
 		refs, err = nil, nil
@@ -347,6 +363,11 @@ func (sync *indexSync) ensureSchema() error {
 	} else if err != nil {
 		return err
 	}
+	if schema.Version == indexSyncSchemaV2 && sync.migrationRepair != nil {
+		if err := sync.repairMixedV2Tree(); err != nil {
+			return err
+		}
+	}
 	if err := validateSyncTreeForSchema(sync.dir, schema.Version); err != nil {
 		return err
 	}
@@ -355,14 +376,18 @@ func (sync *indexSync) ensureSchema() error {
 }
 
 func (sync *indexSync) snapshotPath(target indexSyncTarget) (string, error) {
+	return snapshotPathForSchema(sync.dir, target, sync.schema)
+}
+
+func snapshotPathForSchema(root string, target indexSyncTarget, schema int) (string, error) {
 	if err := validateSyncTarget(target); err != nil {
 		return "", err
 	}
 	encodedModelKey := digestHex(syncModelKey(target.model, target.dimensions))
-	if sync.schema == indexSyncSchemaV2 {
-		return filepath.Join(sync.dir, "indexes", metadata.IdentitySHA(target.origin), target.revision, encodedModelKey+".json"), nil
+	if schema == indexSyncSchemaV2 {
+		return filepath.Join(root, "indexes", metadata.IdentitySHA(target.origin), target.revision, encodedModelKey+".json"), nil
 	}
-	return filepath.Join(sync.dir, "indexes", metadata.IdentitySHA(target.origin), target.revision, encodedModelKey[:16]+".json"), nil
+	return filepath.Join(root, "indexes", metadata.IdentitySHA(target.origin), target.revision, encodedModelKey[:16]+".json"), nil
 }
 
 func (sync *indexSync) importIndex(ctx context.Context, target indexSyncTarget) error {

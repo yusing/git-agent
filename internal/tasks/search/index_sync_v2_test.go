@@ -9,8 +9,12 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/yusing/git-agent/internal/metadata"
 )
 
 func TestIndexSyncSchemaRejectsMalformedAndFutureData(t *testing.T) {
@@ -210,6 +214,7 @@ func TestIndexMigrationDeduplicatesAndImportsV2(t *testing.T) {
 	if got, want := compactProgressStatuses(migrationProgress), []string{ProgressStatusFetching, ProgressStatusScanning, ProgressStatusBuilding, ProgressStatusInstalling, ProgressStatusPushing}; !slices.Equal(got, want) {
 		t.Fatalf("migration progress statuses = %q, want %q", got, want)
 	}
+	assertRemoteHasNoLegacyV1Manifests(t, remote)
 
 	t.Setenv("HOME", t.TempDir())
 	metadataDir := t.TempDir()
@@ -237,6 +242,279 @@ func TestIndexMigrationDeduplicatesAndImportsV2(t *testing.T) {
 	}
 	if len(loaded) != 1 || !bytes.Equal(encodeVector(loaded[0].Vector), encodeVector(record.Vector)) {
 		t.Fatalf("imported records = %#v", loaded)
+	}
+}
+
+func TestIndexMigrationRepairsLegacyV1ManifestInV2Repository(t *testing.T) {
+	fixture := newMixedV2Remote(t, true)
+	before := remoteHead(t, fixture.remote)
+	var progress []Progress
+	summary, err := MigrateIndex(t.Context(), fixture.remote, IndexMigrationOptions{
+		ProgressLog: func(update Progress) error {
+			progress = append(progress, update)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.From != indexSyncSchemaV2 || summary.To != indexSyncSchemaV2 || summary.Indexes != 1 || summary.Records != 1 {
+		t.Fatalf("repair summary = %#v", summary)
+	}
+	if got, want := compactProgressStatuses(progress), []string{ProgressStatusFetching, ProgressStatusScanning, ProgressStatusBuilding, ProgressStatusInstalling, ProgressStatusPushing}; !slices.Equal(got, want) {
+		t.Fatalf("repair progress statuses = %q, want %q", got, want)
+	}
+	after := remoteHead(t, fixture.remote)
+	if after == before {
+		t.Fatal("repair did not advance the remote")
+	}
+
+	t.Setenv("HOME", t.TempDir())
+	repaired, err := openIndexSync(t.Context(), fixture.remote, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(repaired.dir, fixture.legacyRel)); !os.IsNotExist(err) {
+		t.Fatalf("legacy v1 manifest remains after repair: %v", err)
+	}
+	fullPath, err := repaired.snapshotPath(fixture.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := repaired.loadV2Snapshot(fullPath, fixture.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || !bytes.Equal(encodeVector(records[0].Vector), encodeVector(fixture.record.Vector)) {
+		t.Fatalf("repaired records = %#v", records)
+	}
+	if err := repaired.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	repeated, err := MigrateIndex(t.Context(), fixture.remote, IndexMigrationOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated.From != indexSyncSchemaV2 || repeated.To != indexSyncSchemaV2 || repeated.Indexes != 0 || remoteHead(t, fixture.remote) != after {
+		t.Fatalf("repeated repair summary = %#v", repeated)
+	}
+}
+
+func TestIndexMigrationDryRunReportsLegacyV1ManifestRepairWithoutMutation(t *testing.T) {
+	fixture := newMixedV2Remote(t, true)
+	before := remoteHead(t, fixture.remote)
+	var progress []Progress
+	summary, err := MigrateIndex(t.Context(), fixture.remote, IndexMigrationOptions{
+		DryRun: true,
+		ProgressLog: func(update Progress) error {
+			progress = append(progress, update)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.From != indexSyncSchemaV2 || summary.To != indexSyncSchemaV2 || summary.Indexes != 1 || summary.Records != 1 {
+		t.Fatalf("dry-run repair summary = %#v", summary)
+	}
+	if got, want := compactProgressStatuses(progress), []string{ProgressStatusFetching, ProgressStatusScanning, ProgressStatusBuilding}; !slices.Equal(got, want) {
+		t.Fatalf("dry-run repair progress statuses = %q, want %q", got, want)
+	}
+	if after := remoteHead(t, fixture.remote); after != before {
+		t.Fatalf("dry-run repair advanced remote from %s to %s", before, after)
+	}
+}
+
+func TestIndexMigrationRemovesRedundantLegacyV1ManifestFromV2Remote(t *testing.T) {
+	fixture := newMixedV2Remote(t, false)
+	summary, err := MigrateIndex(t.Context(), fixture.remote, IndexMigrationOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Indexes != 1 || summary.Records != 1 {
+		t.Fatalf("redundant repair summary = %#v", summary)
+	}
+	assertRemoteHasNoLegacyV1Manifests(t, fixture.remote)
+}
+
+func TestIndexMigrationMixedV2RejectsInvalidStateWithoutMutation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		want   string
+		mutate func(*testing.T, string, mixedV2Fixture)
+	}{
+		{
+			name: "malformed legacy manifest",
+			want: "parse synced index v1",
+			mutate: func(t *testing.T, root string, fixture mixedV2Fixture) {
+				writeFile(t, root, fixture.legacyRel, "{")
+			},
+		},
+		{
+			name: "metadata path mismatch",
+			want: "metadata does not match path",
+			mutate: func(t *testing.T, root string, fixture mixedV2Fixture) {
+				mismatch := filepath.Join(filepath.Dir(fixture.legacyRel), strings.Repeat("a", 16)+".json")
+				if err := os.Rename(filepath.Join(root, fixture.legacyRel), filepath.Join(root, mismatch)); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "conflicting legacy payload",
+			want: "conflicting vector payloads",
+			mutate: func(t *testing.T, root string, fixture mixedV2Fixture) {
+				conflict := fixture.record
+				conflict.Vector = []float64{0, 1, 0}
+				snapshot := syncedIndex{
+					Version:    indexSyncSchemaV1,
+					Origin:     fixture.target.origin,
+					Revision:   fixture.target.revision,
+					Model:      fixture.target.model,
+					Dimensions: fixture.target.dimensions,
+					Records:    []vectorRecord{conflict},
+				}
+				if err := writeJSONSync(filepath.Join(root, fixture.legacyRel), snapshot); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "malformed existing v2 manifest",
+			want: "parse synced index v2",
+			mutate: func(t *testing.T, root string, fixture mixedV2Fixture) {
+				writeFile(t, root, fixture.fullRel, "{")
+			},
+		},
+		{
+			name: "malformed unreferenced v2 pack",
+			want: "vector pack",
+			mutate: func(t *testing.T, root string, _ mixedV2Fixture) {
+				path := filepath.Join("packs", strings.Repeat("a", 64), strings.Repeat("b", 64)+".pack")
+				writeFile(t, root, path, "not a vector pack")
+			},
+		},
+		{
+			name: "unrelated path collision",
+			want: "unsafe path",
+			mutate: func(t *testing.T, root string, _ mixedV2Fixture) {
+				writeFile(t, root, "README.md", "not index data\n")
+			},
+		},
+		{
+			name: "future schema",
+			want: "unsupported index sync schema version 3",
+			mutate: func(t *testing.T, root string, _ mixedV2Fixture) {
+				writeFile(t, root, "schema.json", "{\"version\":3}\n")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newMixedV2Remote(t, false)
+			mutateRemoteTree(t, fixture.remote, "inject invalid mixed-v2 state", func(root string) {
+				test.mutate(t, root, fixture)
+			})
+			before := remoteHead(t, fixture.remote)
+			_, err := MigrateIndex(t.Context(), fixture.remote, IndexMigrationOptions{})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("migration error = %v, want %q", err, test.want)
+			}
+			if after := remoteHead(t, fixture.remote); after != before {
+				t.Fatalf("failed migration advanced remote from %s to %s", before, after)
+			}
+		})
+	}
+}
+
+func TestIndexSyncStillRejectsLegacyV1ManifestInV2Repository(t *testing.T) {
+	fixture := newMixedV2Remote(t, false)
+	t.Setenv("HOME", t.TempDir())
+	sync, err := openIndexSync(t.Context(), fixture.remote, nil)
+	if sync != nil {
+		_ = sync.close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "unsafe path") {
+		t.Fatalf("normal index sync error = %v", err)
+	}
+}
+
+func TestIndexMigrationMixedV2ProgressFailureDoesNotMutateRemote(t *testing.T) {
+	fixture := newMixedV2Remote(t, true)
+	before := remoteHead(t, fixture.remote)
+	wantErr := errors.New("stop mixed-v2 repair")
+	_, err := MigrateIndex(t.Context(), fixture.remote, IndexMigrationOptions{
+		ProgressLog: func(update Progress) error {
+			if update.Status == ProgressStatusBuilding {
+				return wantErr
+			}
+			return nil
+		},
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("migration error = %v, want %v", err, wantErr)
+	}
+	if after := remoteHead(t, fixture.remote); after != before {
+		t.Fatalf("failed migration advanced remote from %s to %s", before, after)
+	}
+}
+
+func TestIndexMigrationRecoversInterruptedV1InstallationBoundaries(t *testing.T) {
+	for _, publishCandidate := range []bool{false, true} {
+		name := "after schema switch"
+		if publishCandidate {
+			name = "after v2 publish"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := writeIndexSyncSchema(root, indexSyncSchemaV1); err != nil {
+				t.Fatal(err)
+			}
+			target := indexSyncTarget{
+				origin:     "https://example.test/acme/interrupted",
+				revision:   strings.Repeat("7", 40),
+				model:      "test-model",
+				dimensions: 3,
+			}
+			record := testSyncedVectorRecord("interrupted", []float64{1, 0, 0})
+			v1 := &indexSync{dir: root, schema: indexSyncSchemaV1}
+			if _, err := v1.writeSnapshot(target, []vectorRecord{record}); err != nil {
+				t.Fatal(err)
+			}
+			legacyPath, err := v1.snapshotPath(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			candidate := t.TempDir()
+			if err := writeIndexSyncSchema(candidate, indexSyncSchemaV2); err != nil {
+				t.Fatal(err)
+			}
+			v2 := &indexSync{dir: candidate, schema: indexSyncSchemaV2}
+			if _, err := v2.writeSnapshotV2(target, []vectorRecord{record}); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeIndexSyncSchema(root, indexSyncSchemaV2); err != nil {
+				t.Fatal(err)
+			}
+			if publishCandidate {
+				if err := publishV2CandidateFiles(root, candidate); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			repair := newIndexMigrationRepair(t.Context(), false, nil)
+			interrupted := &indexSync{dir: root, schema: indexSyncSchemaV2, migrationRepair: repair}
+			if err := interrupted.ensureSchema(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+				t.Fatalf("legacy manifest remains after restart recovery: %v", err)
+			}
+			if err := interrupted.validateV2TreeContents(); err != nil {
+				t.Fatalf("recovered tree is invalid: %v", err)
+			}
+		})
 	}
 }
 
@@ -503,4 +781,146 @@ func compactProgressStatuses(progress []Progress) []string {
 		}
 	}
 	return result
+}
+
+type mixedV2Fixture struct {
+	remote    string
+	target    indexSyncTarget
+	record    vectorRecord
+	legacyRel string
+	fullRel   string
+}
+
+func newMixedV2Remote(t *testing.T, removeV2Manifest bool) mixedV2Fixture {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	remote := newEmptySyncRemote(t)
+	sync, err := openIndexSync(t.Context(), remote, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := indexSyncTarget{
+		origin:     "https://example.test/acme/mixed-schema",
+		revision:   strings.Repeat("9", 40),
+		model:      "test-model",
+		dimensions: 3,
+	}
+	record := testSyncedVectorRecord("mixed-schema", []float64{1, 0, 0})
+	if _, err := sync.writeSnapshot(target, []vectorRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+	legacyPath, err := sync.snapshotPath(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyData, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyRel, err := filepath.Rel(sync.dir, legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sync.commitPending("seed mixed-schema migration test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sync.push(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := sync.close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateIndex(t.Context(), remote, IndexMigrationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	cloneDir := filepath.Join(t.TempDir(), "mixed")
+	repo, err := git.PlainClone(cloneDir, &git.CloneOptions{URL: remote})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyClonePath := filepath.Join(cloneDir, legacyRel)
+	if err := os.MkdirAll(filepath.Dir(legacyClonePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyClonePath, legacyData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worktree.Add(legacyRel); err != nil {
+		t.Fatal(err)
+	}
+	modelKey := digestHex(syncModelKey(target.model, target.dimensions))
+	fullRel := filepath.Join("indexes", metadata.IdentitySHA(target.origin), target.revision, modelKey+".json")
+	if removeV2Manifest {
+		if _, err := worktree.Remove(fullRel); err != nil {
+			t.Fatal(err)
+		}
+	}
+	signature := &object.Signature{Name: "Search Test", Email: "search@example.test", When: time.Unix(1, 0)}
+	if _, err := worktree.Commit("inject legacy v1 manifest into schema v2", &git.CommitOptions{Author: signature, Committer: signature}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Push(&git.PushOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	return mixedV2Fixture{remote: remote, target: target, record: record, legacyRel: legacyRel, fullRel: fullRel}
+}
+
+func remoteHead(t *testing.T, remote string) plumbing.Hash {
+	t.Helper()
+	repo, err := git.PlainOpen(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return head.Hash()
+}
+
+func assertRemoteHasNoLegacyV1Manifests(t *testing.T, remote string) {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "strict-v2")
+	if _, err := git.PlainClone(root, &git.CloneOptions{URL: remote}); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := legacyV1ManifestPaths(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(legacy) != 0 {
+		t.Fatalf("remote retains legacy v1 manifests: %q", legacy)
+	}
+	if err := validateSyncTreeForSchema(root, indexSyncSchemaV2); err != nil {
+		t.Fatalf("remote is not strict schema v2: %v", err)
+	}
+}
+
+func mutateRemoteTree(t *testing.T, remote, message string, mutate func(root string)) {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "remote-mutation")
+	repo, err := git.PlainClone(root, &git.CloneOptions{URL: remote})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(root)
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worktree.AddWithOptions(&git.AddOptions{All: true}); err != nil {
+		t.Fatal(err)
+	}
+	signature := &object.Signature{Name: "Search Test", Email: "search@example.test", When: time.Unix(2, 0)}
+	if _, err := worktree.Commit(message, &git.CommitOptions{Author: signature, Committer: signature}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Push(&git.PushOptions{}); err != nil {
+		t.Fatal(err)
+	}
 }

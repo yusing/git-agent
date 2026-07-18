@@ -8,11 +8,71 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type v2ReconcileState struct {
 	dir       string
 	snapshots map[string][]byte
+}
+
+func (sync *indexSync) validateV2TreeContents() error {
+	if err := validateSyncTreeForSchema(sync.dir, indexSyncSchemaV2); err != nil {
+		return err
+	}
+	indexesRoot := filepath.Join(sync.dir, "indexes")
+	err := filepath.WalkDir(indexesRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if errors.Is(walkErr, fs.ErrNotExist) {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		target, err := v2TargetFromSnapshot(data)
+		if err != nil {
+			return err
+		}
+		expected, err := snapshotPathForSchema(sync.dir, target, indexSyncSchemaV2)
+		if err != nil {
+			return err
+		}
+		if expected != path {
+			return fmt.Errorf("synced index v2 metadata does not match path %s", path)
+		}
+		_, err = sync.decodeV2Snapshot(data, target)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	packsRoot := filepath.Join(sync.dir, "packs")
+	return filepath.WalkDir(packsRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if errors.Is(walkErr, fs.ErrNotExist) {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		digest := strings.TrimSuffix(entry.Name(), ".pack")
+		pack, err := readVectorPack(path, digest)
+		if err != nil {
+			return err
+		}
+		if digestHex(pack.ModelKey) != filepath.Base(filepath.Dir(path)) {
+			return fmt.Errorf("vector pack %s model key does not match path", digest)
+		}
+		return nil
+	})
 }
 
 func (sync *indexSync) captureV2ReconcileState() (v2ReconcileState, error) {

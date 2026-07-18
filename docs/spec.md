@@ -783,14 +783,27 @@ form validates every v1 snapshot, builds and revalidates a complete v2 tree,
 publishes schema v2, commits once, pushes through normal reconciliation, and
 writes `migrated from=1 to=2 indexes=<n> records=<n> unique_vectors=<n>
 packs=<n> bytes=<n>` to stdout. Repeating migration on a v2 repository is a
-successful no-op. Migration changes only the current tree; history rewriting,
-retention, pruning, and pack compaction are not performed.
+successful no-op. If a schema-v2 repository contains canonical 16-character
+schema-v1 manifests, migration treats it as a recoverable interrupted or mixed
+migration: it strictly validates each v1 manifest and its metadata/path match,
+merges its records into canonical v2 packs and 64-character manifests, removes
+all v1 manifest paths from the current tree, commits the additions and removals,
+and pushes the repaired tree. This recovery is exclusive to `index migrate`;
+normal index sync continues rejecting mixed-schema trees. Malformed manifests,
+metadata/path mismatches, symlinks, unrelated paths, and unknown schemas fail
+without publishing a repair. Dry-run constructs and validates the same repaired
+tree without changing local or remote Git state. A repair writes the existing
+summary forms with `from=2 to=2` and counts the recovered v1 indexes and records.
+Migration changes only the current tree; history rewriting, retention, pruning,
+and pack compaction are not performed.
 
 Migration progress uses the same stderr rules as index sync. It reports
 `index migrate: fetching remote`, `index migrate: scanning v1 snapshots`, and
 `index migrate: building indexes <done>/<total>` for both forms. A non-dry-run
 migration additionally reports `index migrate: installing schema v2` and
-`index migrate: pushing remote`. Building updates include percentage and
+`index migrate: pushing remote`. Mixed-schema recovery uses the same phases and
+may scan both the pending local tree and fetched authoritative tree before it
+publishes one strictly valid v2 result. Building updates include percentage and
 elapsed time once at least one index is complete. Fetch and push transport
 details use the same bracketed suffix as index sync. Interactive stderr
 rewrites and clears one transient line; non-interactive stderr emits each
