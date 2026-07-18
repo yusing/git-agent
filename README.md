@@ -106,6 +106,10 @@ git-agent review --wait <id-from-launch-json>
 # Review only the Git index
 git-agent review --staged
 
+# Choose the lower or upper end of the calculated inspection budget
+git-agent review --depth fast
+git-agent review --depth thorough
+
 # Audit the full repository
 git-agent review --codebase
 
@@ -132,6 +136,17 @@ JSON reports to stdout. They have no request deadline by default; `--timeout
 <duration>` adds one explicitly. Without `--model` or `OPENAI_MODEL`, `review`
 uses `gpt-5.6-sol` and `simplify` uses `gpt-5.6-terra`; both use provider-default
 reasoning effort unless an effort flag is supplied.
+
+Diff-based runs calculate a bounded step range from effective changed lines,
+changed files, top-level scope dispersion, concrete repository-tool capability
+coverage, and applicable skills. `--depth fast|balanced|thorough` selects the
+lower bound, midpoint, or upper bound; the default is `balanced`. Generated Go
+files with standard markers are discounted, not ignored. Automatic review is
+capped at 60 model steps and 48 local tool calls; simplify is capped at 45 and
+36. `--max-steps` is a mutually exclusive expert override. Codebase mode has no
+change-size input and retains the fixed command caps; use `--max-steps` for a
+smaller codebase audit. The selected range, inputs, and ceilings are published
+as `inspection_budget` in the session event.
 
 Diff-based review and simplification preload a bounded current-change context
 and, when available, a previous-`HEAD` context pack for contrast. Current dirty
@@ -398,7 +413,8 @@ Common generation and inspection flags:
 | `--low`, `--medium`, `--high`, `--xhigh` | Set reasoning effort |
 | `--base-url <url>` | Override provider base URL |
 | `--timeout <duration>` | Set request timeout; `review`/`simplify` default to none |
-| `--max-steps <n>` | Bound agent loop steps |
+| `--depth fast\|balanced\|thorough` | Review/simplify only: select calculated inspection depth |
+| `--max-steps <n>` | Bound agent loop steps; overrides and conflicts with `--depth` |
 | `--max-web-searches <n>` | Review/simplify only: override hosted-search cap |
 | `--orchestration-artifact <path>` | Review/simplify only: authorize immutable helper artifact manifest |
 | `--dry-run` | Review/simplify only: emit deterministic events without provider access |

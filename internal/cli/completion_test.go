@@ -269,6 +269,7 @@ func fishCompletionCases(refs, remotes, paths []string) []fishCompletionCase {
 	add("commit rejects positional flag continuation", "git-agent commit unexpected --", nil)
 	add("pr message rejects positional flag continuation", "git-agent pr-message unexpected --", nil)
 	add("invalid guidance value", "git-agent commit --guidance-family future --", nil)
+	add("invalid review depth", "git-agent review --depth exhaustive --", nil)
 	add("unknown command option", "git-agent commit --future value --", nil)
 
 	searchCommand := completionCommandNamed(commands, "search")
@@ -332,6 +333,7 @@ func fishCompletionCommands(refs, remotes, paths []string) []fishCompletionComma
 		fishCompletionOption{name: "uncommitted"},
 		fishCompletionOption{name: "staged"},
 		fishCompletionOption{name: "wait", takesValue: true, value: "task-123"},
+		fishCompletionOption{name: "depth", takesValue: true, value: "balanced", valueCandidates: []string{"balanced", "fast", "thorough"}},
 		fishCompletionOption{name: "max-web-searches", takesValue: true, value: "4"},
 		fishCompletionOption{name: "dry-run"},
 		fishCompletionOption{name: "orchestration-artifact", takesValue: true, value: "artifact.json", valueCandidates: slices.Clone(paths)},
@@ -389,6 +391,11 @@ func expectedOptionCandidates(command fishCompletionCommand, used []fishCompleti
 		if _, wait := seen["wait"]; wait && len(seen) != 1 {
 			return nil
 		}
+		if _, depth := seen["depth"]; depth {
+			if _, maxSteps := seen["max-steps"]; maxSteps {
+				return nil
+			}
+		}
 	}
 	if command.name == "search" && !validSearchCompletionState(seen) {
 		return nil
@@ -420,6 +427,14 @@ func completionOptionCompatible(command, candidate string, seen map[string]fishC
 		}
 		if slices.Contains([]string{"codebase", "uncommitted", "staged"}, candidate) {
 			return countEnabledOptions(seen, "codebase", "uncommitted", "staged") == 0
+		}
+		if candidate == "depth" {
+			_, incompatible := seen["max-steps"]
+			return !incompatible
+		}
+		if candidate == "max-steps" {
+			_, incompatible := seen["depth"]
+			return !incompatible
 		}
 	}
 	if command == "search" {

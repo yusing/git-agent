@@ -82,7 +82,7 @@ function __git_agent_command_has_option
         case release-note
             contains -- "$option" out $shared
         case review simplify
-            contains -- "$option" codebase uncommitted staged wait max-web-searches dry-run orchestration-artifact $shared
+            contains -- "$option" codebase uncommitted staged wait depth max-web-searches dry-run orchestration-artifact $shared
         case search
             contains -- "$option" rev remote scope min-score limit format index reindex code no-tests agent ls ls-remotes ls-files embedding-model embedding-dimensions base-url timeout debug pprof
         case '*'
@@ -91,7 +91,7 @@ function __git_agent_command_has_option
 end
 
 function __git_agent_option_takes_value
-    contains -- "$argv[1]" model base-url timeout max-steps guidance-family append-prompt pprof wait max-web-searches orchestration-artifact out rev remote scope min-score limit format embedding-model embedding-dimensions
+    contains -- "$argv[1]" model base-url timeout max-steps guidance-family append-prompt pprof wait depth max-web-searches orchestration-artifact out rev remote scope min-score limit format embedding-model embedding-dimensions
 end
 
 function __git_agent_option_value_is_valid
@@ -100,6 +100,8 @@ function __git_agent_option_value_is_valid
     set -l value $argv[3]
 
     switch $option
+        case depth
+            contains -- "$command_name" review simplify; and contains -- "$value" fast balanced thorough
         case guidance-family
             contains -- "$value" auto agents claude codex none
         case format
@@ -178,6 +180,10 @@ function __git_agent_option_state_is_valid
             if contains -- wait $seen_options
                 test (count $seen_options) -eq 1; or return 1
             end
+            if contains -- depth $seen_options; and contains -- max-steps $seen_options
+                return 1
+            end
+            return 0
         case search
             set -l list_modes
             for mode in ls ls-remotes ls-files
@@ -223,6 +229,12 @@ function __git_agent_option_is_compatible
                 for mode in codebase uncommitted staged
                     contains -- $mode $enabled_options; and return 1
                 end
+            end
+            if test "$candidate" = depth; and contains -- max-steps $seen_options
+                return 1
+            end
+            if test "$candidate" = max-steps; and contains -- depth $seen_options
+                return 1
             end
         case search
             set -l list_modes
@@ -452,6 +464,7 @@ complete -c git-agent -n '__git_agent_option_available codebase review simplify'
 complete -c git-agent -n '__git_agent_option_available uncommitted review simplify' -l uncommitted -d 'Inspect all dirty worktree changes'
 complete -c git-agent -n '__git_agent_option_available staged review simplify' -l staged -d 'Inspect staged changes only'
 complete -c git-agent -n '__git_agent_option_available wait review simplify' -l wait -r -f -d 'Wait for a detached task ID and print its report'
+complete -c git-agent -n '__git_agent_option_available depth review simplify' -l depth -r -f -a 'fast balanced thorough' -d 'Select automatic inspection depth'
 complete -c git-agent -n '__git_agent_option_available max-web-searches review simplify' -l max-web-searches -r -f -d 'Cap provider-hosted web searches'
 complete -c git-agent -n '__git_agent_option_available dry-run review simplify' -l dry-run -d 'Emit deterministic provider events without a provider request'
 complete -c git-agent -n '__git_agent_option_available orchestration-artifact review simplify' -l orchestration-artifact -r -d 'Read helper-authorized orchestration artifact manifest'

@@ -23,18 +23,24 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 		key       string
 		model     string
 		reasoning string
+		steps     int
+		tools     int
 	}{
 		{
 			command: "review",
 			output:  `{"summary":"` + strings.Repeat("x", 20<<10) + `","recommendation":"APPROVE","findings":[]}`,
 			key:     "findings",
 			model:   reviewDefaultModel,
+			steps:   11,
+			tools:   9,
 		},
 		{
 			command: "simplify",
 			output:  `{"summary":"No simplifications found","opportunities":[]}`,
 			key:     "opportunities",
 			model:   simplifyDefaultModel,
+			steps:   9,
+			tools:   8,
 		},
 	}
 	for _, test := range tests {
@@ -66,8 +72,8 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 						`operator focus`,
 						`Never send secrets, source code, diffs, credentials, personal data`,
 						`deduplicated material source URLs or local documentation locators`,
-						fmt.Sprintf(`<max_model_steps>%d</max_model_steps>`, map[string]int{"review": reviewDefaultMaxSteps, "simplify": simplifyDefaultSteps}[test.command]),
-						fmt.Sprintf(`<max_tool_calls>%d</max_tool_calls>`, map[string]int{"review": reviewDefaultMaxTools, "simplify": simplifyDefaultTools}[test.command]),
+						fmt.Sprintf(`<max_model_steps>%d</max_model_steps>`, test.steps),
+						fmt.Sprintf(`<max_tool_calls>%d</max_tool_calls>`, test.tools),
 					} {
 						if !strings.Contains(body, want) {
 							t.Fatalf("request missing %q:\n%s", want, body)
@@ -291,12 +297,32 @@ func TestReviewHelpDocumentsDefaultMode(t *testing.T) {
 		"--timeout <duration>",
 		"set request timeout (disabled by default)",
 		"override model (default gpt-5.6-sol)",
+		"--depth <fast|balanced|thorough>",
+		"select automatic inspection depth: fast, balanced, or thorough (default balanced)",
 		"--max-web-searches <n>",
 		"API-key default 4; ChatGPT auth uncapped",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("help missing %q:\n%s", want, err)
 		}
+	}
+}
+
+func TestReviewDepthValidationHappensBeforeDetach(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"invalid", []string{"review", "--depth", "exhaustive"}, "--depth must be one of"},
+		{"explicit conflict", []string{"review", "--depth", "fast", "--max-steps", "12"}, "mutually exclusive"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := New().Run(t.Context(), test.args)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -326,13 +352,13 @@ func TestCodeReviewContextHasNoDefaultDeadline(t *testing.T) {
 func TestCodeReviewDefaultsPreserveExplicitOverrides(t *testing.T) {
 	t.Setenv("OPENAI_MODEL", "env-model")
 	cfg := config.Config{Model: "env-model"}
-	applyCodeReviewDefaults(reviewtask.KindReview, config.Options{}, &cfg)
+	applyCodeReviewModelDefault(reviewtask.KindReview, config.Options{}, &cfg)
 	if cfg.Model != "env-model" || cfg.ThinkingEffort != "" {
 		t.Fatalf("environment override config = %#v", cfg)
 	}
 
 	cfg = config.Config{Model: "flag-model", ThinkingEffort: "low"}
-	applyCodeReviewDefaults(reviewtask.KindReview, config.Options{Model: "flag-model", Low: true}, &cfg)
+	applyCodeReviewModelDefault(reviewtask.KindReview, config.Options{Model: "flag-model", Low: true}, &cfg)
 	if cfg.Model != "flag-model" || cfg.ThinkingEffort != "low" {
 		t.Fatalf("flag override config = %#v", cfg)
 	}

@@ -204,7 +204,10 @@ func buildContextPack(repo *gitctx.Repository, prepared PreparedContext) context
 			if prepared.Mode == ModeStaged {
 				source = gitctx.FileSourceIndex
 			}
-			header, _, _ = repo.FilePrefix(source, path, 8*1024)
+			if statusByPath[path] == "deleted" {
+				source = gitctx.FileSourceHead
+			}
+			header = reviewFilePrefix(repo, prepared.Mode, source, path, 8*1024)
 		}
 		facts = append(facts, contextpack.FileFact{
 			Path:     path,
@@ -216,6 +219,23 @@ func buildContextPack(repo *gitctx.Repository, prepared PreparedContext) context
 		})
 	}
 	return contextpack.Build(facts, contextpack.Options{})
+}
+
+func reviewFilePrefix(repo *gitctx.Repository, mode Mode, source gitctx.FileSource, path string, maxBytes int) string {
+	if repo == nil {
+		return ""
+	}
+	if mode != ModeUncommitted || source != gitctx.FileSourceHead {
+		prefix, _, _ := repo.FilePrefix(source, path, maxBytes)
+		return prefix
+	}
+	reader, err := repo.OpenUncommittedReviewFile(source, path)
+	if err != nil {
+		return ""
+	}
+	defer reader.Close()
+	prefix, _ := io.ReadAll(io.LimitReader(reader, int64(maxBytes)))
+	return string(prefix)
 }
 
 func statusName(status string) string {

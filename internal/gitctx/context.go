@@ -2060,14 +2060,28 @@ func fileStatsFromPatch(patch *object.Patch) []FileStat {
 	if patch == nil {
 		return nil
 	}
+	filePatches := patch.FilePatches()
 	stats := patch.Stats()
-	out := make([]FileStat, 0, len(stats))
-	for _, stat := range stats {
-		out = append(out, FileStat{
-			Path:    stat.Name,
-			Adds:    stat.Addition,
-			Deletes: stat.Deletion,
-		})
+	out := make([]FileStat, 0, len(filePatches))
+	statsIndex := 0
+	for _, filePatch := range filePatches {
+		binary := filePatch.IsBinary()
+		// go-git Patch.Stats omits empty-chunk patches, including binary
+		// files and submodule pointer updates, while FilePatches retains them.
+		if len(filePatch.Chunks()) == 0 && !binary {
+			continue
+		}
+		from, to := filePatch.Files()
+		path, _ := patchPath(from, to)
+		stat := FileStat{Path: path, IsBinary: binary}
+		if len(filePatch.Chunks()) > 0 {
+			if statsIndex < len(stats) {
+				stat.Adds = stats[statsIndex].Addition
+				stat.Deletes = stats[statsIndex].Deletion
+			}
+			statsIndex++
+		}
+		out = append(out, stat)
 	}
 	return out
 }

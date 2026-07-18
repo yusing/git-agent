@@ -163,6 +163,10 @@ Mode flags are mutually exclusive. No mode flag means `--uncommitted`.
   under those names remain ordinary review scope.
 - `--staged` reviews index state against `HEAD` and ignores unstaged content.
 - `--codebase` audits full repository without preloaded diff scope.
+- `--depth fast|balanced|thorough` selects the lower bound, midpoint, or upper
+  bound of the automatic inspection budget. Omission means `balanced`.
+- `--max-steps <positive-n>` is an exact expert override and is mutually
+  exclusive with `--depth`.
 - `--orchestration-artifact <absolute-path>` validates an owner-only manifest
   and its declared immutable files beneath manifest directory. It enables no
   arbitrary filesystem access.
@@ -270,14 +274,69 @@ agent progress. `review` defaults to `gpt-5.6-sol`; `simplify` defaults to
 `gpt-5.6-terra`. Both omit reasoning effort so provider default applies; an
 explicit reasoning flag overrides that default.
 
-Review defaults to 60 model steps and 48 tool calls. Simplify defaults to 45
-model steps and 36 tool calls. `--max-steps` overrides the command's model-step
-default. Every provider request states the current step and remaining tool-call
-budget. These local safety ceilings are never extended interactively for either
-command. At a ceiling, the runner records a JSON `budget` SSE event and makes a
-tool-free forced-finalization request using evidence already collected. On
-success, the detached worker persists and publishes the terminal report; it
-writes no report to stdout.
+Diff-based review and simplify calculate deterministic lower and upper model-step
+bounds after preparing the authoritative snapshot, discovering skills, and
+building the concrete tool registry. Let `Lh` and `Lg` be handwritten and
+standards-marker-generated added-plus-deleted lines, `B` binary files, `Fh` and
+`Fg` handwritten and generated files, and `D` distinct top-level path scopes:
+
+```text
+Le = Lh + ceil(0.15 * Lg) + 50 * B
+Fe = Fh + ceil(Fg / 4) + B
+W  = 2 * ceil(sqrt(Le / 50))
+     + ceil(sqrt(Fe))
+     + ceil(log2(1 + max(0, D - 1)))
+```
+
+Only the standard Go generated-file marker classifies generated content;
+deletions and additions otherwise have equal weight. Root-level paths form one
+`.` scope. Binary files contribute a fixed line-equivalent because they have no
+meaningful line stat.
+
+Tool coverage `C` is a value in `[0,1]` based on concrete registered
+capabilities, not raw tool count: bounded source read `0.30`, authoritative
+change enumeration `0.20`, path-bounded diff `0.20`, search or structural
+inspection `0.20`, and path discovery `0.10`. Codebase mode omits path-bounded
+diff and renormalizes the other `0.80`. Missing bounded source reading, or
+missing authoritative scope enumeration/discovery, fails budget planning rather
+than granting more steps. Let `K` be applicable skill roots capped at four.
+Explicitly named skills apply; otherwise only a focused code-review or
+code-simplification skill name or description matching the command applies.
+Unrelated discovered skills do not affect the budget.
+
+```text
+Mlow  = 1 + 0.25 * (1 - C)
+Mhigh = 1 + 0.75 * (1 - C)
+
+review lower = 6 + ceil(0.5 * W * Mlow) + ceil(K / 3)
+review upper = 6 + ceil(W * Mhigh) + K + 3
+
+simplify lower = 5 + ceil(0.5 * W * Mlow) + ceil(K / 3)
+simplify upper = 5 + ceil(W * Mhigh) + K + 2
+```
+
+Review clamps both bounds to `[8,60]`; simplify clamps them to `[6,45]`.
+`fast` selects the lower bound, `balanced` selects
+`ceil((lower+upper)/2)`, and `thorough` selects the upper bound. The automatic
+local function-tool ceiling is `ceil(0.8*selected_steps)+K`, clamped to `[6,48]`
+for review and `[5,36]` for simplify. An explicit `--max-steps` selects exactly
+that positive model-step ceiling, may exceed the automatic hard cap, and retains
+the command's fixed 48- or 36-call local tool ceiling for compatibility.
+
+Codebase mode has no changed-line input and retains fixed 60/48 review and 45/36
+simplify budgets for every automatic depth; `--max-steps` is the way to request
+a smaller or larger codebase audit. The `session` event includes an
+`inspection_budget` object containing policy, effective size, scope and work
+units, capability coverage, applicable-skill count, lower/selected/upper steps,
+local tool ceiling, hard caps, automatic/explicit state, and whether the fixed
+codebase budget applied.
+
+Every provider request states the selected step and remaining tool-call budget.
+These local safety ceilings are never extended interactively for either command.
+At a ceiling, the runner records a JSON `budget` SSE event and makes a tool-free
+forced-finalization request using evidence already collected. On success, the
+detached worker persists and publishes the terminal report; it writes no report
+to stdout.
 
 Every normal review and simplification model step enables provider-hosted
 `web_search`. It uses existing provider authentication and requests both
@@ -842,8 +901,10 @@ Message-generation subcommands reserve this shared flag surface:
 - `--debug`
 - `--pprof <addr>`
 
-`review` and `simplify` additionally support `--max-web-searches <positive-n>`
-and `--wait <id>` only as isolated retrieval form documented above.
+`review` and `simplify` additionally support
+`--depth fast|balanced|thorough` and `--max-web-searches <positive-n>`.
+`--wait <id>` is valid only as the isolated retrieval form documented above.
+`--depth` and `--max-steps` are mutually exclusive.
 
 `release-note` additionally supports:
 

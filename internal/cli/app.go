@@ -42,10 +42,6 @@ const (
 	releaseNoteMinTimeout  = 4 * time.Minute
 	reviewDefaultModel     = "gpt-5.6-sol"
 	simplifyDefaultModel   = "gpt-5.6-terra"
-	reviewDefaultMaxSteps  = 60
-	reviewDefaultMaxTools  = 48
-	simplifyDefaultSteps   = 45
-	simplifyDefaultTools   = 36
 )
 
 type App struct {
@@ -102,22 +98,24 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	var staged bool
 	var waitID string
 	var orchestrationArtifact string
+	var depthValue string
 	var dryRun bool
 	fs.BoolVar(&codebase, "codebase", false, "inspect the full codebase")
 	fs.BoolVar(&uncommitted, "uncommitted", false, "inspect all dirty worktree changes")
 	fs.BoolVar(&staged, "staged", false, "inspect staged changes only")
 	fs.StringVar(&waitID, "wait", "", "wait for a detached task and print its report")
 	fs.StringVar(&orchestrationArtifact, "orchestration-artifact", "", "read helper-authorized orchestration artifacts from manifest")
+	fs.StringVar(&depthValue, "depth", "", "select automatic inspection depth: fast, balanced, or thorough (default balanced)")
 	fs.BoolVar(&dryRun, "dry-run", false, "emit deterministic provider events without a provider request")
 	registerSharedFlags(fs, &opts)
 	fs.IntVar(&opts.MaxWebSearches, "max-web-searches", 0, "cap provider-hosted web searches (API-key default 4; ChatGPT auth uncapped)")
 	fs.Lookup("timeout").Usage = "set request timeout (disabled by default)"
 	fs.Lookup("model").Usage = fmt.Sprintf("override model (default %s)", codeReviewDefaultModel(kind))
-	defaultSteps := reviewDefaultMaxSteps
+	defaultSteps := reviewtask.ReviewMaxSteps
 	if kind == reviewtask.KindSimplify {
-		defaultSteps = simplifyDefaultSteps
+		defaultSteps = reviewtask.SimplifyMaxSteps
 	}
-	fs.Lookup("max-steps").Usage = fmt.Sprintf("set maximum agent steps (default %d)", defaultSteps)
+	fs.Lookup("max-steps").Usage = fmt.Sprintf("override automatic inspection depth (codebase default %d)", defaultSteps)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return codeReviewUsageError(command, fs)
@@ -127,6 +125,8 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	waitRequested := false
 	waitConflict := false
 	maxWebSearchesSet := false
+	depthSet := false
+	maxStepsSet := false
 	fs.Visit(func(flag *flag.Flag) {
 		if flag.Name == "wait" {
 			waitRequested = true
@@ -135,10 +135,23 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		if flag.Name == "max-web-searches" {
 			maxWebSearchesSet = true
 		}
+		if flag.Name == "depth" {
+			depthSet = true
+		}
+		if flag.Name == "max-steps" {
+			maxStepsSet = true
+		}
 		waitConflict = true
 	})
 	if maxWebSearchesSet && opts.MaxWebSearches < 1 {
 		return errors.New("--max-web-searches must be positive")
+	}
+	depth, err := reviewtask.ParseDepth(depthValue)
+	if err != nil {
+		return err
+	}
+	if depthSet && maxStepsSet {
+		return errors.New("--depth and --max-steps are mutually exclusive")
 	}
 	if waitRequested {
 		if waitConflict || len(fs.Args()) > 0 {
@@ -245,6 +258,24 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	if err != nil {
 		return err
 	}
+	toolCandidates := withSkillTools(tools.ReviewToolCandidates(mode.ToolMode()), skillStore)
+	registry := tools.NewReviewRegistryWithSkills(repo, skillStore, mode.ToolMode(), tools.NewReviewScope(prepared.Paths, prepared.Status, prepared.Stats), prepared.Fingerprint, orchestration)
+	toolSpecs := registry.Definitions(toolCandidates)
+	allowedTools := make([]string, 0, len(toolSpecs))
+	for _, definition := range toolSpecs {
+		allowedTools = append(allowedTools, definition.Name)
+	}
+	budgetPlan, err := reviewtask.PlanBudget(reviewtask.BudgetInput{
+		Kind:             kind,
+		Prepared:         prepared,
+		ToolNames:        allowedTools,
+		ApplicableSkills: applicableInspectionSkillCount(kind, mode, skillStore, opts.AppendPrompt),
+		Depth:            depth,
+		ExplicitMaxSteps: opts.MaxSteps,
+	})
+	if err != nil {
+		return fmt.Errorf("plan %s budget: %w", command, err)
+	}
 	eventServer, err := startDetachedAgentEventServer(a.stderr, command, taskID)
 	if err != nil {
 		return err
@@ -280,6 +311,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	if skillStore.Len() > 0 {
 		session["skills"] = skillStore.Summary()
 	}
+	session["inspection_budget"] = budgetPlan
 	if orchestration != nil {
 		session["orchestration_manifest_sha256"] = orchestration.Digest
 	}
@@ -304,18 +336,13 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		return err
 	}
 	cfg.Timeout = reviewTimeout
-	applyCodeReviewDefaults(kind, opts, &cfg)
+	applyCodeReviewModelDefault(kind, opts, &cfg)
+	cfg.MaxSteps = budgetPlan.SelectedSteps
+	cfg.MaxToolCalls = budgetPlan.MaxToolCalls
 	failureDiagnostic.Model = cfg.Model
 	failureDiagnostic.MaxSteps = cfg.MaxSteps
 	failureDiagnostic.MaxToolCalls = cfg.MaxToolCalls
 
-	toolCandidates := withSkillTools(tools.ReviewToolCandidates(mode.ToolMode()), skillStore)
-	registry := tools.NewReviewRegistryWithSkills(repo, skillStore, mode.ToolMode(), tools.NewReviewScope(prepared.Paths, prepared.Status, prepared.Stats), prepared.Fingerprint, orchestration)
-	toolSpecs := registry.Definitions(toolCandidates)
-	allowedTools := make([]string, 0, len(toolSpecs))
-	for _, definition := range toolSpecs {
-		allowedTools = append(allowedTools, definition.Name)
-	}
 	runner := agent.OpenAIRunner{
 		Config:             cfg,
 		Client:             openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
@@ -410,21 +437,9 @@ func codeReviewDefaultModel(kind reviewtask.Kind) string {
 	return reviewDefaultModel
 }
 
-func applyCodeReviewDefaults(kind reviewtask.Kind, opts config.Options, cfg *config.Config) {
+func applyCodeReviewModelDefault(kind reviewtask.Kind, opts config.Options, cfg *config.Config) {
 	if opts.Model == "" && os.Getenv("OPENAI_MODEL") == "" {
 		cfg.Model = codeReviewDefaultModel(kind)
-	}
-	if opts.MaxSteps == 0 {
-		if kind == reviewtask.KindReview {
-			cfg.MaxSteps = reviewDefaultMaxSteps
-		} else {
-			cfg.MaxSteps = simplifyDefaultSteps
-		}
-	}
-	if kind == reviewtask.KindReview {
-		cfg.MaxToolCalls = reviewDefaultMaxTools
-	} else {
-		cfg.MaxToolCalls = simplifyDefaultTools
 	}
 }
 
@@ -2081,6 +2096,7 @@ func codeReviewUsageError(command string, fs *flag.FlagSet) error {
 		"append-prompt":          "text",
 		"base-url":               "url",
 		"dry-run":                "",
+		"depth":                  "fast|balanced|thorough",
 		"guidance-family":        "family",
 		"max-web-searches":       "n",
 		"max-steps":              "n",

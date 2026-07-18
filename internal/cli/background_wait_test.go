@@ -136,6 +136,7 @@ func TestWaitRejectsEveryOtherReviewInput(t *testing.T) {
 		{"--timeout", "1s"},
 		{"--model", "test-model"},
 		{"--max-steps", "1"},
+		{"--depth", "fast"},
 		{"--fast"},
 		{"--low"},
 		{"--medium"},

@@ -764,6 +764,13 @@ func TestStagedDiffPreservesRenameHeaders(t *testing.T) {
 			t.Fatalf("rename diff missing %q:\n%s", want, diff)
 		}
 	}
+	snapshot, err := repo.StagedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Stats) != 1 || snapshot.Stats[0].Path != "new.txt" {
+		t.Fatalf("rename snapshot stats = %#v", snapshot.Stats)
+	}
 }
 
 func TestStagedDiffPreservesBinaryMarkers(t *testing.T) {
@@ -786,6 +793,40 @@ func TestStagedDiffPreservesBinaryMarkers(t *testing.T) {
 	}
 	if !strings.Contains(diff, "Binary files /dev/null and b/bin.dat differ") {
 		t.Fatalf("binary diff missing marker:\n%s", diff)
+	}
+	snapshot, err := repo.StagedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Stats) != 1 || snapshot.Stats[0].Path != "bin.dat" || !snapshot.Stats[0].IsBinary {
+		t.Fatalf("binary snapshot stats = %#v", snapshot.Stats)
+	}
+}
+
+func TestStagedSnapshotAlignsStatsAroundBinaryPatch(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "a.txt"), "first\n")
+	writeBinaryFile(t, filepath.Join(repoDir, "b.bin"), []byte{0x00, 0x01, 0x02, 0x03})
+	writeFile(t, filepath.Join(repoDir, "c.txt"), "third\nline\n")
+	runGit(t, repoDir, "add", "a.txt", "b.bin", "c.txt")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repo.StagedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []FileStat{
+		{Path: "a.txt", Adds: 1},
+		{Path: "b.bin", IsBinary: true},
+		{Path: "c.txt", Adds: 2},
+	}
+	if !slices.Equal(snapshot.Stats, want) {
+		t.Fatalf("mixed snapshot stats = %#v, want %#v", snapshot.Stats, want)
 	}
 }
 
