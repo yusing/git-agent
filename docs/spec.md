@@ -180,8 +180,10 @@ Mode flags are mutually exclusive. No mode flag means `--uncommitted`.
   500–1000 ms, keeping run observable for roughly 8–16 seconds.
 - `--help-agent` returns help for automated coding agents: the launch synopsis,
   the three scope modes, `--depth`, and the mutually exclusive reasoning-effort
-  flags `--low`, `--medium`, `--high`, and `--xhigh` rendered on one line. It
-  omits operator, provider, retrieval, diagnostic, budget-override, dry-run, and
+  flags `--low`, `--medium`, `--high`, and `--xhigh` rendered on one line. Its
+  depth guidance tells agents to use `thorough` only for security-related issues
+  or very complex logic, and to use `fast` or `balanced` otherwise. It omits
+  operator, provider, retrieval, diagnostic, budget-override, dry-run, and
   orchestration flags. Like `--help`, it exits without launching a detached
   task.
 
@@ -929,7 +931,8 @@ Message-generation subcommands reserve this shared flag surface:
 `--depth fast|balanced|thorough` and `--max-web-searches <positive-n>`.
 They also support `--help-agent`, which prints only the launch syntax, scope
 modes, `--depth`, and reasoning-effort flags intended for automated coding
-agents.
+agents. The agent help reserves `thorough` for security-related issues or very
+complex logic and directs agents to use `fast` or `balanced` otherwise.
 `--wait <id>` is valid only as the isolated retrieval form documented above.
 `--depth` and `--max-steps` are mutually exclusive.
 

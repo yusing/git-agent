@@ -331,6 +331,7 @@ func TestCodeReviewAgentHelpOnlyDocumentsAgentFacingFlags(t *testing.T) {
 				"--codebase     inspect the full codebase",
 				"--depth <fast|balanced|thorough>",
 				depthUsage,
+				"use thorough only for security-related issues or very complex logic; otherwise use fast or balanced",
 				"--low | --medium | --high | --xhigh",
 				"set reasoning effort (mutually exclusive)",
 			} {

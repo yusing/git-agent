@@ -2163,6 +2163,7 @@ func codeReviewAgentUsageError(command string, fs *flag.FlagSet) error {
 	depth := fs.Lookup("depth")
 	b.WriteString("  --depth <fast|balanced|thorough>\n")
 	fmt.Fprintf(&b, "      %s\n", depth.Usage)
+	b.WriteString("      use thorough only for security-related issues or very complex logic; otherwise use fast or balanced\n")
 	b.WriteString("  --low | --medium | --high | --xhigh\n")
 	b.WriteString("      set reasoning effort (mutually exclusive)\n")
 	return errors.New(b.String())

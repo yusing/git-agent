@@ -111,6 +111,7 @@ git-agent review --depth fast
 git-agent review --depth thorough
 
 # Show only the scope, depth, and reasoning options intended for coding agents
+# Agent help reserves thorough depth for security-related issues or very complex logic
 git-agent review --help-agent
 
 # Audit the full repository
