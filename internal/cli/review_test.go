@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -148,6 +149,59 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 				t.Fatalf("stderr = %q", stderr.String())
 			}
 		})
+	}
+}
+
+func TestDetachedReviewStartsWithUnreadableIgnoredAllowlistSibling(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory permissions required")
+	}
+
+	repoDir := initRepo(t)
+	t.Chdir(repoDir)
+	ignoreText := "*\n!.gitignore\n!app.txt\n!.local/\n!.local/share/\n!.local/share/keep.txt\n"
+	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte(ignoreText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "add", ".gitignore", "app.txt")
+	runGit(t, repoDir, "commit", "-m", "base")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".local", "share"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, ".local", "share", "keep.txt"), []byte("visible\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(repoDir, ".local", "share", "containers", "overlay", "partial")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv(detachedChildEnv, "1")
+	t.Setenv(detachedTaskIDEnv, cliWaitTaskID)
+	previousDelay := dryRunEventDelay
+	dryRunEventDelay = func() time.Duration { return 0 }
+	t.Cleanup(func() { dryRunEventDelay = previousDelay })
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"review", "--dry-run"}); err != nil {
+		t.Fatalf("detached review startup failed: %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("detached worker stdout = %q, want empty", stdout.String())
+	}
+	var launch detachedLaunch
+	if err := json.Unmarshal(stderr.Bytes(), &launch); err != nil {
+		t.Fatalf("worker launch metadata is not JSON: %v\n%s", err, stderr.String())
+	}
+	if launch.Command != "review" || launch.ID != cliWaitTaskID {
+		t.Fatalf("launch = %#v", launch)
 	}
 }
 

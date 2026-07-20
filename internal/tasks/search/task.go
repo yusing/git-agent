@@ -31,6 +31,7 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
 	"github.com/yusing/git-agent/internal/gitctx"
+	ignorectx "github.com/yusing/git-agent/internal/ignore"
 	"github.com/yusing/git-agent/internal/openai"
 	"golang.org/x/sync/errgroup"
 )
@@ -1008,7 +1009,7 @@ func discoverFilesystemFiles(root string, scope []string, debugLog func(string, 
 				skip(rel, "dot_dir")
 				return filepath.SkipDir
 			}
-			if path != root && ignoreMatcher.Match(pathParts(rel), true) {
+			if path != root && ignoreMatcher.Match(ignorectx.PathParts(rel), true) {
 				skipped.Dirs++
 				return filepath.SkipDir
 			}
@@ -1023,7 +1024,7 @@ func discoverFilesystemFiles(root string, scope []string, debugLog func(string, 
 				return nil
 			}
 		}
-		if ignoreMatcher.Match(pathParts(rel), false) {
+		if ignoreMatcher.Match(ignorectx.PathParts(rel), false) {
 			return nil
 		}
 		info, err := entry.Info()
@@ -2716,7 +2717,7 @@ func shouldSkipFile(name string) bool {
 }
 
 func shouldSkipPath(path string, scope []string) bool {
-	parts := pathParts(path)
+	parts := ignorectx.PathParts(path)
 	for i, part := range parts {
 		if shouldSkipDir(part) {
 			prefix := strings.Join(parts[:i+1], "/")
@@ -2761,7 +2762,7 @@ func filesystemIgnoreMatcher(root string, scope []string) gitignore.Matcher {
 				if shouldSkipDir(entry.Name()) && shouldSkipPath(rel, scope) {
 					return filepath.SkipDir
 				}
-				if searchIgnoreMatcher(patterns).Match(pathParts(rel), true) {
+				if patterns.Match(ignorectx.PathParts(rel), true) {
 					return filepath.SkipDir
 				}
 				relDir = rel
@@ -2771,12 +2772,12 @@ func filesystemIgnoreMatcher(root string, scope []string) gitignore.Matcher {
 		}
 		return nil
 	})
-	return searchIgnoreMatcher(patterns)
+	return patterns
 }
 
 func filesystemIgnoreMatcherForPaths(root string, paths []string) gitignore.Matcher {
 	if len(paths) == 0 {
-		return searchIgnoreMatcher(nil)
+		return ignorectx.New()
 	}
 	dirs := map[string]bool{"": true}
 	for _, path := range paths {
@@ -2784,7 +2785,7 @@ func filesystemIgnoreMatcherForPaths(root string, paths []string) gitignore.Matc
 		if dir == "." {
 			continue
 		}
-		parts := pathParts(dir)
+		parts := ignorectx.PathParts(dir)
 		for i := range parts {
 			dirs[strings.Join(parts[:i+1], "/")] = true
 		}
@@ -2797,20 +2798,20 @@ func filesystemIgnoreMatcherForPaths(root string, paths []string) gitignore.Matc
 		}
 		patterns = appendSearchIgnoreFilesFromDir(patterns, abs, dir)
 	}
-	return searchIgnoreMatcher(patterns)
+	return patterns
 }
 
-func appendSearchIgnoreFilesFromDir(patterns []searchIgnorePattern, dir, relDir string) []searchIgnorePattern {
+func appendSearchIgnoreFilesFromDir(patterns ignorectx.Matcher, dir, relDir string) ignorectx.Matcher {
 	var base []string
 	if relDir != "" {
-		base = pathParts(relDir)
+		base = ignorectx.PathParts(relDir)
 	}
 	for _, name := range searchIgnoreFileOrder {
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			continue
 		}
-		patterns = appendSearchIgnorePatterns(patterns, string(data), base)
+		patterns = patterns.Append(string(data), base)
 	}
 	return patterns
 }
@@ -2862,16 +2863,16 @@ func buildRevisionIgnoreMatcher(ignoreFiles []revisionIgnoreFile) gitignore.Matc
 
 	patterns := defaultIgnorePatterns()
 	for _, file := range ignoreFiles {
-		if file.dir != "" && searchIgnoreMatcher(patterns).Match(pathParts(file.dir), true) {
+		if file.dir != "" && patterns.Match(ignorectx.PathParts(file.dir), true) {
 			continue
 		}
 		var base []string
 		if file.dir != "" {
-			base = pathParts(file.dir)
+			base = ignorectx.PathParts(file.dir)
 		}
-		patterns = appendSearchIgnorePatterns(patterns, file.text, base)
+		patterns = patterns.Append(file.text, base)
 	}
-	return searchIgnoreMatcher(patterns)
+	return patterns
 }
 
 func ignoreFileOrder(name string) int {
@@ -2883,98 +2884,16 @@ func ignoreFileOrder(name string) int {
 	return len(searchIgnoreFileOrder)
 }
 
-const ignoreMatchEnd = "\x00git-agent-ignore-match-end"
-
-type searchIgnorePattern struct {
-	pattern     gitignore.Pattern
-	exact       gitignore.Pattern
-	base        []string
-	simpleExact bool
-}
-
-type searchIgnoreMatcher []searchIgnorePattern
-
-func defaultIgnorePatterns() []searchIgnorePattern {
-	patterns := make([]searchIgnorePattern, len(defaultSearchIgnorePatterns))
-	for i, pattern := range defaultSearchIgnorePatterns {
-		patterns[i] = searchIgnorePattern{pattern: pattern, simpleExact: true}
-	}
-	return patterns
-}
-
-func (m searchIgnoreMatcher) Match(path []string, isDir bool) bool {
-	ignored := false
-	for end := 1; end <= len(path); end++ {
-		prefix := path[:end]
-		prefixIsDir := end < len(path) || isDir
-		if matched, found := m.matchExact(prefix, prefixIsDir); found {
-			ignored = matched == gitignore.Exclude
-		}
-		if ignored && end < len(path) {
-			return true
-		}
-	}
-	return ignored
-}
-
-func (m searchIgnoreMatcher) matchExact(path []string, isDir bool) (gitignore.MatchResult, bool) {
-	for i := len(m) - 1; i >= 0; i-- {
-		if result := m[i].matchExact(path, isDir); result != gitignore.NoMatch {
-			return result, true
-		}
-	}
-	return gitignore.NoMatch, false
-}
-
-func (p searchIgnorePattern) matchExact(path []string, isDir bool) gitignore.MatchResult {
-	if p.simpleExact {
-		if len(path) <= len(p.base) {
-			return gitignore.NoMatch
-		}
-		direct := make([]string, len(p.base)+1)
-		copy(direct, p.base)
-		direct[len(p.base)] = path[len(path)-1]
-		return p.pattern.Match(direct, isDir)
-	}
-	if p.exact == nil {
-		return gitignore.NoMatch
-	}
-	exactPath := make([]string, len(path)+1)
-	copy(exactPath, path)
-	exactPath[len(path)] = ignoreMatchEnd
-	return p.exact.Match(exactPath, false)
-}
-
-func appendSearchIgnorePatterns(patterns []searchIgnorePattern, text string, base []string) []searchIgnorePattern {
-	for line := range strings.Lines(text) {
-		line = strings.TrimRight(line, "\r\n")
-		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		normalized := line
-		if !strings.HasSuffix(normalized, `\ `) {
-			normalized = strings.TrimRight(normalized, " ")
-		}
-		exact := strings.TrimSuffix(strings.TrimPrefix(normalized, "!"), "/")
-		pattern := searchIgnorePattern{
-			pattern:     gitignore.ParsePattern(normalized, base),
-			base:        slices.Clone(base),
-			simpleExact: !strings.Contains(exact, "/"),
-		}
-		if !pattern.simpleExact {
-			pattern.exact = gitignore.ParsePattern(strings.TrimSuffix(normalized, "/")+"/"+ignoreMatchEnd, base)
-		}
-		patterns = append(patterns, pattern)
-	}
-	return patterns
+func defaultIgnorePatterns() ignorectx.Matcher {
+	return ignorectx.New(defaultSearchIgnorePatterns...)
 }
 
 func revisionPathIgnored(matcher gitignore.Matcher, path string) bool {
-	return matcher.Match(pathParts(path), false)
+	return matcher.Match(ignorectx.PathParts(path), false)
 }
 
 func pathHasSkippedDir(path string) bool {
-	for _, part := range pathParts(path) {
+	for _, part := range ignorectx.PathParts(path) {
 		if shouldSkipDir(part) {
 			return true
 		}
@@ -2989,14 +2908,6 @@ func scopeUsesSkippedPath(scope []string) bool {
 		}
 	}
 	return false
-}
-
-func pathParts(path string) []string {
-	path = strings.Trim(filepath.ToSlash(path), "/")
-	if path == "" || path == "." {
-		return nil
-	}
-	return strings.Split(path, "/")
 }
 
 func normalizeScopes(scopes []string) ([]string, error) {
@@ -3083,7 +2994,7 @@ func indexDir(base, mode, root, resolvedRev string, filters Filters) string {
 }
 
 func isTestPath(path string) bool {
-	parts := pathParts(path)
+	parts := ignorectx.PathParts(path)
 	if len(parts) == 0 {
 		return false
 	}

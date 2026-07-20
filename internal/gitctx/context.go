@@ -1265,29 +1265,6 @@ func (r *Repository) RepoKind() string {
 	return "repository"
 }
 
-func (r *Repository) status() (git.Status, error) {
-	worktree, err := r.Repo.Worktree()
-	if err != nil {
-		return nil, err
-	}
-	status, err := worktree.Status()
-	if err != nil {
-		return nil, err
-	}
-	for path, file := range status {
-		if file.Staging == git.Untracked && isInternalStatePath(path) {
-			delete(status, path)
-		}
-	}
-	return status, nil
-}
-
-func isInternalStatePath(path string) bool {
-	path = filepath.ToSlash(path)
-	first, _, _ := strings.Cut(path, "/")
-	return first == ".git-agent" || first == ".omx"
-}
-
 func (r *Repository) headCommit() (*object.Commit, error) {
 	head, err := r.Repo.Head()
 	if err != nil {
@@ -1438,12 +1415,7 @@ func (r *Repository) dirtySubmoduleChanges(headTree *object.Tree) ([]SubmoduleCh
 		if err != nil {
 			continue
 		}
-		subWorktree, err := subRepo.Worktree()
-		if err != nil {
-			_ = subRepo.Close()
-			continue
-		}
-		subStatus, statusErr := subWorktree.Status()
+		subStatus, statusErr := (&Repository{RootPath: subRoot, WorkPath: subRoot, Repo: subRepo}).status()
 		head, headErr := subRepo.Head()
 		dirtyState := ""
 		if statusErr == nil && !subStatus.IsClean() {

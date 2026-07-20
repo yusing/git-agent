@@ -160,7 +160,13 @@ Mode flags are mutually exclusive. No mode flag means `--uncommitted`.
   with descendant checkout `HEAD`. Clean, uninitialized, unregistered,
   malformed-path, and symlink-escaping repositories do not gain nested scope.
   Untracked `.git-agent/` and `.omx/` runtime state is excluded; tracked files
-  under those names remain ordinary review scope.
+  under those names remain ordinary review scope. Filesystem status applies
+  `.git/info/exclude` and per-directory `.gitignore` rules before descending
+  into untracked directories. A descendant allowlist rule takes effect only
+  after every excluded parent directory has been re-included. Ignored untracked
+  subtrees are not inspected, while tracked files below ignored directories
+  remain ordinary review scope. Access failures outside ignored subtrees fail
+  preparation with an actionable error.
 - `--staged` reviews index state against `HEAD` and ignores unstaged content.
 - `--codebase` audits full repository without preloaded diff scope.
 - `--depth fast|balanced|thorough` selects the lower bound, midpoint, or upper

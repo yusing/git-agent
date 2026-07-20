@@ -4,9 +4,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
+
+	git "github.com/go-git/go-git/v6"
 )
 
 func TestOpenAndInspectStagedChanges(t *testing.T) {
@@ -284,6 +287,207 @@ func TestUncommittedSnapshotExcludesUntrackedInternalState(t *testing.T) {
 	}
 	if strings.Contains(snapshot.Diff, "secret") {
 		t.Fatalf("snapshot exposed internal state:\n%s", snapshot.Diff)
+	}
+}
+
+func TestUncommittedSnapshotPrunesIgnoredAllowlistSiblingBeforePermissionBoundary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory permissions required")
+	}
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, ".gitignore"), "*\n!.gitignore\n!.local/\n!.local/share/\n!.local/share/keep.txt\n")
+	runGit(t, repoDir, "add", ".gitignore")
+	runGit(t, repoDir, "commit", "-m", "base")
+	writeFile(t, filepath.Join(repoDir, ".local", "share", "keep.txt"), "visible\n")
+	locked := filepath.Join(repoDir, ".local", "share", "containers", "overlay", "partial")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repo.UncommittedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatalf("ignored unreadable subtree blocked snapshot: %v", err)
+	}
+	if !slices.Equal(snapshot.Paths, []string{".local/share/keep.txt"}) {
+		t.Fatalf("paths = %#v, want allowlisted file only", snapshot.Paths)
+	}
+}
+
+func TestUncommittedSnapshotReportsUnignoredIgnoreFileReadFailure(t *testing.T) {
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "tracked.txt"), "base\n")
+	runGit(t, repoDir, "add", "tracked.txt")
+	runGit(t, repoDir, "commit", "-m", "base")
+	invalidIgnoreFile := filepath.Join(repoDir, "visible", ".gitignore")
+	if err := os.MkdirAll(invalidIgnoreFile, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.UncommittedSnapshot(16*1024, 400); err == nil || !strings.Contains(err.Error(), ".gitignore") {
+		t.Fatalf("error = %v, want visible ignore-file read failure", err)
+	}
+}
+
+func TestUncommittedSnapshotKeepsTrackedFilesBelowIgnoredDirectory(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, ".gitignore"), "ignored/\n")
+	writeFile(t, filepath.Join(repoDir, "ignored", "tracked.txt"), "base\n")
+	runGit(t, repoDir, "add", ".gitignore")
+	runGit(t, repoDir, "add", "-f", "ignored/tracked.txt")
+	runGit(t, repoDir, "commit", "-m", "base")
+	writeFile(t, filepath.Join(repoDir, "ignored", "tracked.txt"), "changed\n")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repo.UncommittedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(snapshot.Paths, []string{"ignored/tracked.txt"}) {
+		t.Fatalf("paths = %#v, want tracked ignored path", snapshot.Paths)
+	}
+}
+
+func TestStatusCombinesStagedAndWorktreeCodes(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "staged.txt"), "base\n")
+	writeFile(t, filepath.Join(repoDir, "worktree.txt"), "base\n")
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-m", "base")
+	writeFile(t, filepath.Join(repoDir, "staged.txt"), "staged\n")
+	runGit(t, repoDir, "add", "staged.txt")
+	writeFile(t, filepath.Join(repoDir, "worktree.txt"), "worktree\n")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := repo.status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := status["staged.txt"]; got == nil || got.Staging != git.Modified || got.Worktree != git.Unmodified {
+		t.Fatalf("staged status = %#v, want M/unchanged", got)
+	}
+	if got := status["worktree.txt"]; got == nil || got.Staging != git.Unmodified || got.Worktree != git.Modified {
+		t.Fatalf("worktree status = %#v, want unchanged/M", got)
+	}
+}
+
+func TestUncommittedSnapshotDoesNotInterpretUnknownIgnoreFiles(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, ".gitignore"), "[\nignored/\n")
+	runGit(t, repoDir, "add", ".gitignore")
+	runGit(t, repoDir, "commit", "-m", "base")
+	writeFile(t, filepath.Join(repoDir, ".gitignore.future"), "visible/locked.txt\n")
+	writeFile(t, filepath.Join(repoDir, "ignored", "locked.txt"), "ignored\n")
+	writeFile(t, filepath.Join(repoDir, "visible", "locked.txt"), "visible\n")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repo.UncommittedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{".gitignore.future", "visible/locked.txt"}
+	if !slices.Equal(snapshot.Paths, want) {
+		t.Fatalf("paths = %#v, want %#v", snapshot.Paths, want)
+	}
+}
+
+func TestUncommittedSnapshotHonorsRepositoryExcludeFile(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "tracked.txt"), "base\n")
+	runGit(t, repoDir, "add", "tracked.txt")
+	runGit(t, repoDir, "commit", "-m", "base")
+	writeFile(t, filepath.Join(repoDir, ".git", "info", "exclude"), "excluded/\n")
+	writeFile(t, filepath.Join(repoDir, "excluded", "same.txt"), "ignored\n")
+	writeFile(t, filepath.Join(repoDir, "visible", "same.txt"), "visible\n")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repo.UncommittedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(snapshot.Paths, []string{"visible/same.txt"}) {
+		t.Fatalf("paths = %#v, want visible collision only", snapshot.Paths)
+	}
+}
+
+func TestUncommittedSnapshotScopesNestedBasenameRules(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "a", ".gitignore"), "*.secret\n")
+	runGit(t, repoDir, "add", "a/.gitignore")
+	runGit(t, repoDir, "commit", "-m", "base")
+	writeFile(t, filepath.Join(repoDir, "a", "same.secret"), "ignored\n")
+	writeFile(t, filepath.Join(repoDir, "b", "same.secret"), "visible\n")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repo.UncommittedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(snapshot.Paths, []string{"b/same.secret"}) {
+		t.Fatalf("paths = %#v, want sibling file only", snapshot.Paths)
+	}
+}
+
+func TestUncommittedSnapshotHonorsExcludeFileInLinkedWorktree(t *testing.T) {
+	t.Parallel()
+
+	mainDir := initTempRepo(t)
+	writeFile(t, filepath.Join(mainDir, "tracked.txt"), "base\n")
+	runGit(t, mainDir, "add", "tracked.txt")
+	runGit(t, mainDir, "commit", "-m", "base")
+	linkedDir := filepath.Join(t.TempDir(), "linked")
+	runGit(t, mainDir, "worktree", "add", "-b", "linked", linkedDir)
+	writeFile(t, filepath.Join(mainDir, ".git", "info", "exclude"), "excluded/\n")
+	writeFile(t, filepath.Join(linkedDir, "excluded", "same.txt"), "ignored\n")
+	writeFile(t, filepath.Join(linkedDir, "visible", "same.txt"), "visible\n")
+
+	repo, err := Open(linkedDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repo.UncommittedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(snapshot.Paths, []string{"visible/same.txt"}) {
+		t.Fatalf("paths = %#v, want visible linked-worktree file only", snapshot.Paths)
 	}
 }
 

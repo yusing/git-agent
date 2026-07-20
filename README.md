@@ -158,7 +158,11 @@ Diff-based review and simplification preload a bounded current-change context
 and, when available, a previous-`HEAD` context pack for contrast. Current dirty
 or staged changes remain authoritative. Uncommitted mode includes dirty changes
 from initialized submodules recursively; staged mode remains limited to the
-current repository index. Simplification also checks explicitly
+current repository index. Uncommitted inspection honors `.git/info/exclude`
+and per-directory `.gitignore` rules without entering ignored untracked
+subtrees; tracked files remain reviewable even below ignored directories.
+Allowlist rules cannot re-include descendants through a still-ignored parent.
+Simplification also checks explicitly
 for behavior-preserving removal of overengineering such as unnecessary
 abstractions, premature generalization, needless indirection or configuration,
 redundant state or concurrency, and disproportionate architecture.
