@@ -189,10 +189,10 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 	}
 	reason, retry := streamRetryReason(streamErr)
 	if !retry {
-		return Response{}, responseError(streamErr)
+		return Response{}, responseError(streamErr, request)
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return Response{}, responseError(errors.Join(streamErr, ctxErr))
+		return Response{}, responseError(errors.Join(streamErr, ctxErr), request)
 	}
 	if request.OnRetry != nil {
 		if err := request.OnRetry(RetryEvent{Attempt: 1, MaxAttempts: maxStreamRetryAttempts, Reason: reason}); err != nil {
@@ -200,11 +200,11 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 		}
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return Response{}, responseError(errors.Join(streamErr, ctxErr))
+		return Response{}, responseError(errors.Join(streamErr, ctxErr), request)
 	}
 	retried, retryErr := createStreamingResponse(ctx, client, params, 2, request.OnStreamEvent)
 	if retryErr != nil {
-		return Response{}, responseError(errors.Join(streamErr, retryErr))
+		return Response{}, responseError(errors.Join(streamErr, retryErr), request)
 	}
 	return retried, nil
 }
@@ -374,14 +374,14 @@ func upstreamError(err error) error {
 	return fmt.Errorf("upstream request failed: %w", err)
 }
 
-func responseError(err error) error {
-	if failure, ok := hostedCapabilityFailure(err); ok {
+func responseError(err error, request Request) error {
+	if failure, ok := hostedCapabilityFailure(err, request); ok {
 		return &provider.UnsupportedCapabilityError{Failure: failure}
 	}
 	return upstreamError(err)
 }
 
-func hostedCapabilityFailure(err error) (provider.CapabilityFailure, bool) {
+func hostedCapabilityFailure(err error, request Request) (provider.CapabilityFailure, bool) {
 	apiErr, ok := errors.AsType[*openaisdk.Error](err)
 	if !ok || apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden || apiErr.StatusCode == http.StatusTooManyRequests {
 		return provider.CapabilityFailure{}, false
@@ -389,20 +389,67 @@ func hostedCapabilityFailure(err error) (provider.CapabilityFailure, bool) {
 	if apiErr.StatusCode < 400 || apiErr.StatusCode >= 500 {
 		return provider.CapabilityFailure{}, false
 	}
+	webSearch, enabled := findHostedCapability(request.HostedCapabilities, provider.HostedCapabilityWebSearch)
+	if !enabled {
+		return provider.CapabilityFailure{}, false
+	}
 
 	param := strings.ToLower(apiErr.Param)
 	code := strings.ToLower(apiErr.Code)
 	message := strings.ToLower(apiErr.Message)
 	switch {
-	case strings.Contains(param, "web_search") || strings.Contains(code, "web_search") || strings.Contains(message, "web_search"):
+	case strings.Contains(param, "web_search") || strings.Contains(code, "web_search") || isWebSearchToolRejection(param, message):
 		return provider.CapabilityFailure{Capability: provider.HostedCapabilityWebSearch, Reason: "web_search rejected"}, true
-	case strings.HasPrefix(param, "include") && (strings.Contains(message, "source") || strings.Contains(message, "reasoning.encrypted_content")):
+	case isHostedIncludeRejection(param, code, message):
 		return provider.CapabilityFailure{Capability: provider.HostedCapabilityWebSearch, Reason: "web_search metadata include rejected"}, true
-	case param == "max_tool_calls" || strings.Contains(code, "max_tool_calls") || strings.Contains(message, "max_tool_calls"):
+	case param == "max_tool_calls" || strings.Contains(code, "max_tool_calls") || (param == "" && isExplicitRejection(message, "max_tool_calls")):
+		return provider.CapabilityFailure{Capability: provider.HostedCapabilityWebSearch, Reason: "hosted tool call limit rejected"}, true
+	case apiErr.StatusCode == http.StatusBadRequest && request.AuthAccountID != "" && webSearch.MaxCalls > 0 && strings.TrimSpace(apiErr.RawJSON()) == "":
 		return provider.CapabilityFailure{Capability: provider.HostedCapabilityWebSearch, Reason: "hosted tool call limit rejected"}, true
 	default:
 		return provider.CapabilityFailure{}, false
 	}
+}
+
+func findHostedCapability(capabilities []provider.HostedCapability, kind provider.HostedCapabilityKind) (provider.HostedCapability, bool) {
+	for _, capability := range capabilities {
+		if capability.Kind == kind {
+			return capability, true
+		}
+	}
+	return provider.HostedCapability{}, false
+}
+
+func isWebSearchToolRejection(param, message string) bool {
+	if param != "tools" && !strings.HasSuffix(param, "].type") && !strings.HasSuffix(param, ".type") {
+		return false
+	}
+	return isExplicitRejection(message, "web_search") || isExplicitRejection(message, "web search")
+}
+
+func isHostedIncludeRejection(param, code, message string) bool {
+	if strings.Contains(param, "web_search_call.action.sources") || strings.Contains(param, "reasoning.encrypted_content") ||
+		strings.Contains(code, "web_search_call.action.sources") || strings.Contains(code, "reasoning.encrypted_content") {
+		return true
+	}
+	if param != "include" && !strings.HasPrefix(param, "include[") && !strings.HasPrefix(param, "include.") {
+		return false
+	}
+	return isExplicitRejection(message, "web_search_call.action.sources") ||
+		isExplicitRejection(message, "reasoning.encrypted_content") ||
+		isExplicitRejection(message, "web search sources")
+}
+
+func isExplicitRejection(message, subject string) bool {
+	if !strings.Contains(message, subject) {
+		return false
+	}
+	for _, marker := range []string{"unsupported", "not supported", "unknown", "unrecognized", "invalid", "rejected", "not allowed", "unavailable"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 type streamAccumulator struct {

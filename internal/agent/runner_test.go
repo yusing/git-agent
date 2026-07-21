@@ -31,7 +31,7 @@ type fakeClient struct {
 func TestRequestInstructionsRequireReadFilePathProvenance(t *testing.T) {
 	t.Parallel()
 
-	instructions := requestInstructions("", []openai.ToolSpec{{Name: "read_file"}}, 1, 3, 0, 2)
+	instructions := requestInstructions("", []openai.ToolSpec{{Name: "read_file"}}, nil, 1, 3, 0, 2)
 	if !containsAll(instructions,
 		"path copied verbatim from prepared context or prior repository-tool output",
 		"Discover paths with available inventory or search tools first",
@@ -40,9 +40,14 @@ func TestRequestInstructionsRequireReadFilePathProvenance(t *testing.T) {
 		t.Fatalf("read_file instructions missing path provenance contract: %s", instructions)
 	}
 
-	withoutReadFile := requestInstructions("", []openai.ToolSpec{{Name: "repo_summary"}}, 1, 3, 0, 2)
+	withoutReadFile := requestInstructions("", []openai.ToolSpec{{Name: "repo_summary"}}, nil, 1, 3, 0, 2)
 	if strings.Contains(withoutReadFile, "do not imply filenames") {
 		t.Fatalf("instructions mention read_file contract without read_file: %s", withoutReadFile)
+	}
+
+	withHostedSearch := requestInstructions("", nil, []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch}}, 1, 3, 0, 2)
+	if !strings.Contains(withHostedSearch, "web_search (provider-hosted)") || strings.Contains(withHostedSearch, "No tools are available") {
+		t.Fatalf("instructions do not advertise hosted web search: %s", withHostedSearch)
 	}
 }
 
@@ -156,12 +161,21 @@ func TestRunnerDisablesRejectedHostedCapabilityAndRetriesStepOnce(t *testing.T) 
 	if len(client.requests[0].HostedCapabilities) != 1 {
 		t.Fatalf("initial hosted capabilities = %#v", client.requests[0].HostedCapabilities)
 	}
+	if !strings.Contains(client.requests[0].Instructions, "web_search (provider-hosted)") {
+		t.Fatalf("initial request does not advertise hosted web search: %s", client.requests[0].Instructions)
+	}
 	for index := 1; index < len(client.requests); index++ {
 		if len(client.requests[index].HostedCapabilities) != 0 {
 			t.Fatalf("request %d re-enabled hosted capability: %#v", index, client.requests[index].HostedCapabilities)
 		}
+		if len(client.requests[index].Tools) != 1 || client.requests[index].Tools[0].Name != "repo_summary" {
+			t.Fatalf("request %d lost local tools: %#v", index, client.requests[index].Tools)
+		}
 		if !strings.Contains(client.requests[index].Instructions, "hosted web lookup was unavailable") {
 			t.Fatalf("request %d missing disclosure instruction: %s", index, client.requests[index].Instructions)
+		}
+		if strings.Contains(client.requests[index].Instructions, "web_search (provider-hosted)") {
+			t.Fatalf("request %d still advertises disabled hosted search: %s", index, client.requests[index].Instructions)
 		}
 	}
 	lastInput := client.requests[2].Input
@@ -421,7 +435,7 @@ func TestRunnerExecutesToolCallRoundTrip(t *testing.T) {
 	if got := client.requests[1].Input[len(client.requests[1].Input)-1]; got.Type != "function_call_output" || got.CallID != "call_1" {
 		t.Fatalf("missing tool output input: %#v", got)
 	}
-	if instructions := client.requests[0].Instructions; !containsAll(instructions, "bounded agent loop", "model step 1 of 3", "2 of 2 tool calls remaining", "reduce material uncertainty", "do not call tools just to repeat provided context", "Conclude before the remaining budget reaches zero", "Do not ask the user for more evidence") {
+	if instructions := client.requests[0].Instructions; !containsAll(instructions, "bounded agent loop", "model step 1 of 3", "2 of 2 local function tool calls remaining", "reduce material uncertainty", "do not call tools just to repeat provided context", "Conclude before the remaining budget reaches zero", "Do not ask the user for more evidence") {
 		t.Fatalf("request instructions missing tool economy guidance: %s", instructions)
 	}
 	if strings.Contains(client.requests[0].Instructions, "Use skills_read") {

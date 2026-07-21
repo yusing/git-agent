@@ -62,6 +62,8 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 				func(body string) string {
 					for _, want := range []string{
 						`"type":"web_search"`,
+						`web_search (provider-hosted)`,
+						`listed local function tools and configured provider-hosted capabilities`,
 						`"max_tool_calls":4`,
 						`"web_search_call.action.sources"`,
 						`"reasoning.encrypted_content"`,
@@ -149,6 +151,156 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 				t.Fatalf("stderr = %q", stderr.String())
 			}
 		})
+	}
+}
+
+func TestReviewHostedWebSearchAndContext7ScriptedEndToEnd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX ctx7 fixture required")
+	}
+	repoDir := initRepo(t)
+	t.Chdir(repoDir)
+	guidancePath := filepath.Join(repoDir, "AGENTS.md")
+	if err := os.WriteFile(guidancePath, []byte("review public API usage\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "add", "AGENTS.md")
+
+	binDir := t.TempDir()
+	ctx7Log := filepath.Join(t.TempDir(), "ctx7.log")
+	ctx7Path := filepath.Join(binDir, "ctx7")
+	ctx7Script := `#!/bin/sh
+printf '%s\n' "$#" "$1" "$2" "$3" "$4" >> "$CTX7_E2E_LOG"
+case "$1" in
+library)
+  printf '%s\n' '{"results":[{"id":"/openai/openai-go","title":"OpenAI Go"}]}'
+  ;;
+docs)
+  printf '%s\n' '{"snippets":[{"title":"Responses tools","content":"Use typed function tools."}]}'
+  ;;
+*)
+  printf '%s\n' "unexpected ctx7 command: $1" >&2
+  exit 2
+  ;;
+esac
+`
+	if err := os.WriteFile(ctx7Path, []byte(ctx7Script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	server := newScriptedResponsesServer(t, []func(string) string{
+		func(body string) string {
+			for _, want := range []string{
+				`"type":"web_search"`,
+				`web_search (provider-hosted)`,
+				`listed local function tools and configured provider-hosted capabilities`,
+				`"max_tool_calls":4`,
+				`"web_search_call.action.sources"`,
+				`"reasoning.encrypted_content"`,
+				`"name":"context7_library"`,
+				`"name":"context7_docs"`,
+			} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("initial request missing %q:\n%s", want, body)
+				}
+			}
+			return marshalResponse(map[string]any{
+				"id": "resp_external_1", "object": "response", "created_at": 0,
+				"status": "completed", "model": "test-model",
+				"output": []map[string]any{
+					{
+						"id": "rs_1", "type": "reasoning", "status": "completed",
+						"summary": []any{}, "encrypted_content": "encrypted-reasoning",
+					},
+					{
+						"id": "ws_1", "type": "web_search_call", "status": "completed",
+						"action": map[string]any{
+							"type": "search", "queries": []string{"OpenAI Go Responses tools"},
+							"sources": []map[string]any{{"type": "url", "url": "https://pkg.go.dev/github.com/openai/openai-go"}},
+						},
+					},
+					{
+						"id": "fc_library", "type": "function_call", "status": "completed",
+						"call_id": "call_library", "name": "context7_library",
+						"arguments": `{"name":"openai-go","query":"Responses API web search"}`,
+					},
+				},
+			})
+		},
+		func(body string) string {
+			for _, want := range []string{
+				`"type":"web_search_call"`,
+				`"url":"https://pkg.go.dev/github.com/openai/openai-go"`,
+				`"encrypted_content":"encrypted-reasoning"`,
+				`"type":"function_call_output"`,
+				`\"tool\": \"context7_library\"`,
+				`\"id\": \"/openai/openai-go\"`,
+			} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("request after hosted search and library lookup missing %q:\n%s", want, body)
+				}
+			}
+			return responseWithToolCalls("resp_external_2", toolCallSpec{
+				ID: "fc_docs", CallID: "call_docs", Name: "context7_docs",
+				Arguments: `{"library_id":"/openai/openai-go","query":"Responses API tool configuration"}`,
+			})
+		},
+		func(body string) string {
+			for _, want := range []string{
+				`"type":"web_search_call"`,
+				`"name":"context7_library"`,
+				`"name":"context7_docs"`,
+				`\"tool\": \"context7_docs\"`,
+				`Use typed function tools.`,
+			} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("final request missing replayed external evidence %q:\n%s", want, body)
+				}
+			}
+			return responseWithText("resp_external_3", `{"summary":"Hosted search and Context7 completed.","recommendation":"APPROVE","findings":[]}`)
+		},
+	})
+	defer server.Close()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "")
+	t.Setenv("PATH", binDir)
+	t.Setenv("CTX7_E2E_LOG", ctx7Log)
+	t.Setenv(detachedChildEnv, "1")
+	t.Setenv(detachedTaskIDEnv, cliWaitTaskID)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"review", "--staged", "check", "public", "API", "usage"}); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("detached worker stdout = %q, want empty", stdout.String())
+	}
+	record, err := backgroundStoreForCurrentProject(t).Read(cliWaitTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Terminal == nil || record.Terminal.Kind != "final" {
+		t.Fatalf("background record = %#v", record)
+	}
+	report, ok := record.Terminal.Value["text"].(map[string]any)
+	if !ok || report["summary"] != "Hosted search and Context7 completed." || report["recommendation"] != "APPROVE" {
+		t.Fatalf("stored final report = %#v", record.Terminal.Value["text"])
+	}
+
+	logData, err := os.ReadFile(ctx7Log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantLog := strings.Join([]string{
+		"4", "library", "openai-go", "Responses API web search", "--json",
+		"4", "docs", "/openai/openai-go", "Responses API tool configuration", "--json",
+	}, "\n") + "\n"
+	if string(logData) != wantLog {
+		t.Fatalf("ctx7 invocations:\n%s\nwant:\n%s", logData, wantLog)
 	}
 }
 

@@ -386,7 +386,10 @@ encrypted-reasoning include, or hosted `max_tool_calls`, runner emits sanitized
 capability failure, disables hosted search for remaining run, injects summary
 disclosure requirement, and repeats rejected step once. Authentication,
 authorization, rate-limit, transport, malformed-response, and unrelated
-provider errors remain terminal.
+provider errors remain terminal. Because the ChatGPT/Codex-plan endpoint returns
+an empty HTTP 400 for unsupported hosted `max_tool_calls`, that exact response is
+recognized only when the rejected plan-auth request carried a positive hosted
+call cap; an empty response without that request shape remains terminal.
 
 Every `review` or `simplify` invocation without `--wait` starts a detached
 process. The launcher waits until the event server is listening, then writes

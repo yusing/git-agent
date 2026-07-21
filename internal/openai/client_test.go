@@ -182,21 +182,69 @@ func TestResponsePreservesContinuationAndHostedMetadata(t *testing.T) {
 func TestHostedCapabilityFailureClassificationIsNarrow(t *testing.T) {
 	t.Parallel()
 
+	var unknownBody openaisdk.Error
+	if err := json.Unmarshal([]byte(`{"future_error":{"detail":"unknown"}}`), &unknownBody); err != nil {
+		t.Fatal(err)
+	}
+	unknownBody.StatusCode = http.StatusBadRequest
+	enabledRequest := Request{HostedCapabilities: []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch}}}
+
 	tests := []struct {
-		name string
-		err  *openaisdk.Error
-		want bool
+		name    string
+		err     *openaisdk.Error
+		request Request
+		want    bool
 	}{
-		{"web search", &openaisdk.Error{StatusCode: 400, Param: "tools[0].type", Message: "web_search is not supported"}, true},
-		{"source include", &openaisdk.Error{StatusCode: 422, Param: "include", Message: "web search sources unsupported"}, true},
-		{"hosted limit", &openaisdk.Error{StatusCode: 400, Param: "max_tool_calls", Message: "unknown parameter"}, true},
-		{"unrelated bad request", &openaisdk.Error{StatusCode: 400, Param: "text.format", Message: "invalid schema"}, false},
-		{"auth", &openaisdk.Error{StatusCode: 401, Param: "tools", Message: "web_search unauthorized"}, false},
-		{"rate limit", &openaisdk.Error{StatusCode: 429, Param: "max_tool_calls", Message: "rate limit"}, false},
+		{name: "web search", err: &openaisdk.Error{StatusCode: 400, Param: "tools[0].type", Message: "web_search is not supported"}, request: enabledRequest, want: true},
+		{name: "source include", err: &openaisdk.Error{StatusCode: 422, Param: "include", Message: "web search sources unsupported"}, request: enabledRequest, want: true},
+		{name: "hosted limit", err: &openaisdk.Error{StatusCode: 400, Param: "max_tool_calls", Message: "unknown parameter"}, request: enabledRequest, want: true},
+		{name: "unrelated bad request", err: &openaisdk.Error{StatusCode: 400, Param: "text.format", Message: "invalid schema"}, request: enabledRequest},
+		{name: "unrelated web search collision", err: &openaisdk.Error{StatusCode: 400, Param: "text.format", Message: "invalid schema while web_search is enabled"}, request: enabledRequest},
+		{name: "unrelated hosted limit collision", err: &openaisdk.Error{StatusCode: 400, Param: "text.format", Message: "invalid max_tool_calls schema example"}, request: enabledRequest},
+		{name: "unknown future tool error", err: &openaisdk.Error{StatusCode: 400, Param: "tools[0].future", Message: "unsupported future field"}, request: enabledRequest},
+		{name: "auth", err: &openaisdk.Error{StatusCode: 401, Param: "tools", Message: "web_search unauthorized"}, request: enabledRequest},
+		{name: "rate limit", err: &openaisdk.Error{StatusCode: 429, Param: "max_tool_calls", Message: "rate limit"}, request: enabledRequest},
+		{name: "disabled capability", err: &openaisdk.Error{StatusCode: 400, Param: "tools[0].type", Message: "web_search is not supported"}},
+		{
+			name: "empty ChatGPT capped rejection",
+			err:  &openaisdk.Error{StatusCode: 400},
+			request: Request{
+				AuthAccountID: "workspace",
+				HostedCapabilities: []provider.HostedCapability{{
+					Kind: provider.HostedCapabilityWebSearch, MaxCalls: 1,
+				}},
+			},
+			want: true,
+		},
+		{
+			name: "empty API key capped rejection",
+			err:  &openaisdk.Error{StatusCode: 400},
+			request: Request{HostedCapabilities: []provider.HostedCapability{{
+				Kind: provider.HostedCapabilityWebSearch, MaxCalls: 1,
+			}}},
+		},
+		{
+			name: "empty ChatGPT uncapped rejection",
+			err:  &openaisdk.Error{StatusCode: 400},
+			request: Request{
+				AuthAccountID:      "workspace",
+				HostedCapabilities: []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch}},
+			},
+		},
+		{
+			name: "unknown ChatGPT error body",
+			err:  &unknownBody,
+			request: Request{
+				AuthAccountID: "workspace",
+				HostedCapabilities: []provider.HostedCapability{{
+					Kind: provider.HostedCapabilityWebSearch, MaxCalls: 1,
+				}},
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, got := hostedCapabilityFailure(test.err)
+			_, got := hostedCapabilityFailure(test.err, test.request)
 			if got != test.want {
 				t.Fatalf("classified = %t, want %t", got, test.want)
 			}
@@ -299,6 +347,24 @@ func TestCreateResponseUsesChatGPTRequestContract(t *testing.T) {
 	}
 	if resp.Text != "hello" {
 		t.Fatalf("text = %q", resp.Text)
+	}
+}
+
+func TestCreateResponseClassifiesEmptyChatGPTCappedBadRequest(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	_, err := NewHTTPClient(server.Client()).CreateResponse(t.Context(), Request{
+		Model: "test-model", BaseURL: server.URL, APIKey: "access-token", AuthAccountID: "workspace-123",
+		HostedCapabilities: []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch, MaxCalls: 1}},
+	})
+	unsupported, ok := errors.AsType[*provider.UnsupportedCapabilityError](err)
+	if !ok || unsupported.Failure.Capability != provider.HostedCapabilityWebSearch {
+		t.Fatalf("error = %v, want hosted web-search capability rejection", err)
 	}
 }
 

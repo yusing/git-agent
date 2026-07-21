@@ -167,7 +167,7 @@ func (r *OpenAIRunner) runUntilText(ctx context.Context, instructions string, me
 	for step := 0; step < maxSteps; step++ {
 		effectiveInstructions := withCapabilityFailure(instructions, state.capabilityFailure)
 		req := r.providerRequest(
-			requestInstructions(effectiveInstructions, toolSpecs, step+1, maxSteps, result.ToolCalls, maxToolCalls),
+			requestInstructions(effectiveInstructions, toolSpecs, state.hostedCapabilities, step+1, maxSteps, result.ToolCalls, maxToolCalls),
 			messages,
 			toolSpecs,
 			state.hostedCapabilities,
@@ -657,16 +657,21 @@ func writeTraceResponse(recorder *trace.Recorder, response openai.Response) erro
 	})
 }
 
-func requestInstructions(taskInstructions string, toolSpecs []openai.ToolSpec, step, maxSteps, usedTools, maxTools int) string {
+func requestInstructions(taskInstructions string, toolSpecs []openai.ToolSpec, hostedCapabilities []provider.HostedCapability, step, maxSteps, usedTools, maxTools int) string {
 	prefix := taskInstructions
 	if prefix != "" {
 		prefix += "\n\n"
 	}
-	if len(toolSpecs) == 0 {
+	if len(toolSpecs) == 0 && len(hostedCapabilities) == 0 {
 		return prefix + "No tools are available. Return only the final artifact."
 	}
 	var toolsList strings.Builder
 	toolsList.WriteString("# Available tools\n")
+	for _, capability := range hostedCapabilities {
+		if capability.Kind == provider.HostedCapabilityWebSearch {
+			toolsList.WriteString("- web_search (provider-hosted): Search the public web for current language or library documentation. Never send repository content or sensitive data.\n")
+		}
+	}
 	for _, spec := range toolSpecs {
 		fmt.Fprintf(&toolsList, "- %s: %s\n", spec.Name, spec.Description)
 	}
@@ -674,8 +679,9 @@ func requestInstructions(taskInstructions string, toolSpecs []openai.ToolSpec, s
 	return prefix + toolsList.String() + fmt.Sprintf(`
 # Agent loop
 You are in a bounded agent loop.
-This is model step %d of %d. You have %d of %d tool calls remaining.
-Use only listed read-only tools.
+This is model step %d of %d. You have %d of %d local function tool calls remaining.
+Use only the listed read-only local tools and provider-hosted capabilities.
+Provider-hosted calls do not consume the local function-call budget.
 Call tools only when they reduce material uncertainty; do not call tools just to repeat provided context.
 When a tool output has ok=false, correct the invocation or use different evidence and continue.
 %s%sPrefer narrow tool calls that target the missing evidence.

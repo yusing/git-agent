@@ -127,16 +127,37 @@ func TestResolveUsesChatGPTAuthFileByDefault(t *testing.T) {
 }
 
 func TestResolveExplicitWebSearchCapOverridesAuthDefaults(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "api-key")
-	t.Setenv("HOME", t.TempDir())
+	t.Run("API key", func(t *testing.T) {
+		t.Setenv("OPENAI_API_KEY", "api-key")
+		t.Setenv("HOME", t.TempDir())
 
-	cfg, err := Resolve(Options{MaxWebSearches: 7})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.MaxWebSearches != 7 {
-		t.Fatalf("MaxWebSearches = %d", cfg.MaxWebSearches)
-	}
+		cfg, err := Resolve(Options{MaxWebSearches: 7})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.MaxWebSearches != 7 {
+			t.Fatalf("MaxWebSearches = %d", cfg.MaxWebSearches)
+		}
+	})
+
+	t.Run("ChatGPT", func(t *testing.T) {
+		t.Setenv("OPENAI_API_KEY", "")
+		writeCodexAuth(t, `{
+			"auth_mode": "chatgpt",
+			"tokens": {
+				"access_token": "access-token",
+				"account_id": "workspace-123"
+			}
+		}`)
+
+		cfg, err := Resolve(Options{MaxWebSearches: 7})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.MaxWebSearches != 7 {
+			t.Fatalf("MaxWebSearches = %d", cfg.MaxWebSearches)
+		}
+	})
 }
 
 func TestResolveEmbeddingsRequiresAPIKeyEvenWithChatGPTAuthFile(t *testing.T) {
