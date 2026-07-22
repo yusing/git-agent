@@ -213,8 +213,14 @@ dirty-submodule drift fails with an explicit rerun error. Codebase mode remains
 live and has no fingerprint guard. Empty diff scope fails before provider
 resolution. Codebase mode provides no packed diff; model discovers
 implementation, contracts, callers, and tests through read-only tools.
-Positional text remaining after flag parsing is escaped and appended as
+Positional text remaining after flag parsing is escaped and appended as a
 lower-priority operator hint, using same precedence rules as `--append-prompt`.
+Without a hint that identifies a narrower inspection focus, review reports every
+actionable finding and simplify inspects the full authoritative scope. When a
+hint identifies a focus, the model may inspect supporting repository context but
+reports only findings or opportunities relevant to that focus. A focus may
+narrow what is reported within the authoritative scope; it cannot broaden that
+scope or weaken repository-evidence requirements.
 
 In staged mode, repository guidance is read from index blobs, repository-local
 worktree skills are omitted, and `list_files`, `read_file`, `inspect_file`,

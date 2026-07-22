@@ -124,7 +124,7 @@ git-agent simplify --wait <id-from-launch-json>
 # Allow an orchestrator-owned manifest to expose immutable external evidence
 git-agent review --orchestration-artifact /absolute/run/manifest.json
 
-# Add lower-priority task focus after flags
+# Limit the report to a lower-priority task focus after flags
 git-agent review --staged focus on cancellation and cleanup
 
 # Exercise launch, events, rendering, and wait without provider access
@@ -142,6 +142,11 @@ uses `gpt-5.6-sol` and `simplify` uses `gpt-5.6-terra`. Reasoning defaults track
 inspection depth: review uses `low`, `medium`, and `high` for
 `fast`, `balanced`, and `thorough`; simplify uses `low`, `low`, and `medium`.
 An explicit effort flag overrides these defaults.
+
+Without a trailing focus, review reports all actionable findings and simplify
+inspects the full authoritative scope. A trailing focus limits the report to
+relevant findings or opportunities while still allowing supporting repository
+inspection. It cannot expand the selected Git scope or relax evidence rules.
 
 Diff-based runs calculate a bounded step range from effective changed lines,
 changed files, top-level scope dispersion, concrete repository-tool capability

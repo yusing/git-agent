@@ -41,6 +41,24 @@ func TestOutputSchemasRequireEvidenceLocations(t *testing.T) {
 	}
 }
 
+func TestUserPromptsLetOperatorHintsNarrowInspectionFocus(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range []Kind{KindReview, KindSimplify} {
+		prompt := UserPrompt(kind, PreparedContext{Mode: ModeStaged})
+		for _, want := range []string{
+			"Without an operator hint that identifies a narrower",
+			"inspect supporting repository context as needed but report only",
+			"may narrow what is reported within authoritative scope",
+			"cannot broaden authoritative scope or weaken evidence requirements",
+		} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("%s prompt missing %q:\n%s", kind, want, prompt)
+			}
+		}
+	}
+}
+
 func TestValidateReviewEnforcesSeverityOrderRecommendationAndStyleSeverity(t *testing.T) {
 	valid := `{
   "summary": "Two findings",
