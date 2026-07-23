@@ -20,6 +20,8 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/yusing/git-agent/internal/agent"
 	backgroundtask "github.com/yusing/git-agent/internal/background"
+	"github.com/yusing/git-agent/internal/checks"
+	checkbuiltin "github.com/yusing/git-agent/internal/checks/builtin"
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/giturl"
@@ -60,6 +62,12 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	}
 
 	switch args[0] {
+	case checks.PrivateCommand:
+		set, err := checkbuiltin.New()
+		if err != nil {
+			return fmt.Errorf("construct bundled checker set: %w", err)
+		}
+		return set.DispatchHelper(args[1:])
 	case "config":
 		return a.runConfig(args[1:])
 	case "index":
@@ -324,7 +332,23 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		return err
 	}
 	if dryRun {
-		for _, event := range dryRunEvents(kind, orchestration) {
+		var checkResults []checks.Result
+		if kind == reviewtask.KindReview {
+			checkSession, err := newReviewCheckSession(repo, mode, prepared)
+			if err != nil {
+				return err
+			}
+			defer checkSession.Close()
+			checkResults, err = checkSession.SyntheticResults()
+			if err != nil {
+				return err
+			}
+		}
+		events, err := dryRunEvents(kind, orchestration, checkResults)
+		if err != nil {
+			return err
+		}
+		for _, event := range events {
 			if err := waitReviewTestEvent(taskCtx, dryRunEventDelay()); err != nil {
 				return err
 			}
@@ -373,20 +397,54 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
 	})
-	err = errors.Join(err, finishHeartbeat())
 	if err != nil {
 		traceErr := recorder.WriteExact("error", map[string]any{"message": err.Error()})
 		eventServer.Finish()
 		return errors.Join(err, traceErr)
 	}
-	var report map[string]any
-	decoder := sonic.ConfigStd.NewDecoder(strings.NewReader(result.Text))
-	decoder.UseNumber()
-	if err := decoder.Decode(&report); err != nil {
-		return fmt.Errorf("decode validated review report: %w", err)
-	}
-	if orchestration != nil {
-		report["orchestration_manifest_sha256"] = orchestration.Digest
+	var report any
+	if kind == reviewtask.KindReview {
+		checkSession, err := newReviewCheckSession(repo, mode, prepared)
+		if err != nil {
+			traceErr := recorder.WriteExact("error", map[string]any{"message": err.Error()})
+			eventServer.Finish()
+			return errors.Join(err, traceErr)
+		}
+		defer checkSession.Close()
+		executable, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("locate git-agent executable for static checks: %w", err)
+		}
+		checkResults, err := checkSession.Run(taskCtx, executable, func(name string) error {
+			return recorder.WriteExact("runtime.status", map[string]any{
+				"phase": "running_static_checks",
+				"check": name,
+			})
+		})
+		if err != nil {
+			traceErr := recorder.WriteExact("error", map[string]any{"message": err.Error()})
+			eventServer.Finish()
+			return errors.Join(err, traceErr)
+		}
+		orchestrationDigest := ""
+		if orchestration != nil {
+			orchestrationDigest = orchestration.Digest
+		}
+		report, err = reviewtask.BuildFinalReviewReport(result.Text, checkResults, orchestrationDigest)
+		if err != nil {
+			return err
+		}
+	} else {
+		var simplifyReport map[string]any
+		decoder := sonic.ConfigStd.NewDecoder(strings.NewReader(result.Text))
+		decoder.UseNumber()
+		if err := decoder.Decode(&simplifyReport); err != nil {
+			return fmt.Errorf("decode validated simplify report: %w", err)
+		}
+		if orchestration != nil {
+			simplifyReport["orchestration_manifest_sha256"] = orchestration.Digest
+		}
+		report = simplifyReport
 	}
 	if err := recorder.WriteExact("final", map[string]any{
 		"text":         report,

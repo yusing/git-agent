@@ -42,6 +42,7 @@ var (
 type PreparedContext struct {
 	Mode                    Mode                     `json:"mode"`
 	Paths                   []string                 `json:"paths,omitempty"`
+	Components              []string                 `json:"components,omitempty"`
 	Status                  []gitctx.PathChange      `json:"status,omitempty"`
 	Stats                   []gitctx.FileStat        `json:"stats,omitempty"`
 	ContextPack             contextpack.ContextPack  `json:"context_pack,omitzero"`
@@ -125,6 +126,11 @@ func (m Mode) ToolMode() tools.ReviewMode {
 func Prepare(repo *gitctx.Repository, mode Mode) (PreparedContext, error) {
 	prepared := PreparedContext{Mode: mode}
 	if mode == ModeCodebase {
+		components, err := repo.ReviewComponentPaths()
+		if err != nil {
+			return PreparedContext{}, err
+		}
+		prepared.Components = components
 		return prepared, nil
 	}
 
@@ -134,7 +140,7 @@ func Prepare(repo *gitctx.Repository, mode Mode) (PreparedContext, error) {
 	case ModeUncommitted:
 		snapshot, err = repo.UncommittedSnapshot(48*1024, 1200)
 	case ModeStaged:
-		snapshot, err = repo.StagedSnapshot(48*1024, 1200)
+		snapshot, err = repo.StagedReviewSnapshot(48*1024, 1200)
 	default:
 		return PreparedContext{}, fmt.Errorf("unknown review mode %q", mode)
 	}
@@ -145,6 +151,7 @@ func Prepare(repo *gitctx.Repository, mode Mode) (PreparedContext, error) {
 		return PreparedContext{}, fmt.Errorf("%s mode requires changed files", mode)
 	}
 	prepared.Paths = snapshot.Paths
+	prepared.Components = snapshot.Components
 	prepared.Status = snapshot.Status
 	prepared.Stats = snapshot.Stats
 	prepared.Diff = snapshot.Diff
@@ -225,11 +232,17 @@ func reviewFilePrefix(repo *gitctx.Repository, mode Mode, source gitctx.FileSour
 	if repo == nil {
 		return ""
 	}
-	if mode != ModeUncommitted || source != gitctx.FileSourceHead {
+	if mode == ModeCodebase {
 		prefix, _, _ := repo.FilePrefix(source, path, maxBytes)
 		return prefix
 	}
-	reader, err := repo.OpenUncommittedReviewFile(source, path)
+	var reader io.ReadCloser
+	var err error
+	if mode == ModeStaged {
+		reader, err = repo.OpenStagedReviewFile(source, path)
+	} else {
+		reader, err = repo.OpenUncommittedReviewFile(source, path)
+	}
 	if err != nil {
 		return ""
 	}
@@ -406,7 +419,7 @@ func ValidateRepository(kind Kind, text string, repo *gitctx.Repository, mode Mo
 		var err error
 		switch mode {
 		case ModeStaged:
-			err = repo.CheckStagedFingerprint(fingerprint)
+			err = repo.CheckStagedReviewFingerprint(fingerprint)
 		case ModeUncommitted:
 			err = repo.CheckUncommittedFingerprint(fingerprint)
 		}
@@ -463,12 +476,16 @@ func validateEvidenceLocation(repo *gitctx.Repository, mode Mode, evidence Evide
 	var err error
 	if mode == ModeUncommitted {
 		reader, err = repo.OpenUncommittedReviewFile(source, evidence.Path)
+	} else if mode == ModeStaged {
+		reader, err = repo.OpenStagedReviewFile(source, evidence.Path)
 	} else {
 		reader, err = repo.OpenFile(source, evidence.Path)
 	}
 	if err != nil && mode != ModeCodebase {
 		if mode == ModeUncommitted {
 			reader, err = repo.OpenUncommittedReviewFile(gitctx.FileSourceHead, evidence.Path)
+		} else if mode == ModeStaged {
+			reader, err = repo.OpenStagedReviewFile(gitctx.FileSourceHead, evidence.Path)
 		} else {
 			reader, err = repo.OpenFile(gitctx.FileSourceHead, evidence.Path)
 		}

@@ -146,12 +146,111 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 			if !ok || storedReport["summary"] != expectedReport["summary"] {
 				t.Fatalf("stored final report = %#v", record.Terminal.Value["text"])
 			}
+			if test.command == "review" {
+				checks, ok := storedReport["checks"].([]any)
+				if !ok || len(checks) != 1 {
+					t.Fatalf("stored review checks = %#v", storedReport["checks"])
+				}
+				check, ok := checks[0].(map[string]any)
+				if !ok || check["name"] != "golangci-lint" || check["status"] != "skipped" {
+					t.Fatalf("stored review check = %#v", checks[0])
+				}
+			} else if _, exists := storedReport["checks"]; exists {
+				t.Fatalf("simplify report unexpectedly contains checks: %#v", storedReport)
+			}
 			var launch detachedLaunch
 			if err := json.Unmarshal(stderr.Bytes(), &launch); err != nil {
 				t.Fatalf("worker launch metadata is not JSON: %v\n%s", err, stderr.String())
 			}
 			if launch.Command != test.command || launch.ID != cliWaitTaskID || launch.PID != os.Getpid() || launch.Endpoint.Network != localHTTPNetwork || !filepath.IsAbs(launch.Endpoint.Address) || !strings.HasPrefix(launch.Endpoint.URL, "http://localhost/events?token=") {
 				t.Fatalf("stderr = %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestReviewDryRunPlansEveryModeWithoutLaunchingChecker(t *testing.T) {
+	tests := []struct {
+		name    string
+		modeArg string
+		prepare func(*testing.T, string)
+	}{
+		{
+			name: "uncommitted", modeArg: "--uncommitted",
+			prepare: func(t *testing.T, root string) {
+				if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example/root\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "staged", modeArg: "--staged",
+			prepare: func(t *testing.T, root string) {
+				if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example/root\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n\nconst staged = true\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				runGit(t, root, "add", "go.mod", "main.go")
+				if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n\nconst unstaged = true\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "codebase", modeArg: "--codebase",
+			prepare: func(t *testing.T, root string) {
+				if err := os.MkdirAll(filepath.Join(root, "nested"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "nested", "go.mod"), []byte("module example/nested\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "nested", "main.go"), []byte("package nested\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := initRepo(t)
+			test.prepare(t, root)
+			t.Chdir(root)
+			t.Setenv(detachedChildEnv, "1")
+			t.Setenv(detachedTaskIDEnv, cliWaitTaskID)
+			previousDelay := dryRunEventDelay
+			dryRunEventDelay = func() time.Duration { return 0 }
+			t.Cleanup(func() { dryRunEventDelay = previousDelay })
+
+			var stderr bytes.Buffer
+			app := &App{stdout: io.Discard, stderr: &stderr}
+			if err := app.Run(t.Context(), []string{"review", test.modeArg, "--dry-run"}); err != nil {
+				t.Fatal(err)
+			}
+			record, err := backgroundStoreForCurrentProject(t).Read(cliWaitTaskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored, ok := record.Terminal.Value["text"].(map[string]any)
+			if !ok {
+				t.Fatalf("stored final = %#v", record.Terminal)
+			}
+			results, ok := stored["checks"].([]any)
+			if !ok || len(results) != 1 {
+				t.Fatalf("checks = %#v", stored["checks"])
+			}
+			result, ok := results[0].(map[string]any)
+			if !ok || result["name"] != "golangci-lint" || result["status"] != "findings" {
+				t.Fatalf("check result = %#v", results[0])
+			}
+			diagnostics, ok := result["diagnostics"].([]any)
+			if !ok || len(diagnostics) != 1 {
+				t.Fatalf("diagnostics = %#v", result["diagnostics"])
 			}
 		})
 	}

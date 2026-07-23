@@ -52,7 +52,9 @@ current_slice:
       result and diagnostic contract, checker-owned planning contract,
       deterministic registered-runner coordination, progress callback, and
       registered private-helper dispatch. `internal/checks/builtin` owns the
-      only registration list.
+      only registration list. Scope includes recursive repository-component
+      prefixes so adapters cannot search configuration across submodule
+      boundaries.
     upstream_boundary: >-
       `github.com/golangci/golangci-lint/v2@v2.12.2`; its public command calls
       `os.Exit`, while its lower runner needs an upstream `internal/cache`

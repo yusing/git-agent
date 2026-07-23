@@ -89,6 +89,7 @@ type FileStat struct {
 
 type ChangeSnapshot struct {
 	Paths         []string
+	Components    []string
 	Status        []PathChange
 	Stats         []FileStat
 	Diff          string

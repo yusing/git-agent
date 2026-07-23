@@ -17,7 +17,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/bytedance/sonic"
-	"github.com/go-git/go-git/v6/plumbing/format/index"
 	"github.com/yusing/git-agent/internal/doccmd"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/skills"
@@ -220,7 +219,7 @@ func (r *Registry) Execute(ctx context.Context, invocation Invocation) (Result, 
 func (g *reviewStateGuard) check() error {
 	switch g.mode {
 	case ReviewModeStaged:
-		return g.repo.CheckStagedFingerprint(g.fingerprint)
+		return g.repo.CheckStagedReviewFingerprint(g.fingerprint)
 	case ReviewModeUncommitted:
 		return g.repo.CheckUncommittedFingerprint(g.fingerprint)
 	default:
@@ -461,53 +460,31 @@ type listFilesTool struct {
 
 var errListFilesComplete = errors.New("list_files entry cap reached")
 
-func stagedIndexEntries(repo *gitctx.Repository, requested string) ([]*index.Entry, error) {
+func stagedFilePaths(repo *gitctx.Repository, requested string, maxEntries int) ([]string, bool, error) {
 	root, err := cleanRepoPath(requested)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	idx, err := repo.Repo.Storer.Index()
+	files, err := repo.StagedReviewFiles()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	prefix := ""
 	if root != "." {
 		prefix = strings.TrimSuffix(root, "/")
 	}
-	byPath := make(map[string]*index.Entry, len(idx.Entries))
-	for _, entry := range idx.Entries {
-		path := filepath.ToSlash(entry.Name)
+	selected := make([]string, 0, len(files))
+	for _, path := range files {
 		if prefix != "" && path != prefix && !strings.HasPrefix(path, prefix+"/") {
 			continue
 		}
-		byPath[path] = entry
+		selected = append(selected, path)
+		if len(selected) > maxEntries {
+			break
+		}
 	}
-	paths := make([]string, 0, len(byPath))
-	for path := range byPath {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	entries := make([]*index.Entry, 0, len(paths))
-	for _, path := range paths {
-		entries = append(entries, byPath[path])
-	}
-	return entries, nil
-}
-
-func stagedFilePaths(repo *gitctx.Repository, requested string, maxEntries int) ([]string, bool, error) {
-	entries, err := stagedIndexEntries(repo, requested)
-	if err != nil {
-		return nil, false, err
-	}
-	truncated := len(entries) > maxEntries
-	if truncated {
-		entries = entries[:maxEntries]
-	}
-	paths := make([]string, len(entries))
-	for i, entry := range entries {
-		paths[i] = filepath.ToSlash(entry.Name)
-	}
-	return paths, truncated, nil
+	truncated := len(selected) > maxEntries
+	return selected[:min(len(selected), maxEntries)], truncated, nil
 }
 
 func (t listFilesTool) Definition() Definition {
@@ -638,6 +615,8 @@ func openInspectedFile(repo *gitctx.Repository, mode ReviewMode, rawPath, source
 	var reader io.ReadCloser
 	if mode == ReviewModeUncommitted {
 		reader, err = repo.OpenUncommittedReviewFile(gitctx.FileSource(source), path)
+	} else if mode == ReviewModeStaged {
+		reader, err = repo.OpenStagedReviewFile(gitctx.FileSource(source), path)
 	} else {
 		reader, err = openRepositoryFile(repo, path, source)
 	}
@@ -939,22 +918,17 @@ func (t grepTool) Execute(_ context.Context, invocation Invocation) (Result, err
 }
 
 func (t grepTool) executeStaged(pattern *regexp.Regexp, requested, glob string, maxMatches int) (Result, error) {
-	entries, err := stagedIndexEntries(t.repo, requested)
+	paths, _, err := stagedFilePaths(t.repo, requested, int(^uint(0)>>1))
 	if err != nil {
 		return Result{}, err
 	}
 	var matches []map[string]any
 	truncated := false
-	for _, entry := range entries {
-		path := filepath.ToSlash(entry.Name)
+	for _, path := range paths {
 		if glob != "" && !globMatches(glob, path) {
 			continue
 		}
-		blob, err := t.repo.Repo.BlobObject(entry.Hash)
-		if err != nil {
-			continue
-		}
-		reader, err := blob.Reader()
+		reader, err := t.repo.OpenStagedReviewFile(gitctx.FileSourceIndex, path)
 		if err != nil {
 			continue
 		}
@@ -975,7 +949,7 @@ func (t grepTool) executeStaged(pattern *regexp.Regexp, requested, glob string, 
 				}
 			}
 		}
-		if scanner.Err() != nil || blob.Size > 2*1024*1024 {
+		if scanner.Err() != nil {
 			truncated = true
 		}
 		_ = reader.Close()
@@ -1176,7 +1150,7 @@ func (t reviewDiffTool) Execute(_ context.Context, invocation Invocation) (Resul
 	case ReviewModeUncommitted:
 		diff, truncated, err = t.repo.UncommittedDiff(maxBytes, maxLines)
 	case ReviewModeStaged:
-		diff, truncated, err = t.repo.StagedDiff(maxBytes, maxLines)
+		diff, truncated, err = t.repo.StagedReviewDiffForPaths(nil, maxBytes, maxLines)
 	default:
 		return Result{}, fmt.Errorf("review_diff is unavailable in %s mode", t.mode)
 	}
@@ -1223,7 +1197,7 @@ func (t reviewDiffForPathsTool) Execute(_ context.Context, invocation Invocation
 	case ReviewModeUncommitted:
 		diff, truncated, err = t.repo.UncommittedDiffForPaths(args.Paths, maxBytes, maxLines)
 	case ReviewModeStaged:
-		diff, truncated, err = t.repo.StagedDiffForPaths(args.Paths, maxBytes, maxLines)
+		diff, truncated, err = t.repo.StagedReviewDiffForPaths(args.Paths, maxBytes, maxLines)
 	default:
 		return Result{}, fmt.Errorf("review_diff_for_paths is unavailable in %s mode", t.mode)
 	}

@@ -135,6 +135,11 @@ adapter and one registration rather than changes to provider schemas, Git
 snapshot ownership, detached review sequencing, background persistence, or
 wait output.
 
+The shared scope must preserve the recursively discovered repository-component
+prefixes from the same authoritative snapshot. An adapter may discover
+language projects within a component, but must not cross a submodule boundary
+while searching ancestors for project configuration.
+
 This extension boundary must not expose arbitrary commands, runtime plugin
 loading, public helper commands, or model-callable check tools. Every adapter
 must still validate its own targets and helper protocol against the shared

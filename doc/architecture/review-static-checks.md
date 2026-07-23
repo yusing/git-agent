@@ -110,6 +110,7 @@ Scope
   kind: "changed" | "codebase"
   root: absolute authoritative workspace root
   paths: exact repository-relative changed paths when kind="changed"
+  components: sorted root-relative repository-component prefixes, including ""
 
 Plan
   CheckerName(): stable checker name
@@ -126,9 +127,12 @@ Helper
 ```
 
 `Scope` fields are private. Its constructor validates one absolute canonical
-root, normalizes and clones changed paths, rejects paths for codebase scope,
-and its accessors return copies. An adapter therefore cannot mutate the scope
-seen by another checker.
+root, normalizes and clones changed paths and recursive repository-component
+prefixes, requires the root component `""`, rejects paths for codebase scope,
+and its accessors return copies. It exposes the longest containing component
+for a repository-relative path. An adapter therefore cannot mutate the scope
+seen by another checker or search ancestor configuration across a registered
+submodule boundary.
 
 Presence invariants:
 
@@ -288,22 +292,25 @@ still emits one result. `KindSimplify` retains its existing schema and contains
 no `checks` field.
 
 For `ModeUncommitted`, build `Scope{kind: changed}` from the recursively
-expanded `PreparedContext.Paths` and the live authoritative root. The
+expanded `PreparedContext.Paths`, its snapshot component prefixes, and the live
+authoritative root. The
 golangci-lint adapter associates each existing `.go` path with its nearest
-ancestor `go.mod` without crossing that root and passes only the selected
-changed files. Final diagnostics must be normalized against invocation root
-and filtered to the exact selected changed-file set.
+ancestor `go.mod` without crossing the path's containing repository component
+and passes only the selected changed files. Final diagnostics must be
+normalized against invocation root and filtered to the exact selected
+changed-file set.
 
 For `ModeStaged`, recursive initialized-submodule discovery, root-relative
 paths, diff rendering, file reads, and fingerprinting must share one staged
 review workspace owner in `internal/gitctx`. Before creating the shared
 `Scope{kind: changed}`, materialize every component index tree into one
 owner-only temporary workspace and set the scope root to that materialization.
-All adapters consume the same root and exact prepared paths. Never inspect the
-dirty worktree as staged checker input.
+All adapters consume the same root, exact prepared paths, and component
+prefixes. Never inspect the dirty worktree as staged checker input.
 
 For `ModeCodebase`, create `Scope{kind: codebase}` at the authoritative
-repository root without inventing paths. The golangci-lint adapter discovers
+repository root with recursively discovered component prefixes and without
+inventing changed paths. The golangci-lint adapter discovers
 every `go.mod` below that root, including initialized registered submodules,
 while excluding Git metadata, vendored module trees, symlink escapes, and
 duplicate module roots. It runs modules in deterministic root-relative order

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yusing/git-agent/internal/checks"
 	reviewtask "github.com/yusing/git-agent/internal/tasks/review"
 )
 
@@ -74,7 +75,18 @@ func TestReviewTestRejectsArguments(t *testing.T) {
 
 func TestDryRunEventsEndWithValidReportForEachKind(t *testing.T) {
 	for _, kind := range []reviewtask.Kind{reviewtask.KindReview, reviewtask.KindSimplify} {
-		events := dryRunEvents(kind, nil)
+		var results []checks.Result
+		if kind == reviewtask.KindReview {
+			result, err := checks.NewSkipped("fixture-checker", "fixture has no eligible input")
+			if err != nil {
+				t.Fatal(err)
+			}
+			results = []checks.Result{result}
+		}
+		events, err := dryRunEvents(kind, nil, results)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if len(events) != 15 {
 			t.Fatalf("%s dry-run event count = %d", kind, len(events))
 		}
@@ -91,7 +103,15 @@ func TestDryRunEventsEndWithValidReportForEachKind(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if problems := reviewtask.Validate(kind, string(data)); len(problems) != 0 {
+		if kind == reviewtask.KindReview {
+			var report reviewtask.FinalReviewReport
+			if err := json.Unmarshal(data, &report); err != nil {
+				t.Fatal(err)
+			}
+			if err := reviewtask.ValidateFinalReviewReport(report); err != nil {
+				t.Fatalf("%s dry-run report invalid: %v", kind, err)
+			}
+		} else if problems := reviewtask.Validate(kind, string(data)); len(problems) != 0 {
 			t.Fatalf("%s dry-run report invalid: %v", kind, problems)
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"github.com/yusing/git-agent/internal/checks"
 	reviewtask "github.com/yusing/git-agent/internal/tasks/review"
 	"github.com/yusing/git-agent/internal/tools"
 	"github.com/yusing/git-agent/internal/trace"
@@ -86,16 +87,31 @@ func reviewTestEvents(started time.Time) []trace.Event {
 	return events
 }
 
-func dryRunEvents(kind reviewtask.Kind, manifest *tools.OrchestrationManifest) []trace.Event {
-	report := map[string]any{"summary": "Deterministic dry-run fixture completed."}
+func dryRunEvents(kind reviewtask.Kind, manifest *tools.OrchestrationManifest, checkResults []checks.Result) ([]trace.Event, error) {
+	var report any
 	if kind == reviewtask.KindSimplify {
-		report["opportunities"] = []any{}
+		simplifyReport := map[string]any{
+			"summary":       "Deterministic dry-run fixture completed.",
+			"opportunities": []any{},
+		}
+		if manifest != nil {
+			simplifyReport["orchestration_manifest_sha256"] = manifest.Digest
+		}
+		report = simplifyReport
 	} else {
-		report["recommendation"] = "APPROVE"
-		report["findings"] = []any{}
-	}
-	if manifest != nil {
-		report["orchestration_manifest_sha256"] = manifest.Digest
+		digest := ""
+		if manifest != nil {
+			digest = manifest.Digest
+		}
+		finalReport, err := reviewtask.BuildFinalReviewReport(
+			`{"summary":"Deterministic dry-run fixture completed.","recommendation":"APPROVE","findings":[]}`,
+			checkResults,
+			digest,
+		)
+		if err != nil {
+			return nil, err
+		}
+		report = finalReport
 	}
 	events := []trace.Event{
 		{Kind: "reasoning_summary.delta", Value: map[string]any{"delta": "Inspecting deterministic dry-run fixture"}},
@@ -116,5 +132,5 @@ func dryRunEvents(kind reviewtask.Kind, manifest *tools.OrchestrationManifest) [
 			trace.Event{Kind: "tool-output", Value: map[string]any{"name": tool.name, "content": tool.output}},
 		)
 	}
-	return append(events, trace.Event{Kind: "final", Value: map[string]any{"text": report}})
+	return append(events, trace.Event{Kind: "final", Value: map[string]any{"text": report}}), nil
 }

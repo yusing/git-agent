@@ -275,9 +275,17 @@ func (w *uncommittedWorkspace) snapshot(maxBytes, maxLines int) (ChangeSnapshot,
 		return ChangeSnapshot{}, err
 	}
 	return ChangeSnapshot{
-		Paths: orderedPaths, Status: orderedStatus, Stats: orderedStats,
+		Paths: orderedPaths, Components: w.componentPaths(), Status: orderedStatus, Stats: orderedStats,
 		Diff: diff, DiffTruncated: truncated, Fingerprint: w.fingerprint(),
 	}, nil
+}
+
+func (w *uncommittedWorkspace) componentPaths() []string {
+	paths := make([]string, len(w.components))
+	for index, component := range w.components {
+		paths[index] = component.prefix
+	}
+	return paths
 }
 
 func (w *uncommittedWorkspace) diff(paths []string, maxBytes, maxLines int) (string, bool, error) {
@@ -451,4 +459,40 @@ func prefixRepoPath(prefix, path string) string {
 		return prefix
 	}
 	return prefix + "/" + filepath.ToSlash(path)
+}
+
+func (r *Repository) ReviewComponentPaths() ([]string, error) {
+	baseTree, err := r.headTree()
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	visited := map[string]bool{}
+	var collect func(*Repository, string, *object.Tree) error
+	collect = func(repo *Repository, prefix string, base *object.Tree) error {
+		root, err := filepath.EvalSymlinks(repo.RootPath)
+		if err != nil {
+			return err
+		}
+		if visited[root] {
+			return nil
+		}
+		visited[root] = true
+		paths = append(paths, prefix)
+		submodules, err := initializedSubmodules(repo, base)
+		if err != nil {
+			return err
+		}
+		for _, submodule := range submodules {
+			if err := collect(submodule.repo, prefixRepoPath(prefix, submodule.path), submodule.baseTree); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := collect(r, "", baseTree); err != nil {
+		return nil, err
+	}
+	slices.Sort(paths)
+	return slices.Compact(paths), nil
 }

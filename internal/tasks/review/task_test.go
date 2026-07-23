@@ -265,6 +265,9 @@ func TestPrepareUncommittedIncludesDirtyRegisteredSubmodulesRecursively(t *testi
 			t.Errorf("prepared paths = %#v, missing %q", prepared.Paths, path)
 		}
 	}
+	if !slices.Equal(prepared.Components, []string{"", "webui", "webui/wiki"}) {
+		t.Fatalf("prepared components = %#v", prepared.Components)
+	}
 	for _, text := range []string{"a/backend.go", `Repository "webui"`, "a/ui.txt", `Repository "webui/wiki"`, "a/wiki.txt"} {
 		if !strings.Contains(prepared.Diff, text) {
 			t.Errorf("prepared diff missing %q:\n%s", text, prepared.Diff)
