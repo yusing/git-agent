@@ -105,6 +105,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	var uncommitted bool
 	var staged bool
 	var waitID string
+	var followUpID string
 	var orchestrationArtifact string
 	var depthValue string
 	var dryRun bool
@@ -113,6 +114,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	fs.BoolVar(&uncommitted, "uncommitted", false, "inspect all dirty worktree changes")
 	fs.BoolVar(&staged, "staged", false, "inspect staged changes only")
 	fs.StringVar(&waitID, "wait", "", "wait for a detached task and print its report")
+	fs.StringVar(&followUpID, "follow-up", "", "re-review a successful provider turn with a required prompt")
 	fs.StringVar(&orchestrationArtifact, "orchestration-artifact", "", "read helper-authorized orchestration artifacts from manifest")
 	fs.StringVar(&depthValue, "depth", "", codeReviewDepthUsage(kind))
 	fs.BoolVar(&dryRun, "dry-run", false, "emit deterministic provider events without a provider request")
@@ -137,13 +139,21 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	}
 	waitRequested := false
 	waitConflict := false
+	followUpRequested := false
+	followUpConflict := false
+	followUpPrompt := ""
 	maxWebSearchesSet := false
 	depthSet := false
 	maxStepsSet := false
 	fs.Visit(func(flag *flag.Flag) {
 		if flag.Name == "wait" {
 			waitRequested = true
-			return
+		}
+		if flag.Name == "follow-up" {
+			followUpRequested = true
+		}
+		if flag.Name != "follow-up" {
+			followUpConflict = true
 		}
 		if flag.Name == "max-web-searches" {
 			maxWebSearchesSet = true
@@ -154,8 +164,35 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		if flag.Name == "max-steps" {
 			maxStepsSet = true
 		}
-		waitConflict = true
+		if flag.Name != "wait" {
+			waitConflict = true
+		}
 	})
+	if followUpRequested {
+		if followUpConflict {
+			return errors.New("--follow-up cannot be combined with modes or other flags")
+		}
+		if strings.TrimSpace(followUpID) == "" {
+			return errors.New("--follow-up requires a parent turn ID")
+		}
+		followUpPrompt = strings.Join(fs.Args(), " ")
+		if strings.TrimSpace(followUpPrompt) == "" {
+			return errors.New("--follow-up requires a nonempty re-review prompt")
+		}
+		if len(followUpPrompt) > maxFollowUpPromptBytes {
+			return fmt.Errorf("--follow-up prompt exceeds %d bytes", maxFollowUpPromptBytes)
+		}
+		if !isDetachedChild() {
+			_, parentReport, err := loadFollowUpParent(kind, followUpID)
+			if err != nil {
+				return err
+			}
+			if _, err := reviewtask.FollowUpPrompt(kind, parentReport, followUpPrompt); err != nil {
+				return err
+			}
+			return startDetachedTask(command, args, a.stdout)
+		}
+	}
 	if maxWebSearchesSet && opts.MaxWebSearches < 1 {
 		return errors.New("--max-web-searches must be positive")
 	}
@@ -176,15 +213,20 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		return startDetachedTask(command, args, a.stdout)
 	}
 	taskID := detachedTaskID()
-	mode, err := reviewtask.ParseMode(codebase, uncommitted, staged)
-	if err != nil {
-		return err
+	var mode reviewtask.Mode
+	if !followUpRequested {
+		mode, err = reviewtask.ParseMode(codebase, uncommitted, staged)
+		if err != nil {
+			return err
+		}
 	}
-	extraPrompt := strings.TrimSpace(strings.Join(fs.Args(), " "))
-	if opts.AppendPrompt != "" && extraPrompt != "" {
-		opts.AppendPrompt = strings.TrimSpace(opts.AppendPrompt) + "\n" + extraPrompt
-	} else if extraPrompt != "" {
-		opts.AppendPrompt = extraPrompt
+	if !followUpRequested {
+		extraPrompt := strings.TrimSpace(strings.Join(fs.Args(), " "))
+		if opts.AppendPrompt != "" && extraPrompt != "" {
+			opts.AppendPrompt = strings.TrimSpace(opts.AppendPrompt) + "\n" + extraPrompt
+		} else if extraPrompt != "" {
+			opts.AppendPrompt = extraPrompt
+		}
 	}
 
 	localCfg, err := config.ResolveLocal(opts)
@@ -221,6 +263,13 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	if err != nil {
 		return err
 	}
+	var parentReport any
+	if followUpRequested {
+		mode, parentReport, err = readFollowUpParent(backgroundStore, kind, followUpID)
+		if err != nil {
+			return err
+		}
+	}
 	if err := backgroundStore.Create(taskID, command, os.Getpid(), time.Now()); err != nil {
 		return err
 	}
@@ -234,6 +283,14 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		terminal := trace.Event{At: now, Kind: "error", Value: map[string]any{"message": returnErr.Error()}}
 		returnErr = errors.Join(returnErr, backgroundStore.Complete(taskID, terminal, failureDiagnostic, now))
 	}()
+	if !dryRun {
+		if err := backgroundStore.AttachTurn(taskID, backgroundtask.TurnMetadata{
+			ParentID: followUpID,
+			Mode:     string(mode),
+		}); err != nil {
+			return err
+		}
+	}
 	heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
 	heartbeatDone := make(chan error, 1)
 	go func() {
@@ -255,7 +312,12 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	defer func() {
 		returnErr = errors.Join(returnErr, finishHeartbeat())
 	}()
-	prepared, err := reviewtask.Prepare(repo, mode)
+	var prepared reviewtask.PreparedContext
+	if followUpRequested {
+		prepared, err = reviewtask.PrepareFollowUp(repo, mode)
+	} else {
+		prepared, err = reviewtask.Prepare(repo, mode)
+	}
 	if err != nil {
 		return err
 	}
@@ -328,6 +390,9 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	if orchestration != nil {
 		session["orchestration_manifest_sha256"] = orchestration.Digest
 	}
+	if followUpRequested {
+		session["parent"] = followUpID
+	}
 	if err := recorder.Write("session", session); err != nil {
 		return err
 	}
@@ -371,6 +436,16 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	failureDiagnostic.Model = cfg.Model
 	failureDiagnostic.MaxSteps = cfg.MaxSteps
 	failureDiagnostic.MaxToolCalls = cfg.MaxToolCalls
+	userPrompt := appendUserPrompt(
+		orchestrationPrompt(reviewtask.UserPrompt(kind, prepared), orchestration),
+		opts.AppendPrompt,
+	)
+	if followUpRequested {
+		userPrompt, err = reviewtask.FollowUpPrompt(kind, parentReport, followUpPrompt)
+		if err != nil {
+			return err
+		}
+	}
 
 	runner := agent.OpenAIRunner{
 		Config:             cfg,
@@ -391,7 +466,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		Environment:       environmentContext(repo, command, string(mode), cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls),
 		SkillInstructions: skillStore.Render(),
 		ProjectGuidance:   renderedGuidance,
-		UserPrompt:        appendUserPrompt(orchestrationPrompt(reviewtask.UserPrompt(kind, prepared), orchestration), opts.AppendPrompt),
+		UserPrompt:        userPrompt,
 		TextFormat:        reviewtask.TextFormat(kind),
 		AllowedToolNames:  allowedTools,
 		MaxSteps:          cfg.MaxSteps,
@@ -2162,12 +2237,14 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent release-note [--out <file>] [flags] patch|minor|major\n")
 	b.WriteString("  git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]\n")
 	b.WriteString("  git-agent review --wait <id>\n")
+	b.WriteString("  git-agent review --follow-up <turn-id> <prompt...>\n")
 	b.WriteString("  git-agent search [flags] <query...>\n")
 	b.WriteString("  git-agent search --ls [--remote <url>] [--format text|json]\n")
 	b.WriteString("  git-agent search --ls-remotes [--format text|json|completion]\n")
 	b.WriteString("  git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]\n")
 	b.WriteString("  git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]\n")
 	b.WriteString("  git-agent simplify --wait <id>\n")
+	b.WriteString("  git-agent simplify --follow-up <turn-id> <prompt...>\n")
 	b.WriteString("\nRun `git-agent search --help` for search flags.\n")
 	b.WriteString("Run `git-agent review --help` or `git-agent simplify --help` for inspection flags.\n")
 	return errors.New(b.String())
@@ -2177,6 +2254,7 @@ func codeReviewUsageError(command string, fs *flag.FlagSet) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Usage: git-agent %s [--codebase|--uncommitted|--staged] [flags] [prompt...]\n\n", command)
 	fmt.Fprintf(&b, "       git-agent %s --wait <id>\n\n", command)
+	fmt.Fprintf(&b, "       git-agent %s --follow-up <turn-id> <prompt...>\n\n", command)
 	b.WriteString("Modes:\n")
 	b.WriteString("  --uncommitted  inspect all dirty changes (default)\n")
 	b.WriteString("  --staged       inspect staged changes only\n")
@@ -2187,6 +2265,7 @@ func codeReviewUsageError(command string, fs *flag.FlagSet) error {
 		"base-url":               "url",
 		"dry-run":                "",
 		"depth":                  "fast|balanced|thorough",
+		"follow-up":              "turn-id",
 		"guidance-family":        "family",
 		"help-agent":             "",
 		"max-web-searches":       "n",
@@ -2213,6 +2292,7 @@ func codeReviewUsageError(command string, fs *flag.FlagSet) error {
 func codeReviewAgentUsageError(command string, fs *flag.FlagSet) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Usage: git-agent %s [--codebase|--uncommitted|--staged] [--depth fast|balanced|thorough] [prompt...]\n\n", command)
+	fmt.Fprintf(&b, "       git-agent %s --follow-up <turn-id> <prompt...>\n\n", command)
 	b.WriteString("Modes:\n")
 	b.WriteString("  --uncommitted  inspect all dirty changes (default)\n")
 	b.WriteString("  --staged       inspect staged changes only\n")
@@ -2224,6 +2304,8 @@ func codeReviewAgentUsageError(command string, fs *flag.FlagSet) error {
 	b.WriteString("      use thorough only for security-related issues or very complex logic; otherwise use fast or balanced\n")
 	b.WriteString("  --low | --medium | --high | --xhigh\n")
 	b.WriteString("      set reasoning effort (mutually exclusive)\n")
+	b.WriteString("  --follow-up <turn-id> <prompt...>\n")
+	b.WriteString("      re-evaluate a successful provider turn against current repository state\n")
 	return errors.New(b.String())
 }
 

@@ -124,6 +124,16 @@ func (m Mode) ToolMode() tools.ReviewMode {
 }
 
 func Prepare(repo *gitctx.Repository, mode Mode) (PreparedContext, error) {
+	return prepare(repo, mode, false)
+}
+
+// PrepareFollowUp permits an empty diff because the parent issue may have been
+// fixed, committed, removed, or renamed before re-review.
+func PrepareFollowUp(repo *gitctx.Repository, mode Mode) (PreparedContext, error) {
+	return prepare(repo, mode, true)
+}
+
+func prepare(repo *gitctx.Repository, mode Mode, allowEmpty bool) (PreparedContext, error) {
 	prepared := PreparedContext{Mode: mode}
 	if mode == ModeCodebase {
 		components, err := repo.ReviewComponentPaths()
@@ -147,7 +157,7 @@ func Prepare(repo *gitctx.Repository, mode Mode) (PreparedContext, error) {
 	if err != nil {
 		return PreparedContext{}, err
 	}
-	if len(snapshot.Paths) == 0 {
+	if len(snapshot.Paths) == 0 && !allowEmpty {
 		return PreparedContext{}, fmt.Errorf("%s mode requires changed files", mode)
 	}
 	prepared.Paths = snapshot.Paths
@@ -273,12 +283,61 @@ func statusName(status string) string {
 func SystemPrompt(kind Kind) string {
 	switch kind {
 	case KindReview:
-		return textutil.NormalizePrompt(`You are a focused code reviewer. Find real, actionable defects and return only JSON matching the provided schema. Repository evidence and project guidance outrank assumptions. Do not modify files.`)
+		return textutil.NormalizePrompt(`You are a focused code reviewer. Find real, actionable defects and return only JSON matching the provided schema. Repository evidence and project guidance outrank assumptions. Do not modify files.
+
+When the user message is a JSON object with previous_findings and prompt, re-evaluate only those findings against current repository evidence. Omit resolved or inapplicable findings. You may report a regression directly caused by the attempted fix, but do not expand into an unrelated full inspection.`)
 	case KindSimplify:
-		return textutil.NormalizePrompt(`You are a focused, read-only code simplification reviewer. Find concrete behavior-preserving opportunities and return only JSON matching the provided schema. Repository evidence and project guidance outrank assumptions. Do not modify files.`)
+		return textutil.NormalizePrompt(`You are a focused, read-only code simplification reviewer. Find concrete behavior-preserving opportunities and return only JSON matching the provided schema. Repository evidence and project guidance outrank assumptions. Do not modify files.
+
+When the user message is a JSON object with previous_opportunities and prompt, re-evaluate only those opportunities against current repository evidence. Omit resolved or inapplicable opportunities and do not expand into an unrelated full inspection.`)
 	default:
 		return ""
 	}
+}
+
+// FollowUpPrompt constructs the only user message for a fresh follow-up
+// conversation from a validated public parent report.
+func FollowUpPrompt(kind Kind, report any, prompt string) (string, error) {
+	data, err := sonic.Marshal(report)
+	if err != nil {
+		return "", fmt.Errorf("encode parent report: %w", err)
+	}
+	switch kind {
+	case KindReview:
+		var parent FinalReviewReport
+		if err := sonic.Unmarshal(data, &parent); err != nil {
+			return "", fmt.Errorf("decode parent review report: %w", err)
+		}
+		if err := ValidateFinalReviewReport(parent); err != nil {
+			return "", err
+		}
+		return marshalFollowUp(struct {
+			PreviousFindings []Finding `json:"previous_findings"`
+			Prompt           string    `json:"prompt"`
+		}{PreviousFindings: parent.Findings, Prompt: prompt})
+	case KindSimplify:
+		var parent SimplifyReport
+		if err := sonic.Unmarshal(data, &parent); err != nil {
+			return "", fmt.Errorf("decode parent simplify report: %w", err)
+		}
+		if errs := validateSimplify(parent); len(errs) > 0 {
+			return "", fmt.Errorf("invalid parent simplify report: %s", strings.Join(errs, "; "))
+		}
+		return marshalFollowUp(struct {
+			PreviousOpportunities []Opportunity `json:"previous_opportunities"`
+			Prompt                string        `json:"prompt"`
+		}{PreviousOpportunities: parent.Opportunities, Prompt: prompt})
+	default:
+		return "", fmt.Errorf("unknown report kind %q", kind)
+	}
+}
+
+func marshalFollowUp(value any) (string, error) {
+	data, err := sonic.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("encode follow-up prompt: %w", err)
+	}
+	return string(data), nil
 }
 
 func UserPrompt(kind Kind, prepared PreparedContext) string {

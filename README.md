@@ -49,6 +49,7 @@ directory is on `PATH`.
 | Version bump release body | `git-agent release-note patch` | Release Markdown for latest tag to `HEAD` |
 | Uncommitted review | `git-agent review` | Detached task launch JSON |
 | Staged review | `git-agent review --staged` | Detached staged-review launch JSON |
+| Re-review a completed turn | `git-agent review --follow-up <turn-id> <prompt...>` | New detached task launch JSON |
 | Codebase simplification audit | `git-agent simplify --codebase` | Detached codebase-audit launch JSON |
 | Agent context search | `git-agent search --agent <query...>` | Brief results, plus progress endpoint when indexing |
 | Configure index sync | `git-agent config index.remote <git-url>` | Save a dedicated Git remote for shared revision indexes |
@@ -103,6 +104,9 @@ git-agent review
 # {"command":"review","id":"...","pid":12345,"endpoint":{"network":"unix","address":"/tmp/.../http.sock","url":"http://localhost/events?token=..."}}
 git-agent review --wait <id-from-launch-json>
 
+# After applying fixes, re-evaluate an earlier report
+git-agent review --follow-up <id-from-launch-json> re-review the fixes
+
 # Review only the Git index
 git-agent review --staged
 
@@ -142,6 +146,13 @@ uses `gpt-5.6-sol` and `simplify` uses `gpt-5.6-terra`. Reasoning defaults track
 inspection depth: review uses `low`, `medium`, and `high` for
 `fast`, `balanced`, and `thorough`; simplify uses `low`, `low`, and `medium`.
 An explicit effort flag overrides these defaults.
+
+An eligible completed provider turn can be followed with
+`--follow-up <turn-id> <prompt...>`. The new detached turn inherits the original
+uncommitted, staged, or codebase mode, inspects current repository state, and
+starts a fresh provider conversation containing only the prior findings or
+opportunities and the new prompt. Follow-up is mutually exclusive with all
+other flags and uses the same SSE and repeatable `--wait` workflow.
 
 Without a trailing focus, review reports all actionable findings and simplify
 inspects the full authoritative scope. A trailing focus limits the report to
@@ -413,12 +424,14 @@ git-agent release-note [--out <file>] [flags] <base> <release>
 git-agent release-note [--out <file>] [flags] patch|minor|major
 git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]
 git-agent review --wait <id>
+git-agent review --follow-up <turn-id> <prompt...>
 git-agent search [flags] <query...>
 git-agent search --ls [--remote <url>] [--format text|json]
 git-agent search --ls-remotes [--format text|json|completion]
 git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]
 git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]
 git-agent simplify --wait <id>
+git-agent simplify --follow-up <turn-id> <prompt...>
 git-agent config index.remote [<git-url>]
 git-agent config --unset index.remote
 git-agent index sync
@@ -441,6 +454,7 @@ Common generation and inspection flags:
 | `--max-web-searches <n>` | Review/simplify only: override hosted-search cap |
 | `--orchestration-artifact <path>` | Review/simplify only: authorize immutable helper artifact manifest |
 | `--dry-run` | Review/simplify only: emit deterministic events without provider access |
+| `--follow-up <turn-id> <prompt...>` | Review/simplify only: re-evaluate a successful provider turn |
 | `--help-agent` | Review/simplify only: show scope, depth, and reasoning help intended for coding agents |
 | `--guidance-family auto\|agents\|claude\|codex\|none` | Force guidance family |
 | `--append-prompt <text>` | Add a bounded operator hint |

@@ -26,8 +26,10 @@ Supported workflows:
 - `git-agent release-note [--out <file>] patch|minor|major`
 - `git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 - `git-agent review --wait <id>`
+- `git-agent review --follow-up <turn-id> <prompt...>`
 - `git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 - `git-agent simplify --wait <id>`
+- `git-agent simplify --follow-up <turn-id> <prompt...>`
 - `git-agent search [flags] <query...>`
 - `git-agent search --ls [--remote <url>] [--format text|json]`
 - `git-agent search --ls-remotes [--format text|json|completion]`
@@ -415,8 +417,38 @@ completion. A stored `error`, unknown or malformed ID, corrupt record, dead
 producer, or task created by the other command returns nonzero with empty
 stdout.
 
+`review --follow-up <turn-id> <prompt...>` and
+`simplify --follow-up <turn-id> <prompt...>` start a new detached turn that
+targets a successful real-provider report from the same command and current
+project. The prompt is required; after flag parsing, its argv elements are
+joined with one ASCII space. `--` permits a prompt whose first element starts
+with `-`. `--follow-up` is isolated from `--wait`, scope modes, ordinary
+trailing focus, `--append-prompt`, orchestration artifacts, and provider or
+execution overrides.
+
+The new turn inherits only the parent's uncommitted, staged, or codebase mode
+and otherwise uses current configuration, guidance, skills, read-only tools,
+validation, and repository state. It starts a fresh provider conversation whose
+first user message is one strict JSON object containing only
+`previous_findings` plus `prompt` for review, or `previous_opportunities` plus
+`prompt` for simplify. The prior summary, recommendation, checks, prepared
+context, reasoning, and tool transcript are not reconstructed.
+
+Every follow-up re-evaluates the named provider report's items against current
+authoritative repository state. Resolved or inapplicable items are omitted;
+review may add a regression directly caused by the attempted fix.
+Uncommitted and staged modes retain their current-turn fingerprint guard, staged
+mode still excludes unstaged bytes, codebase mode remains live, and an empty
+current diff is valid. Review reruns current host checks after the provider
+report.
+
+Each accepted follow-up allocates a new task ID, launch object, replayable
+authenticated SSE endpoint, durable report, and repeatable `--wait` result.
+The `session` event records the parent but never the prompt or prior report.
+
 `--dry-run` is valid only on initial review/simplify launch and is mutually
-exclusive with `--wait` through normal wait-flag conflict validation.
+exclusive with `--wait` and `--follow-up` through normal flag conflict
+validation.
 
 The detached producer creates a versioned running record before publishing its
 launch JSON, refreshes its update timestamp with a heartbeat while running, then
@@ -424,12 +456,14 @@ atomically replaces it with a `0600` record containing task ID, command, PID,
 start/update timestamps, and the exact terminal `final` or `error` trace event.
 Version 2 failure records additionally contain model, mode, step/tool budgets,
 launch repository fingerprint when applicable, and the last eight sanitized
-tool-call/tool-output summaries. Each diagnostic payload is capped at 4 KiB and
-40 lines. Successful records contain no failure diagnostic. Readers continue to
-accept version 1 records, which have no diagnostic field. Diagnostics never
-contain API credentials, provider endpoints, full requests/responses, or
-unbounded repository content; they are not full traces. Terminal events are
-written without trace compaction and published to SSE. Records live under
+tool-call/tool-output summaries. Version 3 records may also contain the turn's
+mode and parent task ID. Each diagnostic payload is capped at 4 KiB and 40
+lines. Successful records contain
+no failure diagnostic. Readers continue to accept versions 1 and 2.
+Diagnostics never contain API credentials, provider endpoints, full
+requests/responses, or unbounded repository content; they are not full traces.
+Terminal events are written without trace compaction and published to SSE.
+Records live under
 `~/.git-agent/<project-identity-sha>/background/<task-id>.json` and are retained
 indefinitely. The containing directory is `0700`.
 
@@ -943,9 +977,10 @@ Message-generation subcommands reserve this shared flag surface:
 - `--pprof <addr>`
 
 `review` and `simplify` additionally support
-`--depth fast|balanced|thorough` and `--max-web-searches <positive-n>`.
-They also support `--help-agent`, which prints only the launch syntax, scope
-modes, `--depth`, and reasoning-effort flags intended for automated coding
+`--depth fast|balanced|thorough`, `--max-web-searches <positive-n>`, and the
+isolated `--follow-up <turn-id> <prompt...>` form. They also support
+`--help-agent`, which prints only the launch syntax, scope modes, `--depth`,
+reasoning-effort flags, and follow-up syntax intended for automated coding
 agents. The agent help reserves `thorough` for security-related issues or very
 complex logic and directs agents to use `fast` or `balanced` otherwise.
 `--wait <id>` is valid only as the isolated retrieval form documented above.
@@ -1077,6 +1112,8 @@ unchanged. API-key providers retain the requested model identifier.
 - stdout for generation-only commands: final generated artifact only
 - stdout for `review` and `simplify` launchers: one strict JSON object containing
   `command`, `id`, `pid`, and `url`
+- stdout for `review --follow-up ...` and `simplify --follow-up ...`: the same
+  strict launch object for the newly allocated turn
 - stdout for `review --wait <id>` and `simplify --wait <id>`: the stored strict
   final report JSON only
 - stdout for `search`: JSON result by default; brief header and result lines
@@ -2144,5 +2181,6 @@ The in-repository implementation is complete when:
   `release-note --out <file>` streams human console trace lines and writes the
   artifact to the requested file
 - `review` and `simplify` launchers emit one `command`/`id`/`pid`/`url` JSON
-  object on stdout with empty success stderr, and `--wait <id>` emits only a
-  repeatable strict final report or fails with empty stdout
+  object on stdout with empty success stderr, including follow-up launchers;
+  `--wait <id>` emits only a repeatable strict final report or fails with empty
+  stdout

@@ -21,6 +21,25 @@ const (
 	secondTestTaskID = "BCDEFGHIJKLMNOPQRSTUVWXYZA"
 )
 
+func TestStorePersistsFollowUpMetadata(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Now().UTC()
+	if err := store.Create(testTaskID, "review", 42, now); err != nil {
+		t.Fatal(err)
+	}
+	metadata := TurnMetadata{ParentID: secondTestTaskID, Mode: "staged"}
+	if err := store.AttachTurn(testTaskID, metadata); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Read(testTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Version != recordVersion || record.Turn == nil || *record.Turn != metadata {
+		t.Fatalf("record = %#v", record)
+	}
+}
+
 func TestStoreWaitsForAndRepeatsFinalReports(t *testing.T) {
 	for _, command := range []string{"review", "simplify"} {
 		t.Run(command, func(t *testing.T) {

@@ -13,9 +13,54 @@ import (
 	git "github.com/go-git/go-git/v6"
 	gitconfig "github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/yusing/git-agent/internal/checks"
 	"github.com/yusing/git-agent/internal/contextpack"
 	"github.com/yusing/git-agent/internal/gitctx"
 )
+
+func TestFollowUpPromptContainsOnlyPriorItemsAndPrompt(t *testing.T) {
+	t.Parallel()
+
+	check, err := checks.NewSkipped("golangci-lint", "no eligible Go targets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewPrompt, err := FollowUpPrompt(KindReview, FinalReviewReport{
+		Summary: "old summary", Recommendation: "COMMENT",
+		Findings: []Finding{{
+			Severity: "LOW", Aspect: "tests", Title: "missing case", Impact: "regression risk",
+			Evidences:   []Evidence{{Title: "branch", Path: "a.go", LineStart: 1, LineEnd: 1}},
+			ProposedFix: "add the case",
+		}},
+		Checks: []checks.Result{check},
+	}, "I fixed it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reviewPrompt, `"previous_findings"`) || !strings.Contains(reviewPrompt, `"prompt":"I fixed it"`) {
+		t.Fatalf("review follow-up prompt = %s", reviewPrompt)
+	}
+	for _, excluded := range []string{"old summary", "recommendation", "checks", "no eligible Go targets"} {
+		if strings.Contains(reviewPrompt, excluded) {
+			t.Fatalf("review follow-up prompt contains %q: %s", excluded, reviewPrompt)
+		}
+	}
+
+	simplifyPrompt, err := FollowUpPrompt(KindSimplify, SimplifyReport{
+		Summary: "old summary",
+		Opportunities: []Opportunity{{
+			Aspect: "clarity", Title: "simplify branch", Body: "nested flow",
+			Evidences:      []Evidence{{Title: "branch", Path: "a.go", LineStart: 1, LineEnd: 1}},
+			ProposedChange: "return early",
+		}},
+	}, "done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(simplifyPrompt, `"previous_opportunities"`) || strings.Contains(simplifyPrompt, "old summary") {
+		t.Fatalf("simplify follow-up prompt = %s", simplifyPrompt)
+	}
+}
 
 func TestOutputSchemasRequireEvidenceLocations(t *testing.T) {
 	for _, kind := range []Kind{KindReview, KindSimplify} {

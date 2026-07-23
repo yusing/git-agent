@@ -341,6 +341,7 @@ func fishCompletionCommands(refs, remotes, paths []string) []fishCompletionComma
 		fishCompletionOption{name: "uncommitted"},
 		fishCompletionOption{name: "staged"},
 		fishCompletionOption{name: "wait", takesValue: true, value: "task-123"},
+		fishCompletionOption{name: "follow-up", takesValue: true, value: "task-123"},
 		fishCompletionOption{name: "depth", takesValue: true, value: "balanced", valueCandidates: []string{"balanced", "fast", "thorough"}},
 		fishCompletionOption{name: "max-web-searches", takesValue: true, value: "4"},
 		fishCompletionOption{name: "dry-run"},
@@ -403,6 +404,9 @@ func expectedOptionCandidates(command fishCompletionCommand, used []fishCompleti
 		if _, wait := seen["wait"]; wait && len(seen) != 1 {
 			return nil
 		}
+		if _, followUp := seen["follow-up"]; followUp && len(seen) != 1 {
+			return nil
+		}
 		if _, depth := seen["depth"]; depth {
 			if _, maxSteps := seen["max-steps"]; maxSteps {
 				return nil
@@ -441,6 +445,12 @@ func completionOptionCompatible(command, candidate string, seen map[string]fishC
 			return false
 		}
 		if candidate == "wait" {
+			return len(seen) == 0
+		}
+		if _, followUp := seen["follow-up"]; followUp {
+			return false
+		}
+		if candidate == "follow-up" {
 			return len(seen) == 0
 		}
 		if slices.Contains([]string{"codebase", "uncommitted", "staged"}, candidate) {

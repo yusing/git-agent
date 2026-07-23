@@ -142,6 +142,9 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 			if record.Command != test.command || record.Terminal == nil || record.Terminal.Kind != "final" {
 				t.Fatalf("background record = %#v", record)
 			}
+			if record.Turn == nil || record.Turn.Mode != "staged" || record.Turn.ParentID != "" {
+				t.Fatalf("background turn metadata = %#v", record.Turn)
+			}
 			storedReport, ok := record.Terminal.Value["text"].(map[string]any)
 			if !ok || storedReport["summary"] != expectedReport["summary"] {
 				t.Fatalf("stored final report = %#v", record.Terminal.Value["text"])
@@ -600,7 +603,9 @@ func TestReviewHelpDocumentsDefaultMode(t *testing.T) {
 	for _, want := range []string{
 		"Usage: git-agent review",
 		"git-agent review --wait <id>",
+		"git-agent review --follow-up <turn-id> <prompt...>",
 		"wait for a detached task and print its report",
+		"re-review a successful provider turn with a required prompt",
 		"--uncommitted  inspect all dirty changes (default)",
 		"--staged       inspect staged changes only",
 		"--codebase     inspect the full codebase",
@@ -642,6 +647,8 @@ func TestCodeReviewAgentHelpOnlyDocumentsAgentFacingFlags(t *testing.T) {
 				"use thorough only for security-related issues or very complex logic; otherwise use fast or balanced",
 				"--low | --medium | --high | --xhigh",
 				"set reasoning effort (mutually exclusive)",
+				"--follow-up <turn-id> <prompt...>",
+				"re-evaluate a successful provider turn against current repository state",
 			} {
 				if !strings.Contains(help, want) {
 					t.Fatalf("agent help missing %q:\n%s", want, help)

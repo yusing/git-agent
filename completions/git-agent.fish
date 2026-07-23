@@ -82,7 +82,7 @@ function __git_agent_command_has_option
         case release-note
             contains -- "$option" out $shared
         case review simplify
-            contains -- "$option" codebase uncommitted staged wait depth max-web-searches dry-run help orchestration-artifact $shared
+            contains -- "$option" codebase uncommitted staged wait follow-up depth max-web-searches dry-run help orchestration-artifact $shared
         case search
             contains -- "$option" rev remote scope min-score limit format index reindex code no-tests agent ls ls-remotes ls-files embedding-model embedding-dimensions base-url timeout debug pprof
         case '*'
@@ -91,7 +91,7 @@ function __git_agent_command_has_option
 end
 
 function __git_agent_option_takes_value
-    contains -- "$argv[1]" model base-url timeout max-steps guidance-family append-prompt pprof wait depth max-web-searches orchestration-artifact out rev remote scope min-score limit format embedding-model embedding-dimensions
+    contains -- "$argv[1]" model base-url timeout max-steps guidance-family append-prompt pprof wait follow-up depth max-web-searches orchestration-artifact out rev remote scope min-score limit format embedding-model embedding-dimensions
 end
 
 function __git_agent_option_value_is_valid
@@ -183,6 +183,9 @@ function __git_agent_option_state_is_valid
             if contains -- wait $seen_options
                 test (count $seen_options) -eq 1; or return 1
             end
+            if contains -- follow-up $seen_options
+                test (count $seen_options) -eq 1; or return 1
+            end
             if contains -- depth $seen_options; and contains -- max-steps $seen_options
                 return 1
             end
@@ -230,6 +233,11 @@ function __git_agent_option_is_compatible
             end
             contains -- wait $seen_options; and return 1
             if test "$candidate" = wait
+                test (count $seen_options) -eq 0
+                return
+            end
+            contains -- follow-up $seen_options; and return 1
+            if test "$candidate" = follow-up
                 test (count $seen_options) -eq 0
                 return
             end
@@ -472,6 +480,7 @@ complete -c git-agent -n '__git_agent_option_available codebase review simplify'
 complete -c git-agent -n '__git_agent_option_available uncommitted review simplify' -l uncommitted -d 'Inspect all dirty worktree changes'
 complete -c git-agent -n '__git_agent_option_available staged review simplify' -l staged -d 'Inspect staged changes only'
 complete -c git-agent -n '__git_agent_option_available wait review simplify' -l wait -r -f -d 'Wait for a detached task ID and print its report'
+complete -c git-agent -n '__git_agent_option_available follow-up review simplify' -l follow-up -r -f -d 'Re-evaluate a successful provider turn ID'
 complete -c git-agent -n '__git_agent_option_available depth review' -l depth -r -f -a 'fast balanced thorough' -d 'Select depth and reasoning default: fast=low, balanced=medium, thorough=high'
 complete -c git-agent -n '__git_agent_option_available depth simplify' -l depth -r -f -a 'fast balanced thorough' -d 'Select depth and reasoning default: fast=low, balanced=low, thorough=medium'
 complete -c git-agent -n '__git_agent_option_available max-web-searches review simplify' -l max-web-searches -r -f -d 'Cap provider-hosted web searches'

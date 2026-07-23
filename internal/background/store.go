@@ -23,7 +23,8 @@ import (
 
 const (
 	legacyRecordVersion = 1
-	recordVersion       = 2
+	diagnosticVersion   = 2
+	recordVersion       = 3
 	defaultPollInterval = 100 * time.Millisecond
 	heartbeatInterval   = 5 * time.Second
 	heartbeatStaleAfter = 30 * time.Second
@@ -41,6 +42,7 @@ type Record struct {
 	PID       int                `json:"pid"`
 	StartedAt time.Time          `json:"started_at"`
 	UpdatedAt time.Time          `json:"updated_at"`
+	Turn      *TurnMetadata      `json:"turn,omitempty"`
 	Terminal  *trace.Event       `json:"terminal,omitempty"`
 	Failure   *FailureDiagnostic `json:"failure,omitempty"`
 }
@@ -483,7 +485,7 @@ func (s *Store) readPath(path, id string) (Record, error) {
 }
 
 func validateRecord(record Record, id string) error {
-	if record.Version != legacyRecordVersion && record.Version != recordVersion {
+	if record.Version != legacyRecordVersion && record.Version != diagnosticVersion && record.Version != recordVersion {
 		return fmt.Errorf("background task %s has unsupported record version %d", id, record.Version)
 	}
 	if record.ID != id {
@@ -500,6 +502,12 @@ func validateRecord(record Record, id string) error {
 	}
 	if record.Version == legacyRecordVersion && record.Failure != nil {
 		return fmt.Errorf("background task %s legacy record contains failure diagnostics", id)
+	}
+	if record.Version < recordVersion && record.Turn != nil {
+		return fmt.Errorf("background task %s legacy record contains turn metadata", id)
+	}
+	if err := validateTurnMetadata(record.Turn); err != nil {
+		return fmt.Errorf("background task %s: %w", id, err)
 	}
 	if record.Failure != nil && (record.Terminal == nil || record.Terminal.Kind != "error") {
 		return fmt.Errorf("background task %s has diagnostics without terminal error", id)
