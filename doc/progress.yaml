@@ -1,5 +1,41 @@
 version: 1
 items:
+  - id: CTR-FOLLOWUP-001
+    title: CTR-FOLLOWUP-001 — Route through the existing detached command
+    kind: contract
+    scope: root
+    path: doc/architecture/review-follow-up.md
+    status: implemented
+  - id: CTR-FOLLOWUP-002
+    title: CTR-FOLLOWUP-002 — Keep durable state minimal
+    kind: contract
+    scope: root
+    path: doc/architecture/review-follow-up.md
+    status: implemented
+  - id: CTR-FOLLOWUP-003
+    title: CTR-FOLLOWUP-003 — Construct one fresh user message
+    kind: contract
+    scope: root
+    path: doc/architecture/review-follow-up.md
+    status: implemented
+  - id: CTR-FOLLOWUP-004
+    title: CTR-FOLLOWUP-004 — Reprepare current mode-authoritative state
+    kind: contract
+    scope: root
+    path: doc/architecture/review-follow-up.md
+    status: implemented
+  - id: CTR-FOLLOWUP-005
+    title: CTR-FOLLOWUP-005 — Preserve report and event sequencing
+    kind: contract
+    scope: root
+    path: doc/architecture/review-follow-up.md
+    status: implemented
+  - id: CTR-FOLLOWUP-006
+    title: CTR-FOLLOWUP-006 — Prove the reduced boundary
+    kind: contract
+    scope: root
+    path: doc/architecture/review-follow-up.md
+    status: implemented
   - id: CTR-REVIEW-CHECK-001
     title: CTR-REVIEW-CHECK-001 — Preserve provider and final-report ownership
     kind: contract
@@ -42,6 +78,54 @@ items:
     scope: root
     path: doc/architecture/review-static-checks.md
     status: in_progress
+  - id: REQ-FOLLOWUP-001
+    title: REQ-FOLLOWUP-001 — Require a successful parent and prompt
+    kind: requirement
+    scope: root
+    path: doc/spec/review-follow-up.md
+    status: implemented
+  - id: REQ-FOLLOWUP-002
+    title: REQ-FOLLOWUP-002 — Isolate follow-up from ordinary launch options
+    kind: requirement
+    scope: root
+    path: doc/spec/review-follow-up.md
+    status: implemented
+  - id: REQ-FOLLOWUP-003
+    title: REQ-FOLLOWUP-003 — Start one fresh targeted conversation
+    kind: requirement
+    scope: root
+    path: doc/spec/review-follow-up.md
+    status: implemented
+  - id: REQ-FOLLOWUP-004
+    title: REQ-FOLLOWUP-004 — Inspect current authoritative repository state
+    kind: requirement
+    scope: root
+    path: doc/spec/review-follow-up.md
+    status: implemented
+  - id: REQ-FOLLOWUP-005
+    title: "REQ-FOLLOWUP-005 — Preserve detached launch, progress, and wait"
+    kind: requirement
+    scope: root
+    path: doc/spec/review-follow-up.md
+    status: implemented
+  - id: REQ-FOLLOWUP-006
+    title: REQ-FOLLOWUP-006 — Persist only reusable parent metadata
+    kind: requirement
+    scope: root
+    path: doc/spec/review-follow-up.md
+    status: implemented
+  - id: REQ-FOLLOWUP-007
+    title: REQ-FOLLOWUP-007 — Return only currently actionable items
+    kind: requirement
+    scope: root
+    path: doc/spec/review-follow-up.md
+    status: implemented
+  - id: REQ-FOLLOWUP-008
+    title: REQ-FOLLOWUP-008 — Reuse existing failure and cancellation behavior
+    kind: requirement
+    scope: root
+    path: doc/spec/review-follow-up.md
+    status: implemented
   - id: REQ-REVIEW-CHECK-001
     title: REQ-REVIEW-CHECK-001 — Run checks after the review agent
     kind: requirement

@@ -7,6 +7,7 @@ pjdoc:
   revision: ARCH-2
   files:
     - review-static-checks.md
+    - review-follow-up.md
 ---
 # Git Agent planned-increment architecture
 
@@ -22,6 +23,9 @@ Current increment owners:
 - `internal/cli`: detached review sequencing and authoritative scope creation.
 - `internal/checks/golangci`: exact bundled golangci-lint adapter.
 - `internal/gitctx`: authoritative scope and drift fingerprints.
-- `internal/background`: format-agnostic durable final-event storage.
+- `internal/background`: durable final-event storage and minimal follow-up
+  parent/mode metadata.
 
 - [Review static-check architecture](review-static-checks.md)
+
+- [Review and simplify follow-up architecture](review-follow-up.md)

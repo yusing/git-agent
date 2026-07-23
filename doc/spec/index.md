@@ -7,7 +7,10 @@ pjdoc:
   revision: SPEC-1
   files:
     - review-static-checks.md
+    - review-follow-up.md
 ---
 # Git Agent planned product increments
 
 - [Review static-check requirements](review-static-checks.md)
+
+- [Review and simplify follow-up requirements](review-follow-up.md)

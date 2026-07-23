@@ -249,13 +249,98 @@ current_slice:
         outside the model tool registry and defer sandbox hardening to a
         concrete release requirement.
 
-later_slices: []
+later_slices:
+  - id: SLICE-FOLLOWUP-001
+    title: Follow up review and simplify with a fresh detached turn
+    status: completed
+    depends_on:
+      - SLICE-REVIEW-CHECKS-001
+    observable_outcome: >-
+      After an eligible successful review or simplify turn, an agent supplies
+      `--follow-up <turn-id> <prompt...>` and receives a new detached re-review
+      turn in the parent's mode. The child starts a fresh conversation whose
+      only user message contains prior actionable items and the required
+      prompt, while normal tools and validation inspect current repository
+      state. Dry-run output is ineligible because it has no turn metadata.
+    requirement_ids:
+      - REQ-FOLLOWUP-001
+      - REQ-FOLLOWUP-002
+      - REQ-FOLLOWUP-003
+      - REQ-FOLLOWUP-004
+      - REQ-FOLLOWUP-005
+      - REQ-FOLLOWUP-006
+      - REQ-FOLLOWUP-007
+      - REQ-FOLLOWUP-008
+    contract_ids:
+      - CTR-FOLLOWUP-001
+      - CTR-FOLLOWUP-002
+      - CTR-FOLLOWUP-003
+      - CTR-FOLLOWUP-004
+      - CTR-FOLLOWUP-005
+      - CTR-FOLLOWUP-006
+    boundaries_crossed:
+      - owner: internal/cli
+        contribution: >-
+          Validate the isolated form and parent, then reuse the existing
+          detached review/simplify execution path with the inherited mode,
+          current configuration, and current repository state.
+      - owner: internal/background
+        contribution: >-
+          Persist only the mode and optional parent ID in the existing
+          versioned task record.
+      - owner: internal/tasks/review
+        contribution: >-
+          Allow empty diff preparation and construct the fresh targeted JSON
+          user message from the validated parent report.
+    implementation_outline:
+      - step: 1
+        work: >-
+          Add isolated `--follow-up` parsing and validate the successful
+          same-command, same-project parent before detached launch.
+      - step: 2
+        work: >-
+          Extend the existing background record with minimal mode and parent
+          metadata while retaining version 1 and 2 reads.
+      - step: 3
+        work: >-
+          Reprepare the inherited mode against current state, allowing an empty
+          diff, and build the normal current tools, guidance, skills, budget,
+          validation, checks, progress, and cancellation boundaries.
+      - step: 4
+        work: >-
+          Validate the stored report, construct one fresh user message with
+          prior actionable items plus the prompt, and run through the existing
+          detached provider/report/wait path.
+    acceptance_check:
+      setup: >-
+        Create successful scripted-provider review and simplify records, change
+        cited source, and submit canonical nonempty prompts in staged,
+        uncommitted, codebase, and empty-diff states.
+      assertions:
+        - Each follow-up returns one strict launch JSON object and a new turn ID.
+        - The child record contains the inherited mode and parent ID.
+        - The provider receives one fresh user message containing prior items and the prompt.
+        - Summary, checks, prepared context, and transcript are absent from that message.
+        - Current tools observe changed repository state and staged mode excludes unstaged bytes.
+        - Empty diff follow-up succeeds while ordinary empty diff launch remains invalid.
+        - Current review checks run and repeatable wait returns the child report only.
+        - Dry-run output is rejected because it has no turn metadata.
+    explicit_non_goals:
+      - Continuing, persisting, or reconstructing a provider conversation.
+      - Session hosts, control sockets, lineages, host epochs, or context thresholds.
+      - Reproducing the parent's provider configuration or credential identity.
+      - Preventing multiple independent follow-ups from one historical report.
+      - A structured resolved-item ledger.
+      - Follow-up from dry-run output.
 
 planning_notes:
   requirement_ownership: >-
-    The REQ-REVIEW-CHECK declarations are owned by the indexed pjdoc artifact
-    `doc/spec/review-static-checks.md`. This plan only references their stable
-    IDs.
+    The current check requirements and contracts remain owned by their existing
+    indexed artifacts. Follow-up requirements are owned by
+    `doc/spec/review-follow-up.md` and follow-up contracts are owned by
+    `doc/architecture/review-follow-up.md`. This plan references those stable
+    IDs instead of redeclaring them.
   deferred_work: >-
-    No later slice is ordered yet. Optional follow-up candidates are managed by
-    `pjdoc defer`, not duplicated in this plan.
+    The follow-up slice deliberately has no session-retention or conversation
+    ownership feature. Optional checker work remains in pjdoc's deferred-work
+    catalog.
