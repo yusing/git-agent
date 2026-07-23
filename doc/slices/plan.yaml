@@ -1,0 +1,259 @@
+version: 1
+
+current_slice:
+  id: SLICE-REVIEW-CHECKS-001
+  title: Combine mode-authoritative Go review with golangci-lint diagnostics
+  status: in_progress
+
+  observable_outcome: >-
+    `git-agent review` preserves the selected uncommitted, staged, or codebase
+    scope and its existing launch/wait contract, while its final strict JSON
+    report adds deterministic bounded results for registered bundled checkers;
+    this increment registers golangci-lint.
+    Uncommitted and staged modes check only authoritative changed Go files
+    across recursively initialized submodules; staged mode uses isolated index
+    bytes. Codebase mode checks every discovered Go module independently.
+
+  requirement_ids:
+    - REQ-REVIEW-CHECK-001
+    - REQ-REVIEW-CHECK-002
+    - REQ-REVIEW-CHECK-003
+    - REQ-REVIEW-CHECK-004
+    - REQ-REVIEW-CHECK-005
+    - REQ-REVIEW-CHECK-006
+    - REQ-REVIEW-CHECK-007
+    - REQ-REVIEW-CHECK-008
+    - REQ-REVIEW-CHECK-009
+    - REQ-REVIEW-CHECK-010
+
+  contract_ids:
+    - CTR-REVIEW-CHECK-001
+    - CTR-REVIEW-CHECK-002
+    - CTR-REVIEW-CHECK-003
+    - CTR-REVIEW-CHECK-004
+    - CTR-REVIEW-CHECK-005
+    - CTR-REVIEW-CHECK-006
+    - CTR-REVIEW-CHECK-007
+
+  implementation_handoff:
+    architecture: doc/architecture/review-static-checks.md
+    provider_result_seam: >-
+      `internal/cli/app.go`, in `(*App).runCodeReview`, after
+      `agent.OpenAIRunner.Run` succeeds and its validated result is strictly
+      decoded, before `recorder.WriteExact("final", ...)`.
+    provider_schema_owner: >-
+      `internal/tasks/review/task.go`; keep `ReviewReport`, `OutputSchema`,
+      `ValidateRepository`, and provider repair unaware of static checks.
+    final_storage_owner: >-
+      `internal/background/store.go`; persist one combined final event and keep
+      `Store.Wait` format-agnostic.
+    checker_boundary: >-
+      `internal/checks`; own the immutable changed-or-codebase scope, generic
+      result and diagnostic contract, checker-owned planning contract,
+      deterministic registered-runner coordination, progress callback, and
+      registered private-helper dispatch. `internal/checks/builtin` owns the
+      only registration list.
+    upstream_boundary: >-
+      `github.com/golangci/golangci-lint/v2@v2.12.2`; its public command calls
+      `os.Exit`, while its lower runner needs an upstream `internal/cache`
+      type. Use the exact private self-helper contract in
+      `CTR-REVIEW-CHECK-003`, not an installed binary or copied config loader.
+    authoritative_scope_rule: >-
+      For uncommitted and staged review, derive checker targets from the same
+      recursive snapshot and root-relative changed paths as the prepared diff,
+      associate existing `.go` files with their nearest containing module, and
+      filter diagnostics to those exact files. Materialize staged index trees
+      outside the checkout. For codebase review, discover and run every module
+      independently; never fall back to one invocation-root `./...`.
+
+  boundaries_crossed:
+    - owner: internal/cli
+      contribution: >-
+        Continue the detached review workflow after `agent.OpenAIRunner.Run`,
+        publish check progress, combine the validated model report with the
+        check result, and only then write the final event.
+    - owner: internal/tasks/review
+      contribution: >-
+        Strictly decode the provider-owned report and combine it with generic
+        `internal/checks` results in the additive final review envelope.
+    - owner: internal/checks
+      contribution: >-
+        Own checker-neutral scope, result normalization and caps,
+        checker-owned plan interface, deterministic bundled-runner
+        coordination, progress callbacks, and registered private-helper
+        dispatch. Reject malformed, duplicate, mismatched, and unknown/future
+        checker names, plans, and results.
+    - owner: internal/checks/builtin
+      contribution: >-
+        Own the sole compile-time registration list used identically for
+        parent execution and private child dispatch. A future bundled checker
+        adds one adapter and one entry here.
+    - owner: internal/checks/golangci
+      contribution: >-
+        Own the exact golangci-lint adapter, private helper protocol,
+        cancellation, bounded output, result parsing, path normalization, and
+        error classification. It implements the shared bundled-checker
+        contract without teaching review orchestration about Go.
+    - owner: internal/gitctx
+      contribution: >-
+        Own recursive staged-review snapshots, fingerprints, root-relative
+        submodule paths, authoritative staged file reads and diffs, and safe
+        owner-only index materialization. The checker must consume this owner
+        rather than reconstruct Git scope.
+    - owner: internal/cli/private-helper
+      contribution: >-
+        Route one private, undocumented command to the registered checker set.
+        The golangci helper calls the imported
+        `golangci-lint/v2/pkg/commands.Execute` entrypoint, whose process-global
+        flags, output handles, and `os.Exit` behavior must not run inside the
+        long-lived review worker. `cmd/git-agent/main.go` remains unchanged.
+    - owner: go.mod
+      contribution: >-
+        Pin the tested golangci-lint v2 release and accept its transitive
+        dependency and binary-size cost as part of the v1 Go-only integration.
+    - owner: docs/spec.md
+      contribution: >-
+        Normatively define check timing, mode eligibility, combined JSON,
+        progress, cancellation, caps, errors, and read-only output overrides.
+    - owner: README.md
+      contribution: >-
+        Briefly describe automatic Go checking and the additive `checks`
+        result without repeating the normative schema.
+
+  implementation_outline:
+    - step: 1
+      work: >-
+        Add `internal/checks` with an immutable changed-or-codebase `Scope`,
+        generic `Result` and `Diagnostic` normalization, deterministic runner
+        planning/execution set, progress callback, and registered helper
+        dispatch. Add `internal/checks/builtin` as the only registration owner.
+        Prove two registered runners, immutable scope, ineligible skip,
+        malformed/duplicate registration, mismatched plan/result, unrelated
+        scope, and unknown/future helper behavior.
+    - step: 2
+      work: >-
+        Add combined review-report types in `internal/tasks/review`. Keep the
+        existing agent `ReviewReport` unchanged, strictly decode its fields,
+        attach generic `[]checks.Result`, and validate/shape the final object
+        without importing an adapter or asking the model to fabricate checks.
+    - step: 3
+      work: >-
+        Add the golangci runner and a versioned, private helper request/result
+        protocol behind the checker set. The parent invokes the current
+        git-agent executable through `os.StartProcess` with one validated
+        module root and a bounded target list. The helper imports the pinned
+        golangci-lint command package and is isolated because upstream calls
+        `os.Exit`. Do not add `exec.Command*`, search PATH, expose a user-facing
+        command, accept unvalidated argv, or reuse this as a model tool.
+    - step: 4
+      work: >-
+        Add deterministic target planning. In uncommitted and staged modes,
+        group existing authoritative changed `.go` files by nearest module and
+        package directory and pass only those files. In codebase mode,
+        discover every module and run `./...` separately from each module
+        root. Explicitly force `--fix=false`, redirect every supported output
+        format away from the checkout, aggregate JSON results, and pass no
+        config/default-linter/enable-disable flags.
+    - step: 5
+      work: >-
+        Reuse recursive uncommitted snapshot ownership and add the equivalent
+        recursive staged-review snapshot in `internal/gitctx`. Materialize all
+        staged component index trees into one owner-only temporary workspace;
+        verify the staged fingerprint before and after materialization and
+        after checking. Verify uncommitted fingerprints before and after
+        checking. Normalize diagnostics against invocation root and retain only
+        the selected mode-authoritative paths. Return a stable skip only when
+        planning finds no eligible Go module/file target.
+    - step: 6
+      work: >-
+        After the validated agent result is decoded, construct one immutable
+        mode-authoritative scope and run the registered checker set. Its
+        progress callback publishes `runtime.status` with
+        `phase=running_static_checks` and the registered checker name only for
+        real work. Combine all results with the model report and
+        persist/publish one final event. A check failure remains data in the
+        successful combined report; cancellation remains terminal.
+    - step: 7
+      work: >-
+        Extend dry-run's deterministic final payload with a mode-planned
+        synthetic compact check result. Add focused tests for recursive
+        submodule changes, staged isolation from unrelated unstaged bytes,
+        rootless multi-module codebase discovery, changed-file-only targets,
+        absent/discovered config, diagnostics, pass, execution error,
+        filtering, truncation, malformed private requests, cancellation,
+        output isolation, deterministic ordering, final-event persistence,
+        repeatable wait, and unchanged launch stdout/stderr.
+    - step: 8
+      work: >-
+        Update `docs/spec.md` and `README.md` from the implemented contract,
+        then run the existing Shadowtree formatting and check recipes.
+
+  acceptance_check:
+    setup: >-
+      Create a temporary Git repository whose invocation root is not a module,
+      with two nested Go modules including one initialized registered
+      submodule. Prepare one uncommitted Go issue, one independently staged Go
+      issue with conflicting unstaged bytes, and a scripted provider that
+      returns an otherwise valid APPROVE report.
+    exercise:
+      - git-agent review
+      - git-agent review --staged
+      - git-agent review --codebase
+      - git-agent review --wait <launch-id>
+    assertions:
+      - The launch command still emits exactly one strict launch JSON object.
+      - The event stream reports `phase=running_static_checks` after agent completion.
+      - The wait command emits exactly one strict final JSON object and no progress text.
+      - The original summary, recommendation, and model findings are preserved.
+      - "`checks` contains one aggregated `golangci-lint` entry with the mode-appropriate status."
+      - Uncommitted and staged diagnostics identify only exact changed root-relative Go paths in their nearest modules.
+      - Staged diagnostics reflect index bytes and never the conflicting unstaged worktree bytes.
+      - Codebase runs both nested modules independently even though invocation root has no `go.mod`.
+      - Repeating `review --wait` returns the identical combined report.
+      - No golangci-lint executable is required on PATH.
+      - No config or report file is created in or modifies the temporary repository.
+
+  explicit_non_goals:
+    - Shipping adapters for languages or engines other than golangci-lint in this increment.
+    - Runtime plugin discovery/loading, arbitrary command runners, model-callable check tools, or new public CLI flags.
+    - Feeding lint diagnostics back into the model, asking the model to deduplicate them, or changing the model's recommendation from unranked lint data.
+    - Custom config discovery, generated default configuration, auto-installation, dependency download policy, or automatic fixes.
+    - Full release hardening for untrusted custom golangci-lint plugins or malicious repository configuration.
+    - Inferring or installing missing Go modules for changed `.go` files that have no containing `go.mod`.
+
+  material_risks:
+    - risk: >-
+        golangci-lint exposes a public CLI entrypoint rather than an embeddable
+        cancellable runner; it calls `os.Exit`, and lower-level execution relies
+        on upstream `internal` packages.
+      mitigation: >-
+        Isolate the imported CLI in a private child process, pin its version,
+        make the helper protocol narrow, and cover exit/error/output behavior
+        with integration tests. Re-evaluate if upstream publishes a true
+        library API.
+    - risk: >-
+        The imported dependency materially increases build time, transitive
+        dependencies, and git-agent binary size.
+      mitigation: >-
+        Measure the release binary and clean-build cost in this slice and stop
+        before implementation if the increase breaches the project's release
+        budget; do not hide the cost behind dynamic installation.
+    - risk: >-
+        Repository or home golangci-lint configuration may load custom plugins
+        or otherwise execute analyzer code.
+      mitigation: >-
+        Document that this post-review host integration trusts the same
+        configuration and analyzers as a direct golangci-lint run; keep it
+        outside the model tool registry and defer sandbox hardening to a
+        concrete release requirement.
+
+later_slices: []
+
+planning_notes:
+  requirement_ownership: >-
+    The REQ-REVIEW-CHECK declarations are owned by the indexed pjdoc artifact
+    `doc/spec/review-static-checks.md`. This plan only references their stable
+    IDs.
+  deferred_work: >-
+    No later slice is ordered yet. Optional follow-up candidates are managed by
+    `pjdoc defer`, not duplicated in this plan.

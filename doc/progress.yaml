@@ -1,0 +1,104 @@
+version: 1
+items:
+  - id: CTR-REVIEW-CHECK-001
+    title: CTR-REVIEW-CHECK-001 — Preserve provider and final-report ownership
+    kind: contract
+    scope: root
+    path: doc/architecture/review-static-checks.md
+    status: in_progress
+  - id: CTR-REVIEW-CHECK-002
+    title: CTR-REVIEW-CHECK-002 — Use one checker-neutral result and runner contract
+    kind: contract
+    scope: root
+    path: doc/architecture/review-static-checks.md
+    status: in_progress
+  - id: CTR-REVIEW-CHECK-003
+    title: CTR-REVIEW-CHECK-003 — Route private helpers through the checker set
+    kind: contract
+    scope: root
+    path: doc/architecture/review-static-checks.md
+    status: in_progress
+  - id: CTR-REVIEW-CHECK-004
+    title: CTR-REVIEW-CHECK-004 — Fix the upstream invocation
+    kind: contract
+    scope: root
+    path: doc/architecture/review-static-checks.md
+    status: in_progress
+  - id: CTR-REVIEW-CHECK-005
+    title: CTR-REVIEW-CHECK-005 — Preserve authoritative review scope
+    kind: contract
+    scope: root
+    path: doc/architecture/review-static-checks.md
+    status: in_progress
+  - id: CTR-REVIEW-CHECK-006
+    title: "CTR-REVIEW-CHECK-006 — Keep sequencing, progress, and failure explicit"
+    kind: contract
+    scope: root
+    path: doc/architecture/review-static-checks.md
+    status: in_progress
+  - id: CTR-REVIEW-CHECK-007
+    title: CTR-REVIEW-CHECK-007 — Prove the integration at real boundaries
+    kind: contract
+    scope: root
+    path: doc/architecture/review-static-checks.md
+    status: in_progress
+  - id: REQ-REVIEW-CHECK-001
+    title: REQ-REVIEW-CHECK-001 — Run checks after the review agent
+    kind: requirement
+    scope: root
+    path: doc/spec/review-static-checks.md
+    status: in_progress
+  - id: REQ-REVIEW-CHECK-002
+    title: REQ-REVIEW-CHECK-002 — Bundle golangci-lint
+    kind: requirement
+    scope: root
+    path: doc/spec/review-static-checks.md
+    status: in_progress
+  - id: REQ-REVIEW-CHECK-003
+    title: REQ-REVIEW-CHECK-003 — Delegate configuration to golangci-lint
+    kind: requirement
+    scope: root
+    path: doc/spec/review-static-checks.md
+    status: in_progress
+  - id: REQ-REVIEW-CHECK-004
+    title: REQ-REVIEW-CHECK-004 — Add compact checks to the report
+    kind: requirement
+    scope: root
+    path: doc/spec/review-static-checks.md
+    status: in_progress
+  - id: REQ-REVIEW-CHECK-005
+    title: "REQ-REVIEW-CHECK-005 — Bound, locate, and scope diagnostics"
+    kind: requirement
+    scope: root
+    path: doc/spec/review-static-checks.md
+    status: in_progress
+  - id: REQ-REVIEW-CHECK-006
+    title: REQ-REVIEW-CHECK-006 — Report progress and propagate cancellation
+    kind: requirement
+    scope: root
+    path: doc/spec/review-static-checks.md
+    status: in_progress
+  - id: REQ-REVIEW-CHECK-007
+    title: REQ-REVIEW-CHECK-007 — Preserve useful results on check failure
+    kind: requirement
+    scope: root
+    path: doc/spec/review-static-checks.md
+    status: in_progress
+  - id: REQ-REVIEW-CHECK-008
+    title: REQ-REVIEW-CHECK-008 — Keep checking read-only
+    kind: requirement
+    scope: root
+    path: doc/spec/review-static-checks.md
+    status: in_progress
+  - id: REQ-REVIEW-CHECK-009
+    title: REQ-REVIEW-CHECK-009 — Respect review modes and Go module boundaries
+    kind: requirement
+    scope: root
+    path: doc/spec/review-static-checks.md
+    status: in_progress
+  - id: REQ-REVIEW-CHECK-010
+    title: REQ-REVIEW-CHECK-010 — Isolate checker-specific behavior
+    kind: requirement
+    scope: root
+    path: doc/spec/review-static-checks.md
+    status: in_progress

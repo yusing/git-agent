@@ -1,0 +1,10 @@
+version: 1
+items:
+  - id: DFR-003
+    title: Add bundled checker adapters
+    reason: Version 1 ships only the golangci-lint adapter while preserving a checker-neutral registration boundary.
+    reconsider_when: When a concrete repository workflow requires another language or checker and its eligibility and helper trust contract are known.
+  - id: DFR-004
+    title: Sandbox custom analyzer execution
+    reason: The first increment trusts the same golangci-lint configuration and analyzers as a direct local run.
+    reconsider_when: Before a release target requires checking untrusted repositories or untrusted golangci-lint plugins.
