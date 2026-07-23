@@ -107,7 +107,7 @@ func TestUserPromptsLetOperatorHintsNarrowInspectionFocus(t *testing.T) {
 func TestValidateReviewEnforcesSeverityOrderRecommendationAndStyleSeverity(t *testing.T) {
 	valid := `{
   "summary": "Two findings",
-  "recommendation": "REQUEST_CHANGES",
+  "recommendation": "FIX",
   "findings": [
     {
       "severity": "HIGH",

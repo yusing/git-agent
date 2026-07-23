@@ -237,7 +237,7 @@ evidence and one-line synthetic evidence for changed gitlinks.
 Review examines correctness, security, reliability, performance,
 maintainability, tests, and style. Style findings are preserved alongside other
 findings and must use `LOW`. Findings are ordered from highest to lowest
-severity. Recommendation is `REQUEST_CHANGES` when any `CRITICAL` or `HIGH`
+severity. Recommendation is `FIX` when any `CRITICAL` or `HIGH`
 finding exists, `COMMENT` for only `MEDIUM`/`LOW` findings, and `APPROVE` when
 findings are empty.
 

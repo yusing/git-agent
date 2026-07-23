@@ -68,7 +68,7 @@ Add a distinct typed final report that contains:
 
 ```text
 summary: string
-recommendation: APPROVE | COMMENT | REQUEST_CHANGES
+recommendation: APPROVE | COMMENT | FIX
 findings: []Finding
 checks: []checks.Result
 orchestration_manifest_sha256?: string

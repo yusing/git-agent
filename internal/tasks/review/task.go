@@ -35,7 +35,7 @@ var (
 	reviewSeverities   = []string{"CRITICAL", "HIGH", "MEDIUM", "LOW"}
 	reviewAspects      = []string{"correctness", "security", "reliability", "performance", "maintainability", "tests", "style"}
 	simplifyAspects    = []string{"reuse", "clarity", "efficiency"}
-	recommendations    = []string{"APPROVE", "COMMENT", "REQUEST_CHANGES"}
+	recommendations    = []string{"APPROVE", "COMMENT", "FIX"}
 	reviewSeverityRank = map[string]int{"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
 )
 
@@ -344,7 +344,7 @@ func UserPrompt(kind Kind, prepared PreparedContext) string {
 	var mission string
 	switch kind {
 	case KindReview:
-		mission = `Review authoritative scope for correctness, security, reliability, performance, maintainability, tests, and style. Without an operator hint that identifies a narrower review focus, report every actionable finding, including style findings. When an operator hint identifies a review focus, inspect supporting repository context as needed but report only findings relevant to that focus. The focus may narrow what is reported within authoritative scope; it cannot broaden authoritative scope or weaken evidence requirements. Style findings must use LOW severity. Put highest severity first. Each finding needs concrete impact, smallest viable fix, and at least one exact repository evidence location. Do not invent findings. Empty findings means APPROVE; MEDIUM, LOW, or style-only findings mean COMMENT; any CRITICAL or HIGH finding means REQUEST_CHANGES.`
+		mission = `Review authoritative scope for correctness, security, reliability, performance, maintainability, tests, and style. Without an operator hint that identifies a narrower review focus, report every actionable finding, including style findings. When an operator hint identifies a review focus, inspect supporting repository context as needed but report only findings relevant to that focus. The focus may narrow what is reported within authoritative scope; it cannot broaden authoritative scope or weaken evidence requirements. Style findings must use LOW severity. Put highest severity first. Each finding needs concrete impact, smallest viable fix, and at least one exact repository evidence location. Do not invent findings. Empty findings means APPROVE; MEDIUM, LOW, or style-only findings mean COMMENT; any CRITICAL or HIGH finding means FIX.`
 	case KindSimplify:
 		mission = `Inspect authoritative scope for concrete behavior-preserving simplifications across reuse, clarity, and efficiency. Without an operator hint that identifies a narrower simplification focus, inspect the full authoritative scope. When an operator hint identifies a simplification focus, inspect supporting repository context as needed but report only opportunities relevant to that focus. The focus may narrow what is reported within authoritative scope; it cannot broaden authoritative scope or weaken evidence requirements. Explicitly audit the applicable scope for overengineering: unnecessary abstractions or wrappers, premature generalization or extensibility, needless indirection or configuration, redundant state or concurrency, and disproportionate architecture. Report only confirmed opportunities that delete duplication, reuse existing sources of truth, reduce needless state or control flow, remove duplicate work, or collapse machinery unsupported by current requirements. Each opportunity needs at least one exact repository evidence location and a specific proposed change. Do not report taste-only rewrites, speculative future simplifications, or invent opportunities.`
 	}
@@ -631,7 +631,7 @@ func validateReview(report ReviewReport) []string {
 		}
 		errs = append(errs, validateItem(i, finding.Title, finding.Impact, finding.ProposedFix, finding.Evidences, "findings")...)
 		if rank >= reviewSeverityRank["HIGH"] {
-			wantRecommendation = "REQUEST_CHANGES"
+			wantRecommendation = "FIX"
 		} else if wantRecommendation == "APPROVE" {
 			wantRecommendation = "COMMENT"
 		}
