@@ -190,7 +190,7 @@ func (r *OpenAIRunner) RunNode(ctx context.Context, request Request) (NodeResult
 			if len(repairMessages) == 0 {
 				repairMessages = append(slices.Clone(messages), openai.NewMessage("assistant", result.Text))
 			}
-			repairMessages = append(repairMessages, openai.NewMessage("user", fmt.Sprintf("Repair the output to satisfy these validation errors: %v\nReturn only the corrected final artifact.", errs)))
+			repairMessages = append(repairMessages, openai.NewMessage("user", renderRepairPrompt(errs)))
 			repairedOutcome, err := r.runUntilOutcome(ctx, request.SystemPrompt, repairMessages, nil, request.TextFormat, 1, state, "")
 			if err != nil {
 				return NodeResult{}, err
@@ -633,16 +633,11 @@ func finalizationNotice(status BudgetStatus) string {
 	case BudgetKindNoProgress:
 		reason = fmt.Sprintf("no semantic progress before repeated %q tool call", status.RequestedTool)
 	}
-	return fmt.Sprintf(`<budget_exhausted>
-reason: %s
-current_step_limit: %d
-current_tool_call_limit: %d
-Do not call tools.
-Do not ask for more evidence.
-Use only evidence already gathered in the conversation.
-Produce the best final artifact immediately.
-If evidence is partial, stay conservative and avoid unsupported claims.
-</budget_exhausted>`, reason, status.MaxSteps, status.MaxToolCalls)
+	return renderBudgetExhaustedPrompt(budgetExhaustedPromptData{
+		Reason:       reason,
+		MaxSteps:     status.MaxSteps,
+		MaxToolCalls: status.MaxToolCalls,
+	})
 }
 
 func toolAllowed(name string, toolSpecs []openai.ToolSpec) bool {
@@ -671,12 +666,7 @@ func withCapabilityFailure(instructions string, failure *provider.CapabilityFail
 	if failure == nil {
 		return instructions
 	}
-	notice := `<hosted_capability_failure>
-Provider-hosted web search failed capability negotiation and is disabled for this run.
-Do not retry hosted web search.
-Continue with repository evidence and available typed documentation tools.
-Final report summary must disclose that hosted web lookup was unavailable.
-</hosted_capability_failure>`
+	notice := strings.TrimSpace(hostedCapabilityFailurePrompt)
 	if instructions == "" {
 		return notice
 	}
@@ -769,38 +759,25 @@ func requestInstructions(taskInstructions string, toolSpecs []openai.ToolSpec, h
 		prefix += "\n\n"
 	}
 	if len(toolSpecs) == 0 && len(hostedCapabilities) == 0 {
-		return prefix + "No tools are available. Return only the final artifact."
+		return prefix + strings.TrimSpace(noToolsPrompt)
 	}
-	var toolsList strings.Builder
-	toolsList.WriteString("# Available tools\n")
+	promptTools := make([]requestPromptTool, 0, len(hostedCapabilities)+len(toolSpecs))
 	for _, capability := range hostedCapabilities {
 		if capability.Kind == provider.HostedCapabilityWebSearch {
-			toolsList.WriteString("- web_search (provider-hosted): Search the public web for current language or library documentation. Never send repository content or sensitive data.\n")
+			promptTools = append(promptTools, requestPromptTool{Hosted: true})
 		}
 	}
 	for _, spec := range toolSpecs {
-		fmt.Fprintf(&toolsList, "- %s: %s\n", spec.Name, spec.Description)
+		promptTools = append(promptTools, requestPromptTool{Name: spec.Name, Description: spec.Description})
 	}
-	remainingTools := max(0, maxTools-usedTools)
-	return prefix + toolsList.String() + fmt.Sprintf(`
-# Agent loop
-You are in a bounded agent loop.
-This is model step %d of %d. You have %d of %d local function tool calls remaining.
-Use only the listed local tools and provider-hosted capabilities.
-Provider-hosted calls do not consume the local function-call budget.
-Call tools only when they reduce material uncertainty; do not call tools just to repeat provided context.
-When a tool output has ok=false, correct the invocation or use different evidence and continue.
-%sPrefer narrow tool calls that target the missing evidence.
-Conclude before the remaining budget reaches zero.
-Do not ask the user for more evidence.
-Return only the final artifact when enough evidence has been gathered.`, step, maxSteps, remainingTools, maxTools, readFileInstruction(toolSpecs))
-}
-
-func readFileInstruction(toolSpecs []openai.ToolSpec) string {
-	if !slices.ContainsFunc(toolSpecs, func(spec openai.ToolSpec) bool { return spec.Name == "read_file" }) {
-		return ""
-	}
-	return "Use read_file only with a repository path copied verbatim from prepared context or prior repository-tool output. Discover paths with available inventory or search tools first. Package import paths, package names, types, and symbols do not imply filenames.\n"
+	return prefix + renderRequestPrompt(requestPromptData{
+		Tools:             promptTools,
+		Step:              step,
+		MaxSteps:          maxSteps,
+		RemainingTools:    max(0, maxTools-usedTools),
+		MaxTools:          maxTools,
+		ReadFileAvailable: slices.ContainsFunc(toolSpecs, func(spec openai.ToolSpec) bool { return spec.Name == "read_file" }),
+	})
 }
 
 func finalArtifactInstructions(taskInstructions string) string {
@@ -808,9 +785,5 @@ func finalArtifactInstructions(taskInstructions string) string {
 	if prefix != "" {
 		prefix += "\n\n"
 	}
-	return prefix + `# Forced finalization
-Do not call tools.
-Use only evidence already gathered in the conversation.
-If evidence is partial, stay conservative and avoid unsupported claims.
-Return only the best final artifact possible.`
+	return prefix + strings.TrimSpace(forcedFinalizationPrompt)
 }

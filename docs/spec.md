@@ -1245,6 +1245,12 @@ Defaults:
 - `internal/textutil`: shared normalization and output shaping helpers
 - `internal/trace`: in-memory and console event recording
 
+System, user, and developer instruction prompts owned by the agent, CLI, and
+task packages are maintained as package-local embedded Markdown. Static prompts
+use `.md` sources; prompts with runtime values use `.md.tmpl` sources rendered
+with `text/template`. Go code owns prompt selection and data assembly but does
+not duplicate the instruction prose.
+
 ### Request assembly layers
 
 Every task request is assembled using Codex-style layering:

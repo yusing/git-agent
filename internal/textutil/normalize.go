@@ -1,7 +1,9 @@
 package textutil
 
 import (
+	"bytes"
 	"strings"
+	"text/template"
 	"unicode/utf8"
 )
 
@@ -16,6 +18,18 @@ func NormalizePrompt(text string) string {
 		out = strings.ReplaceAll(out, "\n\n\n", "\n\n")
 	}
 	return strings.TrimSpace(out)
+}
+
+func ExecutePromptTemplate(tmpl *template.Template, data any) string {
+	return NormalizePrompt(ExecuteTemplate(tmpl, data))
+}
+
+func ExecuteTemplate(tmpl *template.Template, data any) string {
+	var output bytes.Buffer
+	if err := tmpl.Execute(&output, data); err != nil {
+		panic("execute embedded prompt template " + tmpl.Name() + ": " + err.Error())
+	}
+	return output.String()
 }
 
 func Limit(text string, maxBytes, maxLines int) (string, bool) {

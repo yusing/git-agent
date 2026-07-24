@@ -1,0 +1,66 @@
+package agent
+
+import (
+	_ "embed"
+	"strings"
+	"text/template"
+
+	"github.com/yusing/git-agent/internal/textutil"
+)
+
+//go:embed prompts/no-tools.md
+var noToolsPrompt string
+
+//go:embed prompts/request.md.tmpl
+var requestPromptSource string
+
+//go:embed prompts/budget-exhausted.md.tmpl
+var budgetExhaustedPromptSource string
+
+//go:embed prompts/hosted-capability-failure.md
+var hostedCapabilityFailurePrompt string
+
+//go:embed prompts/forced-finalization.md
+var forcedFinalizationPrompt string
+
+//go:embed prompts/repair.md.tmpl
+var repairPromptSource string
+
+var (
+	requestPromptTemplate         = template.Must(template.New("agent-request").Parse(requestPromptSource))
+	budgetExhaustedPromptTemplate = template.Must(template.New("budget-exhausted").Parse(budgetExhaustedPromptSource))
+	repairPromptTemplate          = template.Must(template.New("repair").Parse(repairPromptSource))
+)
+
+type requestPromptTool struct {
+	Name        string
+	Description string
+	Hosted      bool
+}
+
+type requestPromptData struct {
+	Tools             []requestPromptTool
+	Step              int
+	MaxSteps          int
+	RemainingTools    int
+	MaxTools          int
+	ReadFileAvailable bool
+}
+
+type budgetExhaustedPromptData struct {
+	Reason       string
+	MaxSteps     int
+	MaxToolCalls int
+}
+
+func renderRequestPrompt(data requestPromptData) string {
+	return strings.TrimSpace(textutil.ExecuteTemplate(requestPromptTemplate, data))
+}
+
+func renderBudgetExhaustedPrompt(data budgetExhaustedPromptData) string {
+	return strings.TrimSpace(textutil.ExecuteTemplate(budgetExhaustedPromptTemplate, data))
+}
+
+func renderRepairPrompt(errs []string) string {
+	return strings.TrimSpace(textutil.ExecuteTemplate(repairPromptTemplate, struct{ Errors []string }{Errors: errs}))
+}
