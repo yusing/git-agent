@@ -116,6 +116,25 @@ func TestWriteExactPreservesMachineConsumedStrings(t *testing.T) {
 	}
 }
 
+func TestNewEventSinkDoesNotCreateIndependentSession(t *testing.T) {
+	t.Parallel()
+
+	var events []Event
+	recorder, err := NewEventSink(func(event Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.WriteExact("runtime.status", map[string]any{"phase": "requesting"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Seq != 1 || events[0].Kind != "runtime.status" {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
 func TestNewStreamRequestOmitsInstructions(t *testing.T) {
 	t.Parallel()
 

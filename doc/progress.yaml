@@ -1,5 +1,65 @@
 version: 1
 items:
+  - id: CTR-BRANCH-001
+    title: CTR-BRANCH-001 — Add one in-process conversation-tree boundary
+    kind: contract
+    scope: root
+    path: doc/architecture/branched-review.md
+    status: verified
+  - id: CTR-BRANCH-002
+    title: CTR-BRANCH-002 — Return branch as a terminal node outcome
+    kind: contract
+    scope: root
+    path: doc/architecture/branched-review.md
+    status: verified
+  - id: CTR-BRANCH-003
+    title: CTR-BRANCH-003 — Generate one strict branch interface from task policy
+    kind: contract
+    scope: root
+    path: doc/architecture/branched-review.md
+    status: verified
+  - id: CTR-BRANCH-004
+    title: CTR-BRANCH-004 — Fork portable context without promoting scope authority
+    kind: contract
+    scope: root
+    path: doc/architecture/branched-review.md
+    status: verified
+  - id: CTR-BRANCH-005
+    title: CTR-BRANCH-005 — Fan out immediately under one task context
+    kind: contract
+    scope: root
+    path: doc/architecture/branched-review.md
+    status: verified
+  - id: CTR-BRANCH-006
+    title: CTR-BRANCH-006 — Keep hints outside repository policy
+    kind: contract
+    scope: root
+    path: doc/architecture/branched-review.md
+    status: verified
+  - id: CTR-BRANCH-007
+    title: CTR-BRANCH-007 — Aggregate validated leaves with one pure task function
+    kind: contract
+    scope: root
+    path: doc/architecture/branched-review.md
+    status: verified
+  - id: CTR-BRANCH-008
+    title: CTR-BRANCH-008 — Complete only one durable task
+    kind: contract
+    scope: root
+    path: doc/architecture/branched-review.md
+    status: verified
+  - id: CTR-BRANCH-009
+    title: CTR-BRANCH-009 — Publish one branch-aware replay log
+    kind: contract
+    scope: root
+    path: doc/architecture/branched-review.md
+    status: verified
+  - id: CTR-BRANCH-010
+    title: CTR-BRANCH-010 — Verify the new boundaries rather than restating policy
+    kind: contract
+    scope: root
+    path: doc/architecture/branched-review.md
+    status: verified
   - id: CTR-FOLLOWUP-001
     title: CTR-FOLLOWUP-001 — Route through the existing detached command
     kind: contract
@@ -78,6 +138,78 @@ items:
     scope: root
     path: doc/architecture/review-static-checks.md
     status: in_progress
+  - id: REQ-BRANCH-001
+    title: REQ-BRANCH-001 — Keep branching inside the existing commands
+    kind: requirement
+    scope: root
+    path: doc/spec/branched-review.md
+    status: verified
+  - id: REQ-BRANCH-002
+    title: REQ-BRANCH-002 — Bound the branch tree by inspection depth
+    kind: requirement
+    scope: root
+    path: doc/spec/branched-review.md
+    status: verified
+  - id: REQ-BRANCH-003
+    title: REQ-BRANCH-003 — Publish a bounded model catalog to the agent
+    kind: requirement
+    scope: root
+    path: doc/spec/branched-review.md
+    status: verified
+  - id: REQ-BRANCH-004
+    title: REQ-BRANCH-004 — Branch only independently reviewable large work
+    kind: requirement
+    scope: root
+    path: doc/spec/branched-review.md
+    status: verified
+  - id: REQ-BRANCH-005
+    title: REQ-BRANCH-005 — Require natural-language scope and keep paths advisory
+    kind: requirement
+    scope: root
+    path: doc/spec/branched-review.md
+    status: verified
+  - id: REQ-BRANCH-006
+    title: REQ-BRANCH-006 — Retire the calling conversation
+    kind: requirement
+    scope: root
+    path: doc/spec/branched-review.md
+    status: verified
+  - id: REQ-BRANCH-007
+    title: REQ-BRANCH-007 — Run accepted children in parallel
+    kind: requirement
+    scope: root
+    path: doc/spec/branched-review.md
+    status: verified
+  - id: REQ-BRANCH-008
+    title: REQ-BRANCH-008 — Preserve scoped review behavior through the fork
+    kind: requirement
+    scope: root
+    path: doc/spec/branched-review.md
+    status: verified
+  - id: REQ-BRANCH-009
+    title: REQ-BRANCH-009 — Merge leaf reports without another model review
+    kind: requirement
+    scope: root
+    path: doc/spec/branched-review.md
+    status: verified
+  - id: REQ-BRANCH-010
+    title: REQ-BRANCH-010 — Fail rather than publish a partial review
+    kind: requirement
+    scope: root
+    path: doc/spec/branched-review.md
+    status: verified
+  - id: REQ-BRANCH-011
+    title: REQ-BRANCH-011 — Stream replayable branch topology and progress
+    kind: requirement
+    scope: root
+    path: doc/spec/branched-review.md
+    status: verified
+  - id: REQ-BRANCH-012
+    title: REQ-BRANCH-012 — Preserve nonbranched execution
+    kind: requirement
+    scope: root
+    path: doc/spec/branched-review.md
+    status: verified
   - id: REQ-FOLLOWUP-001
     title: REQ-FOLLOWUP-001 — Require a successful parent and prompt
     kind: requirement

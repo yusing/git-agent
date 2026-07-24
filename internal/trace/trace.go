@@ -53,6 +53,16 @@ func NewEventStream(command string, sink func(Event) error) (*Recorder, error) {
 	return startMemory(&Recorder{eventSink: sink}, command)
 }
 
+// NewEventSink creates a recorder that forwards events without creating an
+// independent session. It is used by activity that belongs to an existing
+// globally sequenced task stream.
+func NewEventSink(sink func(Event) error) (*Recorder, error) {
+	if sink == nil {
+		return nil, errors.New("event sink is required")
+	}
+	return &Recorder{eventSink: sink}, nil
+}
+
 func startMemory(recorder *Recorder, command string) (*Recorder, error) {
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()

@@ -66,7 +66,22 @@ type FailureToolEvent struct {
 }
 
 func (d *FailureDiagnostic) RecordToolEvent(event trace.Event) {
-	if d == nil || (event.Kind != "tool-call" && event.Kind != "tool-output") {
+	if d == nil {
+		return
+	}
+	if event.Kind == "branch.event" {
+		inner, ok := diagnosticObject(event.Value["event"])
+		if !ok {
+			return
+		}
+		kind, _ := inner["kind"].(string)
+		value, ok := diagnosticObject(inner["value"])
+		if !ok {
+			return
+		}
+		event = trace.Event{Seq: event.Seq, Kind: kind, Value: value}
+	}
+	if event.Kind != "tool-call" && event.Kind != "tool-output" {
 		return
 	}
 	toolEvent := FailureToolEvent{

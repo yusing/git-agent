@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -170,6 +171,161 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestDetachedSimplifyBranchesThroughExistingTaskAndPersistsMergedFinal(t *testing.T) {
+	repoDir := initRepo(t)
+	t.Chdir(repoDir)
+	path := filepath.Join(repoDir, "branch.go")
+	if err := os.WriteFile(path, []byte("package branch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "add", "branch.go")
+
+	childModels := []string{}
+	server := newScriptedResponsesServer(t, []func(string) string{
+		func(body string) string {
+			var request map[string]any
+			if err := json.Unmarshal([]byte(body), &request); err != nil {
+				t.Fatal(err)
+			}
+			tools, ok := request["tools"].([]any)
+			if !ok {
+				t.Fatalf("root request has no tools: %s", body)
+			}
+			foundBranch := false
+			foundBranchHelp := false
+			for _, value := range tools {
+				tool := value.(map[string]any)
+				if tool["name"] == reviewtask.BranchToolName {
+					foundBranch = true
+					function := tool
+					if nested, ok := tool["function"].(map[string]any); ok {
+						function = nested
+					}
+					if function["strict"] != true {
+						t.Fatalf("branch tool is not strict: %#v", tool)
+					}
+				}
+				if tool["name"] == reviewtask.BranchHelpToolName {
+					foundBranchHelp = true
+					if tool["description"] != "Use before deciding to use `branch`" {
+						t.Fatalf("branch_help description = %#v", tool["description"])
+					}
+				}
+			}
+			if !foundBranch || !foundBranchHelp {
+				t.Fatalf("root request does not expose branch and branch_help: %s", body)
+			}
+			return responseWithToolCalls("resp_branch_help", toolCallSpec{
+				ID: "fc_branch_help", CallID: "call_branch_help", Name: reviewtask.BranchHelpToolName, Arguments: `{}`,
+			})
+		},
+		func(body string) string {
+			assertBranchHelpOutput(t, body)
+			return responseWithToolCalls("resp_branch", toolCallSpec{
+				ID: "fc_branch", CallID: "call_branch", Name: reviewtask.BranchToolName,
+				Arguments: `{"branches":[
+					{"scope":"Inspect branch setup.","path_hints":["branch.go"],"model":"gpt-5.6-sol","reasoning_effort":"medium"},
+					{"scope":"Inspect branch cleanup.","path_hints":[],"model":"inherit","reasoning_effort":"inherit"}
+				]}`,
+			})
+		},
+		func(body string) string {
+			childModels = append(childModels, assertChildBranchRequest(t, body))
+			return responseWithText("resp_child_1", `{"summary":"setup complete","opportunities":[]}`)
+		},
+		func(body string) string {
+			childModels = append(childModels, assertChildBranchRequest(t, body))
+			return responseWithText("resp_child_2", `{"summary":"cleanup complete","opportunities":[]}`)
+		},
+	})
+	defer server.Close()
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "")
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv(detachedChildEnv, "1")
+	t.Setenv(detachedTaskIDEnv, cliWaitTaskID)
+
+	var stderr bytes.Buffer
+	app := &App{stdout: io.Discard, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"simplify", "--staged"}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := backgroundStoreForCurrentProject(t).Read(cliWaitTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Terminal == nil || record.Terminal.Kind != "final" {
+		t.Fatalf("terminal = %#v", record.Terminal)
+	}
+	report := record.Terminal.Value["text"].(map[string]any)
+	summary := report["summary"].(string)
+	for _, want := range []string{"Inspect branch setup.:", "Inspect branch cleanup.:"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("merged summary missing %q: %q", want, summary)
+		}
+	}
+	if calls := record.Terminal.Value["tool_calls"]; fmt.Sprint(calls) != "2" {
+		t.Fatalf("tool_calls = %#v", calls)
+	}
+	if len(childModels) != 2 ||
+		!slices.Contains(childModels, "gpt-5.6-sol") ||
+		!slices.Contains(childModels, simplifyDefaultModel) {
+		t.Fatalf("child models = %#v", childModels)
+	}
+}
+
+func assertBranchHelpOutput(t *testing.T, body string) {
+	t.Helper()
+	var request struct {
+		Input []struct {
+			Type   string `json:"type"`
+			CallID string `json:"call_id"`
+			Output string `json:"output"`
+		} `json:"input"`
+	}
+	if err := json.Unmarshal([]byte(body), &request); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range request.Input {
+		if item.Type != "function_call_output" || item.CallID != "call_branch_help" {
+			continue
+		}
+		if !strings.Contains(item.Output, `"tool": "branch_help"`) ||
+			!strings.Contains(item.Output, `"reasoning_effort_mapping"`) {
+			t.Fatalf("branch_help output = %s", item.Output)
+		}
+		return
+	}
+	t.Fatalf("branch request has no branch_help output: %s", body)
+}
+
+func assertChildBranchRequest(t *testing.T, body string) string {
+	t.Helper()
+	for _, want := range []string{
+		`"type":"function_call_output"`,
+		`In scope: Inspect branch`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("child request missing %q:\n%s", want, body)
+		}
+	}
+	var request map[string]any
+	if err := json.Unmarshal([]byte(body), &request); err != nil {
+		t.Fatal(err)
+	}
+	if tools, ok := request["tools"].([]any); ok {
+		for _, value := range tools {
+			tool := value.(map[string]any)
+			if tool["name"] == reviewtask.BranchToolName || tool["name"] == reviewtask.BranchHelpToolName {
+				t.Fatalf("leaf request exposes branch tool: %#v", tools)
+			}
+		}
+	}
+	model, _ := request["model"].(string)
+	return model
 }
 
 func TestReviewDryRunPlansEveryModeWithoutLaunchingChecker(t *testing.T) {

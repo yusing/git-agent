@@ -149,6 +149,68 @@ func TestStorePersistsBoundedFailureDiagnostics(t *testing.T) {
 	}
 }
 
+func TestStorePersistsWrappedBranchToolDiagnostics(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Now().UTC()
+	if err := store.Create(testTaskID, "review", 42, now); err != nil {
+		t.Fatal(err)
+	}
+	diagnostic := &FailureDiagnostic{}
+	diagnostic.RecordToolEvent(trace.Event{
+		Seq: 3, Kind: "branch.event",
+		Value: map[string]any{"event": map[string]any{
+			"kind": "future-event",
+			"value": map[string]any{"kind": "tool-call", "arguments": `{"path":"collision.go"}`},
+		}},
+	})
+	diagnostic.RecordToolEvent(trace.Event{
+		Seq: 4, Kind: "branch.event",
+		Value: map[string]any{"event": map[string]any{"kind": "tool-call", "value": "malformed"}},
+	})
+	diagnostic.RecordToolEvent(trace.Event{
+		Seq: 7, Kind: "branch.event",
+		Value: map[string]any{"event": map[string]any{
+			"kind": "tool-call",
+			"value": map[string]any{
+				"name": "read_file", "call_id": "child-call", "arguments": `{"path":"internal/child.go","secret":"omitted"}`,
+			},
+		}},
+	})
+	diagnostic.RecordToolEvent(trace.Event{
+		Seq: 9, Kind: "branch.event",
+		Value: map[string]any{"event": map[string]any{
+			"kind": "tool-output",
+			"value": map[string]any{
+				"name": "read_file", "call_id": "child-call",
+				"content": `{"ok":false,"tool":"read_file","error":"missing"}`,
+			},
+		}},
+	})
+	if err := store.Complete(testTaskID, trace.Event{
+		Seq: 10, At: now.Add(time.Second), Kind: "error", Value: map[string]any{"message": "child failed"},
+	}, diagnostic, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	record, err := store.Read(testTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Failure == nil || len(record.Failure.ToolEvents) != 2 {
+		t.Fatalf("failure diagnostic = %#v", record.Failure)
+	}
+	call, output := record.Failure.ToolEvents[0], record.Failure.ToolEvents[1]
+	if call.Seq != 7 || call.Kind != "tool-call" || call.Tool != "read_file" || call.CallID != "child-call" {
+		t.Fatalf("wrapped call = %#v", call)
+	}
+	if output.Seq != 9 || output.Kind != "tool-output" || !strings.Contains(output.Payload, `"error":"missing"`) {
+		t.Fatalf("wrapped output = %#v", output)
+	}
+	if strings.Contains(call.Payload, "secret") {
+		t.Fatalf("wrapped call retained unsafe argument: %#v", call)
+	}
+}
+
 func TestStoreReadsLegacyRecordsWithoutDiagnostics(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now().UTC()

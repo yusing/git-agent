@@ -108,6 +108,22 @@ type Item struct {
 	RawJSON   string `json:"raw_json,omitempty"`
 }
 
+// PortableItems returns conversation items that can be replayed by another
+// model. Provider-specific opaque items are omitted; ordinary messages and
+// local function exchanges remain exact.
+func PortableItems(items []Item) []Item {
+	portable := make([]Item, 0, len(items))
+	for _, item := range items {
+		switch item.Type {
+		case "reasoning", "web_search_call":
+			continue
+		default:
+			portable = append(portable, item)
+		}
+	}
+	return portable
+}
+
 type ToolSpec struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description,omitempty"`

@@ -335,6 +335,8 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	}
 	toolCandidates := withSkillTools(tools.ReviewToolCandidates(mode.ToolMode()), skillStore)
 	registry := tools.NewReviewRegistryWithSkills(repo, skillStore, mode.ToolMode(), tools.NewReviewScope(prepared.Paths, prepared.Status, prepared.Stats), prepared.Fingerprint, orchestration)
+	registry.Register(reviewtask.BranchHelp(kind))
+	toolCandidates = append(toolCandidates, reviewtask.BranchHelpToolName)
 	toolSpecs := registry.Definitions(toolCandidates)
 	allowedTools := make([]string, 0, len(toolSpecs))
 	for _, definition := range toolSpecs {
@@ -376,9 +378,11 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		return err
 	}
 	session := map[string]any{
-		"command": command,
-		"mode":    mode,
-		"repo":    repo.Summary(),
+		"command":      command,
+		"mode":         mode,
+		"repo":         repo.Summary(),
+		"event_schema": "git-agent.events/v2",
+		"root_node_id": "root",
 	}
 	if mode != reviewtask.ModeCodebase {
 		session["prepared_change_context"] = prepared
@@ -460,7 +464,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		Normalize: func(text string) string { return reviewtask.Shape(kind, text) },
 		Trace:     recorder,
 	}
-	result, err := runner.Run(taskCtx, agent.Request{
+	result, err := runReviewTree(taskCtx, kind, depth, runner, agent.Request{
 		SystemPrompt:      reviewtask.SystemPrompt(kind),
 		ToolPolicy:        reviewToolPolicy(),
 		Environment:       environmentContext(repo, command, string(mode), cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls),
@@ -471,7 +475,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		AllowedToolNames:  allowedTools,
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
-	})
+	}, recorder)
 	if err != nil {
 		traceErr := recorder.WriteExact("error", map[string]any{"message": err.Error()})
 		eventServer.Finish()

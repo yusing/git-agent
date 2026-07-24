@@ -159,6 +159,13 @@ inspects the full authoritative scope. A trailing focus limits the report to
 relevant findings or opportunities while still allowing supporting repository
 inspection. It cannot expand the selected Git scope or relax evidence rules.
 
+When a remaining inspection is large and independently partitionable, the
+model may retire its current conversation and run bounded child inspections in
+parallel inside the same detached task. Children retain the selected Git scope,
+read-only tools, cancellation, and per-conversation budgets. Git-agent merges
+validated leaf reports mechanically and publishes branch topology and progress
+through the same replayable SSE stream; `--wait` still returns one report.
+
 Diff-based runs calculate a bounded step range from effective changed lines,
 changed files, top-level scope dispersion, concrete repository-tool capability
 coverage, and applicable skills. `--depth fast|balanced|thorough` selects the

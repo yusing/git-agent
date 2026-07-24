@@ -179,6 +179,11 @@ func register(registry *Registry, tools []Tool) {
 	}
 }
 
+// Register adds a task-specific tool to the registry.
+func (r *Registry) Register(tool Tool) {
+	r.tools[tool.Definition().Name] = tool
+}
+
 func registerSkillsRead(registry *Registry, skillStore *skills.Store) {
 	if skillStore.Len() == 0 {
 		return
@@ -372,6 +377,11 @@ func jsonResult(tool string, value any, truncated bool) (Result, error) {
 		"data":      value,
 		"truncated": truncated,
 	}, truncated)
+}
+
+// JSONResult returns the stable successful tool-output envelope.
+func JSONResult(tool string, value any, truncated bool) (Result, error) {
+	return jsonResult(tool, value, truncated)
 }
 
 // ErrorResult returns the stable tool-output envelope used when the model can

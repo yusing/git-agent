@@ -28,6 +28,121 @@ type fakeClient struct {
 	retryEvents    []openai.RetryEvent
 }
 
+func TestRunnerReturnsTerminalBranchOutcomeAndPortableForks(t *testing.T) {
+	t.Parallel()
+
+	control := tools.Definition{
+		Name: "branch", Description: "retire and fan out", Strict: true,
+		Schema: map[string]any{"type": "object", "additionalProperties": false},
+	}
+	client := &fakeClient{responses: []openai.Response{{
+		Continuation: []openai.Item{
+			{Type: "reasoning", RawJSON: `{"id":"rs_1","type":"reasoning","encrypted_content":"cipher"}`},
+			{Type: "function_call", RawJSON: `{"id":"fc_1","type":"function_call","call_id":"call_1","name":"branch","arguments":"{}"}`},
+		},
+		ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "branch", Arguments: `{"branches":[]}`}},
+	}}}
+	runner := OpenAIRunner{
+		Config: config.Config{Model: "parent", MaxSteps: 2, MaxToolCalls: 2},
+		Client: client,
+	}
+	outcome, err := runner.RunNode(t.Context(), Request{
+		UserPrompt: "review", MaxSteps: 2, ControlTool: &control,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Final != nil || outcome.Branch == nil || outcome.Branch.ToolCalls != 1 {
+		t.Fatalf("outcome = %#v", outcome)
+	}
+	if len(client.requests) != 1 || len(client.requests[0].Tools) != 1 || client.requests[0].Tools[0].Name != "branch" {
+		t.Fatalf("request tools = %#v", client.requests)
+	}
+
+	sameModel := outcome.Branch.ForkInput(`{"branch_id":"b1"}`, true)
+	if !slices.ContainsFunc(sameModel, func(item openai.Item) bool { return item.Type == "reasoning" }) {
+		t.Fatalf("same-model fork omitted reasoning: %#v", sameModel)
+	}
+	crossModel := outcome.Branch.ForkInput(`{"branch_id":"b1"}`, false)
+	if slices.ContainsFunc(crossModel, func(item openai.Item) bool { return item.Type == "reasoning" || item.Type == "web_search_call" }) {
+		t.Fatalf("cross-model fork retained opaque items: %#v", crossModel)
+	}
+	if !slices.ContainsFunc(crossModel, func(item openai.Item) bool { return item.Type == "function_call" }) ||
+		!slices.ContainsFunc(crossModel, func(item openai.Item) bool { return item.Type == "function_call_output" && item.CallID == "call_1" }) {
+		t.Fatalf("cross-model fork lost portable context: %#v", crossModel)
+	}
+}
+
+func TestRunnerRejectsBranchMixedWithRepositoryCall(t *testing.T) {
+	t.Parallel()
+
+	control := tools.Definition{Name: "branch", Strict: true, Schema: map[string]any{"type": "object"}}
+	client := &fakeClient{responses: []openai.Response{{
+		ToolCalls: []openai.ToolCall{
+			{ID: "fc_1", CallID: "call_1", Name: "branch", Arguments: `{}`},
+			{ID: "fc_2", CallID: "call_2", Name: "read_file", Arguments: `{}`},
+		},
+	}}}
+	runner := OpenAIRunner{Config: config.Config{MaxSteps: 2, MaxToolCalls: 2}, Client: client}
+	_, err := runner.RunNode(t.Context(), Request{UserPrompt: "review", MaxSteps: 2, ControlTool: &control})
+	if err == nil || !strings.Contains(err.Error(), "must be the only local function call") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRunnerForcesFinalizationWhenBranchExceedsToolBudget(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	repo, err := gitctx.Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := tools.Definition{Name: "branch", Strict: true, Schema: map[string]any{"type": "object"}}
+	client := &fakeClient{responses: []openai.Response{
+		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: `{}`}}},
+		{ToolCalls: []openai.ToolCall{{ID: "fc_2", CallID: "call_2", Name: "branch", Arguments: `{}`}}},
+		{Text: "forced final"},
+	}}
+	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeCodebase, tools.ReviewScope{}, gitctx.ChangeFingerprint{})
+	var events []trace.Event
+	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := OpenAIRunner{
+		Config:    config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 1},
+		Client:    client,
+		Tools:     registry,
+		ToolSpecs: registry.Definitions([]string{"repo_summary"}),
+		Trace:     recorder,
+	}
+
+	outcome, err := runner.RunNode(t.Context(), Request{
+		UserPrompt: "review", MaxSteps: 3, ControlTool: &control,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Branch != nil || outcome.Final == nil || outcome.Final.Text != "forced final" || outcome.Final.ToolCalls != 1 {
+		t.Fatalf("outcome = %#v", outcome)
+	}
+	if len(client.requests) != 3 || len(client.requests[2].Tools) != 0 || len(client.requests[2].HostedCapabilities) != 0 {
+		t.Fatalf("forced-finalization request = %#v", client.requests)
+	}
+	if !slices.ContainsFunc(events, func(event trace.Event) bool {
+		return event.Kind == "budget" &&
+			event.Value["kind"] == string(BudgetKindToolCalls) &&
+			event.Value["decision"] == "finalize"
+	}) {
+		t.Fatalf("budget events = %#v", events)
+	}
+}
+
 func TestRequestInstructionsRequireReadFilePathProvenance(t *testing.T) {
 	t.Parallel()
 

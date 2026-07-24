@@ -269,6 +269,41 @@ redundant state or concurrency, and architecture disproportionate to current
 requirements. Taste-only rewrites and speculative future simplifications are
 excluded.
 
+During an ordinary initial or follow-up provider step, either command may
+expose strict `branch_help` and `branch` functions when the remaining
+inspection can be split into at least two independently reviewable
+responsibilities. `branch_help` has no arguments, its description is
+``Use before deciding to use `branch` ``, and its ordinary local-tool result
+contains the bounded model catalog, difficulty-to-reasoning-effort mapping, and
+values allowed for the current command. It consumes one local function-call
+budget unit and does not retire the conversation. `branch` remains the terminal
+control function.
+
+Both functions are absent from dry-run generation, forced finalization, schema
+repair, aggregation, and conversations already at the selected depth limit.
+`fast`, `balanced`, and `thorough` permit respectively `2`, `3`, and `4`
+immediate children and maximum zero-based conversation depths `1`, `1`, and
+`2`. Accepted children start immediately under the same detached task context;
+there is no separate branch task, queue, or global concurrency setting. Each
+child receives a fresh copy of the invocation's per-conversation step and
+local-tool ceilings.
+
+An accepted branch call retires its calling conversation. Child scope is a
+natural-language reporting responsibility; path hints accelerate discovery but
+do not restrict repository inspection, evidence, or final validation. Child
+input is the forked provider-visible conversation followed by the selected
+branch function result; Git-agent appends no child-specific developer message.
+Child model and reasoning effort inherit by default or select from the bounded model
+catalog returned by `branch_help` and enforced by the strict `branch` function
+definition. Every required leaf must pass the ordinary report and
+repository-evidence validators. Git-agent then
+concatenates leaf items in recursive child-array order, applies the existing
+stable review severity ordering and recommendation rule, concatenates
+scope-labeled summaries, and validates the assembled report without a reducer
+model. Review static checks run once after that merge. Any required child
+failure cancels remaining siblings and fails the one detached task instead of
+publishing a partial report.
+
 Both commands always bind an HTTP server to a private local Unix-domain socket
 after local validation. The launcher publishes its socket network, absolute
 address, and token-bearing `http://localhost/events` request URL in launch JSON
@@ -301,6 +336,18 @@ attempt and is superseded by the retry status. Cancellation or
 deadline prevents or aborts the retry. Other, local, unrelated, and unknown
 provider stream failures remain terminal. If the retry fails, the terminal
 error preserves both attempt failures.
+
+The `session` event identifies `event_schema=git-agent.events/v2` and
+`root_node_id=root`. Accepted fan-out adds globally sequenced
+`branch.fanout`; non-root model activity appears only inside `branch.event`;
+validated leaves and failed nodes add `branch.completed` and `branch.failed`.
+Fan-out precedes child activity, lifecycle events do not terminate the stream,
+and only the existing task-level `final` or `error` closes it. Node identity,
+parent identity, depth, effective model/effort, and bounded untrusted display
+text are replayed through the same SSE buffer and `Last-Event-ID` cursor.
+Aggregate `runtime.status` remains unwrapped and uses `branches_running` and
+`aggregating_branches`, so consumers that ignore branch event kinds still
+receive useful task progress and the one final report.
 
 Neither command has a request or overall task deadline by default. Explicit
 `--timeout <duration>` applies that deadline to both the provider HTTP client
