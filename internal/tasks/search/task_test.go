@@ -3708,7 +3708,6 @@ func TestFilesystemChunkingDoesNotRetainAcceptedBodies(t *testing.T) {
 	for i := range fileCount {
 		writeFile(t, root, fmt.Sprintf("%02d.futuretext", i), content)
 	}
-	content = ""
 	runtime.GC()
 	var baseline runtime.MemStats
 	runtime.ReadMemStats(&baseline)

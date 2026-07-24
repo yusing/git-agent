@@ -399,7 +399,7 @@ func (r *Repository) OpenUncommittedReviewFile(source FileSource, path string) (
 	if err != nil {
 		return nil, err
 	}
-	return file.Blob.Reader()
+	return file.Reader()
 }
 
 func resolveReviewSubmoduleForPath(repo *Repository, baseTree *object.Tree, requested string) (initializedSubmodule, string, bool, error) {

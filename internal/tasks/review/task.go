@@ -525,19 +525,21 @@ func validateEvidenceLocation(repo *gitctx.Repository, mode Mode, evidence Evide
 	}
 	var reader io.ReadCloser
 	var err error
-	if mode == ModeUncommitted {
+	switch mode {
+	case ModeUncommitted:
 		reader, err = repo.OpenUncommittedReviewFile(source, evidence.Path)
-	} else if mode == ModeStaged {
+	case ModeStaged:
 		reader, err = repo.OpenStagedReviewFile(source, evidence.Path)
-	} else {
+	default:
 		reader, err = repo.OpenFile(source, evidence.Path)
 	}
 	if err != nil && mode != ModeCodebase {
-		if mode == ModeUncommitted {
+		switch mode {
+		case ModeUncommitted:
 			reader, err = repo.OpenUncommittedReviewFile(gitctx.FileSourceHead, evidence.Path)
-		} else if mode == ModeStaged {
+		case ModeStaged:
 			reader, err = repo.OpenStagedReviewFile(gitctx.FileSourceHead, evidence.Path)
-		} else {
+		default:
 			reader, err = repo.OpenFile(gitctx.FileSourceHead, evidence.Path)
 		}
 	}

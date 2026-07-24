@@ -495,11 +495,12 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		skippedFiles = readyResult.SkippedFiles
 	} else {
 		builder := newSearchChunkBuilder(opts, filters.Code, chunkBodies)
-		if source.Mode == "remote" {
+		switch source.Mode {
+		case "remote":
 			skipped, skippedFiles, err = discoverCachedRemoteFiles(selection.repo, resolvedRev, scope, builder.add)
-		} else if source.Mode == "revision" {
+		case "revision":
 			skipped, skippedFiles, err = discoverRevisionFiles(selection.repo, resolvedRev, scope, debugLog, builder.add)
-		} else {
+		default:
 			skipped, skippedFiles, err = discoverFilesystemFiles(root, scope, debugLog, builder.add)
 		}
 		if err != nil {
@@ -2060,14 +2061,6 @@ func indexRemoteFileStream(ctx context.Context, client openai.EmbeddingClient, f
 		return result, err
 	}
 	return result, nil
-}
-
-func totalTextChars(texts []string) int {
-	total := 0
-	for _, text := range texts {
-		total += len(text)
-	}
-	return total
 }
 
 func embedTexts(ctx context.Context, client openai.EmbeddingClient, opts Options, texts []string) ([][]float64, int, error) {

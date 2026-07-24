@@ -609,22 +609,19 @@ func openInspectedFile(repo *gitctx.Repository, mode ReviewMode, rawPath, source
 		return nil, "", fmt.Errorf("source must be worktree, index, or head")
 	}
 	var reader io.ReadCloser
-	if mode == ReviewModeUncommitted {
+	switch mode {
+	case ReviewModeUncommitted:
 		reader, err = repo.OpenUncommittedReviewFile(gitctx.FileSource(source), path)
-	} else if mode == ReviewModeStaged {
+	case ReviewModeStaged:
 		reader, err = repo.OpenStagedReviewFile(gitctx.FileSource(source), path)
-	} else {
-		reader, err = openRepositoryFile(repo, path, source)
+	default:
+		reader, err = repo.OpenFile(gitctx.FileSource(source), path)
 	}
 	return reader, source, err
 }
 
 func enumStringProp(description string, values ...string) map[string]any {
 	return map[string]any{"type": "string", "description": description, "enum": values}
-}
-
-func openRepositoryFile(repo *gitctx.Repository, path, source string) (io.ReadCloser, error) {
-	return repo.OpenFile(gitctx.FileSource(source), path)
 }
 
 func readLineRange(reader io.Reader, start, end, maxBytes, maxLines int, withLineNumber bool) (string, int, int, bool, error) {

@@ -166,7 +166,7 @@ func (r *Repository) OpenStagedReviewFile(source FileSource, path string) (io.Re
 	if err != nil {
 		return nil, err
 	}
-	return file.Blob.Reader()
+	return file.Reader()
 }
 
 func (r *Repository) StagedReviewFiles() ([]string, error) {
@@ -356,7 +356,7 @@ func materializeTree(root *os.Root, prefix string, tree *object.Tree) error {
 		}
 		switch file.Mode {
 		case filemode.Regular, filemode.Deprecated, filemode.Executable:
-			reader, err := file.Blob.Reader()
+			reader, err := file.Reader()
 			if err != nil {
 				return err
 			}
