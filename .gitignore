@@ -5,3 +5,4 @@
 /coverage.out
 *.env
 *.patch
+.skills-mgr.json
