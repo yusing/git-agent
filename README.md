@@ -3,6 +3,10 @@
 Commit, PR, release, review, simplification, and repository-search context for
 AI-assisted Git work.
 
+When installed, [`skills-mgr`](https://github.com/yusing/skills-mgr) integrates
+skill discovery and on-demand guidance reading into message-generation
+workflows.
+
 `git-agent` gathers Git evidence with typed Go code, runs a bounded
 OpenAI-compatible tool-calling loop, and keeps model tools read-only. The
 `commit` command is the only workflow that writes to Git, and it does that after
