@@ -76,7 +76,7 @@ func planChanged(scope checks.Scope) ([]invocation, error) {
 		moduleRoot string
 		packageDir string
 	}
-	groups := make(map[groupKey][]string)
+	groups := make(map[groupKey]struct{})
 	for _, repositoryPath := range scope.Paths() {
 		absolutePath, eligible, err := changedGoFile(scope.Root(), repositoryPath)
 		if err != nil {
@@ -105,7 +105,7 @@ func planChanged(scope checks.Scope) ([]invocation, error) {
 			return nil, fmt.Errorf("changed Go file %q produced unsafe module target %q", repositoryPath, modulePath)
 		}
 		key := groupKey{moduleRoot: moduleRoot, packageDir: filepath.Dir(absolutePath)}
-		groups[key] = append(groups[key], modulePath)
+		groups[key] = struct{}{}
 	}
 
 	keys := make([]groupKey, 0, len(groups))
@@ -120,9 +120,20 @@ func planChanged(scope checks.Scope) ([]invocation, error) {
 	})
 	result := make([]invocation, 0, len(keys))
 	for _, key := range keys {
+		packagePath, err := filepath.Rel(key.moduleRoot, key.packageDir)
+		if err != nil {
+			return nil, fmt.Errorf("locate affected package %q in module: %w", key.packageDir, err)
+		}
+		packageTarget := "."
+		if packagePath != "." {
+			packageTarget = "./" + filepath.ToSlash(packagePath)
+		}
+		if _, ok := localPackageDirectory(packageTarget); !ok {
+			return nil, fmt.Errorf("affected package %q produced unsafe module target %q", key.packageDir, packageTarget)
+		}
 		result = append(result, invocation{
 			moduleRoot: key.moduleRoot,
-			targets:    uniqueSorted(groups[key]),
+			targets:    []string{packageTarget},
 		})
 	}
 	return result, nil
@@ -236,26 +247,46 @@ func validateInvocation(workspaceRoot string, target invocation) error {
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("checker module %q has no regular go.mod", target.moduleRoot)
 	}
-	if len(target.targets) == 0 {
-		return fmt.Errorf("checker target list is empty")
+	if len(target.targets) != 1 {
+		return fmt.Errorf("checker target list must contain exactly one package pattern")
 	}
-	if len(target.targets) == 1 && target.targets[0] == "./..." {
+	packageTarget := target.targets[0]
+	if packageTarget == "./..." {
 		return nil
 	}
-	for _, path := range target.targets {
-		if !validLocalGoTarget(path) {
-			return fmt.Errorf("unsafe checker target %q", path)
+	packageDirectory, ok := localPackageDirectory(packageTarget)
+	if !ok {
+		return fmt.Errorf("unsafe checker package target %q", packageTarget)
+	}
+	absolutePath := filepath.Join(target.moduleRoot, filepath.FromSlash(packageDirectory))
+	if err := ensureContained(target.moduleRoot, absolutePath); err != nil {
+		return err
+	}
+	info, err = os.Lstat(absolutePath)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("checker package target %q is not a regular directory", packageTarget)
+	}
+	resolved, err = filepath.EvalSymlinks(absolutePath)
+	if err != nil || resolved != absolutePath {
+		return fmt.Errorf("checker package target %q is unsafe", packageTarget)
+	}
+	entries, err := os.ReadDir(absolutePath)
+	if err != nil {
+		return fmt.Errorf("inspect checker package target %q: %w", packageTarget, err)
+	}
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) != ".go" || entry.Type()&os.ModeSymlink != 0 {
+			continue
 		}
-		absolutePath := filepath.Join(target.moduleRoot, filepath.FromSlash(path))
-		if err := ensureContained(target.moduleRoot, absolutePath); err != nil {
-			return err
+		entryInfo, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("inspect checker package file %q: %w", filepath.Join(absolutePath, entry.Name()), err)
 		}
-		info, err := os.Lstat(absolutePath)
-		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("checker target %q is not a regular Go file", path)
+		if entryInfo.Mode().IsRegular() {
+			return nil
 		}
 	}
-	return nil
+	return fmt.Errorf("checker package target %q contains no regular Go files", packageTarget)
 }
 
 func ensureContained(root, path string) error {
@@ -275,6 +306,27 @@ func validLocalGoTarget(path string) bool {
 		!filepath.IsAbs(cleaned) && !strings.HasPrefix(cleaned, "../") &&
 		!strings.HasPrefix(cleaned, "-") && !strings.ContainsRune(cleaned, '\x00') &&
 		filepath.Ext(cleaned) == ".go"
+}
+
+func localPackageDirectory(target string) (string, bool) {
+	if target == "." {
+		return ".", true
+	}
+	if !strings.HasPrefix(target, "./") || target == "./..." || strings.ContainsRune(target, '\x00') {
+		return "", false
+	}
+	relative := strings.TrimPrefix(target, "./")
+	cleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relative)))
+	if relative == "" || relative != cleaned || filepath.IsAbs(filepath.FromSlash(relative)) ||
+		filepath.VolumeName(filepath.FromSlash(relative)) != "" {
+		return "", false
+	}
+	for segment := range strings.SplitSeq(relative, "/") {
+		if segment == "" || segment == "." || segment == ".." || segment == "..." {
+			return "", false
+		}
+	}
+	return relative, true
 }
 
 func uniqueSorted(values []string) []string {

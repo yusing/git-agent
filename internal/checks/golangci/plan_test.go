@@ -9,17 +9,21 @@ import (
 	"github.com/yusing/git-agent/internal/checks"
 )
 
-func TestPlanChangedUsesOnlyExactGoFilesAndNearestModulePackage(t *testing.T) {
+func TestPlanChangedTargetsEachAffectedPackageOnce(t *testing.T) {
 	root := t.TempDir()
 	writePlanFile(t, root, "go.mod", "module root\n")
+	writePlanFile(t, root, "root.go", "package root\n")
 	writePlanFile(t, root, "a/a.go", "package a\n")
 	writePlanFile(t, root, "a/other.go", "package a\n")
+	writePlanFile(t, root, "a/helpers_test.go", "package a\n")
 	writePlanFile(t, root, "b/b.go", "package b\n")
+	writePlanFile(t, root, "b-copy/b.go", "package bcopy\n")
 	writePlanFile(t, root, "nested/go.mod", "module nested\n")
 	writePlanFile(t, root, "nested/c/c.go", "package c\n")
 	writePlanFile(t, root, "README.md", "not Go\n")
 	scope, err := checks.NewChangedScope(root, []string{
-		"nested/c/c.go", "a/a.go", "a/other.go", "b/b.go", "README.md", "deleted.go",
+		"nested/c/c.go", "root.go", "a/a.go", "a/other.go", "a/helpers_test.go",
+		"b/b.go", "b-copy/b.go", "README.md", "deleted.go", "a/a.go",
 	}, []string{""})
 	if err != nil {
 		t.Fatal(err)
@@ -31,9 +35,11 @@ func TestPlanChangedUsesOnlyExactGoFilesAndNearestModulePackage(t *testing.T) {
 	}
 	plan := genericPlan.(*checkerPlan)
 	want := []invocation{
-		{moduleRoot: root, targets: []string{"a/a.go", "a/other.go"}},
-		{moduleRoot: root, targets: []string{"b/b.go"}},
-		{moduleRoot: filepath.Join(root, "nested"), targets: []string{"c/c.go"}},
+		{moduleRoot: root, targets: []string{"."}},
+		{moduleRoot: root, targets: []string{"./a"}},
+		{moduleRoot: root, targets: []string{"./b"}},
+		{moduleRoot: root, targets: []string{"./b-copy"}},
+		{moduleRoot: filepath.Join(root, "nested"), targets: []string{"./c"}},
 	}
 	if !reflect.DeepEqual(plan.invocations, want) {
 		t.Fatalf("invocations:\n got %#v\nwant %#v", plan.invocations, want)
@@ -59,6 +65,29 @@ func TestPlanChangedSkipsNonGoOutsideModulesAndSymlinks(t *testing.T) {
 	plan := genericPlan.(*checkerPlan)
 	if plan.Runnable() || plan.SkipReason() == "" || len(plan.invocations) != 0 {
 		t.Fatalf("plan = %#v", plan)
+	}
+}
+
+func TestPlanChangedSkipsDeletedRenameSourceAndTargetsDestinationPackage(t *testing.T) {
+	root := t.TempDir()
+	writePlanFile(t, root, "go.mod", "module example\n")
+	writePlanFile(t, root, "new/destination.go", "package new\n")
+	scope, err := checks.NewChangedScope(
+		root,
+		[]string{"old/source.go", "new/destination.go"},
+		[]string{""},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericPlan, err := New().Plan(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := genericPlan.(*checkerPlan)
+	want := []invocation{{moduleRoot: root, targets: []string{"./new"}}}
+	if !reflect.DeepEqual(plan.invocations, want) {
+		t.Fatalf("invocations:\n got %#v\nwant %#v", plan.invocations, want)
 	}
 }
 
@@ -131,12 +160,24 @@ func TestValidateInvocationRejectsMalformedMixedAndEscapingTargets(t *testing.T)
 	module := filepath.Join(root, "module")
 	writePlanFile(t, root, "module/go.mod", "module example\n")
 	writePlanFile(t, root, "module/main.go", "package example\n")
+	writePlanFile(t, root, "module/pkg/pkg.go", "package pkg\n")
+	writePlanFile(t, root, "module/not-go/README.md", "not Go\n")
+	writePlanFile(t, root, "outside/outside.go", "package outside\n")
+	if err := os.Symlink(filepath.Join(root, "outside"), filepath.Join(module, "linked")); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, target := range []invocation{
 		{moduleRoot: module},
-		{moduleRoot: module, targets: []string{"./...", "main.go"}},
+		{moduleRoot: module, targets: []string{"./...", "./pkg"}},
+		{moduleRoot: module, targets: []string{"main.go"}},
 		{moduleRoot: module, targets: []string{"-config.go"}},
-		{moduleRoot: module, targets: []string{"../outside.go"}},
+		{moduleRoot: module, targets: []string{"../outside"}},
+		{moduleRoot: module, targets: []string{"./../outside"}},
+		{moduleRoot: module, targets: []string{"./missing"}},
+		{moduleRoot: module, targets: []string{"./not-go"}},
+		{moduleRoot: module, targets: []string{"./linked"}},
+		{moduleRoot: module, targets: []string{filepath.Join(module, "pkg")}},
 		{moduleRoot: root, targets: []string{"./..."}},
 	} {
 		if err := validateInvocation(root, target); err == nil {
@@ -144,7 +185,8 @@ func TestValidateInvocationRejectsMalformedMixedAndEscapingTargets(t *testing.T)
 		}
 	}
 	for _, target := range []invocation{
-		{moduleRoot: module, targets: []string{"main.go"}},
+		{moduleRoot: module, targets: []string{"."}},
+		{moduleRoot: module, targets: []string{"./pkg"}},
 		{moduleRoot: module, targets: []string{"./..."}},
 	} {
 		if err := validateInvocation(root, target); err != nil {

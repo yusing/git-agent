@@ -104,6 +104,7 @@ func (*Checker) RunHelper(args []string) error {
 	argv = append(argv,
 		"--fix=false",
 		"--issues-exit-code=1",
+		"--path-mode=abs",
 		"--show-stats=false",
 		"--output.json.path="+resultPath,
 		"--output.text.path="+os.DevNull,
