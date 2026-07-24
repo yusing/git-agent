@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/yusing/git-agent/internal/gitctx"
-	skillctx "github.com/yusing/git-agent/internal/skills"
 )
 
 func TestErrorResultUsesStableBoundedEnvelope(t *testing.T) {
@@ -50,7 +49,7 @@ func TestDocumentationToolsRegisterOnlyForReviewAndSimplifyRegistry(t *testing.T
 	t.Setenv("PATH", bin)
 
 	names := []string{"go_doc", "rust_doc", "context7_library", "context7_docs"}
-	reviewRegistry := NewReviewRegistryWithSkills(nil, nil, ReviewModeCodebase, ReviewScope{}, gitctx.ChangeFingerprint{})
+	reviewRegistry := NewReviewRegistry(nil, nil, ReviewModeCodebase, ReviewScope{}, gitctx.ChangeFingerprint{})
 	definitions := reviewRegistry.Definitions(names)
 	if len(definitions) != len(names) {
 		t.Fatalf("review documentation definitions = %#v", definitions)
@@ -61,7 +60,7 @@ func TestDocumentationToolsRegisterOnlyForReviewAndSimplifyRegistry(t *testing.T
 		}
 	}
 
-	normalRegistry := NewRegistryWithSkills(nil, nil)
+	normalRegistry := NewRegistry(nil, nil)
 	if definitions := normalRegistry.Definitions(names); len(definitions) != 0 {
 		t.Fatalf("non-review registry exposes documentation tools: %#v", definitions)
 	}
@@ -88,7 +87,7 @@ func TestDocumentationToolsOmitMissingExecutables(t *testing.T) {
 			}
 			t.Setenv("PATH", bin)
 
-			registry := NewReviewRegistryWithSkills(nil, nil, ReviewModeCodebase, ReviewScope{}, gitctx.ChangeFingerprint{})
+			registry := NewReviewRegistry(nil, nil, ReviewModeCodebase, ReviewScope{}, gitctx.ChangeFingerprint{})
 			definitions := registry.Definitions([]string{"go_doc", "rust_doc", "context7_library", "context7_docs"})
 			got := make([]string, 0, len(definitions))
 			for _, definition := range definitions {
@@ -110,7 +109,7 @@ func TestToolDefinitionsAreStrictAndEnvelopeResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewRegistryWithSkills(repo, nil)
+	registry := NewRegistry(repo, nil)
 	defs := registry.Definitions([]string{"repo_summary", "read_file"})
 	if len(defs) != 2 {
 		t.Fatalf("defs = %d", len(defs))
@@ -161,7 +160,7 @@ func TestRepositoryWalkToolsSkipInternalState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewRegistryWithSkills(repo, nil)
+	registry := NewRegistry(repo, nil)
 
 	listResult, err := registry.Execute(t.Context(), Invocation{Name: "list_files", Arguments: "{}"})
 	if err != nil {
@@ -228,7 +227,7 @@ func TestStagedReviewToolsNeverReadUnstagedWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewReviewRegistryWithSkills(repo, nil, ReviewModeStaged, ReviewScope{}, fingerprint)
+	registry := NewReviewRegistry(repo, nil, ReviewModeStaged, ReviewScope{}, fingerprint)
 	if _, err := registry.Execute(t.Context(), Invocation{Name: "git_staged_status", Arguments: `{}`}); err == nil {
 		t.Fatal("review registry exposed a non-review tool")
 	}
@@ -298,7 +297,7 @@ func TestUncommittedReviewReadFileRoutesNestedHeadSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewReviewRegistryWithSkills(repo, nil, ReviewModeUncommitted, ReviewScope{}, fingerprint)
+	registry := NewReviewRegistry(repo, nil, ReviewModeUncommitted, ReviewScope{}, fingerprint)
 	result, err := registry.Execute(t.Context(), Invocation{Name: "read_file", Arguments: `{"path":"webui/removed.txt","source":"head"}`})
 	if err != nil {
 		t.Fatal(err)
@@ -323,7 +322,7 @@ func TestReviewChangesPaginatesAuthoritativeScope(t *testing.T) {
 		stats[i] = gitctx.FileStat{Path: paths[i], Adds: i}
 	}
 	scope := NewReviewScope(paths, status, stats)
-	registry := NewReviewRegistryWithSkills(nil, nil, ReviewModeUncommitted, scope, gitctx.ChangeFingerprint{})
+	registry := NewReviewRegistry(nil, nil, ReviewModeUncommitted, scope, gitctx.ChangeFingerprint{})
 	result, err := registry.Execute(t.Context(), Invocation{Name: "review_changes", Arguments: `{"offset":128,"limit":1}`})
 	if err != nil {
 		t.Fatal(err)
@@ -404,7 +403,7 @@ func TestDiffReviewToolsRejectRepositoryDrift(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			registry := NewReviewRegistryWithSkills(repo, nil, test.mode, ReviewScope{}, fingerprint)
+			registry := NewReviewRegistry(repo, nil, test.mode, ReviewScope{}, fingerprint)
 			test.drift(t, dir)
 
 			_, err = registry.Execute(t.Context(), Invocation{Name: "read_file", Arguments: `{"path":"app.txt"}`})
@@ -433,7 +432,7 @@ func TestRepositoryToolsDoNotFollowSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewRegistryWithSkills(repo, nil)
+	registry := NewRegistry(repo, nil)
 	for _, name := range []string{"read_file", "inspect_file"} {
 		if _, err := registry.Execute(t.Context(), Invocation{Name: name, Arguments: `{"path":"leak.txt"}`}); err == nil {
 			t.Fatalf("%s followed symlink outside repository", name)
@@ -481,7 +480,7 @@ func TestReadFileSelectsSnapshotAndInclusiveLineRange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewRegistryWithSkills(repo, nil)
+	registry := NewRegistry(repo, nil)
 	for source, want := range map[string]string{"head": "base", "index": "staged", "worktree": "worktree"} {
 		result, err := registry.Execute(t.Context(), Invocation{Name: "read_file", Arguments: fmt.Sprintf(`{"path":"app.txt","source":%q,"line_start":2,"line_end":2}`, source)})
 		if err != nil {
@@ -518,7 +517,7 @@ func TestInspectFileReportsMetadataAndUsesReadFilePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewReviewRegistryWithSkills(repo, nil, ReviewModeStaged, ReviewScope{}, fingerprint)
+	registry := NewReviewRegistry(repo, nil, ReviewModeStaged, ReviewScope{}, fingerprint)
 	result, err := registry.Execute(t.Context(), Invocation{Name: "inspect_file", Arguments: `{"path":"app.go"}`})
 	if err != nil {
 		t.Fatal(err)
@@ -605,7 +604,7 @@ func TestFindAndGrepSupportBoundedDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewRegistryWithSkills(repo, nil)
+	registry := NewRegistry(repo, nil)
 
 	grepResult, err := registry.Execute(t.Context(), Invocation{Name: "grep", Arguments: `{"pattern":"^func [A-Z]","path":"internal","glob":"*.go","max_matches":10}`})
 	if err != nil {
@@ -649,7 +648,7 @@ func TestLegacyReleaseNoteToolsAreMarkedDeprecated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	registry := NewRegistryWithSkills(repo, nil)
+	registry := NewRegistry(repo, nil)
 	for _, def := range registry.Definitions([]string{
 		"resolve_ref",
 		"git_log_range",
@@ -683,7 +682,7 @@ func TestStagedDiffForPathsReturnsSelectedStagedPatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewRegistryWithSkills(repo, nil)
+	registry := NewRegistry(repo, nil)
 	defs := registry.Definitions(CommitMessageToolNames())
 	if len(defs) != len(CommitMessageToolNames()) {
 		t.Fatalf("defs = %d, want %d", len(defs), len(CommitMessageToolNames()))
@@ -698,146 +697,6 @@ func TestStagedDiffForPathsReturnsSelectedStagedPatch(t *testing.T) {
 	}
 	if strings.Contains(result.Content, "one.txt") || strings.Contains(result.Content, "+new one") {
 		t.Fatalf("selected patch leaked one.txt diff:\n%s", result.Content)
-	}
-}
-
-func TestSkillsReadToolReadsDiscoveredSkillFiles(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	runGit(t, dir, "init")
-	skillDir := filepath.Join(dir, ".agents", "skills", "change-writer")
-	mustWriteFile(t, filepath.Join(skillDir, "SKILL.md"), "---\nname: change-writer\ndescription: Draft change summaries.\n---\n\nUse evidence.\n")
-	mustWriteFile(t, filepath.Join(skillDir, "references", "style.md"), "Prefer concise subjects.\n")
-	repo, err := gitctx.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, err := skillctx.Discover(skillctx.Options{RepoRoot: dir, WorkDir: dir})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if store.Len() != 1 {
-		t.Fatalf("skills = %d, want 1", store.Len())
-	}
-	locator := store.Skills()[0].Locator
-	registry := NewRegistryWithSkills(repo, store)
-	defs := registry.Definitions(SkillToolNames())
-	if len(defs) != 1 || defs[0].Name != "skills_read" || !defs[0].Strict {
-		t.Fatalf("skill defs = %#v", defs)
-	}
-	required, ok := defs[0].Schema["required"].([]string)
-	if !ok || strings.Join(required, ",") != "max_bytes,max_lines,path,source_locator" {
-		t.Fatalf("skills_read required fields = %#v", defs[0].Schema["required"])
-	}
-	properties, ok := defs[0].Schema["properties"].(map[string]any)
-	if !ok {
-		t.Fatalf("skills_read properties = %#v", defs[0].Schema["properties"])
-	}
-	sourceLocator, ok := properties["source_locator"].(map[string]any)
-	if !ok {
-		t.Fatalf("skills_read source_locator = %#v", properties["source_locator"])
-	}
-	locators, ok := sourceLocator["enum"].([]string)
-	if !ok || len(locators) != 1 || locators[0] != locator {
-		t.Fatalf("skills_read source_locator enum = %#v, want [%q]", sourceLocator["enum"], locator)
-	}
-
-	result, err := registry.Execute(t.Context(), Invocation{Name: "skills_read", Arguments: `{"source_locator":"` + locator + `","path":"SKILL.md","max_bytes":4096,"max_lines":200}`})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(result.Content, "Use evidence.") {
-		t.Fatalf("skill read missing SKILL.md content:\n%s", result.Content)
-	}
-	result, err = registry.Execute(t.Context(), Invocation{Name: "skills_read", Arguments: `{"source_locator":"` + locator + `","path":"references/style.md","max_bytes":4096,"max_lines":200}`})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(result.Content, "Prefer concise subjects.") {
-		t.Fatalf("skill read missing reference content:\n%s", result.Content)
-	}
-}
-
-func TestSkillsReadToolIsNotRegisteredWithoutDiscoveredSkills(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	runGit(t, dir, "init")
-	repo, err := gitctx.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, err := skillctx.Discover(skillctx.Options{
-		RepoRoot:  dir,
-		WorkDir:   dir,
-		Home:      "",
-		CodexHome: "",
-		AdminRoot: "",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if store.Len() != 0 {
-		t.Fatalf("skills = %d, want 0", store.Len())
-	}
-
-	defs := NewRegistryWithSkills(repo, store).Definitions(SkillToolNames())
-	encoded, err := json.Marshal(defs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(encoded) != "[]" {
-		t.Fatalf("serialized empty skill definitions = %s, want []", encoded)
-	}
-}
-
-func TestSkillsReadToolRejectsUnknownAndEscapingPaths(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	runGit(t, dir, "init")
-	skillDir := filepath.Join(dir, ".agents", "skills", "change-writer")
-	mustWriteFile(t, filepath.Join(skillDir, "SKILL.md"), "---\nname: change-writer\ndescription: Draft change summaries.\n---\n")
-	mustWriteFile(t, filepath.Join(skillDir, "scripts", "helper.sh"), "#!/bin/sh\n")
-	mustWriteFile(t, filepath.Join(skillDir, "references", "binary.bin"), "ok\x00no\n")
-	mustWriteFile(t, filepath.Join(dir, "secret.txt"), "secret\n")
-	if err := os.Symlink(filepath.Join(dir, "secret.txt"), filepath.Join(skillDir, "secret-link")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join("..", "scripts", "helper.sh"), filepath.Join(skillDir, "references", "helper-link")); err != nil {
-		t.Fatal(err)
-	}
-	repo, err := gitctx.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, err := skillctx.Discover(skillctx.Options{RepoRoot: dir, WorkDir: dir})
-	if err != nil {
-		t.Fatal(err)
-	}
-	locator := store.Skills()[0].Locator
-	registry := NewRegistryWithSkills(repo, store)
-	for _, tc := range []struct {
-		name string
-		args string
-	}{
-		{name: "unknown locator", args: `{"source_locator":"/missing/SKILL.md"}`},
-		{name: "absolute path", args: `{"source_locator":"` + locator + `","path":"/etc/passwd"}`},
-		{name: "traversal", args: `{"source_locator":"` + locator + `","path":"../other.md"}`},
-		{name: "normalized traversal", args: `{"source_locator":"` + locator + `","path":"references/../SKILL.md"}`},
-		{name: "symlink escape", args: `{"source_locator":"` + locator + `","path":"secret-link"}`},
-		{name: "reference symlink to non-reference file", args: `{"source_locator":"` + locator + `","path":"references/helper-link"}`},
-		{name: "script", args: `{"source_locator":"` + locator + `","path":"scripts/helper.sh"}`},
-		{name: "binary", args: `{"source_locator":"` + locator + `","path":"references/binary.bin"}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			_, err := registry.Execute(t.Context(), Invocation{Name: "skills_read", Arguments: tc.args})
-			if err == nil {
-				t.Fatalf("expected error for %s", tc.name)
-			}
-		})
 	}
 }
 

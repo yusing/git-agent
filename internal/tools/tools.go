@@ -19,7 +19,7 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/yusing/git-agent/internal/doccmd"
 	"github.com/yusing/git-agent/internal/gitctx"
-	"github.com/yusing/git-agent/internal/skills"
+	"github.com/yusing/git-agent/internal/skillcmd"
 	"github.com/yusing/git-agent/internal/textutil"
 )
 
@@ -55,8 +55,6 @@ type reviewStateGuard struct {
 	mode        ReviewMode
 	fingerprint gitctx.ChangeFingerprint
 }
-
-const SkillReadToolName = "skills_read"
 
 type ReviewMode string
 
@@ -100,11 +98,7 @@ func NewReviewScope(paths []string, status []gitctx.PathChange, stats []gitctx.F
 	return ReviewScope{Changes: changes}
 }
 
-func NewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Store) *Registry {
-	return newRegistry(repo, skillStore)
-}
-
-func NewReviewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Store, mode ReviewMode, scope ReviewScope, fingerprint gitctx.ChangeFingerprint, manifests ...*OrchestrationManifest) *Registry {
+func NewReviewRegistry(repo *gitctx.Repository, skillManager *skillcmd.Manager, mode ReviewMode, scope ReviewScope, fingerprint gitctx.ChangeFingerprint, manifests ...*OrchestrationManifest) *Registry {
 	registry := &Registry{tools: map[string]Tool{}}
 	if repo != nil && mode != ReviewModeCodebase {
 		registry.reviewGuard = &reviewStateGuard{repo: repo, mode: mode, fingerprint: fingerprint}
@@ -125,19 +119,19 @@ func NewReviewRegistryWithSkills(repo *gitctx.Repository, skillStore *skills.Sto
 			reviewDiffForPathsTool{repo: repo, mode: mode},
 		})
 	}
-	registerSkillsRead(registry, skillStore)
 	if len(manifests) == 1 && manifests[0] != nil {
 		register(registry, []Tool{orchestrationArtifactTool{manifest: manifests[0]}})
 	}
+	register(registry, skillTools(skillManager))
 	root := "."
 	if repo != nil {
-		root = repo.RootPath
+		root = repo.WorkPath
 	}
 	registerDocumentation(registry, doccmd.Discover(root))
 	return registry
 }
 
-func newRegistry(repo *gitctx.Repository, skillStore *skills.Store) *Registry {
+func NewRegistry(repo *gitctx.Repository, skillManager *skillcmd.Manager) *Registry {
 	registry := &Registry{tools: map[string]Tool{}}
 	register(registry, []Tool{
 		repoSummaryTool{repo: repo},
@@ -169,7 +163,7 @@ func newRegistry(repo *gitctx.Repository, skillStore *skills.Store) *Registry {
 		submoduleLogRangeTool{repo: repo},
 		repoKindTool{repo: repo},
 	})
-	registerSkillsRead(registry, skillStore)
+	register(registry, skillTools(skillManager))
 	return registry
 }
 
@@ -182,14 +176,6 @@ func register(registry *Registry, tools []Tool) {
 // Register adds a task-specific tool to the registry.
 func (r *Registry) Register(tool Tool) {
 	r.tools[tool.Definition().Name] = tool
-}
-
-func registerSkillsRead(registry *Registry, skillStore *skills.Store) {
-	if skillStore.Len() == 0 {
-		return
-	}
-	tool := skillsReadTool{store: skillStore}
-	registry.tools[tool.Definition().Name] = tool
 }
 
 func registerDocumentation(registry *Registry, commands *doccmd.Commands) {
@@ -213,7 +199,7 @@ func (r *Registry) Execute(ctx context.Context, invocation Invocation) (Result, 
 	if !ok {
 		return Result{}, fmt.Errorf("tool %q is not registered", invocation.Name)
 	}
-	if r.reviewGuard != nil && invocation.Name != SkillReadToolName {
+	if r.reviewGuard != nil {
 		if err := r.reviewGuard.check(); err != nil {
 			return Result{}, err
 		}
@@ -265,7 +251,7 @@ func ReviewToolCandidates(mode ReviewMode) []string {
 }
 
 func SkillToolNames() []string {
-	return []string{SkillReadToolName}
+	return []string{SkillsReadToolName}
 }
 
 const (
@@ -720,108 +706,6 @@ func validUTF8Prefix(value string) string {
 		value = value[:len(value)-1]
 	}
 	return value
-}
-
-type skillsReadTool struct {
-	store *skills.Store
-}
-
-func (t skillsReadTool) Definition() Definition {
-	locators := make([]string, 0, t.store.Len())
-	for _, skill := range t.store.Skills() {
-		locators = append(locators, skill.Locator)
-	}
-	return Definition{Name: SkillReadToolName, Description: "Read SKILL.md or a text file under references/ for a discovered skill root.", Schema: skillsReadSchema(locators), Strict: true}
-}
-
-func (t skillsReadTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
-	args, err := parseArgs[struct {
-		SourceLocator string `json:"source_locator"`
-		Path          string `json:"path"`
-		MaxBytes      int    `json:"max_bytes"`
-		MaxLines      int    `json:"max_lines"`
-	}](invocation.Arguments)
-	if err != nil {
-		return Result{}, err
-	}
-	skill, ok := t.store.Lookup(args.SourceLocator)
-	if !ok {
-		return Result{}, fmt.Errorf("unknown skill source locator: %s", args.SourceLocator)
-	}
-	rel, ok := cleanSkillReadPath(args.Path)
-	if !ok {
-		return Result{}, fmt.Errorf("skill path is not readable by this tool: %s", args.Path)
-	}
-	file, err := openSkillReadFile(skill, rel)
-	if err != nil {
-		return Result{}, err
-	}
-	defer file.Close()
-	maxBytes, maxLines := normalizeCaps(args.MaxBytes, args.MaxLines)
-	content, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)+1))
-	if err != nil {
-		return Result{}, err
-	}
-	if bytes.Contains(content, []byte{0}) {
-		return Result{}, fmt.Errorf("skill path is not a text file: %s", rel)
-	}
-	limited, truncated := textutil.Limit(string(content), maxBytes, maxLines)
-	if len(content) > maxBytes {
-		truncated = true
-	}
-	return jsonResult(SkillReadToolName, map[string]any{"source_locator": args.SourceLocator, "path": rel, "content": limited}, truncated)
-}
-
-func openSkillReadFile(skill skills.Skill, rel string) (*os.File, error) {
-	rootPath := skill.Root
-	openPath := rel
-	if strings.HasPrefix(rel, "references/") {
-		rootPath = filepath.Join(skill.Root, "references")
-		openPath = strings.TrimPrefix(rel, "references/")
-	}
-	root, err := os.OpenRoot(rootPath)
-	if err != nil {
-		return nil, err
-	}
-	file, err := root.Open(openPath)
-	if err != nil {
-		_ = root.Close()
-		return nil, err
-	}
-	if err := root.Close(); err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	return file, nil
-}
-
-func skillsReadSchema(locators []string) map[string]any {
-	return schema(map[string]any{
-		"source_locator": map[string]any{
-			"type":        "string",
-			"description": "Exact source locator from the initial Skills section.",
-			"enum":        locators,
-		},
-		"path":      stringProp(`Relative path under the selected skill root. Use "SKILL.md" for the skill body; only files under references/ are readable otherwise.`),
-		"max_bytes": intProp("Maximum bytes to return.", 1, 65536),
-		"max_lines": intProp("Maximum lines to return.", 1, 2000),
-	}, "source_locator", "path", "max_bytes", "max_lines")
-}
-
-func cleanSkillReadPath(rel string) (string, bool) {
-	if strings.TrimSpace(rel) == "" {
-		return "SKILL.md", true
-	}
-	for part := range strings.SplitSeq(filepath.ToSlash(rel), "/") {
-		if part == ".." {
-			return "", false
-		}
-	}
-	cleaned := filepath.ToSlash(filepath.Clean(rel))
-	if cleaned == "SKILL.md" || strings.HasPrefix(cleaned, "references/") {
-		return cleaned, true
-	}
-	return "", false
 }
 
 type grepTool struct {

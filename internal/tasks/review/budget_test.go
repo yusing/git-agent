@@ -19,7 +19,6 @@ func TestPlanBudgetExamples(t *testing.T) {
 		name       string
 		kind       Kind
 		prepared   PreparedContext
-		skills     int
 		coverage   []string
 		wantLower  int
 		wantMiddle int
@@ -47,39 +46,36 @@ func TestPlanBudgetExamples(t *testing.T) {
 			wantTools:  8,
 		},
 		{
-			name:       "medium review with skill",
+			name:       "medium review",
 			kind:       KindReview,
 			prepared:   preparedBudgetChange(600, 8, budgetPaths(8, 3)),
-			skills:     1,
-			coverage:   fullDiffBudgetTools,
-			wantLower:  14,
-			wantMiddle: 19,
-			wantUpper:  23,
-			wantTools:  17,
-		},
-		{
-			name:       "medium simplify with skill",
-			kind:       KindSimplify,
-			prepared:   preparedBudgetChange(600, 8, budgetPaths(8, 3)),
-			skills:     1,
 			coverage:   fullDiffBudgetTools,
 			wantLower:  13,
-			wantMiddle: 17,
-			wantUpper:  21,
+			wantMiddle: 18,
+			wantUpper:  22,
 			wantTools:  15,
+		},
+		{
+			name:       "medium simplify",
+			kind:       KindSimplify,
+			prepared:   preparedBudgetChange(600, 8, budgetPaths(8, 3)),
+			coverage:   fullDiffBudgetTools,
+			wantLower:  12,
+			wantMiddle: 16,
+			wantUpper:  20,
+			wantTools:  13,
 		},
 		{
 			name:     "large review with partial coverage",
 			kind:     KindReview,
 			prepared: preparedBudgetChange(5000, 45, budgetPaths(45, 8)),
-			skills:   2,
 			coverage: []string{
 				"list_files", "read_file", "grep", "find", "review_changes",
 			},
-			wantLower:  23,
-			wantMiddle: 35,
-			wantUpper:  46,
-			wantTools:  30,
+			wantLower:  22,
+			wantMiddle: 33,
+			wantUpper:  44,
+			wantTools:  27,
 		},
 	}
 
@@ -87,7 +83,7 @@ func TestPlanBudgetExamples(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			plan, err := PlanBudget(BudgetInput{
 				Kind: test.kind, Prepared: test.prepared, ToolNames: test.coverage,
-				ApplicableSkills: test.skills, Depth: DepthBalanced,
+				Depth: DepthBalanced,
 			})
 			if err != nil {
 				t.Fatal(err)

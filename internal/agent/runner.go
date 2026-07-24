@@ -786,21 +786,14 @@ func requestInstructions(taskInstructions string, toolSpecs []openai.ToolSpec, h
 # Agent loop
 You are in a bounded agent loop.
 This is model step %d of %d. You have %d of %d local function tool calls remaining.
-Use only the listed read-only local tools and provider-hosted capabilities.
+Use only the listed local tools and provider-hosted capabilities.
 Provider-hosted calls do not consume the local function-call budget.
 Call tools only when they reduce material uncertainty; do not call tools just to repeat provided context.
 When a tool output has ok=false, correct the invocation or use different evidence and continue.
-%s%sPrefer narrow tool calls that target the missing evidence.
+%sPrefer narrow tool calls that target the missing evidence.
 Conclude before the remaining budget reaches zero.
 Do not ask the user for more evidence.
-Return only the final artifact when enough evidence has been gathered.`, step, maxSteps, remainingTools, maxTools, skillToolInstruction(toolSpecs), readFileInstruction(toolSpecs))
-}
-
-func skillToolInstruction(toolSpecs []openai.ToolSpec) string {
-	if !slices.ContainsFunc(toolSpecs, func(spec openai.ToolSpec) bool { return spec.Name == tools.SkillReadToolName }) {
-		return ""
-	}
-	return "Use " + tools.SkillReadToolName + " only after a listed skill is relevant, and only to read that skill's SKILL.md or text files under its references/ directory.\n"
+Return only the final artifact when enough evidence has been gathered.`, step, maxSteps, remainingTools, maxTools, readFileInstruction(toolSpecs))
 }
 
 func readFileInstruction(toolSpecs []openai.ToolSpec) string {

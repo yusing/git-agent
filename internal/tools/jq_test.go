@@ -20,12 +20,12 @@ func TestJQRegistersOnlyForReviewAndSimplify(t *testing.T) {
 		if !slices.Contains(ReviewToolCandidates(mode), jqToolName) {
 			t.Fatalf("%s review candidates omit %s", mode, jqToolName)
 		}
-		definitions := NewReviewRegistryWithSkills(nil, nil, mode, ReviewScope{}, gitctx.ChangeFingerprint{}).Definitions([]string{jqToolName})
+		definitions := NewReviewRegistry(nil, nil, mode, ReviewScope{}, gitctx.ChangeFingerprint{}).Definitions([]string{jqToolName})
 		if len(definitions) != 1 || !definitions[0].Strict || definitions[0].Schema["additionalProperties"] != false {
 			t.Fatalf("%s jq definition = %#v", mode, definitions)
 		}
 	}
-	if definitions := NewRegistryWithSkills(nil, nil).Definitions([]string{jqToolName}); len(definitions) != 0 {
+	if definitions := NewRegistry(nil, nil).Definitions([]string{jqToolName}); len(definitions) != 0 {
 		t.Fatalf("non-review registry exposes jq: %#v", definitions)
 	}
 }
@@ -40,7 +40,7 @@ func TestJQRetrievesJSONPointerValuesWithoutRoundingNumbers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewReviewRegistryWithSkills(repo, nil, ReviewModeCodebase, ReviewScope{}, gitctx.ChangeFingerprint{})
+	registry := NewReviewRegistry(repo, nil, ReviewModeCodebase, ReviewScope{}, gitctx.ChangeFingerprint{})
 
 	tests := []struct {
 		name    string
@@ -90,7 +90,7 @@ func TestJQUsesStagedSourcePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewReviewRegistryWithSkills(repo, nil, ReviewModeStaged, ReviewScope{}, fingerprint)
+	registry := NewReviewRegistry(repo, nil, ReviewModeStaged, ReviewScope{}, fingerprint)
 	result, err := registry.Execute(t.Context(), Invocation{Name: jqToolName, Arguments: `{"path":"config.json","pointer":"/value"}`})
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +144,7 @@ func TestJQMarksOversizedSelectedValuesTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewReviewRegistryWithSkills(repo, nil, ReviewModeCodebase, ReviewScope{}, gitctx.ChangeFingerprint{})
+	registry := NewReviewRegistry(repo, nil, ReviewModeCodebase, ReviewScope{}, gitctx.ChangeFingerprint{})
 	result, err := registry.Execute(t.Context(), Invocation{Name: jqToolName, Arguments: `{"path":"large.json","pointer":"/large","max_bytes":32,"max_lines":10}`})
 	if err != nil {
 		t.Fatal(err)

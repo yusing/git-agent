@@ -84,7 +84,8 @@ entirely and format a deterministic local message.
 | --- | --- |
 | Prepared Git context | Staged paths, status, stats, diffs, amend base, branch diffs, release ranges, and recent style commits |
 | Read-only model tools | Bounded file, diff, and repository inspection tools for generation workflows |
-| Guidance discovery | AGENTS/CLAUDE-family project instructions, plus local Codex-style `SKILL.md` workflow guidance |
+| Guidance discovery | AGENTS/CLAUDE-family project instructions scoped to the task paths |
+| Skill delegation | Prompt skill listing plus on-demand reading through `skills-mgr` |
 | Commit execution | Optional explicit `git commit --file -` or `git commit --amend --file -` after message generation |
 | Release-note writing | Release Markdown from explicit refs or `patch`, `minor`, and `major` shortcuts |
 | Review and simplification | Strict JSON reports with repository evidence and replayable SSE agent events |
@@ -162,13 +163,13 @@ inspection. It cannot expand the selected Git scope or relax evidence rules.
 When a remaining inspection is large and independently partitionable, the
 model may retire its current conversation and run bounded child inspections in
 parallel inside the same detached task. Children retain the selected Git scope,
-read-only tools, cancellation, and per-conversation budgets. Git-agent merges
+tool policy, cancellation, and per-conversation budgets. Git-agent merges
 validated leaf reports mechanically and publishes branch topology and progress
 through the same replayable SSE stream; `--wait` still returns one report.
 
 Diff-based runs calculate a bounded step range from effective changed lines,
 changed files, top-level scope dispersion, concrete repository-tool capability
-coverage, and applicable skills. `--depth fast|balanced|thorough` selects the
+coverage. `--depth fast|balanced|thorough` selects the
 lower bound, midpoint, or upper bound; the default is `balanced`. Generated Go
 files with standard markers are discounted, not ignored. Automatic review is
 capped at 60 model steps and 48 local tool calls; simplify is capped at 45 and
@@ -481,9 +482,10 @@ global. Displayed URLs redact URL credentials; sync uses same Git transport
 and authentication behavior as search `--remote`, without invoking `git`
 executable or interactive credential prompts.
 
-Skill discovery honors Codex `[[skills.config]]` entries in
-`$CODEX_HOME/config.toml` (default `~/.codex/config.toml`), including
-`enabled = false`.
+When `skills-mgr` is available on `PATH`, message-generation commands call
+`skills-mgr list` and inject its Markdown output verbatim as a developer prompt
+layer. The typed `skills_read` tool delegates to `skills-mgr get`. Git-agent
+does not scan skill roots or parse skill configuration, and it invokes no shell.
 
 Default auth comes from:
 
@@ -555,7 +557,7 @@ Behavior defaults:
 flowchart TD
     Start["git-agent command"] --> Inspect["Typed Git inspection"]
     Inspect --> Context["Prepared task context"]
-    Context --> Guidance["Project guidance and skills"]
+    Context --> Guidance["Project guidance"]
     Guidance --> Agent["Bounded read-only agent loop"]
     Agent --> Validate["Validate and shape output"]
     Validate --> Output["stdout, file, or git commit"]

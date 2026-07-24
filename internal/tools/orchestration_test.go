@@ -32,7 +32,7 @@ func TestOrchestrationManifestConfinesAndPinsArtifacts(t *testing.T) {
 	if strings.Contains(manifest.Inventory(), artifactPath) {
 		t.Fatalf("inventory leaked artifact path: %s", manifest.Inventory())
 	}
-	registry := NewReviewRegistryWithSkills(nil, nil, ReviewModeCodebase, ReviewScope{}, gitctx.ChangeFingerprint{}, manifest)
+	registry := NewReviewRegistry(nil, nil, ReviewModeCodebase, ReviewScope{}, gitctx.ChangeFingerprint{}, manifest)
 	result, err := registry.Execute(t.Context(), Invocation{Name: OrchestrationArtifactToolName, Arguments: `{"id":"review","line_start":2}`})
 	if err != nil || !strings.Contains(result.Content, `"content": "two\n"`) {
 		t.Fatalf("result = %s, error = %v", result.Content, err)

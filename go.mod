@@ -3,11 +3,9 @@ module github.com/yusing/git-agent
 go 1.26.5
 
 require (
-	github.com/BurntSushi/toml v1.6.0
 	github.com/bytedance/sonic v1.15.2
 	github.com/go-git/go-billy/v6 v6.0.0-alpha.1
 	github.com/go-git/go-git/v6 v6.0.0-alpha.4
-	github.com/goccy/go-yaml v1.19.2
 	github.com/golangci/golangci-lint/v2 v2.12.2
 	github.com/openai/openai-go/v3 v3.43.0
 	github.com/yusing/goutils v0.0.0-20260713173753-e8944db5b4e1
@@ -32,6 +30,7 @@ require (
 	github.com/Antonboom/errname v1.1.1 // indirect
 	github.com/Antonboom/nilnil v1.1.1 // indirect
 	github.com/Antonboom/testifylint v1.6.4 // indirect
+	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/ClickHouse/clickhouse-go-linter v1.2.0 // indirect
 	github.com/Djarvur/go-err113 v0.1.1 // indirect
 	github.com/Masterminds/semver/v3 v3.5.0 // indirect

@@ -105,7 +105,7 @@ func TestRunnerForcesFinalizationWhenBranchExceedsToolBudget(t *testing.T) {
 		{ToolCalls: []openai.ToolCall{{ID: "fc_2", CallID: "call_2", Name: "branch", Arguments: `{}`}}},
 		{Text: "forced final"},
 	}}
-	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeCodebase, tools.ReviewScope{}, gitctx.ChangeFingerprint{})
+	registry := tools.NewReviewRegistry(repo, nil, tools.ReviewModeCodebase, tools.ReviewScope{}, gitctx.ChangeFingerprint{})
 	var events []trace.Event
 	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
 		events = append(events, event)
@@ -251,7 +251,7 @@ func TestRunnerDisablesRejectedHostedCapabilityAndRetriesStepOnce(t *testing.T) 
 			{Text: `{"summary":"done; hosted web lookup unavailable"}`},
 		},
 	}
-	registry := tools.NewRegistryWithSkills(repo, nil)
+	registry := tools.NewRegistry(repo, nil)
 	var events []trace.Event
 	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
 		events = append(events, event)
@@ -528,7 +528,7 @@ func TestRunnerExecutesToolCallRoundTrip(t *testing.T) {
 		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: "{}"}}},
 		{Text: "Add parser"},
 	}}
-	registry := tools.NewRegistryWithSkills(repo, nil)
+	registry := tools.NewRegistry(repo, nil)
 	runner := OpenAIRunner{
 		Config:    config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 3, MaxToolCalls: 2},
 		Client:    client,
@@ -553,9 +553,6 @@ func TestRunnerExecutesToolCallRoundTrip(t *testing.T) {
 	if instructions := client.requests[0].Instructions; !containsAll(instructions, "bounded agent loop", "model step 1 of 3", "2 of 2 local function tool calls remaining", "reduce material uncertainty", "do not call tools just to repeat provided context", "Conclude before the remaining budget reaches zero", "Do not ask the user for more evidence") {
 		t.Fatalf("request instructions missing tool economy guidance: %s", instructions)
 	}
-	if strings.Contains(client.requests[0].Instructions, "Use skills_read") {
-		t.Fatalf("request instructions should not mention unavailable skills_read: %s", client.requests[0].Instructions)
-	}
 }
 
 func TestRunnerContinuesAfterDistinctCallsReturnEqualOutputs(t *testing.T) {
@@ -572,7 +569,7 @@ func TestRunnerContinuesAfterDistinctCallsReturnEqualOutputs(t *testing.T) {
 		{ToolCalls: []openai.ToolCall{{ID: "fc_2", CallID: "call_2", Name: "grep", Arguments: `{"pattern":"second-missing-pattern"}`}}},
 		{Text: "done"},
 	}}
-	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeCodebase, tools.ReviewScope{}, gitctx.ChangeFingerprint{})
+	registry := tools.NewReviewRegistry(repo, nil, tools.ReviewModeCodebase, tools.ReviewScope{}, gitctx.ChangeFingerprint{})
 	runner := OpenAIRunner{
 		Config:    config.Config{Model: "test", MaxSteps: 4, MaxToolCalls: 3},
 		Client:    client,
@@ -615,7 +612,7 @@ func TestRunnerReturnsToolErrorsToModelForRecovery(t *testing.T) {
 		{ToolCalls: []openai.ToolCall{{ID: "fc_2", CallID: "call_2", Name: "read_file", Arguments: `{"path":"actual.go"}`}}},
 		{Text: "recovered"},
 	}}
-	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeCodebase, tools.ReviewScope{}, gitctx.ChangeFingerprint{})
+	registry := tools.NewReviewRegistry(repo, nil, tools.ReviewModeCodebase, tools.ReviewScope{}, gitctx.ChangeFingerprint{})
 	var events []trace.Event
 	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
 		events = append(events, event)
@@ -687,7 +684,7 @@ func TestRunnerStopsWhenReviewSnapshotChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeUncommitted, tools.ReviewScope{}, fingerprint)
+	registry := tools.NewReviewRegistry(repo, nil, tools.ReviewModeUncommitted, tools.ReviewScope{}, fingerprint)
 	if err := os.WriteFile(path, []byte("package changed\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -723,7 +720,7 @@ func TestRunnerDoesNotRecoverToolErrorsAfterCancellation(t *testing.T) {
 		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "read_file", Arguments: `{"path":"missing.go"}`}}},
 		{Text: "must not recover"},
 	}}
-	registry := tools.NewReviewRegistryWithSkills(repo, nil, tools.ReviewModeCodebase, tools.ReviewScope{}, gitctx.ChangeFingerprint{})
+	registry := tools.NewReviewRegistry(repo, nil, tools.ReviewModeCodebase, tools.ReviewScope{}, gitctx.ChangeFingerprint{})
 	runner := OpenAIRunner{
 		Config:    config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 2},
 		Client:    client,
@@ -756,7 +753,7 @@ func TestRunnerFinalizesOnRepeatedCanonicalToolCall(t *testing.T) {
 		{ToolCalls: []openai.ToolCall{{ID: "fc_2", CallID: "call_2", Name: "repo_summary", Arguments: `{ }`}}},
 		{Text: "done"},
 	}}
-	registry := tools.NewRegistryWithSkills(repo, nil)
+	registry := tools.NewRegistry(repo, nil)
 	var events []trace.Event
 	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
 		events = append(events, event)
@@ -843,7 +840,7 @@ func TestRunnerFinalizesImmediatelyAtReportedContextThreshold(t *testing.T) {
 		},
 		{Text: "all findings"},
 	}}
-	registry := tools.NewRegistryWithSkills(repo, nil)
+	registry := tools.NewRegistry(repo, nil)
 	runner := OpenAIRunner{
 		Config: config.Config{Model: "test", MaxSteps: 10, MaxToolCalls: 10, ContextTokens: 217600},
 		Client: client, Tools: registry,
@@ -874,7 +871,7 @@ func TestRunnerRejectsToolCallsOutsideAllowedSet(t *testing.T) {
 	runner := OpenAIRunner{
 		Config: config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1},
 		Client: client,
-		Tools:  tools.NewRegistryWithSkills(repo, nil),
+		Tools:  tools.NewRegistry(repo, nil),
 	}
 
 	_, err = runner.Run(t.Context(), Request{
@@ -897,7 +894,7 @@ func TestRunnerRejectsAllowedNameWithoutExposedDefinition(t *testing.T) {
 	runner := OpenAIRunner{
 		Config: config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1},
 		Client: client,
-		Tools:  tools.NewRegistryWithSkills(nil, nil),
+		Tools:  tools.NewRegistry(nil, nil),
 	}
 
 	_, err := runner.Run(t.Context(), Request{
@@ -924,7 +921,7 @@ func TestRunnerFinalizesWhenStepBudgetRunsOut(t *testing.T) {
 		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: "{}"}}},
 		{Text: "Add parser"},
 	}}
-	registry := tools.NewRegistryWithSkills(repo, nil)
+	registry := tools.NewRegistry(repo, nil)
 	runner := OpenAIRunner{
 		Config:             config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1, MaxToolCalls: 2},
 		Client:             client,
@@ -984,7 +981,7 @@ func TestRunnerFinalizesWhenToolBudgetRunsOut(t *testing.T) {
 		}},
 		{Text: "Add parser"},
 	}}
-	registry := tools.NewRegistryWithSkills(repo, nil)
+	registry := tools.NewRegistry(repo, nil)
 	runner := OpenAIRunner{
 		Config:    config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 3, MaxToolCalls: 1},
 		Client:    client,

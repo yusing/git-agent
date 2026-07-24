@@ -224,10 +224,9 @@ reports only findings or opportunities relevant to that focus. A focus may
 narrow what is reported within the authoritative scope; it cannot broaden that
 scope or weaken repository-evidence requirements.
 
-In staged mode, repository guidance is read from index blobs, repository-local
-worktree skills are omitted, and `list_files`, `read_file`, `inspect_file`,
-`jq`, `grep`, and `find` use index state. User, Codex, admin, and plugin skills
-remain available. Explicit worktree-source requests for `read_file`,
+In staged mode, repository guidance is read from index blobs, and `list_files`,
+`read_file`, `inspect_file`, `jq`, `grep`, and `find` use index state.
+Explicit worktree-source requests for `read_file`,
 `inspect_file`, and `jq` are rejected. In all modes, `read_file` streams the
 selected source and applies byte/line caps before materializing content. Report
 validation verifies every evidence path and inclusive line end against the
@@ -362,8 +361,8 @@ agent progress. `review` defaults to `gpt-5.6-sol`; `simplify` defaults to
 the depth-derived default.
 
 Diff-based review and simplify calculate deterministic lower and upper model-step
-bounds after preparing the authoritative snapshot, discovering skills, and
-building the concrete tool registry. Let `Lh` and `Lg` be handwritten and
+bounds after preparing the authoritative snapshot and building the concrete
+tool registry. Let `Lh` and `Lg` be handwritten and
 standards-marker-generated added-plus-deleted lines, `B` binary files, `Fh` and
 `Fg` handwritten and generated files, and `D` distinct top-level path scopes:
 
@@ -386,26 +385,23 @@ change enumeration `0.20`, path-bounded diff `0.20`, search or structural
 inspection `0.20`, and path discovery `0.10`. Codebase mode omits path-bounded
 diff and renormalizes the other `0.80`. Missing bounded source reading, or
 missing authoritative scope enumeration/discovery, fails budget planning rather
-than granting more steps. Let `K` be applicable skill roots capped at four.
-Explicitly named skills apply; otherwise only a focused code-review or
-code-simplification skill name or description matching the command applies.
-Unrelated discovered skills do not affect the budget.
+than granting more steps.
 
 ```text
 Mlow  = 1 + 0.25 * (1 - C)
 Mhigh = 1 + 0.75 * (1 - C)
 
-review lower = 6 + ceil(0.5 * W * Mlow) + ceil(K / 3)
-review upper = 6 + ceil(W * Mhigh) + K + 3
+review lower = 6 + ceil(0.5 * W * Mlow)
+review upper = 6 + ceil(W * Mhigh) + 3
 
-simplify lower = 5 + ceil(0.5 * W * Mlow) + ceil(K / 3)
-simplify upper = 5 + ceil(W * Mhigh) + K + 2
+simplify lower = 5 + ceil(0.5 * W * Mlow)
+simplify upper = 5 + ceil(W * Mhigh) + 2
 ```
 
 Review clamps both bounds to `[8,60]`; simplify clamps them to `[6,45]`.
 `fast` selects the lower bound, `balanced` selects
 `ceil((lower+upper)/2)`, and `thorough` selects the upper bound. The automatic
-local function-tool ceiling is `ceil(0.8*selected_steps)+K`, clamped to `[6,48]`
+local function-tool ceiling is `ceil(0.8*selected_steps)`, clamped to `[6,48]`
 for review and `[5,36]` for simplify. An explicit `--max-steps` selects exactly
 that positive model-step ceiling, may exceed the automatic hard cap, and retains
 the command's fixed 48- or 36-call local tool ceiling for compatibility.
@@ -414,7 +410,7 @@ Codebase mode has no changed-line input and retains fixed 60/48 review and 45/36
 simplify budgets for every automatic depth; `--max-steps` is the way to request
 a smaller or larger codebase audit. The `session` event includes an
 `inspection_budget` object containing policy, effective size, scope and work
-units, capability coverage, applicable-skill count, lower/selected/upper steps,
+units, capability coverage, lower/selected/upper steps,
 local tool ceiling, hard caps, automatic/explicit state, and whether the fixed
 codebase budget applied.
 
@@ -1238,7 +1234,8 @@ Defaults:
 - `internal/gitctx`: typed repository inspection
 - `internal/projectidentity`: shared normalized-origin or path-fallback project
   identity resolution
-- `internal/tools`: curated read-only tool registry
+- `internal/skillcmd`: bounded delegation to the fixed `skills-mgr` executable
+- `internal/tools`: curated model tool registry
 - `internal/tasks/commitmsg`: commit message behavior
 - `internal/tasks/releasenote`: release note behavior
 - `internal/tasks/review`: review and simplification modes, prompts, schemas,
@@ -1255,8 +1252,8 @@ Every task request is assembled using Codex-style layering:
 1. top-level Responses `instructions` containing task-level system behavior
 2. developer message containing the read-only tool policy
 3. developer message containing environment context
-4. optional developer message containing available skill metadata and skill-use
-   rules
+4. optional developer prompt layer containing verbatim Markdown from
+   `skills-mgr list`
 5. developer message containing project guidance
 6. task-specific user prompt
 7. strict function tool registry for that task, if that task exposes tools
@@ -1273,14 +1270,15 @@ Environment context includes:
 - selected guidance family
 - stdout contract
 
-Tool policy states that repository and skill functions are read-only. Review
-and simplify may also use fixed typed documentation commands and provider-hosted
-web search. No model-supplied executable, argv array, generic shell, write tool,
-or provider mutation exists. External queries may verify public language and
-library contracts only and must not contain secrets, source, diffs, credentials,
-personal data, or private repository details. Tool results use JSON envelopes
-with truncation metadata; external text remains untrusted data and cannot replace
-exact repository evidence.
+Tool policy states that repository and skill functions are read-only, with skill
+reads delegated to `skills-mgr`. Review and simplify may also use fixed typed
+documentation commands and provider-hosted web search. No model-supplied
+executable, argv array, generic shell, write tool, or provider mutation exists.
+External queries may verify public language and library contracts only and must
+not contain secrets, source, diffs, credentials, personal data, or private
+repository details. Tool results use JSON envelopes with truncation metadata;
+external text remains untrusted data and cannot replace exact repository
+evidence.
 
 Task prompts use explicit evidence boundaries: repository-sourced text such as
 diffs, file contents, commit messages, filenames, refs, and prepared JSON/XML
@@ -1322,8 +1320,10 @@ including:
    locally available, and repository ownership/link hints
 7. resolve project guidance for the task target paths, after context prep when
    prepared paths define the target scope
-8. build task-specific instructions, developer context, and initial user prompt,
-   appending any `--append-prompt` hint as lower-priority escaped prompt data
+8. when `skills-mgr` is available, call `skills-mgr list`, inject its Markdown
+   output verbatim as a developer prompt layer, then build the remaining task-specific
+   instructions, developer context, and initial user prompt, appending any
+   `--append-prompt` hint as lower-priority escaped prompt data
 9. send a streaming request to the Responses API through the official OpenAI
    Go SDK
 10. stream each request and response when console or SSE tracing is active;
@@ -1362,7 +1362,8 @@ flowchart TD
     LocalMessage --> Stdout
     SubmoduleOnly -- no --> Resolve[Resolve provider config from flags, env, defaults]
     Resolve --> Guidance[Resolve project guidance for staged paths]
-    Guidance --> Registry[Register read-only commit-message tools plus optional skills_read]
+    Guidance --> Skills[Inject skills-mgr list Markdown]
+    Skills --> Registry[Register read-only commit-message tools and optional skills_read]
     Registry --> Runner[Build OpenAI runner with validator and tool specs]
     Runner --> Request[Assemble request layers]
     Request --> Model[Call Responses API]
@@ -1397,7 +1398,8 @@ flowchart TD
     StagedPaths --> Prepare[Precompute amend context]
     Prepare --> Evidence[Collect original HEAD message, HEAD diff, final amended diff, staged diagnostics]
     Evidence --> Guidance[Resolve project guidance for final amended paths]
-    Guidance --> Registry[Register read-only commit-message tools plus optional skills_read]
+    Guidance --> Skills[Inject skills-mgr list Markdown]
+    Skills --> Registry[Register read-only commit-message tools and optional skills_read]
     Registry --> Runner[Build OpenAI runner with amend validator and tool specs]
     Runner --> Request[Assemble amend request layers with prepared amend context]
     Request --> Model[Call Responses API]
@@ -1441,8 +1443,9 @@ flowchart TD
     SubmoduleOnly -- no --> Resolve[Resolve provider config from flags, env, defaults]
     PrepareAmend --> Resolve
     Resolve --> Guidance[Resolve project guidance for task paths]
-    Guidance --> Trace[Create stdout-streaming console trace]
-    Trace --> Registry[Register read-only commit-message tools plus optional skills_read]
+    Guidance --> Skills[Inject skills-mgr list Markdown]
+    Skills --> Trace[Create stdout-streaming console trace]
+    Trace --> Registry[Register read-only commit-message tools and optional skills_read]
     Registry --> Runner[Build OpenAI runner with validator and tool specs]
     Runner --> Request[Assemble request layers]
     Request --> Model[Call Responses API]
@@ -1475,12 +1478,13 @@ flowchart TD
     OpenRepo --> Prepare[Precompute PR context for origin/HEAD..HEAD]
     Prepare --> Evidence[Collect base, changed paths, stats, branch commits, recent commits, bounded diff]
     Evidence --> Guidance[Resolve project guidance for changed paths]
-    Guidance --> Registry[Register optional skills_read tool]
-    Registry --> Runner[Build OpenAI runner with prepared context and optional skill tool specs]
+    Guidance --> Skills[Inject skills-mgr list Markdown]
+    Skills --> Registry[Register optional skills_read]
+    Registry --> Runner[Build OpenAI runner with prepared context]
     Runner --> Request[Assemble request layers with prepared PR context]
     Request --> Model[Call Responses API]
-    Model --> ToolDecision{Skill tool call?}
-    ToolDecision -- yes --> ExecuteSkill[Execute skills_read]
+    Model --> ToolDecision{Skill read?}
+    ToolDecision -- yes --> ExecuteSkill[Execute skills-mgr get]
     ExecuteSkill --> Continue[Append function call and output items]
     Continue --> Model
     ToolDecision -- no --> Shape[Shape body wrapping]
@@ -1507,8 +1511,9 @@ flowchart TD
     Floors --> Timeout[Create task timeout context]
     Timeout --> OpenRepo[Open repository]
     OpenRepo --> Guidance[Resolve project guidance for repository root]
-    Guidance --> Trace{--out set?}
-    Trace -- no --> Registry[Register repo_summary plus optional skills_read]
+    Guidance --> Skills[Inject skills-mgr list Markdown]
+    Skills --> Trace{--out set?}
+    Trace -- no --> Registry[Register repo_summary and optional skills_read]
     Trace -- yes --> StreamTrace[Create stdout-streaming console trace]
     StreamTrace --> Registry
     Registry --> Infer{Version bump shortcut?}
@@ -1522,9 +1527,9 @@ flowchart TD
     SubHistory --> Runner[Build OpenAI runner with release-note validator and JSON format]
     Runner --> Request[Assemble request layers with prepared release context]
     Request --> Model[Call Responses API]
-    Model --> ToolDecision{Fallback or skill tool call?}
+    Model --> ToolDecision{Fallback or skill read?}
     ToolDecision -- yes --> ToolBudget{Within tool budget?}
-    ToolBudget -- yes --> ExecuteTool[Execute repo_summary or skills_read]
+    ToolBudget -- yes --> ExecuteTool[Execute repo_summary or skills-mgr get]
     ExecuteTool --> Continue[Append function call and output items]
     Continue --> Model
     ToolBudget -- no --> Budget[Extend interactively or force final artifact]
@@ -1581,7 +1586,6 @@ AGENTS-family candidates:
 CLAUDE-family candidates:
 
 - `CLAUDE.md`
-
 
 ### Scope discovery
 
@@ -1656,46 +1660,12 @@ request. Sources are de-duplicated while preserving root-to-leaf order.
 `pr-message` uses the same family-selection behavior, but its target paths come
 from the current-branch diff against `origin/HEAD`.
 
-## 4.1 Skill discovery
-
-Message-generation commands discover reusable Codex-style skills from local
-`SKILL.md` files before request assembly. A valid skill has YAML frontmatter
-with nonempty `name` and `description`, parsed with `github.com/goccy/go-yaml`.
-Invalid or incomplete skill files are skipped.
-Duplicate names resolve once by source precedence: repository, user, Codex,
-admin, then plugin cache. Lower-precedence duplicates are omitted globally.
-Skills whose names contain a `commit` segment, delimited by `.`, `_`, `-`, or
-`:`, are also skipped so Git agent commit-message rules remain authoritative.
-Segment matching is case-insensitive.
-
-Discovery roots:
-
-- `.agents/skills` in each directory from the current working directory up to
-  the repository root
-- `$HOME/.agents/skills`
-- `$CODEX_HOME/skills`, defaulting to `$HOME/.codex/skills`
-- `/etc/codex/skills`
-- plugin cache skills under `$CODEX_HOME/plugins/cache/**/skills/*/SKILL.md`
-
-Before scanning these roots, discovery reads `$CODEX_HOME/config.toml`,
-defaulting to `$HOME/.codex/config.toml`. A `[[skills.config]]` entry with the
-skill's `SKILL.md` path and `enabled = false` omits that skill from discovery.
-Later entries for the same resolved path take precedence, so `enabled = true`
-re-enables it. A missing config file has no effect; an unreadable or malformed
-config fails discovery rather than silently enabling configured-off skills.
-
-The injected `## Skills` developer message lists only metadata and stable,
-opaque `skill:<hash>` source locators; absolute host paths stay out of initial
-context. The model must call `skills_read` before applying a listed skill.
-Skill instructions are lower priority than task instructions, tool policy,
-output contracts, validators, project guidance priority, and authoritative
-Git/release evidence.
-
 ## 5. Tool system
 
 ### Principles
 
-- read-only only
+- repository inspection tools are read-only
+- skill tools are read-only
 - typed tool contracts
 - no arbitrary shell access
 - no generic “run any git command” escape hatch
@@ -1736,25 +1706,23 @@ and line counts stream across the complete file; outline parsing retains at most
 the first 4 MiB, returns at most 200 entries and 64 KiB of entry data, and marks
 larger results truncated. Worktree file reads reject non-regular files.
 
-### Skill tools
+### Skill manager tools
 
-Message-generation commands discover Codex-style skills before the provider
-request and inject a developer `## Skills` section containing skill names,
-descriptions, and source locators. Skill bodies are not inlined. When at least
-one valid skill is discovered, the model receives:
+Request assembly and registry construction resolve `skills-mgr` from `PATH`.
+When it is available, message-generation commands:
 
-- `skills_read`
+- invoke `skills-mgr list` and inject its Markdown stdout verbatim as a
+  developer prompt layer
+- expose `skills_read`, which invokes `skills-mgr get <locator> [start:end]`
 
-`skills_read` reads `SKILL.md` or a text file under the selected skill's
-`references/` directory. It requires the exact source locator from the initial
-Skills section. Its strict tool schema enumerates the discovered locators so the
-provider cannot emit a different locator. Runtime validation also rejects
-unknown locators, absolute paths, traversal, symlink escapes, non-`references/`
-resource paths, and binary content, and applies the standard byte/line caps. It
-cannot execute skill scripts or expose arbitrary host files.
-
-When no valid skills are discovered, `skills_read` is not registered and no
-provider tool definition or locator enum is constructed.
+Git-agent does not discover skill roots, parse skill configuration, preload
+skill metadata itself, or inject skill-use rules. Read operands pass directly
+to `skills-mgr`, which owns their validation and behavior. Git-agent only
+resolves and invokes the fixed executable without a shell, uses the command
+working directory, captures bounded stdout and stderr, applies cancellation and
+a 20-second timeout, and returns tool results in the standard envelope. When
+`skills-mgr` is unavailable, the skills prompt layer and delegated tool
+definition are omitted.
 
 ### Commit message tools
 
@@ -1772,16 +1740,16 @@ Commit message tools:
 - `git_amend_delta`
 - `git_show_file_at_rev`
 
-`commit-msg` and `commit` expose these tools plus `skills_read` when skills are
-available. `pr-message` exposes no PR/repository diff tools; when skills are
-available, it exposes only `skills_read`. It precomputes `origin/HEAD` base
+`commit-msg` and `commit` expose these tools plus available skill manager
+tools. `pr-message` exposes only available skill manager tools. It precomputes
+`origin/HEAD` base
 metadata, changed paths, diff stats, branch commits, recent style commits, and
 a bounded full diff in Go before the first provider call.
 
 ### Review and simplification tools
 
-Both inspection commands expose shared repository tools, `jq`, plus
-`skills_read` when skills are available. `jq` accepts `path`, `source`,
+Both inspection commands expose shared repository tools, `jq`, and available
+skill manager tools. `jq` accepts `path`, `source`,
 `pointer`, `max_bytes`, and `max_lines`; it parses at most 16 MiB from the
 selected repository JSON source and retrieves one value through a plain RFC
 6901 JSON Pointer. An empty pointer selects the document root. It implements
@@ -1811,10 +1779,8 @@ prepared path, status, and line-stat inventory using zero-based `offset` and a
 bounded `limit`, so prompt compaction never makes changed paths undiscoverable.
 Before any diff-mode repository tool executes, registry verifies current
 authoritative repository fingerprint still matches prepared scope. Codebase
-mode does not register diff tools or apply drift checks. All tools remain
-read-only. Review and simplification requests use discovered skill summaries in
-initial developer context and call `skills_read` only for relevant skill bodies
-or referenced text resources.
+mode does not register diff tools or apply drift checks. All repository tools
+remain read-only.
 
 They also discover executable paths once during registry construction and expose
 only commands present on `PATH`:
@@ -1843,7 +1809,7 @@ discloses failed hosted lookup capability.
 Release-note generation precomputes ref resolution, parent logs, submodule
 gitlink changes, submodule history, and repository ownership in Go before the
 first provider call. The model receives only the `repo_summary` fallback tool
-for rare metadata gaps, plus `skills_read` when skills are available; legacy
+for rare metadata gaps plus available skill manager tools; legacy
 range/submodule tools are intentionally not exposed to the model. `resolve_ref`,
 `git_log_range`, `gitmodules_table`, `submodule_gitlink_range`,
 `submodule_log_range`, and `repo_kind` remain in the registry only as deprecated
@@ -2003,9 +1969,9 @@ Behavior:
 
 - describe the current branch as one squash merge commit versus `origin/HEAD`
 - treat the `origin/HEAD` to `HEAD` diff as authoritative scope
-- use the prepared PR context as authoritative evidence before any skill lookup
-- do not reference or request PR-specific tools; `pr-message` intentionally
-  exposes no PR/repository diff tools and may expose only `skills_read`
+- use the prepared PR context as authoritative evidence
+- do not request repository or PR-specific tools; `pr-message` exposes only
+  available skill manager tools
 - use branch commits only as supporting evidence for intent, grouping, and task
   IDs
 - ignore staged and unstaged work unless it is already committed at `HEAD`
@@ -2222,7 +2188,7 @@ The in-repository implementation is complete when:
 - guidance rendering uses repository-relative `<PROJECT_DOC path="...">` tags
 - normal commit-message guidance resolves against staged paths, while amend
   guidance resolves against the final amended paths
-- tools are read-only and exposed as strict function tools
+- repository tools are read-only; all tools use strict function schemas
 - tool outputs use the stable JSON envelope
 - generation-only stdout contains only the final generated artifact, except
   `release-note --out <file>` streams human console trace lines and writes the

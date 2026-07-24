@@ -159,7 +159,7 @@ func TestStorePersistsWrappedBranchToolDiagnostics(t *testing.T) {
 	diagnostic.RecordToolEvent(trace.Event{
 		Seq: 3, Kind: "branch.event",
 		Value: map[string]any{"event": map[string]any{
-			"kind": "future-event",
+			"kind":  "future-event",
 			"value": map[string]any{"kind": "tool-call", "arguments": `{"path":"collision.go"}`},
 		}},
 	})

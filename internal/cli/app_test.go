@@ -1647,23 +1647,29 @@ func TestCommitMsgAppendPromptAddsUserHint(t *testing.T) {
 	}
 }
 
-func TestCommitMsgIncludesSkillInstructionsAndReadTool(t *testing.T) {
+func TestCommitMsgDelegatesSkillsWithoutDiscoveringThem(t *testing.T) {
 	repoDir := initRepo(t)
 	t.Chdir(repoDir)
-	writeFixtureFile(t, filepath.Join(repoDir, ".agents", "skills", "change-writer", "SKILL.md"), "---\nname: change-writer\ndescription: Draft change summaries from staged diffs.\n---\n")
+	writeFixtureFile(t, filepath.Join(repoDir, ".agents", "skills", "change-writer", "SKILL.md"), "---\nname: change-writer\ndescription: do-not-inject-marker\n---\n")
+	bin := t.TempDir()
+	managerPath := filepath.Join(bin, "skills-mgr")
+	writeFixtureFile(t, managerPath, "#!/bin/sh\nif [ \"$1\" = list ]; then\n  printf '# Skill list\\n\\n- manager-skill\\n'\nfi\n")
+	if err := os.Chmod(managerPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
 
-	var requests []string
+	var request string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatal(err)
 		}
-		requests = append(requests, string(body))
+		request = string(body)
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: ")
 		fmt.Fprint(w, `{"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"test-model","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Add parser","annotations":[]}]}]}}`)
-		fmt.Fprint(w, "\n\n")
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprint(w, "\n\ndata: [DONE]\n\n")
 	}))
 	defer server.Close()
 
@@ -1675,13 +1681,18 @@ func TestCommitMsgIncludesSkillInstructionsAndReadTool(t *testing.T) {
 	if err := app.Run(t.Context(), []string{"commit-msg"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(requests) != 1 {
-		t.Fatalf("request count = %d", len(requests))
-	}
-	for _, want := range []string{"## Skills", "change-writer", "skills_read", "SKILL.md", "Available tools"} {
-		if !strings.Contains(requests[0], want) {
-			t.Fatalf("commit-msg request missing %q:\n%s", want, requests[0])
+	for _, unwanted := range []string{"do-not-inject-marker", "skills_list", "## Skills"} {
+		if strings.Contains(request, unwanted) {
+			t.Fatalf("commit-msg request unexpectedly contains %q:\n%s", unwanted, request)
 		}
+	}
+	for _, wanted := range []string{"# Skill list", "manager-skill", "skills_read"} {
+		if !strings.Contains(request, wanted) {
+			t.Fatalf("commit-msg request missing delegated tool %q:\n%s", wanted, request)
+		}
+	}
+	if strings.Contains(request, "skills_run") {
+		t.Fatalf("commit-msg request exposes removed skills_run tool:\n%s", request)
 	}
 }
 
@@ -2225,9 +2236,8 @@ func TestPRMessageUsesPreparedOriginHeadContextAndPrintsArtifact(t *testing.T) {
 	}
 }
 
-func TestPRMessageRejectsToolCallWhenNoSkillsExist(t *testing.T) {
+func TestPRMessageRejectsToolCallWhenNoToolsAreAvailable(t *testing.T) {
 	repoDir := initRepo(t)
-	t.Setenv("CODEX_HOME", "")
 	runGit(t, repoDir, "commit", "-m", "base")
 	runGit(t, repoDir, "update-ref", "refs/remotes/origin/HEAD", gitHead(t, repoDir))
 	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("branch\n"), 0o644); err != nil {
@@ -2236,6 +2246,7 @@ func TestPRMessageRejectsToolCallWhenNoSkillsExist(t *testing.T) {
 	runGit(t, repoDir, "add", "app.txt")
 	runGit(t, repoDir, "commit", "-m", "feat: branch change")
 	t.Chdir(repoDir)
+	t.Setenv("PATH", t.TempDir())
 
 	var request []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2274,53 +2285,7 @@ func TestPRMessageRejectsToolCallWhenNoSkillsExist(t *testing.T) {
 	}
 	toolList, ok := providerTools.([]any)
 	if !ok || len(toolList) != 0 {
-		t.Fatalf("empty skill discovery sent provider tool definitions: %s", request)
-	}
-}
-
-func TestPRMessageExposesOnlySkillToolsWhenSkillsExist(t *testing.T) {
-	repoDir := initRepo(t)
-	t.Chdir(repoDir)
-	runGit(t, repoDir, "commit", "-m", "base")
-	runGit(t, repoDir, "update-ref", "refs/remotes/origin/HEAD", gitHead(t, repoDir))
-	writeFixtureFile(t, filepath.Join(repoDir, ".agents", "skills", "pr-writer", "SKILL.md"), "---\nname: pr-writer\ndescription: Draft pull request messages.\n---\n")
-	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("branch\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGit(t, repoDir, "add", "app.txt")
-	runGit(t, repoDir, "commit", "-m", "feat: branch change")
-
-	var requests []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		requests = append(requests, string(body))
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: ")
-		fmt.Fprint(w, `{"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"test-model","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"feat: update app from branch","annotations":[]}]}]}}`)
-		fmt.Fprint(w, "\n\n")
-		fmt.Fprint(w, "data: [DONE]\n\n")
-	}))
-	defer server.Close()
-
-	t.Setenv("OPENAI_API_KEY", "test-key")
-	t.Setenv("OPENAI_BASE_URL", server.URL)
-	t.Setenv("OPENAI_MODEL", "test-model")
-
-	app := &App{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
-	if err := app.Run(t.Context(), []string{"pr-message"}); err != nil {
-		t.Fatal(err)
-	}
-	if len(requests) != 1 {
-		t.Fatalf("request count = %d", len(requests))
-	}
-	if !strings.Contains(requests[0], "skills_read") || !strings.Contains(requests[0], "## Skills") {
-		t.Fatalf("pr-message request missing skills:\n%s", requests[0])
-	}
-	if strings.Contains(requests[0], "git_pr_") {
-		t.Fatalf("pr-message request should not expose PR tools:\n%s", requests[0])
+		t.Fatalf("pr-message sent provider tool definitions: %s", request)
 	}
 }
 
@@ -2361,54 +2326,6 @@ func TestReleaseNoteRaisesStepAndTimeoutFloor(t *testing.T) {
 	}
 	if len(requests) == 0 {
 		t.Fatal("expected at least one request")
-	}
-}
-
-func TestReleaseNoteExposesRepoSummaryAndSkillReadTools(t *testing.T) {
-	repoDir := initRepo(t)
-	t.Chdir(repoDir)
-	runGit(t, repoDir, "commit", "-m", "feat: base app")
-	runGit(t, repoDir, "tag", "-m", "v1.0.0", "v1.0.0")
-	writeFixtureFile(t, filepath.Join(repoDir, ".agents", "skills", "release-writer", "SKILL.md"), "---\nname: release-writer\ndescription: Write operator-facing release notes.\n---\n")
-	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("release\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGit(t, repoDir, "add", "app.txt")
-	runGit(t, repoDir, "commit", "-m", "feat: release app")
-
-	var requests []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		requests = append(requests, string(body))
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: ")
-		fmt.Fprint(w, `{"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"test-model","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"{\"sections\":[]}","annotations":[]}]}]}}`)
-		fmt.Fprint(w, "\n\n")
-		fmt.Fprint(w, "data: [DONE]\n\n")
-	}))
-	defer server.Close()
-
-	t.Setenv("OPENAI_API_KEY", "test-key")
-	t.Setenv("OPENAI_BASE_URL", server.URL)
-	t.Setenv("OPENAI_MODEL", "test-model")
-
-	app := &App{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
-	if err := app.Run(t.Context(), []string{"release-note", "v1.0.0", "HEAD"}); err != nil {
-		t.Fatal(err)
-	}
-	if len(requests) != 1 {
-		t.Fatalf("request count = %d", len(requests))
-	}
-	for _, want := range []string{"repo_summary", "skills_read", "## Skills", "release-writer"} {
-		if !strings.Contains(requests[0], want) {
-			t.Fatalf("release-note request missing %q:\n%s", want, requests[0])
-		}
-	}
-	if strings.Contains(requests[0], "git_log_range") || strings.Contains(requests[0], "submodule_log_range") {
-		t.Fatalf("release-note request exposed deprecated tools:\n%s", requests[0])
 	}
 }
 

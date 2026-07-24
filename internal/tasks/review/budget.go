@@ -20,15 +20,12 @@ const (
 	ReviewMaxToolCalls   = 48
 	SimplifyMaxSteps     = 45
 	SimplifyMaxToolCalls = 36
-
-	maxBudgetSkills = 4
 )
 
 type BudgetInput struct {
 	Kind             Kind
 	Prepared         PreparedContext
 	ToolNames        []string
-	ApplicableSkills int
 	Depth            Depth
 	ExplicitMaxSteps int
 }
@@ -40,7 +37,6 @@ type BudgetPlan struct {
 	Scopes              int     `json:"scopes"`
 	WorkUnits           int     `json:"work_units"`
 	CapabilityCoverage  float64 `json:"capability_coverage"`
-	ApplicableSkills    int     `json:"applicable_skills"`
 	LowerSteps          int     `json:"lower_steps"`
 	SelectedSteps       int     `json:"selected_steps"`
 	UpperSteps          int     `json:"upper_steps"`
@@ -87,7 +83,6 @@ func PlanBudget(input BudgetInput) (BudgetPlan, error) {
 		return BudgetPlan{}, err
 	}
 	plan.CapabilityCoverage = coverage
-	plan.ApplicableSkills = min(max(input.ApplicableSkills, 0), maxBudgetSkills)
 
 	if input.Prepared.Mode == ModeCodebase {
 		plan.LowerSteps = hardStepCap
@@ -110,9 +105,8 @@ func PlanBudget(input BudgetInput) (BudgetPlan, error) {
 
 	lowMultiplier := 1 + 0.25*(1-coverage)
 	highMultiplier := 1 + 0.75*(1-coverage)
-	skillLow := ceilDiv(plan.ApplicableSkills, 3)
-	rawLow := base + int(math.Ceil(0.5*float64(metrics.workUnits)*lowMultiplier)) + skillLow
-	rawHigh := base + int(math.Ceil(float64(metrics.workUnits)*highMultiplier)) + plan.ApplicableSkills + verification
+	rawLow := base + int(math.Ceil(0.5*float64(metrics.workUnits)*lowMultiplier))
+	rawHigh := base + int(math.Ceil(float64(metrics.workUnits)*highMultiplier)) + verification
 	plan.LowerSteps = min(max(rawLow, stepFloor), hardStepCap)
 	plan.UpperSteps = min(max(rawHigh, plan.LowerSteps), hardStepCap)
 
@@ -124,7 +118,7 @@ func PlanBudget(input BudgetInput) (BudgetPlan, error) {
 	case DepthThorough:
 		plan.SelectedSteps = plan.UpperSteps
 	}
-	plan.MaxToolCalls = min(max(toolFloor, ceilDiv(4*plan.SelectedSteps, 5)+plan.ApplicableSkills), hardToolCap)
+	plan.MaxToolCalls = min(max(toolFloor, ceilDiv(4*plan.SelectedSteps, 5)), hardToolCap)
 	if input.ExplicitMaxSteps > 0 {
 		plan.Policy = "explicit"
 		plan.SelectedSteps = input.ExplicitMaxSteps
