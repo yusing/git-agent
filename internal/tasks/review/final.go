@@ -45,8 +45,8 @@ func ValidateFinalReviewReport(report FinalReviewReport) error {
 	if errs := validateReview(providerReport); len(errs) > 0 {
 		return fmt.Errorf("invalid final review report: %s", strings.Join(errs, "; "))
 	}
-	if len(report.Checks) == 0 {
-		return fmt.Errorf("invalid final review report: checks must contain registered results")
+	if report.Checks == nil {
+		return fmt.Errorf("invalid final review report: checks must be an array")
 	}
 	seen := make(map[string]bool, len(report.Checks))
 	for index, result := range report.Checks {

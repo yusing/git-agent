@@ -12,12 +12,10 @@ import (
 type fakePlan struct {
 	name     string
 	runnable bool
-	reason   string
 }
 
 func (p fakePlan) CheckerName() string { return p.name }
 func (p fakePlan) Runnable() bool      { return p.runnable }
-func (p fakePlan) SkipReason() string  { return p.reason }
 
 type fakeRunner struct {
 	name         string
@@ -104,14 +102,14 @@ func TestSetRunsRegisteredCheckersInOrderWithImmutableScope(t *testing.T) {
 	}
 }
 
-func TestSetBuildsSkipWithoutProgressOrExecution(t *testing.T) {
+func TestSetOmitsInapplicableCheckersWithoutProgressOrExecution(t *testing.T) {
 	scope, err := NewCodebaseScope(t.TempDir(), []string{""})
 	if err != nil {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{
 		name: "future-checker",
-		plan: fakePlan{name: "future-checker", reason: "no supported project"},
+		plan: fakePlan{name: "future-checker"},
 	}
 	set, err := NewSet(runner)
 	if err != nil {
@@ -132,8 +130,18 @@ func TestSetBuildsSkipWithoutProgressOrExecution(t *testing.T) {
 	if runner.runCount != 0 || progressCalls != 0 {
 		t.Fatalf("run count = %d, progress = %d", runner.runCount, progressCalls)
 	}
-	if len(results) != 1 || results[0].Status != StatusSkipped || results[0].Reason != "no supported project" {
+	if results == nil || len(results) != 0 {
 		t.Fatalf("results = %#v", results)
+	}
+	synthetic, err := prepared.SyntheticResults(func(string) []Diagnostic {
+		t.Fatal("requested diagnostics for inapplicable checker")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if synthetic == nil || len(synthetic) != 0 {
+		t.Fatalf("synthetic results = %#v", synthetic)
 	}
 }
 
@@ -160,8 +168,6 @@ func TestSetRejectsMalformedDuplicateAndMismatchedContracts(t *testing.T) {
 	for name, runner := range map[string]*fakeRunner{
 		"nil-plan":        {name: "check"},
 		"mismatched-plan": {name: "check", plan: fakePlan{name: "future", runnable: true}},
-		"bad-skip":        {name: "check", plan: fakePlan{name: "check"}},
-		"mixed-plan":      {name: "check", plan: fakePlan{name: "check", runnable: true, reason: "skip"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			set, err := NewSet(runner)

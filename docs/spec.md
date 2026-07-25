@@ -253,18 +253,22 @@ When orchestration input is present, Git-agent adds its validated manifest
 SHA-256 to stored final report after model-schema validation.
 
 After the validated provider review report (and after branch reports are merged,
-when applicable), review runs its registered host checks once. It publishes
+when applicable), review selects the registered host checks that apply to the
+authoritative review scope and runs them once. Inapplicable checks are omitted
+from the report rather than represented as skipped. It publishes
 `runtime.status` with `phase=running_static_checks` and the check name before
 each runnable check. The terminal review report preserves the provider fields
-and adds an ordered nonempty `checks` array. Each check result has status
+and adds an ordered `checks` array, which is empty when no checks apply. Each
+check result has status
 `pass`, `findings`, `skipped`, or `error`; findings contain bounded normalized
 diagnostics, skipped results contain a reason, and check-analysis failures
 contain an error. Private checker start, wait, analysis, and output failures
 produce an `error` check result; context cancellation remains a terminal task
 error.
 
-The built-in `golangci-lint` check selects targets from the authoritative review
-scope. Uncommitted review uses the verified worktree; staged review uses the
+The built-in `golangci-lint` check applies only when it selects at least one Go
+target from the authoritative review scope; otherwise it is absent from
+`checks`. Uncommitted review uses the verified worktree; staged review uses the
 verified materialized index snapshot; codebase review runs `./...` once for each
 discovered Go module. In changed modes, existing regular `.go` paths select the
 nearest Go module without crossing a repository-component boundary, then select

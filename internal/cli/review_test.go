@@ -152,12 +152,8 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 			}
 			if test.command == "review" {
 				checks, ok := storedReport["checks"].([]any)
-				if !ok || len(checks) != 1 {
+				if !ok || len(checks) != 0 {
 					t.Fatalf("stored review checks = %#v", storedReport["checks"])
-				}
-				check, ok := checks[0].(map[string]any)
-				if !ok || check["name"] != "golangci-lint" || check["status"] != "skipped" {
-					t.Fatalf("stored review check = %#v", checks[0])
 				}
 			} else if _, exists := storedReport["checks"]; exists {
 				t.Fatalf("simplify report unexpectedly contains checks: %#v", storedReport)

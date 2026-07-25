@@ -12,7 +12,6 @@ const PrivateCommand = "__git-agent-check"
 type Plan interface {
 	CheckerName() string
 	Runnable() bool
-	SkipReason() string
 }
 
 type Runner interface {
@@ -69,12 +68,6 @@ type preparedRunner struct {
 	plan   Plan
 }
 
-type PlanSummary struct {
-	Name       string
-	Runnable   bool
-	SkipReason string
-}
-
 func (s *Set) Prepare(scope Scope) (*PreparedSet, error) {
 	if s == nil || len(s.ordered) == 0 {
 		return nil, fmt.Errorf("checker set is uninitialized")
@@ -95,33 +88,16 @@ func (s *Set) Prepare(scope Scope) (*PreparedSet, error) {
 		if plan.CheckerName() != name {
 			return nil, fmt.Errorf("plan check %q: plan names checker %q", name, plan.CheckerName())
 		}
-		if plan.Runnable() {
-			if plan.SkipReason() != "" {
-				return nil, fmt.Errorf("plan check %q: runnable plan contains skip reason", name)
-			}
-		} else if _, err := NewSkipped(name, plan.SkipReason()); err != nil {
-			return nil, fmt.Errorf("plan check %q: %w", name, err)
+		if !plan.Runnable() {
+			continue
 		}
 		prepared.items = append(prepared.items, preparedRunner{name: name, runner: runner, plan: plan})
 	}
 	return prepared, nil
 }
 
-func (p *PreparedSet) Summaries() []PlanSummary {
-	if p == nil {
-		return nil
-	}
-	summaries := make([]PlanSummary, 0, len(p.items))
-	for _, item := range p.items {
-		summaries = append(summaries, PlanSummary{
-			Name: item.name, Runnable: item.plan.Runnable(), SkipReason: item.plan.SkipReason(),
-		})
-	}
-	return summaries
-}
-
 func (p *PreparedSet) Run(ctx context.Context, executable string, progress Progress) ([]Result, error) {
-	if p == nil || len(p.items) == 0 {
+	if p == nil {
 		return nil, fmt.Errorf("prepared checker set is uninitialized")
 	}
 	if err := p.scope.validate(); err != nil {
@@ -131,14 +107,6 @@ func (p *PreparedSet) Run(ctx context.Context, executable string, progress Progr
 	for _, item := range p.items {
 		if err := ctx.Err(); err != nil {
 			return nil, err
-		}
-		if !item.plan.Runnable() {
-			result, err := NewSkipped(item.name, item.plan.SkipReason())
-			if err != nil {
-				return nil, err
-			}
-			results = append(results, result)
-			continue
 		}
 		if progress != nil {
 			if err := progress(item.name); err != nil {
@@ -164,19 +132,11 @@ func (p *PreparedSet) Run(ctx context.Context, executable string, progress Progr
 }
 
 func (p *PreparedSet) SyntheticResults(diagnostics func(string) []Diagnostic) ([]Result, error) {
-	if p == nil || len(p.items) == 0 {
+	if p == nil {
 		return nil, fmt.Errorf("prepared checker set is uninitialized")
 	}
 	results := make([]Result, 0, len(p.items))
 	for _, item := range p.items {
-		if !item.plan.Runnable() {
-			result, err := NewSkipped(item.name, item.plan.SkipReason())
-			if err != nil {
-				return nil, err
-			}
-			results = append(results, result)
-			continue
-		}
 		result, err := NewResult(item.name, diagnostics(item.name))
 		if err != nil {
 			return nil, err

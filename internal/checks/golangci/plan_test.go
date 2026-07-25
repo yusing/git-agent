@@ -63,7 +63,7 @@ func TestPlanChangedSkipsNonGoOutsideModulesAndSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan := genericPlan.(*checkerPlan)
-	if plan.Runnable() || plan.SkipReason() == "" || len(plan.invocations) != 0 {
+	if plan.Runnable() || len(plan.invocations) != 0 {
 		t.Fatalf("plan = %#v", plan)
 	}
 }

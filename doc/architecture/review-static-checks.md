@@ -114,8 +114,7 @@ Scope
 
 Plan
   CheckerName(): stable checker name
-  Runnable(): whether execution is required
-  SkipReason(): stable reason when Runnable() is false
+  Runnable(): whether the checker applies to this scope and requires execution
 
 Runner
   Name(): stable checker name
@@ -151,9 +150,9 @@ unique diagnostics, not upstream out-of-scope results.
 
 A checker set owns deterministic registration, planning, progress, and
 iteration. It rejects empty, duplicate, malformed, and unknown/future checker
-names; plan-name mismatches; malformed skip plans; and result-name mismatches.
-It constructs skipped results itself, calls progress only after a runnable plan
-exists, and validates each result before accepting it.
+names, plan-name mismatches, and result-name mismatches. It omits non-runnable
+plans, calls progress only after a runnable plan exists, and validates each
+result before accepting it.
 
 `internal/checks/builtin` is the sole compile-time registration owner. Adding a
 bundled checker requires its adapter plus one entry there. It must not require
@@ -285,11 +284,10 @@ syntax. Eligibility belongs in each adapter; the shared coordinator only
 orders registered runners and enforces that their returned names match their
 registrations.
 
-Every `KindReview` final report contains exactly one result for every
-registered bundled checker, including skipped and error outcomes, in
-registration order. The first increment registers only `golangci-lint`, so it
-still emits one result. `KindSimplify` retains its existing schema and contains
-no `checks` field.
+Every `KindReview` final report contains exactly one result for every applicable
+bundled checker, including skipped and error outcomes, in registration order.
+The array is empty when no registered checker applies. `KindSimplify` retains
+its existing schema and contains no `checks` field.
 
 For `ModeUncommitted`, build `Scope{kind: changed}` from the recursively
 expanded `PreparedContext.Paths`, its snapshot component prefixes, and the live
@@ -348,7 +346,7 @@ if uncommitted:
 construct one immutable checks.Scope from mode root and exact paths
 run registered checker set in deterministic order:
   adapter plans only inside checks.Scope
-  if ineligible: append stable skipped Result without progress or helper
+  if ineligible: omit checker without progress or helper
   if eligible:
     publish runtime.status running_static_checks with registered name
     run adapter under task context
@@ -372,9 +370,9 @@ a terminal task error with the existing empty-wait-stdout behavior.
 
 Dry-run must exercise shared scope creation, each registered adapter's
 mode-specific planning, the combined final-report encoder, and event
-persistence without starting the provider or helpers. Each registered checker
-emits a deterministic synthetic finding when eligible and a stable skipped
-result otherwise. Simplify dry-run remains unchanged.
+persistence without starting the provider or helpers. Each applicable checker
+emits a deterministic synthetic finding; inapplicable checkers are omitted.
+Simplify dry-run remains unchanged.
 
 ## CTR-REVIEW-CHECK-007 — Prove the integration at real boundaries
 
@@ -410,7 +408,7 @@ Minimum proof matrix:
 | Case | Required observation |
 | --- | --- |
 | Two registered fake checkers | Both receive the same immutable scope and results preserve registration order |
-| Ineligible registered checker | Stable skipped result, no progress callback, and no helper launch |
+| Ineligible registered checker | Absent from results, no progress callback, and no helper launch |
 | Duplicate or malformed registration | Checker set construction fails before review execution |
 | Unknown/future private helper name | Dispatch rejects it without invoking another adapter |
 | Runner returns a mismatched name or malformed result | Coordinator rejects it as a terminal contract violation |
@@ -425,7 +423,7 @@ Minimum proof matrix:
 | Out-of-scope issue | Removed before final report |
 | More than 100 unique in-scope issues | Deterministic first 100 plus exact `omitted` |
 | Invalid config or package load | Model report preserved plus bounded `status:error` |
-| Non-Go diff or Go file outside a module | `skipped` when no eligible target; helper not started |
+| Non-Go diff or Go file outside a module | `golangci-lint` absent when no eligible target; helper not started |
 | Recursive submodule changes | Root-relative changed files run in their nearest containing submodule module |
 | Simplify | Existing output contract unchanged |
 | Orchestration manifest | Digest remains present beside `checks` |

@@ -31,7 +31,6 @@ type invocation struct {
 type checkerPlan struct {
 	scope       checks.Scope
 	invocations []invocation
-	reason      string
 }
 
 func (p *checkerPlan) CheckerName() string {
@@ -40,10 +39,6 @@ func (p *checkerPlan) CheckerName() string {
 
 func (p *checkerPlan) Runnable() bool {
 	return len(p.invocations) > 0
-}
-
-func (p *checkerPlan) SkipReason() string {
-	return p.reason
 }
 
 func (*Checker) Plan(scope checks.Scope) (checks.Plan, error) {
@@ -60,15 +55,7 @@ func (*Checker) Plan(scope checks.Scope) (checks.Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	plan := &checkerPlan{scope: scope, invocations: invocations}
-	if len(invocations) == 0 {
-		if scope.Kind() == checks.ScopeCodebase {
-			plan.reason = "authoritative review scope contains no Go modules"
-		} else {
-			plan.reason = "authoritative review scope contains no changed Go files in a Go module"
-		}
-	}
-	return plan, nil
+	return &checkerPlan{scope: scope, invocations: invocations}, nil
 }
 
 func planChanged(scope checks.Scope) ([]invocation, error) {

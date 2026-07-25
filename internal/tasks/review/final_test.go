@@ -57,6 +57,20 @@ func TestBuildFinalReviewReportRejectsUnknownProviderFields(t *testing.T) {
 	}
 }
 
+func TestBuildFinalReviewReportAllowsNoApplicableChecks(t *testing.T) {
+	report, err := BuildFinalReviewReport(
+		`{"summary":"ready","recommendation":"APPROVE","findings":[]}`,
+		nil,
+		"",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Checks == nil || len(report.Checks) != 0 {
+		t.Fatalf("checks = %#v, want empty array", report.Checks)
+	}
+}
+
 func TestValidateFinalReviewReportRejectsMissingDuplicateAndMalformedChecks(t *testing.T) {
 	pass, err := checks.NewResult("checker", nil)
 	if err != nil {
