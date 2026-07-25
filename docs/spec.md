@@ -568,7 +568,7 @@ stdin or stderr pipes are forcibly closed after one second so a background
 descendant cannot indefinitely block task completion. Dry runs never execute
 hooks.
 
-The stdin and template-data object has `schema_version: 1`, a `session` object,
+The stdin and template-data object has `schema_version: 2`, a `session` object,
 a `metrics` object, and the exact final `report`. `session` contains task `id`, a
 derived `title` of `<command> <repository-directory> (<mode>)`, `command`,
 `mode`, `model`, `reasoning_effort`, UTC `started_at` and `completed_at`,
@@ -581,6 +581,13 @@ root conversation, branch conversations, schema repair, and forced
 finalization. It contains `input_tokens`, `cached_input_tokens`, derived
 nonnegative `uncached_input_tokens`, `output_tokens`, `reasoning_tokens`, and
 `total_tokens`. Providers that omit a counter contribute zero for that counter.
+`metrics.used_skills` lists each distinct skill successfully read through
+`skills_read`, in deterministic conversation traversal order. Reading a
+skill-relative reference records the leading skill name. `metrics.tool_calls` lists local model
+tools that completed or returned a recoverable error envelope, sorted by tool
+name; each entry contains `name` and `count`. Control calls such as branch
+fanout are included. Provider-hosted tools are not local model tool calls and
+are not included.
 `metrics.branches_created` is the number of child conversations created by
 branch fanout. `metrics.branches` lists those conversations in creation order;
 each entry contains `id`, `parent_id`, resolved `model`, resolved

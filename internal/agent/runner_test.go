@@ -16,6 +16,7 @@ import (
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/openai"
 	"github.com/yusing/git-agent/internal/provider"
+	"github.com/yusing/git-agent/internal/skillcmd"
 	"github.com/yusing/git-agent/internal/tools"
 	"github.com/yusing/git-agent/internal/trace"
 )
@@ -26,6 +27,12 @@ type fakeClient struct {
 	requests       []openai.Request
 	streamEvents   []openai.StreamEvent
 	retryEvents    []openai.RetryEvent
+}
+
+type fakeSkillRunner struct{}
+
+func (fakeSkillRunner) Run(context.Context, skillcmd.Command) (skillcmd.Output, error) {
+	return skillcmd.Output{Stdout: "skill instructions"}, nil
 }
 
 func TestRunnerReturnsTerminalBranchOutcomeAndPortableForks(t *testing.T) {
@@ -54,6 +61,9 @@ func TestRunnerReturnsTerminalBranchOutcomeAndPortableForks(t *testing.T) {
 	}
 	if outcome.Final != nil || outcome.Branch == nil || outcome.Branch.ToolCalls != 1 {
 		t.Fatalf("outcome = %#v", outcome)
+	}
+	if outcome.Branch.ToolCallsByName["branch"] != 1 {
+		t.Fatalf("branch tool calls by name = %#v", outcome.Branch.ToolCallsByName)
 	}
 	if len(client.requests) != 1 || len(client.requests[0].Tools) != 1 || client.requests[0].Tools[0].Name != "branch" {
 		t.Fatalf("request tools = %#v", client.requests)
@@ -612,6 +622,9 @@ func TestRunnerContinuesAfterDistinctCallsReturnEqualOutputs(t *testing.T) {
 	if result.Text != "done" || result.ToolCalls != 2 || len(client.requests) != 3 {
 		t.Fatalf("result = %#v, requests = %d", result, len(client.requests))
 	}
+	if result.ToolCallsByName["grep"] != 2 || len(result.ToolCallsByName) != 1 {
+		t.Fatalf("tool calls by name = %#v", result.ToolCallsByName)
+	}
 	var outputCallIDs []string
 	for _, item := range client.requests[2].Input {
 		if item.Type == "function_call_output" {
@@ -620,6 +633,42 @@ func TestRunnerContinuesAfterDistinctCallsReturnEqualOutputs(t *testing.T) {
 	}
 	if !slices.Equal(outputCallIDs, []string{"call_1", "call_2"}) {
 		t.Fatalf("final request output call IDs = %v", outputCallIDs)
+	}
+}
+
+func TestRunnerCollectsDistinctUsedSkillsAndToolCallCounts(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	repo, err := gitctx.Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := skillcmd.DiscoverWithOptions(skillcmd.Options{
+		Dir: repoDir, Lookup: func(string) (string, error) { return "/tools/skills-mgr", nil },
+		Runner: fakeSkillRunner{},
+	})
+	client := &fakeClient{responses: []openai.Response{
+		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: tools.SkillsReadToolName, Arguments: `{"locator":"go","range":""}`}}},
+		{ToolCalls: []openai.ToolCall{{ID: "fc_2", CallID: "call_2", Name: tools.SkillsReadToolName, Arguments: `{"locator":"go/references/style.md","range":""}`}}},
+		{Text: "done"},
+	}}
+	registry := tools.NewRegistry(repo, manager)
+	runner := OpenAIRunner{
+		Config: config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 2}, Client: client,
+		Tools: registry, ToolSpecs: registry.Definitions([]string{tools.SkillsReadToolName}),
+	}
+
+	result, err := runner.Run(t.Context(), Request{UserPrompt: "review", MaxSteps: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(result.UsedSkills, []string{"go"}) {
+		t.Fatalf("used skills = %#v", result.UsedSkills)
+	}
+	if result.ToolCallsByName[tools.SkillsReadToolName] != 2 || len(result.ToolCallsByName) != 1 {
+		t.Fatalf("tool calls by name = %#v", result.ToolCallsByName)
 	}
 }
 

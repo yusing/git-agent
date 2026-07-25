@@ -70,6 +70,22 @@ func TestSkillToolsDelegateRead(t *testing.T) {
 	if runner.commands[0].Path != filepath.Clean("/tools/skills-mgr") {
 		t.Fatalf("path = %q", runner.commands[0].Path)
 	}
+	if skill, ok := UsedSkill(invocation); !ok || skill != "go" {
+		t.Fatalf("used skill = %q, %t", skill, ok)
+	}
+}
+
+func TestUsedSkillRejectsOtherToolsAndMalformedArguments(t *testing.T) {
+	tests := []Invocation{
+		{Name: "read_file", Arguments: `{"locator":"go"}`},
+		{Name: SkillsReadToolName, Arguments: `{}`},
+		{Name: SkillsReadToolName, Arguments: `{"locator":"/references/style.md"}`},
+	}
+	for _, invocation := range tests {
+		if skill, ok := UsedSkill(invocation); ok {
+			t.Fatalf("UsedSkill(%#v) = %q, true", invocation, skill)
+		}
+	}
 }
 
 func TestSkillToolsAreOmittedWhenSkillsManagerIsUnavailable(t *testing.T) {

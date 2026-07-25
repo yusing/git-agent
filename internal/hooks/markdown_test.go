@@ -13,6 +13,8 @@ func TestFormatMarkdownRendersReviewMetricsFindingsAndChecks(t *testing.T) {
 		},
 		Metrics: InspectionMetrics{
 			Usage:           Usage{InputTokens: 100, CachedInputTokens: 30, UncachedInputTokens: 70, OutputTokens: 20, ReasoningTokens: 12, TotalTokens: 120},
+			UsedSkills:      []string{"go", "security-review"},
+			ToolCalls:       []ToolCallMetric{{Name: "jq", Count: 3}, {Name: "read_file", Count: 2}},
 			BranchesCreated: 1,
 			Branches: []BranchMetric{{
 				ID: "b1", ParentID: "root", Model: "gpt-5.6-terra", ReasoningEffort: "low",
@@ -42,6 +44,7 @@ func TestFormatMarkdownRendersReviewMetricsFindingsAndChecks(t *testing.T) {
 	got := formatMarkdown(payload)
 	for _, want := range []string{
 		`- **Session ID:** session\_\[one\]`, "## Usage", "Input tokens:** 100",
+		"## Used skills", "- go", `- security\-review`, "## Tool calls", "- jq: 3", `- read\_file: 2`,
 		"## Branches (1)", "### Branch `b1`", `Model:** gpt\-5\.6\-terra`,
 		"## Summary\n\nFound \\*one\\* issue\\.\n\\# Fake heading\n\\- Fake finding\n\\> Fake quote\n\\~\\~\\~fake fence\n1\\. Fake ordered finding\n2\\) Fake recommendation\nspoofed code\nspoofed tab code",
 		"### HIGH — Protect \\[metrics\\]", "```main`tick``.go:42-47``` — Public handler",

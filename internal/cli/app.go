@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -549,7 +551,9 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 				Repository: repo.Summary(),
 			},
 			Metrics: hooks.InspectionMetrics{
-				Usage: hookUsage(usage), BranchesCreated: len(branchMetrics), Branches: branchMetrics,
+				Usage: hookUsage(usage), UsedSkills: append([]string{}, result.UsedSkills...),
+				ToolCalls:       hookToolCalls(result.ToolCallsByName),
+				BranchesCreated: len(branchMetrics), Branches: branchMetrics,
 			},
 			Report: report,
 		}
@@ -599,6 +603,15 @@ func hookUsage(usage openai.Usage) hooks.Usage {
 		OutputTokens:        usage.OutputTokens, ReasoningTokens: usage.ReasoningTokens,
 		TotalTokens: usage.TotalTokens,
 	}
+}
+
+func hookToolCalls(counts map[string]int) []hooks.ToolCallMetric {
+	names := slices.Sorted(maps.Keys(counts))
+	metrics := make([]hooks.ToolCallMetric, 0, len(names))
+	for _, name := range names {
+		metrics = append(metrics, hooks.ToolCallMetric{Name: name, Count: counts[name]})
+	}
+	return metrics
 }
 
 func inspectionTitle(command string, mode reviewtask.Mode, workPath string) string {

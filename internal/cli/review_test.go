@@ -194,6 +194,11 @@ func TestReviewRunsConfiguredPostInspectionHookWithUsageAndFindings(t *testing.T
 	report := `{"summary":"clean","recommendation":"APPROVE","findings":[]}`
 	server := newScriptedResponsesServer(t, []func(string) string{
 		func(string) string {
+			return responseWithToolCalls("resp_hook_tool", toolCallSpec{
+				ID: "fc_hook", CallID: "call_hook", Name: "repo_summary", Arguments: `{}`,
+			})
+		},
+		func(string) string {
 			var response map[string]any
 			if err := json.Unmarshal([]byte(responseWithText("resp_hook", report)), &response); err != nil {
 				t.Fatal(err)
@@ -225,7 +230,7 @@ func TestReviewRunsConfiguredPostInspectionHookWithUsageAndFindings(t *testing.T
 	if err := json.Unmarshal(data, &payload); err != nil {
 		t.Fatalf("decode hook payload: %v\n%s", err, data)
 	}
-	if payload["schema_version"] != float64(1) {
+	if payload["schema_version"] != float64(2) {
 		t.Fatalf("schema version = %#v", payload["schema_version"])
 	}
 	session := payload["session"].(map[string]any)
@@ -239,6 +244,14 @@ func TestReviewRunsConfiguredPostInspectionHookWithUsageAndFindings(t *testing.T
 	}
 	if metrics["branches_created"] != float64(0) || len(metrics["branches"].([]any)) != 0 {
 		t.Fatalf("branch metrics = %#v", metrics)
+	}
+	toolCalls := metrics["tool_calls"].([]any)
+	if len(metrics["used_skills"].([]any)) != 0 || len(toolCalls) != 1 {
+		t.Fatalf("agent activity metrics = %#v", metrics)
+	}
+	toolCall := toolCalls[0].(map[string]any)
+	if toolCall["name"] != "repo_summary" || toolCall["count"] != float64(1) {
+		t.Fatalf("tool call metric = %#v", toolCall)
 	}
 	finalReport := payload["report"].(map[string]any)
 	if findings, ok := finalReport["findings"].([]any); !ok || len(findings) != 0 {
@@ -472,6 +485,13 @@ func TestDetachedSimplifyBranchesThroughExistingTaskAndPersistsMergedFinal(t *te
 	metrics := hookPayload["metrics"].(map[string]any)
 	if metrics["branches_created"] != float64(2) || metrics["usage"].(map[string]any)["input_tokens"] != float64(102) {
 		t.Fatalf("metrics = %#v", metrics)
+	}
+	toolCalls := metrics["tool_calls"].([]any)
+	if len(toolCalls) != 2 || toolCalls[0].(map[string]any)["name"] != reviewtask.BranchToolName ||
+		toolCalls[0].(map[string]any)["count"] != float64(1) ||
+		toolCalls[1].(map[string]any)["name"] != reviewtask.BranchHelpToolName ||
+		toolCalls[1].(map[string]any)["count"] != float64(1) {
+		t.Fatalf("tool call metrics = %#v", toolCalls)
 	}
 	branches := metrics["branches"].([]any)
 	if len(branches) != 2 {

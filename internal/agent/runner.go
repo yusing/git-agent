@@ -38,10 +38,12 @@ type Request struct {
 }
 
 type Result struct {
-	Text        string
-	ToolCalls   int
-	RepairCalls int
-	messages    []openai.Item
+	Text            string
+	ToolCalls       int
+	RepairCalls     int
+	ToolCallsByName map[string]int
+	UsedSkills      []string
+	messages        []openai.Item
 }
 
 type NodeResult struct {
@@ -50,11 +52,13 @@ type NodeResult struct {
 }
 
 type BranchRequest struct {
-	CallID      string
-	Arguments   string
-	ToolCalls   int
-	RepairCalls int
-	messages    []openai.Item
+	CallID          string
+	Arguments       string
+	ToolCalls       int
+	RepairCalls     int
+	ToolCallsByName map[string]int
+	UsedSkills      []string
+	messages        []openai.Item
 }
 
 func (b BranchRequest) ForkInput(output string, sameModel bool) []openai.Item {
@@ -330,11 +334,10 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, instructions string,
 				callID = call.ID
 			}
 			return NodeResult{Branch: &BranchRequest{
-				CallID:      callID,
-				Arguments:   call.Arguments,
-				ToolCalls:   result.ToolCalls + 1,
-				RepairCalls: result.RepairCalls,
-				messages:    messages,
+				CallID: callID, Arguments: call.Arguments,
+				ToolCalls: result.ToolCalls + 1, RepairCalls: result.RepairCalls,
+				ToolCallsByName: addToolCall(result.ToolCallsByName, call.Name),
+				UsedSkills:      slices.Clone(result.UsedSkills), messages: messages,
 			}}, nil
 		}
 		if r.Tools == nil {
@@ -382,6 +385,7 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, instructions string,
 				return NodeResult{}, err
 			}
 			toolResult, err := r.Tools.Execute(ctx, tools.Invocation{Name: call.Name, Arguments: call.Arguments})
+			toolSucceeded := err == nil
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return NodeResult{}, fmt.Errorf("tool %s canceled: %w", call.Name, ctxErr)
 			}
@@ -403,6 +407,10 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, instructions string,
 				return NodeResult{}, err
 			}
 			result.ToolCalls++
+			result.ToolCallsByName = addToolCall(result.ToolCallsByName, call.Name)
+			if skill, ok := tools.UsedSkill(tools.Invocation{Name: call.Name, Arguments: call.Arguments}); toolSucceeded && ok && !slices.Contains(result.UsedSkills, skill) {
+				result.UsedSkills = append(result.UsedSkills, skill)
+			}
 			callID := call.CallID
 			if callID == "" {
 				callID = call.ID
@@ -446,8 +454,7 @@ func (r *OpenAIRunner) finalizeForGuard(ctx context.Context, instructions string
 	if err != nil {
 		return Result{}, err
 	}
-	finalized.ToolCalls = current.ToolCalls
-	finalized.RepairCalls = current.RepairCalls
+	finalized.copyActivity(current)
 	if err := r.Trace.Write("budget", map[string]any{
 		"kind": status.Kind, "decision": "finalize", "reason": reason,
 		"step": status.Step, "used": status.Used, "limit": status.Limit,
@@ -548,8 +555,7 @@ func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions
 	if err != nil {
 		return Result{}, 0, 0, err
 	}
-	finalized.ToolCalls = current.ToolCalls
-	finalized.RepairCalls = current.RepairCalls
+	finalized.copyActivity(current)
 	if err := r.Trace.Write("budget", map[string]any{
 		"kind":          status.Kind,
 		"decision":      "finalize",
@@ -560,6 +566,21 @@ func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions
 		return Result{}, 0, 0, err
 	}
 	return finalized, status.MaxSteps, status.MaxToolCalls, nil
+}
+
+func addToolCall(counts map[string]int, name string) map[string]int {
+	if counts == nil {
+		counts = map[string]int{}
+	}
+	counts[name]++
+	return counts
+}
+
+func (r *Result) copyActivity(source Result) {
+	r.ToolCalls = source.ToolCalls
+	r.RepairCalls = source.RepairCalls
+	r.ToolCallsByName = source.ToolCallsByName
+	r.UsedSkills = source.UsedSkills
 }
 
 func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions string, messages []openai.Item, textFormat *openai.TextFormat, status BudgetStatus, toolCalls int, started time.Time) (Result, error) {

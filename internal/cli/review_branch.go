@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 
@@ -35,10 +36,12 @@ type branchProgress struct {
 }
 
 type reviewTreeResult struct {
-	Text        string
-	ToolCalls   int
-	RepairCalls int
-	Branches    []reviewBranchMetric
+	Text            string
+	ToolCalls       int
+	RepairCalls     int
+	ToolCallsByName map[string]int
+	UsedSkills      []string
+	Branches        []reviewBranchMetric
 }
 
 type reviewBranchMetric struct {
@@ -65,9 +68,11 @@ type reviewTree struct {
 }
 
 type reviewNodeResult struct {
-	leaves      []reviewtask.LeafReport
-	toolCalls   int
-	repairCalls int
+	leaves          []reviewtask.LeafReport
+	toolCalls       int
+	repairCalls     int
+	toolCallsByName map[string]int
+	usedSkills      []string
 }
 
 func runReviewTree(
@@ -95,6 +100,7 @@ func runReviewTree(
 	if len(result.leaves) == 1 {
 		return reviewTreeResult{
 			Text: result.leaves[0].Text, ToolCalls: result.toolCalls, RepairCalls: result.repairCalls,
+			ToolCallsByName: result.toolCallsByName, UsedSkills: result.usedSkills,
 			Branches: tree.branchMetrics(),
 		}, nil
 	}
@@ -114,6 +120,7 @@ func runReviewTree(
 	}
 	return reviewTreeResult{
 		Text: text, ToolCalls: result.toolCalls, RepairCalls: result.repairCalls,
+		ToolCallsByName: result.toolCallsByName, UsedSkills: result.usedSkills,
 		Branches: tree.branchMetrics(),
 	}, nil
 }
@@ -217,11 +224,15 @@ func (t *reviewTree) runNode(
 	}
 	result := reviewNodeResult{
 		toolCalls: outcome.Branch.ToolCalls, repairCalls: outcome.Branch.RepairCalls,
+		toolCallsByName: maps.Clone(outcome.Branch.ToolCallsByName),
+		usedSkills:      slices.Clone(outcome.Branch.UsedSkills),
 	}
 	for _, childResult := range results {
 		result.leaves = append(result.leaves, childResult.leaves...)
 		result.toolCalls += childResult.toolCalls
 		result.repairCalls += childResult.repairCalls
+		mergeToolCalls(result.toolCallsByName, childResult.toolCallsByName)
+		result.usedSkills = appendUnique(result.usedSkills, childResult.usedSkills...)
 	}
 	return result, nil
 }
@@ -321,9 +332,24 @@ func (t *reviewTree) completeLeaf(node branchNode, scope string, result agent.Re
 		}
 	}
 	return reviewNodeResult{
-		leaves:    []reviewtask.LeafReport{leaf},
-		toolCalls: result.ToolCalls, repairCalls: result.RepairCalls,
+		leaves: []reviewtask.LeafReport{leaf}, toolCalls: result.ToolCalls, repairCalls: result.RepairCalls,
+		toolCallsByName: maps.Clone(result.ToolCallsByName), usedSkills: slices.Clone(result.UsedSkills),
 	}, nil
+}
+
+func mergeToolCalls(destination, source map[string]int) {
+	for name, count := range source {
+		destination[name] += count
+	}
+}
+
+func appendUnique(destination []string, values ...string) []string {
+	for _, value := range values {
+		if !slices.Contains(destination, value) {
+			destination = append(destination, value)
+		}
+	}
+	return destination
 }
 
 func (t *reviewTree) failNode(node branchNode, failure error) {

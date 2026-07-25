@@ -531,6 +531,12 @@ Usage:
   Input: 42000 (cached: 12000, uncached: 30000)
   Output: 3500 (reasoning: 2100)
   Total: 45500
+  Used skills:
+    - go
+    - security-review
+  Tool calls:
+    - jq: 3
+    - read_file: 5
   Branches created: 2
   Branch b1 (parent: root)
     Model: gpt-5.6-sol
@@ -562,7 +568,7 @@ remains available as JSON from `review --wait` or `simplify --wait`. Hook
 failures are reported only on the live event stream; they do not replace a
 successful report or change wait output.
 
-See [the specification](docs/spec.md) for the v1 payload and template contract.
+See [the specification](docs/spec.md) for the v2 payload and template contract.
 
 When `skills-mgr` is available on `PATH`, message-generation commands call
 `skills-mgr list` and inject its Markdown output verbatim as a developer prompt

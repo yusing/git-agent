@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"strings"
 
 	"github.com/yusing/git-agent/internal/skillcmd"
 )
@@ -47,4 +48,19 @@ func (t skillsReadTool) Execute(ctx context.Context, invocation Invocation) (Res
 		"stdout": output.Stdout,
 		"stderr": output.Stderr,
 	}, output.Truncated)
+}
+
+// UsedSkill returns the skill named by a skills_read invocation.
+func UsedSkill(invocation Invocation) (string, bool) {
+	if invocation.Name != SkillsReadToolName {
+		return "", false
+	}
+	args, err := parseArgs[struct {
+		Locator string `json:"locator"`
+	}](invocation.Arguments)
+	if err != nil {
+		return "", false
+	}
+	name, _, _ := strings.Cut(strings.TrimSpace(args.Locator), "/")
+	return name, name != ""
 }

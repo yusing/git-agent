@@ -21,6 +21,26 @@ func formatMarkdown(payload PostInspection) string {
 	text.WriteString("\n## Usage\n\n")
 	writeMarkdownUsage(&text, payload.Metrics.Usage)
 
+	text.WriteString("\n## Used skills\n")
+	if len(payload.Metrics.UsedSkills) == 0 {
+		text.WriteString("\nNone\n")
+	} else {
+		text.WriteByte('\n')
+		for _, skill := range payload.Metrics.UsedSkills {
+			fmt.Fprintf(&text, "- %s\n", escapeMarkdown(skill))
+		}
+	}
+
+	text.WriteString("\n## Tool calls\n")
+	if len(payload.Metrics.ToolCalls) == 0 {
+		text.WriteString("\nNone\n")
+	} else {
+		text.WriteByte('\n')
+		for _, tool := range payload.Metrics.ToolCalls {
+			fmt.Fprintf(&text, "- %s: %d\n", escapeMarkdown(tool.Name), tool.Count)
+		}
+	}
+
 	fmt.Fprintf(&text, "\n## Branches (%d)\n", payload.Metrics.BranchesCreated)
 	if len(payload.Metrics.Branches) == 0 {
 		text.WriteString("\nNone\n")

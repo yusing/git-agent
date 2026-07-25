@@ -14,7 +14,7 @@ import (
 	"github.com/bytedance/sonic"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 const hookWaitDelay = time.Second
 
@@ -26,9 +26,16 @@ type PostInspection struct {
 }
 
 type InspectionMetrics struct {
-	Usage           Usage          `json:"usage"`
-	BranchesCreated int            `json:"branches_created"`
-	Branches        []BranchMetric `json:"branches"`
+	Usage           Usage            `json:"usage"`
+	UsedSkills      []string         `json:"used_skills"`
+	ToolCalls       []ToolCallMetric `json:"tool_calls"`
+	BranchesCreated int              `json:"branches_created"`
+	Branches        []BranchMetric   `json:"branches"`
+}
+
+type ToolCallMetric struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
 }
 
 type BranchMetric struct {
