@@ -17,7 +17,7 @@ type indexLock struct {
 	path string
 }
 
-func lockIndex(ctx context.Context, indexDir string) (*indexLock, error) {
+func lockIndex(ctx context.Context, indexDir string, onWait ...func() error) (*indexLock, error) {
 	lockPath := indexDir + ".lock"
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return nil, err
@@ -27,6 +27,9 @@ func lockIndex(ctx context.Context, indexDir string) (*indexLock, error) {
 		return &indexLock{file: file, path: lockPath}, nil
 	}
 	if !errors.Is(err, os.ErrExist) {
+		return nil, err
+	}
+	if err := notifyIndexLockWait(onWait); err != nil {
 		return nil, err
 	}
 	ticker := time.NewTicker(indexLockPollInterval)

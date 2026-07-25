@@ -51,6 +51,7 @@ const (
 	DefaultEmbeddingBatchMaxChars = 700_000
 	DefaultEmbeddingMaxInputChars = 32_000
 	maxEmbeddingLineChars         = 4_000
+	ProgressStatusWaiting         = "waiting"
 	ProgressStatusFetching        = "fetching"
 )
 
@@ -327,6 +328,10 @@ type historyEntry struct {
 }
 
 func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query string) (output Output, err error) {
+	return run(ctx, client, opts, query, false)
+}
+
+func run(ctx context.Context, client openai.EmbeddingClient, opts Options, query string, producerLockHeld bool) (output Output, err error) {
 	opts.ProgressLog = serializeProgress(opts.ProgressLog)
 	started := time.Now()
 	phaseStarted := started
@@ -395,7 +400,26 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		}
 	}
 	filters := Filters{Code: opts.CodeOnly, NoTests: opts.NoTests, Scope: scope}
-	selection, err := resolveIndexSelection(ctx, rootOpt, opts.Remote, opts.Rev, filters, opts.Reindex, true, opts.ProgressLog)
+	var producerLock *indexLock
+	producerLocked := false
+	unlockProducer := func() error {
+		if !producerLocked {
+			return nil
+		}
+		producerLocked = false
+		return producerLock.Unlock()
+	}
+	if !producerLockHeld {
+		producerLock, err = lockSearchIndexProducer(ctx, opts.ProgressLog)
+		if err != nil {
+			return fail(err)
+		}
+		producerLocked = true
+		defer func() {
+			err = errors.Join(err, unlockProducer())
+		}()
+	}
+	selection, err := resolveIndexSelection(ctx, rootOpt, opts.Remote, opts.Rev, filters, opts.Reindex, started, true, opts.ProgressLog)
 	if err != nil {
 		return fail(err)
 	}
@@ -436,7 +460,7 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 				headOpts.CodeOnly = false
 				headOpts.NoTests = false
 				headOpts.skipIndexSync = true
-				if _, err := Run(ctx, client, headOpts, ""); err != nil {
+				if _, err := run(ctx, client, headOpts, "", true); err != nil {
 					return fail(fmt.Errorf("index current HEAD for sync: %w", err))
 				}
 				if err := activeSync.exportAndPush(ctx, syncTarget); err != nil {
@@ -781,6 +805,9 @@ func Run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 			return fail(err)
 		}
 		remoteFinished = true
+	}
+	if err := unlockProducer(); err != nil {
+		return fail(err)
 	}
 
 	indexStatus := "miss"

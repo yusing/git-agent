@@ -822,13 +822,16 @@ func TestSearchProgressRewritesAndClearsLine(t *testing.T) {
 	var stderr bytes.Buffer
 	app := &App{stderr: &stderr}
 
+	app.writeSearchProgress(searchtask.Progress{Status: "future-search-progress"})
+	app.writeSearchProgress(searchtask.Progress{Status: searchtask.ProgressStatusWaiting})
 	app.writeSearchProgress(searchtask.Progress{Status: searchtask.ProgressStatusFetching})
 	app.writeSearchProgress(searchtask.Progress{Status: searchtask.ProgressStatusFetching, Detail: "Counting objects: 50%"})
 	app.writeSearchProgress(searchtask.Progress{Total: 5})
 	app.writeSearchProgress(searchtask.Progress{Done: 2, Total: 5, Elapsed: 1500 * time.Millisecond})
 	app.writeSearchProgress(searchtask.Progress{Done: 5, Total: 5, Elapsed: 2 * time.Second})
 
-	want := "\r\x1b[2Ksearch: fetching remote" +
+	want := "\r\x1b[2Ksearch: waiting for index worker" +
+		"\r\x1b[2Ksearch: fetching remote" +
 		"\r\x1b[2Ksearch: fetching remote: Counting objects: 50%" +
 		"\r\x1b[2Ksearch: building embeddings 0/5 chunks" +
 		"\r\x1b[2Ksearch: building embeddings 2/5 chunks (40.0%, 1.5s)" +

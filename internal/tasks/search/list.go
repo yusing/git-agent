@@ -82,7 +82,7 @@ func ListIndexes(ctx context.Context, root, remote string) (IndexListing, error)
 			listing.RepoDir = repoDir
 		}
 	} else {
-		selection, err := resolveIndexSelection(ctx, root, "", "", Filters{}, false, false, nil)
+		selection, err := resolveIndexSelection(ctx, root, "", "", Filters{}, false, time.Time{}, false, nil)
 		if err != nil {
 			return IndexListing{}, err
 		}
@@ -210,7 +210,7 @@ func ListIndexFiles(ctx context.Context, opts ListFilesOptions) (IndexFiles, err
 		}
 	}
 	filters := Filters{Scope: scope}
-	selection, err := resolveIndexSelection(ctx, root, opts.Remote, opts.Rev, filters, false, false, nil)
+	selection, err := resolveIndexSelection(ctx, root, opts.Remote, opts.Rev, filters, false, time.Time{}, false, nil)
 	if err != nil {
 		return IndexFiles{}, err
 	}
@@ -408,9 +408,9 @@ type indexSelection struct {
 	remoteFinish func(bool) error
 }
 
-func resolveIndexSelection(ctx context.Context, rootOpt, remote, rev string, filters Filters, reindex, fetchAllowed bool, progressLog func(Progress) error) (indexSelection, error) {
+func resolveIndexSelection(ctx context.Context, rootOpt, remote, rev string, filters Filters, reindex bool, reindexStarted time.Time, fetchAllowed bool, progressLog func(Progress) error) (indexSelection, error) {
 	if strings.TrimSpace(remote) != "" {
-		return resolveRemoteIndexSelection(ctx, remote, rev, filters, reindex, fetchAllowed, progressLog)
+		return resolveRemoteIndexSelection(ctx, remote, rev, filters, reindex, reindexStarted, fetchAllowed, progressLog)
 	}
 	root, err := filepath.Abs(cmp.Or(rootOpt, "."))
 	if err != nil {

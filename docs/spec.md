@@ -714,6 +714,21 @@ and reads remain bounded. A fresh filtered cache classifies intentionally absent
 over-limit blobs as oversized during later cache-hit traversal. The final remote
 cache contains pack storage, not the temporary parsed objects.
 
+All search index production under one metadata root is a global cross-process
+single flight. Before project metadata migration, remote repository
+initialization or fetch, source discovery, chunking, embedding, and index
+persistence, a search acquires one user-level operating-system lock. This
+serializes those phases across local, revision, and remote searches even when
+they target unrelated projects or remotes; the owning process may retain the
+remote producer/consumer overlap described above. Waiting is context-cancelable
+and does not release, delete, or otherwise disturb the active producer's lock.
+After acquiring the lock, a waiter re-evaluates the selected source and index;
+concurrent requests for the same missing index reuse the completed index, and
+concurrent `--reindex` requests for the same selected index perform one fetch
+and one rebuild in total. An unrelated request runs afterward and builds its
+own index normally. The global lock is released after index persistence and
+remote completion, before query embedding and scoring.
+
 SSH transport tries identities from an available SSH agent first, including
 Pageant or the native agent on Windows, then unencrypted default private keys at
 `~/.ssh/id_ed25519`, `~/.ssh/id_ecdsa`, `~/.ssh/id_rsa`, and
@@ -774,7 +789,8 @@ another result for the same file has an indexed symbol. `--index --format brief`
 writes only the header line because indexing skips scoring.
 
 When stderr is an interactive terminal and `--debug` is not enabled, search
-shows transient indexing progress while missing embeddings are built or updated.
+shows transient progress while waiting for the global index worker and while
+missing embeddings are built or updated.
 The progress line is rewritten and cleared with ANSI control sequences before
 stdout is written. Non-interactive stderr receives no progress output.
 `--agent` starts a local progress probe server instead of terminal progress when
@@ -782,19 +798,21 @@ a remote needs fetching or embeddings need to be built or rebuilt. The server
 listens on a private Unix-domain socket and prints one endpoint JSON object to
 stderr containing `network`, absolute socket `address`, and the fixed
 `http://localhost/progress` request URL. A client dials that socket and receives
-JSON for `GET /progress` with status, including `fetching` before a
+JSON for `GET /progress` with status, including `waiting` while another process
+owns the global index flight and `fetching` before a
 remote network operation and sanitized server-side fetch detail when available,
 completed chunk count, total chunk count, reused chunk count, percent, elapsed
 milliseconds, and last update time. Interactive terminal mode rewrites the same
 remote-fetch detail in place and clears it before stdout. When `--format` is
 omitted, `--agent` changes the output format default
 from JSON to brief. The server shuts down when the search command exits. Cache-hit
-searches that need neither a remote fetch nor embeddings do not start the server
-and do not print progress endpoint metadata.
+searches that neither wait nor need a remote fetch or embeddings do not start
+the server and do not print progress endpoint metadata.
 
-Remote fetch and embedding progress callbacks are serialized. While the fetch
-is active, `fetching` updates may also carry discovered, completed, and reused
-embedding counts; the total can increase until selected-file production closes.
+Waiting, remote fetch, and embedding progress callbacks are serialized. While
+the fetch is active, `fetching` updates may also carry discovered, completed,
+and reused embedding counts; the total can increase until selected-file
+production closes.
 Terminal completion means both object transfer and all required embedding work
 have completed.
 

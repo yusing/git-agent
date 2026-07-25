@@ -20,7 +20,7 @@ type indexLock struct {
 	overlapped windows.Overlapped
 }
 
-func lockIndex(ctx context.Context, indexDir string) (*indexLock, error) {
+func lockIndex(ctx context.Context, indexDir string, onWait ...func() error) (*indexLock, error) {
 	lockPath := indexDir + ".lock"
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return nil, err
@@ -35,6 +35,10 @@ func lockIndex(ctx context.Context, indexDir string) (*indexLock, error) {
 	} else if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
 		file.Close()
 		return nil, fmt.Errorf("lock search index: %w", err)
+	}
+	if err := notifyIndexLockWait(onWait); err != nil {
+		_ = file.Close()
+		return nil, err
 	}
 	ticker := time.NewTicker(indexLockPollInterval)
 	defer ticker.Stop()

@@ -99,7 +99,7 @@ type remoteCache struct {
 	LastResolvedRev string    `json:"last_resolved_rev,omitempty"`
 }
 
-func resolveRemoteIndexSelection(ctx context.Context, remoteURL, rev string, filters Filters, reindex, fetchAllowed bool, progressLog func(Progress) error) (indexSelection, error) {
+func resolveRemoteIndexSelection(ctx context.Context, remoteURL, rev string, filters Filters, reindex bool, reindexStarted time.Time, fetchAllowed bool, progressLog func(Progress) error) (indexSelection, error) {
 	remote := giturl.Sanitize(remoteURL)
 	metadataDir, err := metadata.RemoteDir(remote)
 	if err != nil {
@@ -146,6 +146,9 @@ func resolveRemoteIndexSelection(ctx context.Context, remoteURL, rev string, fil
 	resolvedRev, resolveErr := resolveRemoteRef(wrapped, sourceRev)
 	if resolveErr != nil && fetchAllowed {
 		needFetch = true
+	}
+	if reindex && !reindexStarted.IsZero() && resolveErr == nil && indexBuiltSince(indexDir(metadataDir, "remote", "", resolvedRev, filters), reindexStarted) {
+		needFetch = fetchAllowed && (!ok || cache.LastFetchedAt.IsZero() || time.Since(cache.LastFetchedAt) >= remoteRefreshTTL)
 	}
 	if !needFetch {
 		if resolveErr != nil {

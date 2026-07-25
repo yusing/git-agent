@@ -35,6 +35,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv(searchProducerProcessHelperEnv) == "1" {
+		os.Exit(m.Run())
+	}
 	home, err := os.MkdirTemp("", "git-agent-search-home-*")
 	if err != nil {
 		panic(err)
@@ -2046,7 +2049,7 @@ func TestFilesystemAndRevisionIndexesShareVectorPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, time.Time{}, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2080,7 +2083,7 @@ func TestChangedRevisionAppendsOnlyNewSharedVectorPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, time.Time{}, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2107,7 +2110,7 @@ func TestLegacyLocalVectorIndexMigratesWithoutEmbedding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, time.Time{}, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2180,7 +2183,7 @@ func TestCorruptSharedVectorIsRebuilt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, time.Time{}, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2230,7 +2233,7 @@ func TestFailedIndexWriteInvalidatesSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, time.Time{}, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2305,7 +2308,7 @@ func TestReindexAppendsSharedVectorWithoutChangingOtherSnapshot(t *testing.T) {
 	if _, err := loadVectors(revision.Diagnostics.IndexDir); err != nil {
 		t.Fatalf("load original revision snapshot: %v", err)
 	}
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, time.Time{}, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

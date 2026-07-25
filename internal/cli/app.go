@@ -1262,6 +1262,10 @@ func (a *App) writeSearchDebug(output searchtask.Output) {
 }
 
 func (a *App) writeSearchProgress(progress searchtask.Progress) {
+	if progress.Status == searchtask.ProgressStatusWaiting {
+		_, _ = fmt.Fprint(a.stderr, "\r\x1b[2Ksearch: waiting for index worker")
+		return
+	}
 	if progress.Status == searchtask.ProgressStatusFetching {
 		_, _ = fmt.Fprint(a.stderr, "\r\x1b[2Ksearch: fetching remote")
 		if progress.Detail != "" {

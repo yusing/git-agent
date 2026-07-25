@@ -377,10 +377,19 @@ every snapshot. Existing local vector payloads migrate on a later cache write.
 `--reindex` skips cross-index reuse, rebuilds the selected source, and appends a
 new shared vector generation without changing older snapshots. Interrupted
 cache writes remain incomplete and rebuild on the next search instead of being
-used as completed indexes.
+used as completed indexes. Concurrent `--reindex` requests for the same selected
+index coalesce into one fetch and rebuild.
 
 Remote indexing can overlap download and embedding, reducing first-search and
 refresh time when the remote supplies selected files early enough.
+
+Index production is a global cross-process single flight per user metadata root.
+Local discovery, remote repository initialization and fetch, chunking,
+embedding, and persistence run under one cancelable operating-system lock, so
+unrelated projects and remotes also index sequentially. The active process may
+retain its internal remote fetch/index pipeline while it owns the flight. A
+waiting interactive search reports `search: waiting for index worker`;
+`--agent` exposes the same state as `waiting`.
 
 Useful flags:
 
