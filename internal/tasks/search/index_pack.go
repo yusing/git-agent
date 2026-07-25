@@ -50,7 +50,7 @@ type vectorPackSlot struct {
 type vectorPackCatalog map[string]map[string]vectorPackSlot
 
 func syncModelKey(model string, dimensions int) [32]byte {
-	return sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d", model, dimensions)))
+	return sha256.Sum256(fmt.Appendf(nil, "%s\x00%d", model, dimensions))
 }
 
 func vectorPayloadDigest(data []byte) [32]byte {

@@ -1945,9 +1945,7 @@ func indexRemoteFileStream(ctx context.Context, client openai.EmbeddingClient, f
 		pool = append(pool, current...)
 		pool = append(pool, exact...)
 		reusedVectors, reusedRecords, count := reuseVectors(candidates, pool, opts)
-		for id, vector := range reusedVectors {
-			result.vectors[id] = vector
-		}
+		maps.Copy(result.vectors, reusedVectors)
 		result.records = append(result.records, reusedRecords...)
 		result.reused += count
 		pending = append(pending, missingChunks(candidates, reusedVectors)...)
@@ -2886,21 +2884,11 @@ func revisionPathIgnored(matcher gitignore.Matcher, path string) bool {
 }
 
 func pathHasSkippedDir(path string) bool {
-	for _, part := range ignorectx.PathParts(path) {
-		if shouldSkipDir(part) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(ignorectx.PathParts(path), shouldSkipDir)
 }
 
 func scopeUsesSkippedPath(scope []string) bool {
-	for _, item := range scope {
-		if pathHasSkippedDir(item) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(scope, pathHasSkippedDir)
 }
 
 func normalizeScopes(scopes []string) ([]string, error) {

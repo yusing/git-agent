@@ -346,7 +346,7 @@ func UserPrompt(kind Kind, prepared PreparedContext) string {
 	}
 	data, err := sonic.MarshalIndent(contextForPrompt(prepared), "", "  ")
 	if err != nil {
-		data = []byte(fmt.Sprintf(`{"mode":%q}`, prepared.Mode))
+		data = fmt.Appendf(nil, `{"mode":%q}`, prepared.Mode)
 	}
 	return renderUserPrompt(userPromptData{
 		Mission:         mission,

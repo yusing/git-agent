@@ -45,7 +45,7 @@ type IndexListing struct {
 // RemoteInfo describes one cached remote repository.
 type RemoteInfo struct {
 	Remote          string    `json:"remote"`
-	LastFetchedAt   time.Time `json:"last_fetched_at,omitempty"`
+	LastFetchedAt   time.Time `json:"last_fetched_at,omitzero"`
 	LastResolvedRev string    `json:"last_resolved_rev,omitempty"`
 	Dir             string    `json:"dir"`
 }

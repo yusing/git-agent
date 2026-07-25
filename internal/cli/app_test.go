@@ -303,7 +303,7 @@ func TestSearchHelpReturnsUsage(t *testing.T) {
 		"--pprof <addr>":             "serve pprof on address",
 	}
 	descriptionColumn := -1
-	for _, line := range strings.Split(help, "\n") {
+	for line := range strings.SplitSeq(help, "\n") {
 		for flagText, description := range expectedFlags {
 			if !strings.HasPrefix(line, "  "+flagText) {
 				continue

@@ -689,15 +689,15 @@ func isRetryablePeerStreamReset(message string) bool {
 	const marker = "stream error: stream id "
 	for line := range strings.Lines(message) {
 		line = strings.TrimSpace(line)
-		index := strings.Index(line, marker)
-		if index < 0 {
+		before, after, ok := strings.Cut(line, marker)
+		if !ok {
 			continue
 		}
-		prefix := line[:index]
+		prefix := before
 		if prefix != "" && !strings.HasSuffix(prefix, ": ") {
 			continue
 		}
-		parts := strings.Split(line[index+len(marker):], "; ")
+		parts := strings.Split(after, "; ")
 		if len(parts) != 3 || parts[2] != "received from peer" {
 			continue
 		}
