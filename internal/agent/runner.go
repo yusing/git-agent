@@ -107,6 +107,7 @@ type OpenAIRunner struct {
 	Trace              *trace.Recorder
 	Budget             BudgetHandler
 	ReasoningSummary   string
+	ObserveUsage       func(openai.Usage)
 }
 
 type runState struct {
@@ -266,13 +267,15 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, instructions string,
 			}
 			return NodeResult{}, err
 		}
+		usage := response.ProviderUsage()
+		r.observeUsage(usage)
 		if err := writeTraceResponse(r.Trace, response); err != nil {
 			return NodeResult{}, err
 		}
 		if err := r.traceHostedToolCalls(response.HostedToolCalls); err != nil {
 			return NodeResult{}, err
 		}
-		inputTokens := responseInputTokens(response)
+		inputTokens := int(usage.InputTokens)
 		if err := r.writeRuntimeStatus("response_received", step+1, maxSteps, result.ToolCalls, maxToolCalls, estimatedTokens, inputTokens, started); err != nil {
 			return NodeResult{}, err
 		}
@@ -498,19 +501,10 @@ func estimateRequestTokens(request openai.Request) int {
 	return (len(data) + 3) / 4
 }
 
-func responseInputTokens(response openai.Response) int {
-	if response.RawJSON == "" {
-		return 0
+func (r *OpenAIRunner) observeUsage(usage openai.Usage) {
+	if r.ObserveUsage != nil {
+		r.ObserveUsage(usage)
 	}
-	var payload struct {
-		Usage struct {
-			InputTokens int `json:"input_tokens"`
-		} `json:"usage"`
-	}
-	if sonic.ConfigStd.UnmarshalFromString(response.RawJSON, &payload) != nil {
-		return 0
-	}
-	return payload.Usage.InputTokens
 }
 
 func toolCallSignature(call openai.ToolCall) string {
@@ -579,6 +573,7 @@ func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions st
 	if err != nil {
 		return Result{}, err
 	}
+	r.observeUsage(response.ProviderUsage())
 	if err := writeTraceResponse(r.Trace, response); err != nil {
 		return Result{}, err
 	}

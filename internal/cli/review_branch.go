@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/yusing/git-agent/internal/agent"
+	"github.com/yusing/git-agent/internal/openai"
 	reviewtask "github.com/yusing/git-agent/internal/tasks/review"
 	"github.com/yusing/git-agent/internal/tools"
 	"github.com/yusing/git-agent/internal/trace"
@@ -37,6 +38,15 @@ type reviewTreeResult struct {
 	Text        string
 	ToolCalls   int
 	RepairCalls int
+	Branches    []reviewBranchMetric
+}
+
+type reviewBranchMetric struct {
+	ID              string
+	ParentID        string
+	Model           string
+	ReasoningEffort string
+	Usage           openai.Usage
 }
 
 type reviewTree struct {
@@ -45,10 +55,13 @@ type reviewTree struct {
 	recorder *trace.Recorder
 	cancel   context.CancelFunc
 
-	mu       sync.Mutex
-	nextID   int
-	progress branchProgress
-	failure  error
+	mu           sync.Mutex
+	nextID       int
+	progress     branchProgress
+	failure      error
+	observeUsage func(openai.Usage)
+	branches     map[string]*reviewBranchMetric
+	branchOrder  []string
 }
 
 type reviewNodeResult struct {
@@ -69,7 +82,8 @@ func runReviewTree(
 	defer cancel()
 	tree := &reviewTree{
 		kind: kind, depth: depth, recorder: recorder, cancel: cancel,
-		progress: branchProgress{Active: 1, TotalKnown: 1},
+		progress:     branchProgress{Active: 1, TotalKnown: 1},
+		observeUsage: runner.ObserveUsage, branches: map[string]*reviewBranchMetric{},
 	}
 	result, err := tree.runNode(treeCtx, runner, request, branchNode{ID: "root"}, "")
 	if err != nil {
@@ -81,6 +95,7 @@ func runReviewTree(
 	if len(result.leaves) == 1 {
 		return reviewTreeResult{
 			Text: result.leaves[0].Text, ToolCalls: result.toolCalls, RepairCalls: result.repairCalls,
+			Branches: tree.branchMetrics(),
 		}, nil
 	}
 	if err := recorder.WriteExact("runtime.status", map[string]any{
@@ -99,6 +114,7 @@ func runReviewTree(
 	}
 	return reviewTreeResult{
 		Text: text, ToolCalls: result.toolCalls, RepairCalls: result.repairCalls,
+		Branches: tree.branchMetrics(),
 	}, nil
 }
 
@@ -109,6 +125,14 @@ func (t *reviewTree) runNode(
 	node branchNode,
 	scope string,
 ) (reviewNodeResult, error) {
+	runner.ObserveUsage = func(usage openai.Usage) {
+		if t.observeUsage != nil {
+			t.observeUsage(usage)
+		}
+		if node.ID != "root" {
+			t.recordBranchUsage(node.ID, usage)
+		}
+	}
 	if definition, ok := reviewtask.BranchDefinition(t.kind, t.depth, node.Depth); ok {
 		request.ControlTool = &definition
 	} else {
@@ -225,6 +249,11 @@ func (t *reviewTree) acceptFanout(
 			branchNode: branchNode{ID: fmt.Sprintf("b%d", t.nextID), ParentID: parent.ID, Depth: parent.Depth + 1},
 			Scope:      branch.Scope, Model: model, ReasoningEffort: effort,
 		}
+		t.branches[children[index].ID] = &reviewBranchMetric{
+			ID: children[index].ID, ParentID: children[index].ParentID,
+			Model: children[index].Model, ReasoningEffort: children[index].ReasoningEffort,
+		}
+		t.branchOrder = append(t.branchOrder, children[index].ID)
 	}
 	t.progress.Active--
 	t.progress.Active += len(children)
@@ -238,6 +267,23 @@ func (t *reviewTree) acceptFanout(
 		return nil, err
 	}
 	return children, nil
+}
+
+func (t *reviewTree) recordBranchUsage(id string, usage openai.Usage) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	metric := t.branches[id]
+	metric.Usage.Add(usage)
+}
+
+func (t *reviewTree) branchMetrics() []reviewBranchMetric {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	metrics := make([]reviewBranchMetric, 0, len(t.branchOrder))
+	for _, id := range t.branchOrder {
+		metrics = append(metrics, *t.branches[id])
+	}
+	return metrics
 }
 
 func (t *reviewTree) childTrace(node branchNode) *trace.Recorder {

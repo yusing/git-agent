@@ -141,6 +141,51 @@ type Response struct {
 	RawJSON         string           `json:"raw_json,omitempty"`
 }
 
+type Usage struct {
+	InputTokens       int64 `json:"input_tokens"`
+	CachedInputTokens int64 `json:"cached_input_tokens"`
+	OutputTokens      int64 `json:"output_tokens"`
+	ReasoningTokens   int64 `json:"reasoning_tokens"`
+	TotalTokens       int64 `json:"total_tokens"`
+}
+
+func (u *Usage) Add(other Usage) {
+	u.InputTokens += other.InputTokens
+	u.CachedInputTokens += other.CachedInputTokens
+	u.OutputTokens += other.OutputTokens
+	u.ReasoningTokens += other.ReasoningTokens
+	u.TotalTokens += other.TotalTokens
+}
+
+func (r Response) ProviderUsage() Usage {
+	if r.RawJSON == "" {
+		return Usage{}
+	}
+	var payload struct {
+		Usage struct {
+			InputTokens       int64 `json:"input_tokens"`
+			OutputTokens      int64 `json:"output_tokens"`
+			TotalTokens       int64 `json:"total_tokens"`
+			InputTokenDetails struct {
+				CachedTokens int64 `json:"cached_tokens"`
+			} `json:"input_tokens_details"`
+			OutputTokenDetails struct {
+				ReasoningTokens int64 `json:"reasoning_tokens"`
+			} `json:"output_tokens_details"`
+		} `json:"usage"`
+	}
+	if sonic.ConfigStd.UnmarshalFromString(r.RawJSON, &payload) != nil {
+		return Usage{}
+	}
+	return Usage{
+		InputTokens:       payload.Usage.InputTokens,
+		CachedInputTokens: payload.Usage.InputTokenDetails.CachedTokens,
+		OutputTokens:      payload.Usage.OutputTokens,
+		ReasoningTokens:   payload.Usage.OutputTokenDetails.ReasoningTokens,
+		TotalTokens:       payload.Usage.TotalTokens,
+	}
+}
+
 type HostedToolCall struct {
 	ID      string   `json:"id"`
 	Type    string   `json:"type"`

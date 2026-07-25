@@ -252,6 +252,40 @@ severity-order violations, invalid style severity, and recommendation mismatch.
 When orchestration input is present, Git-agent adds its validated manifest
 SHA-256 to stored final report after model-schema validation.
 
+After the validated provider review report (and after branch reports are merged,
+when applicable), review runs its registered host checks once. It publishes
+`runtime.status` with `phase=running_static_checks` and the check name before
+each runnable check. The terminal review report preserves the provider fields
+and adds an ordered nonempty `checks` array. Each check result has status
+`pass`, `findings`, `skipped`, or `error`; findings contain bounded normalized
+diagnostics, skipped results contain a reason, and check-analysis failures
+contain an error. Private checker start, wait, analysis, and output failures
+produce an `error` check result; context cancellation remains a terminal task
+error.
+
+The built-in `golangci-lint` check selects targets from the authoritative review
+scope. Uncommitted review uses the verified worktree; staged review uses the
+verified materialized index snapshot; codebase review runs `./...` once for each
+discovered Go module. In changed modes, existing regular `.go` paths select the
+nearest Go module without crossing a repository-component boundary, then select
+their exact package directories. Duplicate paths and mixed production/test
+paths in one directory produce one package invocation. Non-Go, deleted,
+nonexistent, symlinked, escaping, and module-less paths do not become linter
+arguments. Renames therefore select the existing destination and skip a missing
+source.
+
+Each selected changed package is passed to golangci-lint as an exact local
+package pattern, not as individual `.go` files, so parsing and type checking see
+all production and `_test.go` siblings in that package. Package selection does
+not recurse into unrelated packages. The helper requests absolute diagnostic
+paths; result normalization rejects paths outside the selected module or checker
+workspace, resolves no symlink aliases, and retains only `.go` diagnostics in
+the authoritative changed-path scope. Thus unchanged siblings provide analysis
+context but cannot add report diagnostics. Unknown fields in golangci's JSON
+issue and report objects remain ignored for forward compatibility; malformed,
+missing, oversized, or internally inconsistent helper output yields an `error`
+check result.
+
 #### `git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 
 Run a read-only simplification audit using same mode selection, prepared diff,
@@ -492,6 +526,67 @@ The `session` event records the parent but never the prompt or prior report.
 `--dry-run` is valid only on initial review/simplify launch and is mutually
 exclusive with `--wait` and `--follow-up` through normal flag conflict
 validation.
+
+Global review and simplification lifecycle settings are read once per detached
+worker from `~/.git-agent/settings.json`. The v1 schema is a strict JSON object
+with optional `hooks`; `hooks` is a strict object with optional string-array
+`post_inspection`:
+
+```json
+{"hooks":{"post_inspection":[""]}}
+```
+
+Unknown fields, malformed JSON, multiple JSON values, and non-string hook
+entries fail the task. A missing file, omitted fields, an empty array, and
+blank array entries configure no corresponding work. This file is distinct
+from the XDG index configuration because it owns user-level inspection
+lifecycle behavior rather than `git-agent config` command state.
+
+After a non-dry-run inspection has produced and validated its report, and after
+review static checks have completed, each nonblank `post_inspection` entry runs
+sequentially through `sh -c`. Before execution, Git-agent parses it as a Go
+`text/template` with `missingkey=error`. Template data is the payload described
+below. Function `format_markdown <payload>` renders session metadata, aggregate
+and per-branch usage, findings or opportunities, evidence, proposed changes,
+and checks as Markdown while escaping dynamic Markdown syntax. Functions
+`json <value>` and `shellquote <value>` encode JSON and quote one POSIX-shell
+argument respectively. The same compact JSON payload is passed
+to every hook on stdin. Hook stdout is discarded. A template error, inability
+to start `sh`, context cancellation, or nonzero exit stops the sequence and
+publishes non-terminal `runtime.status` with
+`phase=post_inspection_hook_failed` and a bounded error message; up to 4096
+bytes of trimmed hook stderr may be included. Hook failures never replace,
+modify, or prevent publication of the already validated final report, so
+`--wait` continues to return that report as strict JSON without printing the
+hook diagnostic. Earlier successful hooks are not rolled back. After the shell
+exits or its context is canceled, inherited
+stdin or stderr pipes are forcibly closed after one second so a background
+descendant cannot indefinitely block task completion. Dry runs never execute
+hooks.
+
+The stdin and template-data object has `schema_version: 1`, a `session` object,
+a `metrics` object, and the exact final `report`. `session` contains task `id`, a
+derived `title` of `<command> <repository-directory> (<mode>)`, `command`,
+`mode`, `model`, `reasoning_effort`, UTC `started_at` and `completed_at`,
+`elapsed_ms`, `tool_calls`, `repair_calls`, and the repository summary already
+used by the session event. `report` therefore contains review `findings` or
+simplification `opportunities`, including their evidence.
+
+`metrics.usage` sums provider-reported usage across every completed response in the
+root conversation, branch conversations, schema repair, and forced
+finalization. It contains `input_tokens`, `cached_input_tokens`, derived
+nonnegative `uncached_input_tokens`, `output_tokens`, `reasoning_tokens`, and
+`total_tokens`. Providers that omit a counter contribute zero for that counter.
+`metrics.branches_created` is the number of child conversations created by
+branch fanout. `metrics.branches` lists those conversations in creation order;
+each entry contains `id`, `parent_id`, resolved `model`, resolved
+`reasoning_effort`, and a `usage` object with the same counters accumulated only
+from that branch conversation. Root-conversation usage remains represented in
+the aggregate and is not counted as a created branch.
+The session completion time and elapsed duration are captured immediately
+before hooks begin, so hook runtime is not inspection runtime. Before running
+configured hooks the SSE stream publishes `runtime.status` with
+`phase=running_post_inspection_hooks` and the nonblank `hook_count`.
 
 The detached producer creates a versioned running record before publishing its
 launch JSON, refreshes its update timestamp with a heartbeat while running, then

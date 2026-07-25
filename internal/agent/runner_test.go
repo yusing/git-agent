@@ -183,10 +183,38 @@ func TestProviderUsageJSONBoundaryRemainsForwardCompatible(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := responseInputTokens(openai.Response{RawJSON: tt.raw}); got != tt.want {
+			if got := int((openai.Response{RawJSON: tt.raw}).ProviderUsage().InputTokens); got != tt.want {
 				t.Fatalf("input tokens = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunnerObservesProviderUsageAcrossSteps(t *testing.T) {
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	repo, err := gitctx.Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeClient{responses: []openai.Response{
+		{RawJSON: `{"usage":{"input_tokens":20,"input_tokens_details":{"cached_tokens":8},"output_tokens":4,"output_tokens_details":{"reasoning_tokens":3},"total_tokens":24}}`, ToolCalls: []openai.ToolCall{{ID: "call-1", Name: "repo_summary", Arguments: `{}`}}},
+		{RawJSON: `{"usage":{"input_tokens":30,"output_tokens":6,"total_tokens":36}}`, Text: "done"},
+	}}
+	registry := tools.NewRegistry(repo, nil)
+	var usage openai.Usage
+	runner := OpenAIRunner{
+		Config: config.Config{MaxSteps: 2, MaxToolCalls: 2}, Client: client, Tools: registry,
+		ToolSpecs: registry.Definitions([]string{"repo_summary"}),
+		ObserveUsage: func(value openai.Usage) {
+			usage.Add(value)
+		},
+	}
+	if _, err := runner.Run(t.Context(), Request{UserPrompt: "review", MaxSteps: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if usage.InputTokens != 50 || usage.CachedInputTokens != 8 || usage.OutputTokens != 10 || usage.ReasoningTokens != 3 || usage.TotalTokens != 60 {
+		t.Fatalf("usage = %#v", usage)
 	}
 }
 

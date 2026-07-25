@@ -215,6 +215,11 @@ as file reads and does not execute an external `jq` command or general filters.
 Requests whose initial serialized estimate reaches the configured context budget
 fail before contacting the provider.
 
+Review final reports also include built-in static-check results. For changed Go
+files, the bundled golangci-lint check analyzes each affected package with its
+complete production and test file context, while reporting diagnostics only for
+files in the selected review scope.
+
 Both commands offer provider-hosted web search on every normal model step using
 the existing OpenAI API-key or ChatGPT/Codex-plan login. API-key auth caps hosted
 searches at four per response by default; plan auth leaves provider default
@@ -485,6 +490,70 @@ Persistent settings are stored in
 global. Displayed URLs redact URL credentials; sync uses same Git transport
 and authentication behavior as search `--remote`, without invoking `git`
 executable or interactive credential prompts.
+
+Review and simplification completion hooks use the separate global file
+`~/.git-agent/settings.json`. This self-contained example formats the complete
+payload as Markdown in Go, uses the session title as the ntfy title, and enables
+ntfy Markdown rendering:
+
+```json
+{
+  "hooks": {
+    "post_inspection": [
+      "printf '%s\\n' {{shellquote (format_markdown .)}} | curl --fail --silent --show-error -H 'Markdown: yes' -H 'Content-Type: text/markdown' -H {{shellquote (printf \"Title: %s\" .Session.Title)}} --data-binary @- https://ntfy.sh/my-topic"
+    ]
+  }
+}
+```
+
+The file is trusted configuration: hook entries execute as shell programs.
+Replace `my-topic` with the destination topic. The example requires only
+`curl`; it introduces no script or JSON-formatting dependency. The
+`format_markdown` template function is implemented by git-agent and renders a
+branched review as Markdown equivalent to:
+A notification from a branched review is rendered as readable text:
+
+```text
+Title: review git-agent (uncommitted)
+
+Session ID: 5FTQATWALYB2QYPXVX4FZIBZIC
+
+Usage:
+  Input: 42000 (cached: 12000, uncached: 30000)
+  Output: 3500 (reasoning: 2100)
+  Total: 45500
+  Branches created: 2
+  Branch b1 (parent: root)
+    Model: gpt-5.6-sol
+    Reasoning effort: medium
+    Input: 14000 (cached: 4000, uncached: 10000)
+    Output: 1200 (reasoning: 700)
+    Total: 15200
+
+Summary: One high-severity finding.
+Recommendation: FIX
+
+Findings:
+[HIGH] Stale result is returned
+  Aspect: correctness
+  Impact: Callers can observe outdated data.
+  Evidence:
+    - internal/cache.go:42-47 — Cached value bypasses refresh
+  Fix: Invalidate the cached value before reading.
+
+Checks:
+golangci-lint: findings
+  - main.go:38:4 [gocritic] os.Exit will exit, and defer stop() will not run
+```
+
+Simplify notifications render `opportunities` instead of `findings`; empty lists
+render as `None`. Malformed optional display fields, unrelated lookalike keys,
+and unknown future report fields do not break formatting. The exact report
+remains available as JSON from `review --wait` or `simplify --wait`. Hook
+failures are reported only on the live event stream; they do not replace a
+successful report or change wait output.
+
+See [the specification](docs/spec.md) for the v1 payload and template contract.
 
 When `skills-mgr` is available on `PATH`, message-generation commands call
 `skills-mgr list` and inject its Markdown output verbatim as a developer prompt

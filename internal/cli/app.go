@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -26,6 +27,7 @@ import (
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/giturl"
 	"github.com/yusing/git-agent/internal/guidance"
+	"github.com/yusing/git-agent/internal/hooks"
 	"github.com/yusing/git-agent/internal/metadata"
 	"github.com/yusing/git-agent/internal/openai"
 	"github.com/yusing/git-agent/internal/projectidentity"
@@ -228,6 +230,10 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 			opts.AppendPrompt = extraPrompt
 		}
 	}
+	settings, err := config.LoadSettings()
+	if err != nil {
+		return err
+	}
 
 	localCfg, err := config.ResolveLocal(opts)
 	if err != nil {
@@ -270,7 +276,8 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 			return err
 		}
 	}
-	if err := backgroundStore.Create(taskID, command, os.Getpid(), time.Now()); err != nil {
+	inspectionStarted := time.Now().UTC()
+	if err := backgroundStore.Create(taskID, command, os.Getpid(), inspectionStarted); err != nil {
 		return err
 	}
 	failureDiagnostic := &backgroundtask.FailureDiagnostic{Mode: string(mode)}
@@ -458,6 +465,8 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		Normalize: func(text string) string { return reviewtask.Shape(kind, text) },
 		Trace:     recorder,
 	}
+	var providerUsage usageAccumulator
+	runner.ObserveUsage = providerUsage.add
 	result, err := runReviewTree(taskCtx, kind, depth, runner, agent.Request{
 		SystemPrompt:      reviewtask.SystemPrompt(kind),
 		ToolPolicy:        reviewToolPolicy(),
@@ -519,6 +528,42 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		}
 		report = simplifyReport
 	}
+	if count := len(settings.Hooks.PostInspection); count > 0 {
+		completedAt := time.Now().UTC()
+		usage := providerUsage.snapshot()
+		branchMetrics := make([]hooks.BranchMetric, len(result.Branches))
+		for index, branch := range result.Branches {
+			branchMetrics[index] = hooks.BranchMetric{
+				ID: branch.ID, ParentID: branch.ParentID, Model: branch.Model,
+				ReasoningEffort: branch.ReasoningEffort, Usage: hookUsage(branch.Usage),
+			}
+		}
+		hookPayload := hooks.PostInspection{
+			SchemaVersion: hooks.SchemaVersion,
+			Session: hooks.InspectionSession{
+				ID: taskID, Title: inspectionTitle(command, mode, repo.WorkPath),
+				Command: command, Mode: string(mode), Model: cfg.Model, ReasoningEffort: cfg.ThinkingEffort,
+				StartedAt: inspectionStarted, CompletedAt: completedAt,
+				ElapsedMS: completedAt.Sub(inspectionStarted).Milliseconds(),
+				ToolCalls: result.ToolCalls, RepairCalls: result.RepairCalls,
+				Repository: repo.Summary(),
+			},
+			Metrics: hooks.InspectionMetrics{
+				Usage: hookUsage(usage), BranchesCreated: len(branchMetrics), Branches: branchMetrics,
+			},
+			Report: report,
+		}
+		if err := recorder.WriteExact("runtime.status", map[string]any{
+			"phase": "running_post_inspection_hooks", "hook_count": count,
+		}); err != nil {
+			return err
+		}
+		if err := hooks.RunPostInspection(taskCtx, settings.Hooks.PostInspection, hookPayload); err != nil {
+			_ = recorder.WriteExact("runtime.status", map[string]any{
+				"phase": "post_inspection_hook_failed", "message": err.Error(),
+			})
+		}
+	}
 	if err := recorder.WriteExact("final", map[string]any{
 		"text":         report,
 		"tool_calls":   result.ToolCalls,
@@ -528,6 +573,37 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	}
 	eventServer.Finish()
 	return nil
+}
+
+type usageAccumulator struct {
+	mu    sync.Mutex
+	usage openai.Usage
+}
+
+func (a *usageAccumulator) add(value openai.Usage) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.usage.Add(value)
+}
+
+func (a *usageAccumulator) snapshot() openai.Usage {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.usage
+}
+
+func hookUsage(usage openai.Usage) hooks.Usage {
+	return hooks.Usage{
+		InputTokens: usage.InputTokens, CachedInputTokens: usage.CachedInputTokens,
+		UncachedInputTokens: max(0, usage.InputTokens-usage.CachedInputTokens),
+		OutputTokens:        usage.OutputTokens, ReasoningTokens: usage.ReasoningTokens,
+		TotalTokens: usage.TotalTokens,
+	}
+}
+
+func inspectionTitle(command string, mode reviewtask.Mode, workPath string) string {
+	name := filepath.Base(filepath.Clean(workPath))
+	return fmt.Sprintf("%s %s (%s)", command, name, mode)
 }
 
 func orchestrationPrompt(prompt string, manifest *tools.OrchestrationManifest) string {
