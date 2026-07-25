@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bytedance/sonic"
 )
 
 func formatMarkdown(payload PostInspection) string {
@@ -199,8 +201,18 @@ func writeMarkdownParagraph(text *strings.Builder, label, value string) {
 }
 
 func markdownObject(value any) (map[string]any, bool) {
-	object, ok := value.(map[string]any)
-	return object, ok
+	if object, ok := value.(map[string]any); ok {
+		return object, true
+	}
+	data, err := sonic.Marshal(value)
+	if err != nil {
+		return nil, false
+	}
+	var object map[string]any
+	if err := sonic.Unmarshal(data, &object); err != nil || object == nil {
+		return nil, false
+	}
+	return object, true
 }
 
 func markdownList(value any) ([]any, bool) {

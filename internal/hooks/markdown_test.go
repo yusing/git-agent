@@ -58,6 +58,37 @@ func TestFormatMarkdownRendersReviewMetricsFindingsAndChecks(t *testing.T) {
 	}
 }
 
+func TestFormatMarkdownRendersTypedJSONReport(t *testing.T) {
+	type finding struct {
+		Severity    string `json:"severity"`
+		Title       string `json:"title"`
+		ProposedFix string `json:"proposed_fix"`
+	}
+	type report struct {
+		Summary        string    `json:"summary"`
+		Recommendation string    `json:"recommendation"`
+		Findings       []finding `json:"findings"`
+	}
+
+	got := formatMarkdown(PostInspection{Report: report{
+		Summary: "Typed report remains available", Recommendation: "COMMENT",
+		Findings: []finding{{Severity: "MEDIUM", Title: "Preserve JSON shape", ProposedFix: "Decode the report object."}},
+	}})
+	for _, want := range []string{
+		"## Summary\n\nTyped report remains available",
+		"Recommendation:** COMMENT",
+		"### MEDIUM — Preserve JSON shape",
+		"Decode the report object\\.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Markdown missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "## Report\n\nUnavailable") {
+		t.Fatalf("typed report rendered as unavailable:\n%s", got)
+	}
+}
+
 func TestFormatMarkdownHandlesSimplifyEmptyMalformedUnrelatedAndFutureReports(t *testing.T) {
 	tests := []struct {
 		name        string

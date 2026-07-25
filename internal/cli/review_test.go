@@ -177,12 +177,16 @@ func TestReviewRunsConfiguredPostInspectionHookWithUsageAndFindings(t *testing.T
 	repoDir := initRepo(t)
 	t.Chdir(repoDir)
 	hookOutput := filepath.Join(t.TempDir(), "completion.json")
+	markdownOutput := filepath.Join(t.TempDir(), "completion.md")
 	settingsPath := filepath.Join(os.Getenv("HOME"), ".git-agent", "settings.json")
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	settings, err := json.Marshal(map[string]any{
-		"hooks": map[string]any{"post_inspection": []string{fmt.Sprintf("tee %q", hookOutput)}},
+		"hooks": map[string]any{"post_inspection": []string{
+			fmt.Sprintf("tee %q", hookOutput),
+			fmt.Sprintf("printf '%%s' {{shellquote (format_markdown .)}} > %q", markdownOutput),
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -243,6 +247,18 @@ func TestReviewRunsConfiguredPostInspectionHookWithUsageAndFindings(t *testing.T
 	finalReport := payload["report"].(map[string]any)
 	if findings, ok := finalReport["findings"].([]any); !ok || len(findings) != 0 {
 		t.Fatalf("report = %#v", finalReport)
+	}
+	markdown, err := os.ReadFile(markdownOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"## Summary\n\nclean", "Recommendation:** APPROVE", "## Findings\n\nNone"} {
+		if !strings.Contains(string(markdown), want) {
+			t.Fatalf("Markdown notification missing %q:\n%s", want, markdown)
+		}
+	}
+	if strings.Contains(string(markdown), "## Report\n\nUnavailable") {
+		t.Fatalf("review report rendered as unavailable:\n%s", markdown)
 	}
 }
 
