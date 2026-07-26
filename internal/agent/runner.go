@@ -583,8 +583,110 @@ func (r *Result) copyActivity(source Result) {
 	r.UsedSkills = source.UsedSkills
 }
 
+type conversationFunctionCall struct {
+	name     string
+	answered bool
+}
+
+func completePendingFunctionCalls(messages []openai.Item) ([]openai.Item, error) {
+	calls := make(map[string]*conversationFunctionCall)
+	order := make([]string, 0)
+	for index, item := range messages {
+		switch item.Type {
+		case "function_call":
+			callID, name, err := functionCallIdentity(item)
+			if err != nil {
+				return nil, fmt.Errorf("input item %d: %w", index, err)
+			}
+			if _, exists := calls[callID]; exists {
+				return nil, fmt.Errorf("input item %d: duplicate function call ID %q", index, callID)
+			}
+			calls[callID] = &conversationFunctionCall{name: name}
+			order = append(order, callID)
+		case "function_call_output":
+			callID, err := functionCallOutputID(item)
+			if err != nil {
+				return nil, fmt.Errorf("input item %d: %w", index, err)
+			}
+			call, exists := calls[callID]
+			if !exists {
+				return nil, fmt.Errorf("input item %d: function call output %q has no preceding call", index, callID)
+			}
+			if call.answered {
+				return nil, fmt.Errorf("input item %d: duplicate function call output %q", index, callID)
+			}
+			call.answered = true
+		}
+	}
+
+	completed := slices.Clone(messages)
+	for _, callID := range order {
+		call := calls[callID]
+		if call.answered {
+			continue
+		}
+		result, err := tools.ErrorResult(call.name, errors.New("tool call was not executed because the agent is finalizing without tools"))
+		if err != nil {
+			return nil, fmt.Errorf("encode skipped tool output %q: %w", callID, err)
+		}
+		completed = append(completed, openai.NewFunctionCallOutput(callID, result.Content))
+	}
+	return completed, nil
+}
+
+func functionCallIdentity(item openai.Item) (string, string, error) {
+	id, callID, name, err := functionItemFields(item, "function_call")
+	if err != nil {
+		return "", "", err
+	}
+	if callID == "" {
+		callID = id
+	}
+	if callID == "" {
+		return "", "", errors.New("function call ID is required")
+	}
+	if name == "" {
+		return "", "", fmt.Errorf("function call %q name is required", callID)
+	}
+	return callID, name, nil
+}
+
+func functionCallOutputID(item openai.Item) (string, error) {
+	_, callID, _, err := functionItemFields(item, "function_call_output")
+	if err != nil {
+		return "", err
+	}
+	if callID == "" {
+		return "", errors.New("function call output ID is required")
+	}
+	return callID, nil
+}
+
+func functionItemFields(item openai.Item, expectedType string) (string, string, string, error) {
+	if item.RawJSON == "" {
+		return item.ID, item.CallID, item.Name, nil
+	}
+	var raw struct {
+		Type   string `json:"type"`
+		ID     string `json:"id"`
+		CallID string `json:"call_id"`
+		Name   string `json:"name"`
+	}
+	if err := sonic.ConfigStd.UnmarshalFromString(item.RawJSON, &raw); err != nil {
+		return "", "", "", fmt.Errorf("decode %s: %w", strings.ReplaceAll(expectedType, "_", " "), err)
+	}
+	if raw.Type != expectedType {
+		return "", "", "", fmt.Errorf("raw item type %q does not match %s", raw.Type, expectedType)
+	}
+	return raw.ID, raw.CallID, raw.Name, nil
+}
+
 func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions string, messages []openai.Item, textFormat *openai.TextFormat, status BudgetStatus, toolCalls int, started time.Time) (Result, error) {
-	finalMessages := append(slices.Clone(messages), openai.NewMessage("developer", finalizationNotice(status)))
+	completedMessages, err := completePendingFunctionCalls(messages)
+	if err != nil {
+		return Result{}, fmt.Errorf("prepare forced finalization input: %w", err)
+	}
+	finalMessages := append(completedMessages, openai.NewMessage("developer", finalizationNotice(status)))
 	req := r.providerRequest(finalArtifactInstructions(instructions), finalMessages, nil, nil, textFormat)
 	r.attachRetryStatus(&req, status.Step, status.MaxSteps, toolCalls, status.MaxToolCalls, estimateRequestTokens(req), started)
 	if err := writeTraceRequest(r.Trace, req); err != nil {

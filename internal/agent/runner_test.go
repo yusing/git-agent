@@ -144,12 +144,132 @@ func TestRunnerForcesFinalizationWhenBranchExceedsToolBudget(t *testing.T) {
 	if len(client.requests) != 3 || len(client.requests[2].Tools) != 0 || len(client.requests[2].HostedCapabilities) != 0 {
 		t.Fatalf("forced-finalization request = %#v", client.requests)
 	}
+	finalInput := client.requests[2].Input
+	if len(finalInput) < 2 {
+		t.Fatalf("forced-finalization input = %#v", finalInput)
+	}
+	output := finalInput[len(finalInput)-2]
+	if output.Type != "function_call_output" || output.CallID != "call_2" {
+		t.Fatalf("forced-finalization tool output = %#v", output)
+	}
+	var envelope struct {
+		OK    bool   `json:"ok"`
+		Tool  string `json:"tool"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(output.Output), &envelope); err != nil {
+		t.Fatalf("decode forced-finalization tool output: %v", err)
+	}
+	if envelope.OK || envelope.Tool != "branch" || !strings.Contains(envelope.Error, "finalizing without tools") {
+		t.Fatalf("forced-finalization tool output envelope = %#v", envelope)
+	}
 	if !slices.ContainsFunc(events, func(event trace.Event) bool {
 		return event.Kind == "budget" &&
 			event.Value["kind"] == string(BudgetKindToolCalls) &&
 			event.Value["decision"] == "finalize"
 	}) {
 		t.Fatalf("budget events = %#v", events)
+	}
+}
+
+func TestCompletePendingFunctionCallsValidatesConversationHistory(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		input       []openai.Item
+		wantErr     string
+		wantAddedID string
+		wantTool    string
+	}{
+		{
+			name: "positive complete pair",
+			input: []openai.Item{
+				openai.NewFunctionCall(openai.ToolCall{ID: "fc_done", CallID: "call_done", Name: "read_file", Arguments: `{}`}),
+				openai.NewFunctionCallOutput("call_done", `{"ok":true}`),
+			},
+		},
+		{
+			name: "negative missing output",
+			input: []openai.Item{
+				{Type: "function_call", RawJSON: `{"id":"fc_pending","type":"function_call","call_id":"call_pending","name":"grep","arguments":"{}"}`},
+			},
+			wantAddedID: "call_pending",
+			wantTool:    "grep",
+		},
+		{
+			name: "malformed raw call",
+			input: []openai.Item{
+				{Type: "function_call", RawJSON: `{"type":"function_call","call_id":`},
+			},
+			wantErr: "decode function call",
+		},
+		{
+			name: "orphan output",
+			input: []openai.Item{
+				openai.NewFunctionCallOutput("call_missing", `{"ok":false}`),
+			},
+			wantErr: "has no preceding call",
+		},
+		{
+			name: "unrelated text collision",
+			input: []openai.Item{
+				openai.NewMessage("user", `the text says "type":"function_call" and call_pending`),
+			},
+		},
+		{
+			name: "unknown future item",
+			input: []openai.Item{
+				{Type: "future_tool_exchange", RawJSON: `{"type":"future_tool_exchange","call_id":"call_future"}`},
+			},
+		},
+		{
+			name: "unknown future tool",
+			input: []openai.Item{
+				openai.NewFunctionCall(openai.ToolCall{ID: "fc_future", CallID: "call_future", Name: "future_tool", Arguments: `{}`}),
+			},
+			wantAddedID: "call_future",
+			wantTool:    "future_tool",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			completed, err := completePendingFunctionCalls(test.input)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("error = %v, want containing %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.wantAddedID == "" {
+				if !slices.Equal(completed, test.input) {
+					t.Fatalf("completed history changed:\n got: %#v\nwant: %#v", completed, test.input)
+				}
+				return
+			}
+			if len(completed) != len(test.input)+1 {
+				t.Fatalf("completed history = %#v", completed)
+			}
+			output := completed[len(completed)-1]
+			if output.Type != "function_call_output" || output.CallID != test.wantAddedID {
+				t.Fatalf("completed output = %#v", output)
+			}
+			var envelope struct {
+				OK   bool   `json:"ok"`
+				Tool string `json:"tool"`
+			}
+			if err := json.Unmarshal([]byte(output.Output), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if envelope.OK || envelope.Tool != test.wantTool {
+				t.Fatalf("completed output envelope = %#v", envelope)
+			}
+		})
 	}
 }
 
