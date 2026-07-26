@@ -137,6 +137,32 @@ func TestValidateReviewEnforcesSeverityOrderRecommendationAndStyleSeverity(t *te
 	}
 }
 
+func TestValidateReviewSkipsRecommendationWhenSeverityIsInvalid(t *testing.T) {
+	report := `{
+  "summary": "One finding",
+  "recommendation": "FIX",
+  "findings": [
+    {
+      "severity": "BLOCKER",
+      "aspect": "correctness",
+      "title": "Wrong result",
+      "impact": "Returns stale data",
+      "evidences": [{"title":"Stale cache read","path":"internal/cache.go","line_start":20,"line_end":24}],
+      "proposed_fix": "Invalidate before reading"
+    }
+  ]
+}`
+	errs := Validate(KindReview, report)
+	if !containsError(errs, "severity is invalid") {
+		t.Fatalf("errors = %v", errs)
+	}
+	// An unparsed severity ranks 0, so deriving a recommendation from it would demand
+	// COMMENT for a finding that may well be a blocker. Report the severity only.
+	if containsError(errs, "recommendation must be") {
+		t.Fatalf("recommendation derived from invalid severity: %v", errs)
+	}
+}
+
 func TestValidateSimplifyRequiresEvidence(t *testing.T) {
 	report := `{
   "summary": "One opportunity",

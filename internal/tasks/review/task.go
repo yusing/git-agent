@@ -608,10 +608,12 @@ func validateReview(report ReviewReport) []string {
 	}
 	previousRank := 5
 	wantRecommendation := "APPROVE"
+	severitiesValid := true
 	for i, finding := range report.Findings {
 		rank, ok := reviewSeverityRank[finding.Severity]
 		if !ok {
 			errs = append(errs, fmt.Sprintf("findings[%d].severity is invalid", i))
+			severitiesValid = false
 		}
 		if rank > previousRank {
 			errs = append(errs, "findings must be ordered by descending severity")
@@ -630,7 +632,7 @@ func validateReview(report ReviewReport) []string {
 			wantRecommendation = "COMMENT"
 		}
 	}
-	if report.Recommendation != wantRecommendation {
+	if severitiesValid && report.Recommendation != wantRecommendation {
 		errs = append(errs, fmt.Sprintf("recommendation must be %s", wantRecommendation))
 	}
 	return errs
