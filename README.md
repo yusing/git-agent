@@ -100,6 +100,9 @@ entirely and format a deterministic local message.
 
 ## Review and Simplify
 
+See [the Codex review comparison](doc/compare-with-codex-review) for scope,
+output, and simplification differences.
+
 `review` and `simplify` are read-only Responses API workflows designed for LLM
 harnesses. Both default to all dirty changes, regardless of staging state.
 

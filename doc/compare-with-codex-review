@@ -1,0 +1,172 @@
+# Compare with `codex review`
+
+This document compares Git-agent's `review` and `simplify` commands with the
+installed Codex CLI's `codex review` command and the documented Codex review
+surfaces. It describes the current behavior; it does not define a new command
+contract.
+
+## Summary
+
+`git-agent review` overlaps with `codex review` on the basic use case: a
+read-only review of repository changes, including staged, unstaged, and
+untracked work. It is not a drop-in replacement.
+
+Git-agent is more automation-oriented. It always launches a detached task,
+publishes authenticated SSE events, and returns a strict JSON report whose
+evidence is checked against the repository snapshot. It also supports staged
+and full-codebase modes, bounded context preparation, repository drift
+detection, branch fan-out, and post-review static checks.
+
+The largest parity gap is review target selection. Codex supports uncommitted
+changes, a base-branch diff, an exact commit, or custom review instructions.
+Git-agent supports uncommitted changes, staged changes, and a full-codebase
+audit, but not base-branch or exact-commit review.
+
+`simplify` has no direct Codex counterpart. It is a dedicated,
+behavior-preserving cleanup audit that could be approximated with Codex custom
+review instructions, but it has a separate prompt, schema, and evidence
+contract.
+
+## Command surface
+
+| Capability | `codex review` | `git-agent review` | Comparison |
+| --- | --- | --- | --- |
+| Uncommitted changes | `--uncommitted`; includes staged, unstaged, and untracked changes | Default mode, or explicit `--uncommitted` | Core parity |
+| Base branch / PR-style diff | `--base <branch>`; reviews the branch against its merge base | Not supported | Git-agent gap |
+| Exact commit | `--commit <sha>` | Not supported | Git-agent gap |
+| Custom instructions | Positional `PROMPT`, or `-` for stdin; conflicts with scope selectors | Positional text is a lower-priority hint after a selected scope | Partial parity with a narrower safety boundary |
+| Full codebase | No dedicated CLI target | `--codebase` | Git-agent extra |
+| Staged-only CLI review | Not exposed by the Codex CLI review command, although the app review pane has a staged view | `--staged` | Git-agent extra |
+| Commit title | `--title`, only with `--commit` | Not applicable | Follows the missing commit mode |
+| Clean repository | Can select a base branch, commit, or custom prompt | Default uncommitted mode requires changed files | Different default capability |
+
+Codex's CLI contract says to choose exactly one of uncommitted changes,
+a base branch, a commit, or custom review instructions. Those choices conflict
+with one another, and `--title` is valid only with `--commit`.
+
+Git-agent's scope flags are mutually exclusive, but its available scopes are
+implemented in `internal/tasks/review/task.go` as `codebase`, `uncommitted`,
+and `staged`. A positional prompt cannot select a new review target; it can
+only narrow the selected authoritative scope.
+
+Git-agent's previous-`HEAD` context is not a base-branch or commit-review
+equivalent. It is contrast-only context and does not expand the authoritative
+review scope.
+
+## Delivery and output
+
+Codex's CLI review is non-interactive and reports prioritized, actionable
+findings. In the app and IDE, review results can appear in a chat or as inline
+comments; detached delivery is configurable on those surfaces.
+
+Git-agent always starts a detached task:
+
+```sh
+git-agent review
+# prints launch JSON with a durable task ID and authenticated event endpoint
+git-agent review --wait <id>
+# prints the final strict JSON report
+```
+
+This makes Git-agent better suited to agents and automation, but it is not
+drop-in compatible with a caller that expects one `codex review` invocation to
+produce the final review directly.
+
+Git-agent's final report is machine-validated:
+
+- `summary`, `recommendation`, and `findings` are required;
+- every finding requires an aspect, severity, impact, proposed fix, and at
+  least one repository-relative evidence location;
+- evidence paths and inclusive line ranges are checked against the
+  authoritative worktree or index source;
+- findings must be ordered by descending severity;
+- style findings must be `LOW`;
+- `APPROVE`, `COMMENT`, and `FIX` are validated against the finding severities.
+
+The Codex CLI and review-surface documentation describe prioritized findings
+and inline comments, but do not prescribe this strict JSON/evidence schema.
+
+## Repository and safety behavior
+
+Both workflows are intended to review without changing the working tree.
+
+Git-agent keeps model tools read-only and validates the review against a
+fingerprinted snapshot in diff modes. If the worktree, index, `HEAD`, or
+tracked dirty-submodule state changes during a diff review, the review fails
+with an explicit stale-snapshot error rather than reporting against mixed
+states.
+
+Git-agent also adds behavior that is not part of the documented Codex review
+contract:
+
+- recursive inspection of eligible dirty registered submodules;
+- bounded diff and generated-heavy context packs;
+- scoped `AGENTS`/`CLAUDE`-family guidance;
+- bounded branch fan-out for independently partitionable inspections;
+- applicable host checks after provider review, including the bundled
+  `golangci-lint` check;
+- deterministic dry-run events;
+- validated, immutable orchestration artifacts.
+
+Codex uses the normal Codex sandbox and approval settings for the active
+surface. If a user asks Codex to apply fixes, those normal workspace
+permissions still apply; Git-agent's `review` and `simplify` workflows do not
+write fixes.
+
+## `simplify` versus `codex review`
+
+`simplify` is a specialization rather than a parity implementation.
+
+It uses a separate mission and report shape:
+
+- aspects are `reuse`, `clarity`, and `efficiency`;
+- each opportunity requires exact repository evidence;
+- each opportunity needs a concrete proposed change;
+- behavior preservation must be established from code and tests;
+- proposed consolidation must be checked against error handling, nil versus
+  empty behavior, ordering, boundary values, and concurrency;
+- taste-only rewrites, speculative future simplifications, and unverified
+  deduplication are excluded.
+
+The closest Codex equivalent is a custom review prompt such as:
+
+```sh
+codex review "Find only confirmed behavior-preserving simplifications.
+Require repository evidence and do not report style-only rewrites."
+```
+
+That approximation still differs:
+
+1. Codex treats the prompt as the review target; Git-agent treats a prompt after
+   a scope flag as a narrowing hint.
+2. Codex returns generic review findings; Git-agent returns typed
+   `opportunities`.
+3. Git-agent validates every opportunity's evidence and rejects reports that
+   cannot be tied to the current repository state.
+4. Git-agent runs the review-only static-check phase for `review`, not for
+   `simplify`.
+
+## If drop-in parity becomes a goal
+
+The minimum additions would be:
+
+1. Add `--base <branch>`.
+2. Add `--commit <sha>` and `--title`.
+3. Allow prompt-only review, including `-` for stdin.
+4. Define the scope and evidence rules for prompt-only review.
+5. Add a direct, non-detached output mode if compatibility with Codex CLI
+   scripting is required.
+6. Decide whether `code_review.md` should be loaded explicitly when referenced
+   from `AGENTS.md`, rather than discovered through the existing read-only
+   repository tools.
+
+These are compatibility changes, not prerequisites for the current Git-agent
+design. The current design is intentionally stricter and more reproducible for
+automation, while `simplify` is intentionally a separate workflow.
+
+## Sources
+
+- [Codex CLI command reference](https://learn.chatgpt.com/docs/developer-commands.md?surface=cli)
+- [Codex code review](https://learn.chatgpt.com/docs/code-review.md)
+- [Git-agent review and simplify specification](../docs/spec.md)
+
