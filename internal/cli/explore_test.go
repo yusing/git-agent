@@ -18,9 +18,13 @@ import (
 type exploreFakeResponseClient struct {
 	mu       sync.Mutex
 	requests []openai.Request
+	deadline atomic.Bool
 }
 
-func (c *exploreFakeResponseClient) CreateResponse(_ context.Context, request openai.Request) (openai.Response, error) {
+func (c *exploreFakeResponseClient) CreateResponse(ctx context.Context, request openai.Request) (openai.Response, error) {
+	if _, ok := ctx.Deadline(); ok {
+		c.deadline.Store(true)
+	}
 	c.mu.Lock()
 	c.requests = append(c.requests, request)
 	c.mu.Unlock()
@@ -40,6 +44,28 @@ func (c *exploreFakeResponseClient) CreateResponse(_ context.Context, request op
 		return openai.Response{}, err
 	}
 	return openai.Response{Text: text, Continuation: []openai.Item{openai.NewMessage("assistant", text)}}, nil
+}
+
+func TestExploreDoesNotApplyRequestTimeoutToWholeBatch(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_EMBEDDING_DIMENSIONS", "3")
+	t.Chdir(root)
+	runGit(t, root, "init")
+	writeFixtureFile(t, root+"/main.go", "package demo\n")
+
+	responses := &exploreFakeResponseClient{}
+	app := &App{
+		stdin: strings.NewReader(""), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{},
+		responseClient: responses, embeddingClient: &exploreFakeEmbedder{},
+	}
+	if err := app.Run(context.Background(), []string{"explore", "inspect", "the", "repository"}); err != nil {
+		t.Fatal(err)
+	}
+	if responses.deadline.Load() {
+		t.Fatal("explore applied the per-request timeout to the whole batch context")
+	}
 }
 
 func (c *exploreFakeResponseClient) requestCount() int {

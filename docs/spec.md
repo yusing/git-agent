@@ -668,8 +668,11 @@ rediscovery to the caller. Indexing, batch-wait, tool, and provider progress is
 written only to stderr.
 
 Explore is a foreground workflow. It does not detach, create a wait endpoint,
-or support `--wait`. Independently launched processes reserve their intent
-before semantic retrieval. Compatible ready intents elect one foreground
+or support `--wait`. It imposes no internal wall-clock or HTTP timeout on
+semantic retrieval, provider requests or streams, or the multi-turn agent loop;
+it runs until completion or caller cancellation, subject to the agent's bounded
+step and tool-call budgets. Independently launched processes reserve their
+intent before semantic retrieval. Compatible ready intents elect one foreground
 leader and form batches of at most three; followers wait for the leader and
 receive only their own result. A batch is confined to one cleaned absolute
 working directory even when project metadata is shared by clones with the same

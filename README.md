@@ -304,8 +304,9 @@ git-agent explore --follow-up <search-id> "which tests define its failure contra
 Concurrent initial calls batch automatically. Concurrent follow-ups naming the
 same parent ID become independent sibling branches. Three follow-ups preserve
 context; the next invocation succeeds as a fresh search with a reset allowance.
-Progress stays on stderr and the result envelope stays on stdout. See
-[the specification](docs/spec.md) for the exact batching, persistence,
+Explore adds no internal timeout: it runs until completion or caller
+cancellation. Progress stays on stderr and the result envelope stays on stdout.
+See [the specification](docs/spec.md) for the exact batching, persistence,
 read-tool, reset, and failure contracts.
 
 Explore records redacted batch and branch dispositions under

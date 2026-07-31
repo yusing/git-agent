@@ -136,7 +136,7 @@ func (a *App) prepareExploreSearch(ctx context.Context, question string) (explor
 	}
 	client := a.embeddingClient
 	if client == nil {
-		client = openai.NewHTTPClient(&http.Client{Timeout: embeddingCfg.Timeout})
+		client = openai.NewHTTPClient(&http.Client{})
 	}
 	lastStatus := ""
 	output, err := searchtask.Run(ctx, client, searchtask.Options{
@@ -177,9 +177,6 @@ func (a *App) runExploreBatch(ctx context.Context, repo *gitctx.Repository, pare
 	if err != nil {
 		return nil, err
 	}
-	taskCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
-	defer cancel()
-
 	promptItems := make([]explore.PromptItem, 0, len(items))
 	itemIDs := make([]string, 0, len(items))
 	var guidancePaths []string
@@ -223,7 +220,7 @@ func (a *App) runExploreBatch(ctx context.Context, repo *gitctx.Repository, pare
 	}
 	client := a.responseClient
 	if client == nil {
-		client = openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout})
+		client = openai.NewHTTPClient(&http.Client{})
 	}
 	runner := agent.OpenAIRunner{
 		Config: cfg, Client: client, Tools: registry, ToolSpecs: toolSpecs,
@@ -241,7 +238,7 @@ func (a *App) runExploreBatch(ctx context.Context, repo *gitctx.Repository, pare
 	} else {
 		request.Input = explore.FollowUpInput(*parent, userPrompt)
 	}
-	result, err := runner.Run(taskCtx, request)
+	result, err := runner.Run(ctx, request)
 	if err != nil {
 		return nil, err
 	}
