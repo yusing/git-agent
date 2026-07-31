@@ -420,13 +420,14 @@ func (sync *indexSync) importIndex(ctx context.Context, target indexSyncTarget) 
 	}
 	return withIndexLock(ctx, target.indexDir, func() error {
 		local, _ := loadVectors(target.indexDir)
-		records, err := mergeCompatibleRecordsStrict(local, remoteRecords, target.model, target.dimensions)
+		records, changed, err := mergeImportedRecords(local, remoteRecords, target.model, target.dimensions)
 		if err != nil {
 			return err
 		}
-		if len(records) == len(local) {
+		if !changed {
 			return nil
 		}
+
 		return saveIndex(ctx, target.metadataDir, target.indexDir, target.source, target.root, target.revision, target.model, target.dimensions, records, nil)
 	})
 }
@@ -455,10 +456,7 @@ func (sync *indexSync) exportIndexLocked(target indexSyncTarget) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("load revision index for sync: %w", err)
 	}
-	compatible, ok := compatibleIndexRecords(records, target.model, target.dimensions)
-	if !ok {
-		return 0, errors.New("revision index contains incompatible records")
-	}
+	compatible, _ := compatibleIndexRecords(records, target.model, target.dimensions)
 	return sync.writeSnapshot(target, compatible)
 }
 
@@ -511,10 +509,41 @@ func (sync *indexSync) writeSnapshot(target indexSyncTarget, compatible []vector
 
 func compatibleIndexRecords(records []vectorRecord, model string, dimensions int) ([]vectorRecord, bool) {
 	byKey := make(map[string]vectorRecord, len(records))
-	if !collectCompatibleRecords(byKey, records, model, dimensions, false) {
-		return nil, false
+	allCompatible := collectCompatibleRecords(byKey, records, model, dimensions, false)
+	return sortedRecordValues(byKey), allCompatible
+}
+
+func mergeImportedRecords(local, remote []vectorRecord, model string, dimensions int) ([]vectorRecord, bool, error) {
+	remote, err := mergeCompatibleRecordsStrict(nil, remote, model, dimensions)
+	if err != nil {
+		return nil, false, err
 	}
-	return sortedRecordValues(byKey), true
+	compatibleLocal, _ := compatibleIndexRecords(local, model, dimensions)
+	records, err := mergeCompatibleRecordsStrict(compatibleLocal, remote, model, dimensions)
+	if err != nil {
+		return nil, false, err
+	}
+	byKey := make(map[string]vectorRecord, len(records)+len(local))
+	for _, record := range records {
+		byKey[cacheRecordKey(record)] = record
+	}
+	remoteLocations := make(map[string]bool, len(remote))
+	for _, record := range remote {
+		remoteLocations[cacheRecordLocationKey(record)] = true
+	}
+	replaced := false
+	for _, record := range local {
+		if compatibleIndexRecord(record, model, dimensions) {
+			continue
+		}
+		if remoteLocations[cacheRecordLocationKey(record)] {
+			replaced = true
+			continue
+		}
+		byKey[cacheRecordKey(record)] = record
+	}
+	records = sortedRecordValues(byKey)
+	return records, replaced || len(records) != len(local), nil
 }
 
 func validateSnapshot(snapshot syncedIndex, target indexSyncTarget) error {
@@ -554,10 +583,17 @@ func mergeCompatibleRecords(base, incoming []vectorRecord, model string, dims in
 	return sortedRecordValues(byKey)
 }
 
+func compatibleIndexRecord(record vectorRecord, model string, dimensions int) bool {
+	return record.EmbeddingModel == model &&
+		record.Dimensions == dimensions &&
+		len(record.Vector) == dimensions &&
+		record.EmbeddingInputHash != ""
+}
+
 func collectCompatibleRecords(byKey map[string]vectorRecord, records []vectorRecord, model string, dims int, replace bool) bool {
 	allCompatible := true
 	for _, record := range records {
-		if record.EmbeddingModel != model || record.Dimensions != dims || len(record.Vector) != dims || record.EmbeddingInputHash == "" {
+		if !compatibleIndexRecord(record, model, dims) {
 			allCompatible = false
 			continue
 		}

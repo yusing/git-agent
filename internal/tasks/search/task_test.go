@@ -123,6 +123,117 @@ func TestIndexSyncSharesOnlyCurrentHEADRecords(t *testing.T) {
 	}
 }
 
+func TestMergeImportedRecordsReplacesLegacyLocation(t *testing.T) {
+	remote := testSyncedVectorRecord("current-input", []float64{1, 0, 0})
+	local := remote
+	local.EmbeddingInputHash = ""
+
+	records, changed, err := mergeImportedRecords(
+		[]vectorRecord{local},
+		[]vectorRecord{remote},
+		remote.EmbeddingModel,
+		remote.Dimensions,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || len(records) != 1 || records[0].EmbeddingInputHash != remote.EmbeddingInputHash {
+		t.Fatalf("merged records = %#v, changed = %t; want compatible remote replacement", records, changed)
+	}
+}
+
+func TestRemoteCodeSearchSyncFiltersPreservedLegacyRecords(t *testing.T) {
+	sourceRemote := t.TempDir()
+	writeFile(t, sourceRemote, "README.md", "legacy documentation\n")
+	writeFile(t, sourceRemote, "app.go", "package app\n")
+	revision := commitSearchRepo(t, sourceRemote)
+	syncRemote := newEmptySyncRemote(t)
+
+	opts := Options{
+		Root:                t.TempDir(),
+		Remote:              sourceRemote,
+		Rev:                 revision,
+		IndexOnly:           true,
+		MinScore:            DefaultMinScore,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+	}
+	first, err := Run(t.Context(), fakeEmbedder{}, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := loadVectorIndexRecords(first.Diagnostics.IndexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range index {
+		if index[i].Path == "README.md" {
+			index[i].EmbeddingInputHash = ""
+		}
+	}
+	if err := writeJSON(filepath.Join(first.Diagnostics.IndexDir, "vectors.index.json"), index); err != nil {
+		t.Fatal(err)
+	}
+
+	opts.CodeOnly = true
+	opts.IndexRemote = syncRemote
+	for range 2 {
+		if _, err := Run(t.Context(), fakeEmbedder{}, opts, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	local, err := loadVectors(first.Diagnostics.IndexDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(local) != 2 {
+		t.Fatalf("local records = %#v, want code and legacy documentation records", local)
+	}
+	for _, record := range local {
+		switch record.Path {
+		case "README.md":
+			if record.EmbeddingInputHash != "" {
+				t.Fatalf("legacy README record was rebuilt: %#v", record)
+			}
+		case "app.go":
+			if record.EmbeddingInputHash == "" {
+				t.Fatalf("compatible code record lost its input hash: %#v", record)
+			}
+		default:
+			t.Fatalf("unexpected local record: %#v", record)
+		}
+	}
+
+	sync, err := openIndexSync(t.Context(), syncRemote, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sync.close()
+	target := indexSyncTarget{
+		origin:     giturl.Identity(sourceRemote),
+		revision:   revision,
+		model:      opts.EmbeddingModel,
+		dimensions: opts.EmbeddingDimensions,
+	}
+	path, err := sync.snapshotPath(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot syncedIndex
+	if err := sonic.Unmarshal(data, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Records) != 1 || snapshot.Records[0].Path != "app.go" || snapshot.Records[0].EmbeddingInputHash == "" {
+		t.Fatalf("synced records = %#v, want only compatible app.go record", snapshot.Records)
+	}
+}
+
 func TestSearchIndexSyncPreservesConfiguredProgressLog(t *testing.T) {
 	syncRemote := newEmptySyncRemote(t)
 	origin := "https://example.test/acme/widget.git"

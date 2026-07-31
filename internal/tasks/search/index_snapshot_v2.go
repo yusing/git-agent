@@ -150,7 +150,7 @@ func mergeCompatibleRecordsStrict(base, incoming []vectorRecord, model string, d
 	byKey := make(map[string]vectorRecord, len(base)+len(incoming))
 	for _, records := range [][]vectorRecord{base, incoming} {
 		for _, record := range records {
-			if record.EmbeddingModel != model || record.Dimensions != dimensions || len(record.Vector) != dimensions || record.EmbeddingInputHash == "" {
+			if !compatibleIndexRecord(record, model, dimensions) {
 				return nil, errors.New("revision index contains incompatible records")
 			}
 			key := cacheRecordKey(record)
