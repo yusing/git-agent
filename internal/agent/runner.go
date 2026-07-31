@@ -46,6 +46,11 @@ type Result struct {
 	messages        []openai.Item
 }
 
+// History returns a replayable snapshot of the completed conversation.
+func (r Result) History() []openai.Item {
+	return slices.Clone(r.messages)
+}
+
 type NodeResult struct {
 	Final  *Result
 	Branch *BranchRequest
@@ -209,6 +214,7 @@ func (r *OpenAIRunner) RunNode(ctx context.Context, request Request) (NodeResult
 			repaired := *repairedOutcome.Final
 			result.RepairCalls++
 			result.Text = repaired.Text
+			result.messages = slices.Clone(repaired.messages)
 			r.normalizeResult(&result)
 			if errs := r.Validator(result.Text); len(errs) > 0 {
 				return NodeResult{}, fmt.Errorf("validation failed after repair: %v", errs)

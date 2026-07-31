@@ -1,7 +1,7 @@
 # git-agent
 
-Commit, PR, release, review, simplification, and repository-search context for
-AI-assisted Git work.
+Commit, PR, release, review, simplification, exploration, and repository-search
+context for AI-assisted Git work.
 
 When installed, [`skills-mgr`](https://github.com/yusing/skills-mgr) integrates
 skill discovery and on-demand guidance reading into message-generation
@@ -15,8 +15,9 @@ message generation by handing the final message to `git commit`.
 TL;DR: use `commit-msg` when you want a grounded commit message on stdout, use
 `commit` when you want the same message created as a Git commit, use
 `release-note` for release Markdown, and use `search` when an agent needs fast
-local implementation context. Use `review` for evidence-backed defects and
-`simplify` for behavior-preserving cleanup opportunities.
+local implementation context. Use `explore` when that search needs read-tool
+inspection and context-preserving questions. Use `review` for evidence-backed
+defects and `simplify` for behavior-preserving cleanup opportunities.
 
 ## Quick Start
 
@@ -55,6 +56,8 @@ directory is on `PATH`.
 | Staged review | `git-agent review --staged` | Detached staged-review launch JSON |
 | Re-review a completed turn | `git-agent review --follow-up <turn-id> <prompt...>` | New detached task launch JSON |
 | Codebase simplification audit | `git-agent simplify --codebase` | Detached codebase-audit launch JSON |
+| Agent-ready codebase exploration | `git-agent explore <question...>` | Search ID and grounded answer JSON |
+| Continue an exploration | `git-agent explore --follow-up <search-id> <question...>` | New branch ID and answer JSON |
 | Agent context search | `git-agent search --agent <query...>` | Brief results, plus progress endpoint when indexing |
 | Configure index sync | `git-agent config index.remote <git-url>` | Save a dedicated Git remote for shared revision indexes |
 | Push local indexes | `git-agent index sync` | Additively publish all completed local revision indexes |
@@ -282,6 +285,27 @@ The command returns launch JSON while `codex-herdr` follows the review. Its
 
 Git Agent does not require `codex-herdr`; both commands still work normally on
 their own.
+
+## Explore
+
+`git-agent explore` combines embedding search with the established read-only
+repository tools and returns a synchronous JSON answer with an opaque ID.
+
+```sh
+# Start a grounded codebase exploration
+git-agent explore "where is release note evidence prepared?"
+# {"id":"...","answer":"..."}
+
+# Continue that exact context; the result receives another independently usable ID
+git-agent explore --follow-up <search-id> "which tests define its failure contract?"
+```
+
+Concurrent initial calls batch automatically. Concurrent follow-ups naming the
+same parent ID become independent sibling branches. Three follow-ups preserve
+context; the next invocation succeeds as a fresh search with a reset allowance.
+Progress stays on stderr and the result envelope stays on stdout. See
+[the specification](docs/spec.md) for the exact batching, persistence,
+read-tool, reset, and failure contracts.
 
 ## Search
 

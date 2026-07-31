@@ -250,6 +250,10 @@ func ReviewToolCandidates(mode ReviewMode) []string {
 	return names
 }
 
+func ExploreToolNames() []string {
+	return []string{"repo_summary", "list_files", "read_file", "inspect_file", jqToolName, "grep", "find"}
+}
+
 func SkillToolNames() []string {
 	return []string{SkillsReadToolName}
 }

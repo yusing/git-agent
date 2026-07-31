@@ -12,6 +12,8 @@
 - `internal/gitctx/`: typed Git repository inspection and context collection.
 - `internal/contextpack/`: compaction helpers for generated-heavy or large
   context.
+- `internal/explore/`: synchronous exploration batching and durable follow-up
+  sessions.
 - `internal/tools/`: curated read-only model tool registry and tool envelopes.
 - `internal/textutil/`: text normalization and output shaping helpers.
 - `internal/trace/`: in-memory event recording and human console trace rendering.

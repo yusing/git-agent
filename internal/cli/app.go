@@ -51,9 +51,11 @@ const (
 )
 
 type App struct {
-	stdin  io.Reader
-	stdout io.Writer
-	stderr io.Writer
+	stdin           io.Reader
+	stdout          io.Writer
+	stderr          io.Writer
+	responseClient  openai.Client
+	embeddingClient openai.EmbeddingClient
 }
 
 func New() *App {
@@ -74,6 +76,8 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return set.DispatchHelper(args[1:])
 	case "config":
 		return a.runConfig(args[1:])
+	case "explore":
+		return a.runExplore(ctx, args[1:])
 	case "index":
 		return a.runIndex(ctx, args[1:])
 	case "commit":
@@ -2284,6 +2288,7 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent index sync\n")
 	b.WriteString("  git-agent index migrate --to v2 [--dry-run]\n")
 	b.WriteString("  git-agent commit-msg [--amend] [flags]\n")
+	b.WriteString("  git-agent explore [--follow-up <search-id>] <question...>\n")
 	b.WriteString("  git-agent pr-message [flags]\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] patch|minor|major\n")
@@ -2297,7 +2302,8 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]\n")
 	b.WriteString("  git-agent simplify --wait <id>\n")
 	b.WriteString("  git-agent simplify --follow-up <turn-id> <prompt...>\n")
-	b.WriteString("\nRun `git-agent search --help` for search flags.\n")
+	b.WriteString("\nRun `git-agent explore --help` for exploration usage.\n")
+	b.WriteString("Run `git-agent search --help` for search flags.\n")
 	b.WriteString("Run `git-agent review --help` or `git-agent simplify --help` for inspection flags.\n")
 	return errors.New(b.String())
 }

@@ -15,6 +15,13 @@ import (
 	"github.com/yusing/git-agent/internal/gitctx"
 )
 
+func TestExploreToolNamesAreRepositoryReadsOnly(t *testing.T) {
+	want := []string{"repo_summary", "list_files", "read_file", "inspect_file", "jq", "grep", "find"}
+	if got := ExploreToolNames(); !slices.Equal(got, want) {
+		t.Fatalf("explore tools = %v, want %v", got, want)
+	}
+}
+
 func TestErrorResultUsesStableBoundedEnvelope(t *testing.T) {
 	t.Parallel()
 

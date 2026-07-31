@@ -44,6 +44,9 @@ func TestRunWithoutArgsReturnsUsage(t *testing.T) {
 	if !strings.Contains(err.Error(), "git-agent search [flags] <query...>") {
 		t.Fatalf("usage missing search synopsis:\n%s", err)
 	}
+	if !strings.Contains(err.Error(), "git-agent explore [--follow-up <search-id>] <question...>") {
+		t.Fatalf("usage missing explore synopsis:\n%s", err)
+	}
 	if !strings.Contains(err.Error(), "git-agent search --help") {
 		t.Fatalf("usage missing search help hint:\n%s", err)
 	}

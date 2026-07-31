@@ -166,7 +166,7 @@ func fishCompletionCases(refs, remotes, paths []string) []fishCompletionCase {
 		cases = append(cases, fishCompletionCase{name: name, line: line, want: slices.Clone(want)})
 	}
 
-	root := []string{"commit", "commit-msg", "config", "help", "index", "pr-message", "release-note", "review", "search", "simplify"}
+	root := []string{"commit", "commit-msg", "config", "explore", "help", "index", "pr-message", "release-note", "review", "search", "simplify"}
 	add("root commands", "git-agent ", root)
 	for _, candidate := range root {
 		add("root partial "+candidate, "git-agent "+candidate, candidatesWithPrefix(root, candidate))
@@ -374,6 +374,7 @@ func fishCompletionCommands(refs, remotes, paths []string) []fishCompletionComma
 	return []fishCompletionCommand{
 		{name: "commit", options: withShared(fishCompletionOption{name: "amend"})},
 		{name: "commit-msg", options: withShared(fishCompletionOption{name: "amend"})},
+		{name: "explore", options: []fishCompletionOption{{name: "follow-up", takesValue: true, value: "AAAAAAAAAAAAAAAAAAAAAAAAAA"}}},
 		{name: "pr-message", options: slices.Clone(shared)},
 		{name: "release-note", options: withShared(fishCompletionOption{name: "out", takesValue: true, value: "notes.md", valueCandidates: slices.Clone(paths)})},
 		{name: "review", options: slices.Clone(review)},

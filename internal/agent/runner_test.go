@@ -83,6 +83,15 @@ func TestRunnerReturnsTerminalBranchOutcomeAndPortableForks(t *testing.T) {
 	}
 }
 
+func TestResultHistoryReturnsClone(t *testing.T) {
+	result := Result{messages: []openai.Item{openai.NewMessage("assistant", "answer")}}
+	history := result.History()
+	history[0].Content = "changed"
+	if got := result.History()[0].Content; got != "answer" {
+		t.Fatalf("stored history = %q, want answer", got)
+	}
+}
+
 func TestRunnerRejectsBranchMixedWithRepositoryCall(t *testing.T) {
 	t.Parallel()
 
@@ -603,6 +612,10 @@ func TestRunnerRepairsInvalidOutputOnce(t *testing.T) {
 	}
 	if len(client.requests) != 2 {
 		t.Fatalf("requests = %d, want 2", len(client.requests))
+	}
+	history := result.History()
+	if len(history) == 0 || history[len(history)-1].Content != "Add parser" {
+		t.Fatalf("history ends with %#v, want repaired assistant response", history)
 	}
 }
 

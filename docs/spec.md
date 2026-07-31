@@ -11,7 +11,8 @@ It:
 - uses the official OpenAI Go SDK against an OpenAI-compatible Responses API
   endpoint
 - runs a bounded, read-only, tool-calling agent loop
-- emits final generation artifacts or strict review JSON on stdout
+- emits final generation artifacts, exploration envelopes, or strict review
+  JSON on stdout
 - can optionally create the Git commit after generating a message
 - preserves project guidance behavior close to Codex for AGENTS-family files
 
@@ -27,6 +28,7 @@ Supported workflows:
 - `git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 - `git-agent review --wait <id>`
 - `git-agent review --follow-up <turn-id> <prompt...>`
+- `git-agent explore [--follow-up <search-id>] <question...>`
 - `git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 - `git-agent simplify --wait <id>`
 - `git-agent simplify --follow-up <turn-id> <prompt...>`
@@ -633,6 +635,54 @@ gathered so far. Exact repeated tool calls force finalization because they add
 no evidence. Distinct calls may return identical output and still continue
 because invocation identity, not result content, defines repeated work. These
 progress guards do not reduce configured model-step or tool-call ceilings.
+
+#### `git-agent explore [--follow-up <search-id>] <question...>`
+
+Run a synchronous, read-only codebase exploration and write exactly one
+newline-terminated JSON object to stdout:
+
+```json
+{"id":"opaque-search-id","answer":"agent-ready context pack"}
+```
+
+The initial form requires a Git repository. It first runs filesystem semantic
+retrieval with the existing search index, default retrieval limits, and the
+code-only filter. It then gives those unverified leads to a bounded Responses
+API agent with `repo_summary`, `list_files`, `read_file`, `inspect_file`, `jq`,
+`grep`, and `find`. The agent must inspect primary implementation owners and
+contract-defining tests, return direct answers with repository-relative
+path-and-line evidence, and avoid delegating ownership or blast-radius
+rediscovery to the caller. Indexing, batch-wait, tool, and provider progress is
+written only to stderr.
+
+Explore is a foreground workflow. It does not detach, create a wait endpoint,
+or support `--wait`. Independently launched processes reserve their intent
+before semantic retrieval. Compatible ready intents elect one foreground
+leader and form batches of at most three; followers wait for the leader and
+receive only their own result. A batch is confined to one cleaned absolute
+working directory even when project metadata is shared by clones with the same
+origin. Initial searches in that workspace are mutually compatible. Follow-ups
+are compatible only when they name the same parent search ID. Every successful
+batch item receives a distinct opaque ID even when its provider conversation
+was shared with sibling items.
+
+Successful sessions persist in the current project's owner-only metadata
+directory. A session records its selected answer, parent ID, follow-up depth,
+and replayable Responses API item history. `--follow-up <search-id>` appends the
+new natural-language question to that stored context. The parent remains
+immutable and reusable, so simultaneous follow-ups from one parent create
+distinct sibling IDs rather than serializing through shared mutable state.
+Concurrent sibling questions may batch and each resulting ID can itself be
+used as the parent of another concurrent batch.
+
+Each branch permits three context-preserving follow-ups after its initial
+search. Follow-up depths one through three reuse stored context. A follow-up
+against a depth-three ID still succeeds, but it performs a new semantic search,
+has no parent, returns a new ID at depth zero, and resets the three-follow-up
+allowance. An unknown, malformed, unsuccessful, or unreadable ID fails before a
+provider request. Any semantic, provider, validation, persistence, leader, or
+batch-splitting failure returns nonzero and does not emit a success object on
+stdout.
 
 #### `git-agent search [flags] <query...>`
 

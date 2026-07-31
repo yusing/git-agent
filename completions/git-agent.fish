@@ -79,6 +79,8 @@ function __git_agent_command_has_option
             contains -- "$option" amend $shared
         case pr-message
             contains -- "$option" $shared
+        case explore
+            contains -- "$option" follow-up
         case release-note
             contains -- "$option" out $shared
         case review simplify
@@ -455,6 +457,7 @@ complete -c git-agent -f
 
 complete -c git-agent -n '__git_agent_no_subcommand' -a commit -d 'Generate a message and commit staged changes'
 complete -c git-agent -n '__git_agent_no_subcommand' -a config -d 'Read or update persistent configuration'
+complete -c git-agent -n '__git_agent_no_subcommand' -a explore -d 'Explore repository context with read-only tools and follow-up IDs'
 complete -c git-agent -n '__git_agent_no_subcommand' -a index -d 'Manage synchronized search indexes'
 complete -c git-agent -n '__git_agent_no_subcommand' -a commit-msg -d 'Generate a commit message from staged changes'
 complete -c git-agent -n '__git_agent_no_subcommand' -a pr-message -d 'Generate a pull request message from branch changes'
@@ -481,6 +484,7 @@ complete -c git-agent -n '__git_agent_option_available uncommitted review simpli
 complete -c git-agent -n '__git_agent_option_available staged review simplify' -l staged -d 'Inspect staged changes only'
 complete -c git-agent -n '__git_agent_option_available wait review simplify' -l wait -r -f -d 'Wait for a detached task ID and print its report'
 complete -c git-agent -n '__git_agent_option_available follow-up review simplify' -l follow-up -r -f -d 'Re-evaluate a successful provider turn ID'
+complete -c git-agent -n '__git_agent_option_available follow-up explore' -l follow-up -r -f -d 'Fork a completed explore search ID'
 complete -c git-agent -n '__git_agent_option_available depth review' -l depth -r -f -a 'fast balanced thorough' -d 'Select depth and reasoning default: fast=low, balanced=medium, thorough=high'
 complete -c git-agent -n '__git_agent_option_available depth simplify' -l depth -r -f -a 'fast balanced thorough' -d 'Select depth and reasoning default: fast=low, balanced=low, thorough=medium'
 complete -c git-agent -n '__git_agent_option_available max-web-searches review simplify' -l max-web-searches -r -f -d 'Cap provider-hosted web searches'
