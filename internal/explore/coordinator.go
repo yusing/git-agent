@@ -23,7 +23,7 @@ import (
 const (
 	defaultBatchSize         = 3
 	defaultBatchWait         = 2 * time.Minute
-	defaultJoinGrace         = 50 * time.Millisecond
+	defaultJoinGrace         = 100 * time.Millisecond
 	defaultPollInterval      = 50 * time.Millisecond
 	defaultHeartbeatInterval = time.Second
 	defaultHeartbeatStale    = 30 * time.Second
@@ -60,6 +60,7 @@ type BatchRunner func(context.Context, *Session, []BatchItem) (map[string]BatchR
 // owner-only project metadata. It never detaches work from the elected leader.
 type Coordinator struct {
 	store             *Store
+	workspace         string
 	workspaceKey      string
 	batchSize         int
 	batchWait         time.Duration
@@ -68,12 +69,15 @@ type Coordinator struct {
 	heartbeatInterval time.Duration
 	heartbeatStale    time.Duration
 	Progress          func(string)
+	DispositionLog    *DispositionLog
 }
 
 func NewCoordinator(store *Store, workspace string) *Coordinator {
-	sum := sha256.Sum256([]byte(filepath.Clean(workspace)))
+	workspace = filepath.Clean(workspace)
+	sum := sha256.Sum256([]byte(workspace))
 	return &Coordinator{
 		store:             store,
+		workspace:         workspace,
 		workspaceKey:      hex.EncodeToString(sum[:]),
 		batchSize:         defaultBatchSize,
 		batchWait:         defaultBatchWait,
@@ -257,6 +261,9 @@ func (c *Coordinator) runLeader(ctx context.Context, keyDir, batchDir string, pa
 	if err != nil {
 		_ = c.failBatch(ctx, keyDir, batchDir, err)
 		return err
+	}
+	if c.DispositionLog != nil {
+		_ = c.DispositionLog.AppendBatch(ctx, filepath.Base(batchDir), c.workspace, parent, items)
 	}
 	c.progress("exploring")
 	results, err := runner(ctx, parent, items)

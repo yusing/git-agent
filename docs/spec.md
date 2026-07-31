@@ -29,6 +29,7 @@ Supported workflows:
 - `git-agent review --wait <id>`
 - `git-agent review --follow-up <turn-id> <prompt...>`
 - `git-agent explore [--follow-up <search-id>] <question...>`
+- `git-agent project_id`
 - `git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 - `git-agent simplify --wait <id>`
 - `git-agent simplify --follow-up <turn-id> <prompt...>`
@@ -636,6 +637,17 @@ no evidence. Distinct calls may return identical output and still continue
 because invocation identity, not result content, defines repeated work. These
 progress guards do not reduce configured model-step or tool-call ceilings.
 
+#### `git-agent project_id`
+
+Print exactly one lowercase 64-character project identifier followed by a
+newline. The command accepts no arguments. It uses the same project identity as
+search metadata: when the containing Git repository has an `origin`, normalize
+the first origin URL and print its SHA-256 identity hash; otherwise hash the
+cleaned absolute project path. Clones sharing a normalized origin therefore
+share an identifier, while repositories without an origin and non-Git
+directories remain path-specific. The command does not create an index or call
+a provider.
+
 #### `git-agent explore [--follow-up <search-id>] <question...>`
 
 Run a synchronous, read-only codebase exploration and write exactly one
@@ -683,6 +695,29 @@ allowance. An unknown, malformed, unsuccessful, or unreadable ID fails before a
 provider request. Any semantic, provider, validation, persistence, leader, or
 batch-splitting failure returns nonzero and does not emit a success object on
 stdout.
+
+After each batch is sealed, its leader best-effort appends one disposition line
+per item to:
+
+```text
+${XDG_STATE_HOME:-$HOME/.local/state}/git-agent/<project_id>/explore.log
+```
+
+The `git-agent` and project directories are owner-only (`0700`), and the log
+and its coordination lock are owner-only files (`0600`). Concurrent batches,
+including batches under different parents, serialize appends so records do not
+interleave or overwrite one another. A logging failure never changes the
+explore result, matching `search_code` debug-log behavior.
+
+Each single-line record contains an RFC 3339 timestamp followed by
+`mode=batched|unbatched`, `branch=true|false`, `project_id`, quoted absolute
+`workspace`, `batch`, `size`, `item`, `parent`, `depth`, and
+`query=[redacted]`. `mode` and `branch` are independent because a follow-up
+branch may itself be batched or unbatched. Fresh searches and the depth-three
+reset record `branch=false`, an empty parent, and depth zero. Disposition is
+recorded before provider execution, so a sealed item remains auditable even if
+semantic preparation has succeeded but provider execution or later result
+handling fails. Query text is never written to this log.
 
 #### `git-agent search [flags] <query...>`
 

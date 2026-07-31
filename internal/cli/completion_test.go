@@ -166,7 +166,7 @@ func fishCompletionCases(refs, remotes, paths []string) []fishCompletionCase {
 		cases = append(cases, fishCompletionCase{name: name, line: line, want: slices.Clone(want)})
 	}
 
-	root := []string{"commit", "commit-msg", "config", "explore", "help", "index", "pr-message", "release-note", "review", "search", "simplify"}
+	root := []string{"commit", "commit-msg", "config", "explore", "help", "index", "pr-message", "project_id", "release-note", "review", "search", "simplify"}
 	add("root commands", "git-agent ", root)
 	for _, candidate := range root {
 		add("root partial "+candidate, "git-agent "+candidate, candidatesWithPrefix(root, candidate))

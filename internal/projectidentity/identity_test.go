@@ -38,6 +38,17 @@ func TestResolveSharesNormalizedOriginAcrossClonesAndURLSpellings(t *testing.T) 
 	if firstDir != want || secondDir != want {
 		t.Fatalf("metadata dirs = %q and %q, want %q", firstDir, secondDir, want)
 	}
+	firstID, err := firstIdentity.ID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := secondIdentity.ID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstID != metadata.IdentitySHA("github.com/Acme/Widget") || secondID != firstID {
+		t.Fatalf("project IDs = %q and %q", firstID, secondID)
+	}
 }
 
 func TestResolveFallsBackToCleanedProjectPathWithoutOrigin(t *testing.T) {
@@ -66,6 +77,13 @@ func TestResolveFallsBackToCleanedProjectPathWithoutOrigin(t *testing.T) {
 			want := filepath.Join(home, ".git-agent", metadata.PathSHA(filepath.Clean(root)))
 			if dir != want {
 				t.Fatalf("metadata dir = %q, want %q", dir, want)
+			}
+			projectID, err := identity.ID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if projectID != metadata.PathSHA(filepath.Clean(root)) {
+				t.Fatalf("project ID = %q", projectID)
 			}
 		})
 	}

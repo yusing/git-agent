@@ -58,6 +58,7 @@ directory is on `PATH`.
 | Codebase simplification audit | `git-agent simplify --codebase` | Detached codebase-audit launch JSON |
 | Agent-ready codebase exploration | `git-agent explore <question...>` | Search ID and grounded answer JSON |
 | Continue an exploration | `git-agent explore --follow-up <search-id> <question...>` | New branch ID and answer JSON |
+| Print search project identity | `git-agent project_id` | Stable project hash on stdout |
 | Agent context search | `git-agent search --agent <query...>` | Brief results, plus progress endpoint when indexing |
 | Configure index sync | `git-agent config index.remote <git-url>` | Save a dedicated Git remote for shared revision indexes |
 | Push local indexes | `git-agent index sync` | Additively publish all completed local revision indexes |
@@ -307,6 +308,11 @@ Progress stays on stderr and the result envelope stays on stdout. See
 [the specification](docs/spec.md) for the exact batching, persistence,
 read-tool, reset, and failure contracts.
 
+Explore records redacted batch and branch dispositions under
+`${XDG_STATE_HOME:-$HOME/.local/state}/git-agent/$(git-agent project_id)/explore.log`.
+Use `git-agent project_id` to print the same stable project hash used by search
+metadata and this log path.
+
 ## Search
 
 `git-agent search` is embedding-backed implementation-location search. It does
@@ -487,6 +493,7 @@ Everyday commands:
 git-agent commit-msg [--amend] [flags]
 git-agent commit [--amend] [flags]
 git-agent pr-message [flags]
+git-agent project_id
 git-agent release-note [--out <file>] [flags] <base> <release>
 git-agent release-note [--out <file>] [flags] patch|minor|major
 git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]

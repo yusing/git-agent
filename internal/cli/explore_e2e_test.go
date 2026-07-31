@@ -27,6 +27,7 @@ func TestExploreCommandEndToEndChainResetAndReadTool(t *testing.T) {
 	embeddings, embeddingStats := newSearchEmbeddingsServer(t)
 	defer embeddings.Close()
 	configureExploreE2EEnvironment(t, responses.URL, embeddings.URL)
+	projectID := runProjectIDProcess(t, executable, repoDir)
 
 	initial := runSuccessfulExploreProcess(t, executable, repoDir, "read-owner", "of", "Answer")
 	if !strings.Contains(initial.output.Answer, "main.go:3") {
@@ -45,6 +46,7 @@ func TestExploreCommandEndToEndChainResetAndReadTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	parentID := initial.output.ID
+	chain := []exploreProcessResult{initial}
 	allIDs := map[string]bool{parentID: true}
 	for depth := 1; depth <= explore.MaxFollowUps; depth++ {
 		result := runSuccessfulExploreProcess(t, executable, repoDir, "--follow-up", parentID, "continue", "depth", fmt.Sprint(depth))
@@ -55,6 +57,7 @@ func TestExploreCommandEndToEndChainResetAndReadTool(t *testing.T) {
 			t.Fatalf("depth %d reused search ID %s", depth, result.output.ID)
 		}
 		allIDs[result.output.ID] = true
+		chain = append(chain, result)
 		session, readErr := store.Read(result.output.ID)
 		if readErr != nil {
 			t.Fatal(readErr)
@@ -88,6 +91,8 @@ func TestExploreCommandEndToEndChainResetAndReadTool(t *testing.T) {
 	if calls, outputs := responseStats.readCounts(); calls != 1 || outputs != 1 {
 		t.Fatalf("read tool calls/observed outputs = %d/%d, want 1/1", calls, outputs)
 	}
+	chain = append(chain, reset)
+	assertExploreChainLog(t, projectID, chain)
 }
 
 func TestExploreCommandEndToEndBatchesAndForks(t *testing.T) {
@@ -98,6 +103,7 @@ func TestExploreCommandEndToEndBatchesAndForks(t *testing.T) {
 	embeddings, _ := newSearchEmbeddingsServer(t)
 	defer embeddings.Close()
 	configureExploreE2EEnvironment(t, responses.URL, embeddings.URL)
+	projectID := runProjectIDProcess(t, executable, repoDir)
 
 	initial := runConcurrentExploreProcesses(t, executable, repoDir, [][]string{
 		{"find", "alpha"},
@@ -160,6 +166,7 @@ func TestExploreCommandEndToEndBatchesAndForks(t *testing.T) {
 	if got := responseStats.answerBatchSizes(); !slices.Equal(got, []int{3, 3, 3, 1, 1}) {
 		t.Fatalf("different-parent provider batch sizes = %v, want [3 3 3 1 1]", got)
 	}
+	assertExploreBatchLog(t, projectID)
 }
 
 func TestExploreCommandEndToEndRejectsUnknownIDWithoutProvider(t *testing.T) {
@@ -382,7 +389,11 @@ func runConcurrentExploreProcesses(t *testing.T, executable, repoDir string, arg
 }
 
 func runExploreProcess(ctx context.Context, executable, repoDir string, args ...string) exploreProcessResult {
-	command := exec.CommandContext(ctx, executable, append([]string{"explore"}, args...)...)
+	return runGitAgentProcess(ctx, executable, repoDir, append([]string{"explore"}, args...)...)
+}
+
+func runGitAgentProcess(ctx context.Context, executable, repoDir string, args ...string) exploreProcessResult {
+	command := exec.CommandContext(ctx, executable, args...)
 	command.Dir = repoDir
 	command.Env = os.Environ()
 	var stdout bytes.Buffer
@@ -391,6 +402,98 @@ func runExploreProcess(ctx context.Context, executable, repoDir string, args ...
 	command.Stderr = &stderr
 	err := command.Run()
 	return exploreProcessResult{stdout: stdout.String(), stderr: stderr.String(), err: err}
+}
+
+func runProjectIDProcess(t *testing.T, executable, repoDir string) string {
+	t.Helper()
+	result := runGitAgentProcess(t.Context(), executable, repoDir, "project_id")
+	if result.err != nil {
+		t.Fatalf("project_id failed: %v\nstderr:\n%s", result.err, result.stderr)
+	}
+	if result.stderr != "" {
+		t.Fatalf("project_id stderr = %q", result.stderr)
+	}
+	projectID := strings.TrimSuffix(result.stdout, "\n")
+	if len(projectID) != 64 || result.stdout != projectID+"\n" {
+		t.Fatalf("project_id stdout = %q", result.stdout)
+	}
+	return projectID
+}
+
+func assertExploreChainLog(t *testing.T, projectID string, chain []exploreProcessResult) {
+	t.Helper()
+	lines := readExploreLogLines(t, projectID)
+	if len(lines) != len(chain) {
+		t.Fatalf("explore log lines = %d, want %d\n%s", len(lines), len(chain), strings.Join(lines, "\n"))
+	}
+	parentID := ""
+	for index, result := range chain {
+		branch := index > 0 && index <= explore.MaxFollowUps
+		depth := index
+		if !branch {
+			depth = 0
+			parentID = ""
+		}
+		for _, want := range []string{
+			" mode=unbatched ", fmt.Sprintf(" branch=%t ", branch), " project_id=" + projectID + " ",
+			" size=1 ", " item=" + result.output.ID + " ", " parent=" + parentID + " ",
+			fmt.Sprintf(" depth=%d ", depth), " query=[redacted]",
+		} {
+			if !strings.Contains(lines[index], want) {
+				t.Errorf("chain log line %d missing %q: %s", index, want, lines[index])
+			}
+		}
+		if strings.Contains(lines[index], "read-owner") || strings.Contains(lines[index], "continue depth") || strings.Contains(lines[index], "reset with fresh context") {
+			t.Errorf("query leaked in chain log: %s", lines[index])
+		}
+		parentID = result.output.ID
+	}
+}
+
+func assertExploreBatchLog(t *testing.T, projectID string) {
+	t.Helper()
+	lines := readExploreLogLines(t, projectID)
+	if len(lines) != 11 {
+		t.Fatalf("explore batch log lines = %d, want 11\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	logText := strings.Join(lines, "\n")
+	for token, want := range map[string]int{
+		" mode=batched ":   9,
+		" mode=unbatched ": 2,
+		" branch=false ":   3,
+		" branch=true ":    8,
+		" size=3 ":         9,
+		" size=1 ":         2,
+	} {
+		if got := strings.Count(logText, token); got != want {
+			t.Errorf("log token %q count = %d, want %d\n%s", token, got, want, logText)
+		}
+	}
+	for _, line := range lines {
+		if !strings.Contains(line, " project_id="+projectID+" ") || !strings.Contains(line, " batch=batch-") || !strings.HasSuffix(line, " query=[redacted]") {
+			t.Errorf("incomplete batch log line: %s", line)
+		}
+		for _, query := range []string{
+			"find alpha", "find beta", "find gamma",
+			"sibling one", "sibling two", "sibling three",
+			"nested one", "nested two", "nested three",
+			"branch zero", "branch one",
+		} {
+			if strings.Contains(line, query) {
+				t.Errorf("query %q leaked in batch log: %s", query, line)
+			}
+		}
+	}
+}
+
+func readExploreLogLines(t *testing.T, projectID string) []string {
+	t.Helper()
+	path := filepath.Join(os.Getenv("XDG_STATE_HOME"), "git-agent", projectID, "explore.log")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 }
 
 func assertSuccessfulExploreProcess(t *testing.T, result *exploreProcessResult) {
@@ -454,6 +557,7 @@ func newExploreE2ERepository(t *testing.T) string {
 func configureExploreE2EEnvironment(t *testing.T, responsesURL, embeddingsURL string) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_BASE_URL", responsesURL)
 	t.Setenv("OPENAI_MODEL", "test-model")

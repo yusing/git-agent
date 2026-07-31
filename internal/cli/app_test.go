@@ -47,6 +47,9 @@ func TestRunWithoutArgsReturnsUsage(t *testing.T) {
 	if !strings.Contains(err.Error(), "git-agent explore [--follow-up <search-id>] <question...>") {
 		t.Fatalf("usage missing explore synopsis:\n%s", err)
 	}
+	if !strings.Contains(err.Error(), "git-agent project_id") {
+		t.Fatalf("usage missing project_id synopsis:\n%s", err)
+	}
 	if !strings.Contains(err.Error(), "git-agent search --help") {
 		t.Fatalf("usage missing search help hint:\n%s", err)
 	}
@@ -58,6 +61,26 @@ func TestRunWithoutArgsReturnsUsage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "git-agent [--cwd <directory>] <command> [args...]") {
 		t.Fatalf("usage missing global cwd synopsis:\n%s", err)
+	}
+}
+
+func TestProjectIDUsesSearchProjectIdentity(t *testing.T) {
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "remote", "add", "origin", "git@GitHub.com:Acme/Widget.git")
+	t.Chdir(repoDir)
+
+	var stdout bytes.Buffer
+	app := &App{stdout: &stdout, stderr: io.Discard}
+	if err := app.Run(t.Context(), []string{"project_id"}); err != nil {
+		t.Fatal(err)
+	}
+	want := metadata.IdentitySHA("github.com/Acme/Widget") + "\n"
+	if stdout.String() != want {
+		t.Fatalf("project_id stdout = %q, want %q", stdout.String(), want)
+	}
+	if err := app.Run(t.Context(), []string{"project_id", "extra"}); err == nil || err.Error() != "usage: git-agent project_id" {
+		t.Fatalf("project_id extra argument error = %v", err)
 	}
 }
 

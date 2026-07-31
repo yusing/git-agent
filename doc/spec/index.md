@@ -4,12 +4,13 @@ pjdoc:
   kind: spec
   scope: root
   status: draft
-  revision: SPEC-2
+  revision: SPEC-3
   files:
     - review-static-checks.md
     - review-follow-up.md
     - branched-review.md
     - global-cwd.md
+    - project-identity-explore-log.md
 ---
 # Git Agent planned product increments
 
@@ -20,3 +21,5 @@ pjdoc:
 - [Branched review and simplify requirements](branched-review.md)
 
 - [Global working-directory requirements](global-cwd.md)
+
+- [Project identity and explore disposition-log requirements](project-identity-explore-log.md)

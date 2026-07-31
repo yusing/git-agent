@@ -483,6 +483,7 @@ complete -c git-agent -n '__git_agent_no_subcommand' -a explore -d 'Explore repo
 complete -c git-agent -n '__git_agent_no_subcommand' -a index -d 'Manage synchronized search indexes'
 complete -c git-agent -n '__git_agent_no_subcommand' -a commit-msg -d 'Generate a commit message from staged changes'
 complete -c git-agent -n '__git_agent_no_subcommand' -a pr-message -d 'Generate a pull request message from branch changes'
+complete -c git-agent -n '__git_agent_no_subcommand' -a project_id -d 'Print the current search project identifier'
 complete -c git-agent -n '__git_agent_no_subcommand' -a release-note -d 'Generate a release note for a range or version bump'
 complete -c git-agent -n '__git_agent_no_subcommand' -a review -d 'Review code with structured findings and streamed agent events'
 complete -c git-agent -n '__git_agent_no_subcommand' -a search -d 'Search repository context with embeddings'

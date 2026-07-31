@@ -111,6 +111,8 @@ func (a *App) Run(ctx context.Context, args []string) (returnErr error) {
 		return a.runCommitMsg(ctx, args[1:])
 	case "pr-message":
 		return a.runPRMessage(ctx, args[1:])
+	case "project_id":
+		return a.runProjectID(args[1:])
 	case "release-note":
 		return a.runReleaseNote(ctx, args[1:])
 	case "review":
@@ -2316,6 +2318,7 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent commit-msg [--amend] [flags]\n")
 	b.WriteString("  git-agent explore [--follow-up <search-id>] <question...>\n")
 	b.WriteString("  git-agent pr-message [flags]\n")
+	b.WriteString("  git-agent project_id\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] patch|minor|major\n")
 	b.WriteString("  git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]\n")

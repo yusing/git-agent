@@ -60,3 +60,8 @@ func Origin(repo *gitctx.Repository) string {
 func (i Identity) Dir() (string, error) {
 	return metadata.ProjectDir(i.Root, i.OriginIdentity)
 }
+
+// ID returns the stable hash used as the project's metadata directory name.
+func (i Identity) ID() (string, error) {
+	return metadata.ProjectID(i.Root, i.OriginIdentity)
+}

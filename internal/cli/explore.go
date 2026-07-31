@@ -47,7 +47,12 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 	if err := migrateProjectMetadata(repo.RootPath); err != nil {
 		return err
 	}
-	metadataDir, err := projectidentity.FromRepository(repo).Dir()
+	identity := projectidentity.FromRepository(repo)
+	metadataDir, err := identity.Dir()
+	if err != nil {
+		return err
+	}
+	projectID, err := identity.ID()
 	if err != nil {
 		return err
 	}
@@ -68,6 +73,9 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 		return err
 	}
 	coordinator := explore.NewCoordinator(store, workspace)
+	if dispositionLog, logErr := explore.NewDispositionLog(projectID); logErr == nil {
+		coordinator.DispositionLog = dispositionLog
+	}
 	lastProgress := ""
 	coordinator.Progress = func(status string) {
 		if status == lastProgress {

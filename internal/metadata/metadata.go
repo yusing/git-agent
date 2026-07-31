@@ -31,7 +31,11 @@ func Dir(projectRoot string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(metadataRoot, PathSHA(root))
+	projectID, err := ProjectID(root, "")
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(metadataRoot, projectID)
 	if err := migrate(filepath.Join(root, dirName), dir); err != nil {
 		return "", err
 	}
@@ -101,11 +105,29 @@ func ProjectDir(projectRoot, originIdentity string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(metadataRoot, IdentitySHA(originIdentity))
+	projectID, err := ProjectID(projectRoot, originIdentity)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(metadataRoot, projectID)
 	if err := secureDir(dir); err != nil {
 		return "", err
 	}
 	return dir, nil
+}
+
+// ProjectID returns the stable directory identifier used by search and other
+// project-scoped state. Repositories with an origin share its normalized
+// identity hash; other projects use their cleaned absolute path hash.
+func ProjectID(projectRoot, originIdentity string) (string, error) {
+	if strings.TrimSpace(originIdentity) != "" {
+		return IdentitySHA(originIdentity), nil
+	}
+	root, err := filepath.Abs(projectRoot)
+	if err != nil {
+		return "", err
+	}
+	return PathSHA(root), nil
 }
 
 // RemoteDir returns the metadata directory for a cached remote repository URL.

@@ -94,8 +94,8 @@ func TestCoordinatorInitialJoinGraceIncludesSlightlyDelayedCaller(t *testing.T) 
 	store := testStore(t)
 	first := testCoordinator(store)
 	second := testCoordinator(store)
-	first.joinGrace = 50 * time.Millisecond
-	second.joinGrace = 50 * time.Millisecond
+	first.joinGrace = defaultJoinGrace
+	second.joinGrace = defaultJoinGrace
 	firstPrepared := make(chan struct{})
 	prepareFirst := func(context.Context) (Prepared, error) {
 		close(firstPrepared)
@@ -123,7 +123,7 @@ func TestCoordinatorInitialJoinGraceIncludesSlightlyDelayedCaller(t *testing.T) 
 		results <- callResult{output: output, err: err}
 	}()
 	<-firstPrepared
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(75 * time.Millisecond)
 	go func() {
 		output, err := second.Run(t.Context(), nil, "slightly delayed question", prepareSecond, runner)
 		results <- callResult{output: output, err: err}
