@@ -28,7 +28,9 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("explore", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var followUpID string
+	var fast bool
 	fs.StringVar(&followUpID, "follow-up", "", "fork a completed explore search")
+	fs.BoolVar(&fast, "fast", false, "use priority service tier")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return exploreUsageError()
@@ -75,7 +77,7 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 		}
 	}
 
-	coordinator := explore.NewCoordinator(store, workspace)
+	coordinator := explore.NewCoordinator(store, workspace, fast)
 	if dispositionLog, logErr := explore.NewDispositionLog(projectID); logErr == nil {
 		coordinator.DispositionLog = dispositionLog
 	}
@@ -96,7 +98,7 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 	output, err := coordinator.Run(ctx, parent, question, prepare, func(
 		batchCtx context.Context, batchParent *explore.Session, items []explore.BatchItem,
 	) (map[string]explore.BatchResult, error) {
-		return a.runExploreBatch(batchCtx, workspace, repo, batchParent, items)
+		return a.runExploreBatch(batchCtx, workspace, repo, batchParent, items, fast)
 	})
 	if err != nil {
 		return err
@@ -175,8 +177,8 @@ func (a *App) prepareExploreSearch(ctx context.Context, question string) (explor
 	return explore.Prepared{SemanticResults: string(semantic), GuidancePaths: paths}, nil
 }
 
-func (a *App) runExploreBatch(ctx context.Context, root string, repo *gitctx.Repository, parent *explore.Session, items []explore.BatchItem) (map[string]explore.BatchResult, error) {
-	cfg, err := config.Resolve(config.Options{})
+func (a *App) runExploreBatch(ctx context.Context, root string, repo *gitctx.Repository, parent *explore.Session, items []explore.BatchItem, fast bool) (map[string]explore.BatchResult, error) {
+	cfg, err := config.Resolve(config.Options{Fast: fast})
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +268,7 @@ func (a *App) runExploreBatch(ctx context.Context, root string, repo *gitctx.Rep
 
 func exploreUsageError() error {
 	var usage strings.Builder
-	usage.WriteString("Usage: git-agent explore [--follow-up <search-id>] <question...>\n\n")
-	usage.WriteString("Flags:\n  --follow-up <search-id>\n      fork a completed explore search")
+	usage.WriteString("Usage: git-agent explore [--fast] [--follow-up <search-id>] <question...>\n\n")
+	usage.WriteString("Flags:\n  --fast\n      use priority service tier\n  --follow-up <search-id>\n      fork a completed explore search")
 	return errors.New(usage.String())
 }

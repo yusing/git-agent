@@ -28,7 +28,7 @@ Supported workflows:
 - `git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 - `git-agent review --wait <id>`
 - `git-agent review --follow-up <turn-id> <prompt...>`
-- `git-agent explore [--follow-up <search-id>] <question...>`
+- `git-agent explore [--fast] [--follow-up <search-id>] <question...>`
 - `git-agent project_id`
 - `git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 - `git-agent simplify --wait <id>`
@@ -648,7 +648,7 @@ share an identifier, while repositories without an origin and non-Git
 directories remain path-specific. The command does not create an index or call
 a provider.
 
-#### `git-agent explore [--follow-up <search-id>] <question...>`
+#### `git-agent explore [--fast] [--follow-up <search-id>] <question...>`
 
 Run a synchronous, read-only codebase exploration and write exactly one
 newline-terminated JSON object to stdout:
@@ -674,7 +674,8 @@ The agent must inspect primary implementation owners and contract-defining
 tests, return direct answers with exploration-root-relative path-and-line
 evidence, and avoid delegating ownership or blast-radius rediscovery to the
 caller. Indexing, batch-wait, tool, and provider progress is written only to
-stderr.
+stderr. With `--fast`, the Responses API request sends
+`service_tier=priority`; without it, `service_tier` is omitted.
 
 Explore is a foreground workflow. It does not detach, create a wait endpoint,
 or support `--wait`. It imposes no internal wall-clock or HTTP timeout on
@@ -685,10 +686,11 @@ intent before semantic retrieval. Compatible ready intents elect one foreground
 leader and form batches of at most three; followers wait for the leader and
 receive only their own result. A batch is confined to one cleaned absolute
 working directory even when project metadata is shared by clones with the same
-origin. Initial searches in that workspace are mutually compatible. Follow-ups
-are compatible only when they name the same parent search ID. Every successful
-batch item receives a distinct opaque ID even when its provider conversation
-was shared with sibling items.
+origin. Initial searches in that workspace are mutually compatible only when
+they use the same service tier. Follow-ups are compatible only when they name
+the same parent search ID and use the same service tier. Every successful batch
+item receives a distinct opaque ID even when its provider conversation was
+shared with sibling items.
 
 Successful sessions persist in the current project's owner-only metadata
 directory. A session records its selected answer, parent ID, follow-up depth,
@@ -1261,6 +1263,9 @@ Message-generation subcommands reserve this shared flag surface:
 - `--append-prompt <text>`
 - `--debug`
 - `--pprof <addr>`
+
+`explore` supports `--fast` with the shared service-tier behavior and its
+command-specific `--follow-up <search-id>` form.
 
 `review` and `simplify` additionally support
 `--depth fast|balanced|thorough`, `--max-web-searches <positive-n>`, and the

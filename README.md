@@ -304,6 +304,9 @@ remain relative to—and confined beneath—the selected directory.
 git-agent explore "where is release note evidence prepared?"
 # {"id":"...","answer":"..."}
 
+# Request priority Responses API processing
+git-agent explore --fast "where is release note evidence prepared?"
+
 # Continue that exact context; the result receives another independently usable ID
 git-agent explore --follow-up <search-id> "which tests define its failure contract?"
 ```

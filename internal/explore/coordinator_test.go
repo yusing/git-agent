@@ -201,8 +201,8 @@ func TestCoordinatorCapsConcurrentBatchAtThree(t *testing.T) {
 
 func TestCoordinatorDoesNotBatchDifferentWorkspaces(t *testing.T) {
 	store := testStore(t)
-	first := NewCoordinator(store, "/workspace/one")
-	second := NewCoordinator(store, "/workspace/two")
+	first := NewCoordinator(store, "/workspace/one", false)
+	second := NewCoordinator(store, "/workspace/two", false)
 	for _, coordinator := range []*Coordinator{first, second} {
 		coordinator.pollInterval = time.Millisecond
 		coordinator.heartbeatInterval = 5 * time.Millisecond
@@ -250,6 +250,52 @@ func TestCoordinatorRejectsParentFromDifferentWorkspace(t *testing.T) {
 	parent := &Session{Workspace: "other-workspace"}
 	if _, err := coordinator.Run(t.Context(), parent, "continue", nil, answerRunner); err == nil || !strings.Contains(err.Error(), "does not match current workspace") {
 		t.Fatalf("cross-workspace parent error = %v", err)
+	}
+}
+
+func TestCoordinatorDoesNotBatchDifferentServiceTiers(t *testing.T) {
+	store := testStore(t)
+	standard := NewCoordinator(store, testWorkspace, false)
+	priority := NewCoordinator(store, testWorkspace, true)
+	for _, coordinator := range []*Coordinator{standard, priority} {
+		coordinator.pollInterval = time.Millisecond
+		coordinator.heartbeatInterval = 5 * time.Millisecond
+		coordinator.heartbeatStale = 100 * time.Millisecond
+	}
+	var prepared atomic.Int32
+	release := make(chan struct{})
+	prepare := func(context.Context) (Prepared, error) {
+		if prepared.Add(1) == 2 {
+			close(release)
+		}
+		<-release
+		return Prepared{SemanticResults: `{"results":[]}`}, nil
+	}
+	var runs atomic.Int32
+	runner := func(ctx context.Context, _ *Session, items []BatchItem) (map[string]BatchResult, error) {
+		if len(items) != 1 {
+			return nil, fmt.Errorf("different service tiers formed batch of %d", len(items))
+		}
+		runs.Add(1)
+		return answerRunner(ctx, nil, items)
+	}
+	var wg sync.WaitGroup
+	errors := make(chan error, 2)
+	for index, coordinator := range []*Coordinator{standard, priority} {
+		wg.Go(func() {
+			_, err := coordinator.Run(t.Context(), nil, fmt.Sprintf("tier %d", index), prepare, runner)
+			errors <- err
+		})
+	}
+	wg.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if runs.Load() != 2 {
+		t.Fatalf("batch runs = %d, want 2", runs.Load())
 	}
 }
 
@@ -541,7 +587,7 @@ func testStore(t *testing.T) *Store {
 }
 
 func testCoordinator(store *Store) *Coordinator {
-	coordinator := NewCoordinator(store, testWorkspace)
+	coordinator := NewCoordinator(store, testWorkspace, false)
 	coordinator.batchWait = time.Second
 	coordinator.joinGrace = 50 * time.Millisecond
 	coordinator.pollInterval = time.Millisecond

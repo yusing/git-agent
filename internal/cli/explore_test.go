@@ -70,6 +70,34 @@ func TestExploreDoesNotApplyRequestTimeoutToWholeBatch(t *testing.T) {
 	}
 }
 
+func TestExploreFastRequestsPriorityServiceTier(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_EMBEDDING_DIMENSIONS", "3")
+	t.Chdir(root)
+	runGit(t, root, "init")
+	writeFixtureFile(t, root+"/main.go", "package demo\n")
+
+	responses := &exploreFakeResponseClient{}
+	var stdout bytes.Buffer
+	app := &App{
+		stdin: strings.NewReader(""), stdout: &stdout, stderr: &bytes.Buffer{},
+		responseClient: responses, embeddingClient: &exploreFakeEmbedder{},
+	}
+	output := runExploreForTest(t, app, &stdout, "--fast", "inspect", "the", "repository")
+	runExploreForTest(t, app, &stdout, "--fast", "--follow-up", output.ID, "continue")
+	requests := responses.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(requests))
+	}
+	for index, request := range requests {
+		if got := request.ServiceTier; got != "priority" {
+			t.Fatalf("request %d service tier = %q, want priority", index, got)
+		}
+	}
+}
+
 func (c *exploreFakeResponseClient) requestCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -193,7 +221,7 @@ func TestExploreInitialFollowUpsAndFreshReset(t *testing.T) {
 func TestExploreHelpDoesNotResolveProviderConfiguration(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 	err := New().Run(t.Context(), []string{"explore", "--help"})
-	if err == nil || !strings.Contains(err.Error(), "Usage: git-agent explore [--follow-up <search-id>] <question...>") {
+	if err == nil || !strings.Contains(err.Error(), "Usage: git-agent explore [--fast] [--follow-up <search-id>] <question...>") {
 		t.Fatalf("help error = %v", err)
 	}
 }

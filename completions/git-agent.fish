@@ -516,7 +516,7 @@ complete -c git-agent -n '__git_agent_option_available help review simplify' -l 
 complete -c git-agent -n '__git_agent_option_available orchestration-artifact review simplify' -l orchestration-artifact -r -d 'Read helper-authorized orchestration artifact manifest'
 
 complete -c git-agent -n '__git_agent_option_available model commit commit-msg pr-message release-note review simplify' -l model -r -f -d 'Set generation model'
-complete -c git-agent -n '__git_agent_option_available fast commit commit-msg pr-message release-note review simplify' -l fast -d 'Use priority service tier'
+complete -c git-agent -n '__git_agent_option_available fast commit commit-msg explore pr-message release-note review simplify' -l fast -d 'Use priority service tier'
 complete -c git-agent -n '__git_agent_option_available low commit commit-msg pr-message release-note review simplify' -l low -d 'Use low reasoning effort'
 complete -c git-agent -n '__git_agent_option_available medium commit commit-msg pr-message release-note review simplify' -l medium -d 'Use medium reasoning effort'
 complete -c git-agent -n '__git_agent_option_available high commit commit-msg pr-message release-note review simplify' -l high -d 'Use high reasoning effort'

@@ -72,9 +72,13 @@ type Coordinator struct {
 	DispositionLog    *DispositionLog
 }
 
-func NewCoordinator(store *Store, workspace string) *Coordinator {
+func NewCoordinator(store *Store, workspace string, fast bool) *Coordinator {
 	workspace = filepath.Clean(workspace)
-	sum := sha256.Sum256([]byte(workspace))
+	batchIdentity := workspace
+	if fast {
+		batchIdentity += "\x00priority"
+	}
+	sum := sha256.Sum256([]byte(batchIdentity))
 	return &Coordinator{
 		store:             store,
 		workspace:         workspace,
