@@ -1,6 +1,7 @@
 package gitctx
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,15 @@ import (
 
 	git "github.com/go-git/go-git/v6"
 )
+
+func TestOpenIdentifiesDirectoryOutsideRepository(t *testing.T) {
+	t.Parallel()
+
+	_, err := Open(t.TempDir())
+	if !errors.Is(err, ErrNotRepository) {
+		t.Fatalf("Open error = %v, want ErrNotRepository", err)
+	}
+}
 
 func TestOpenAndInspectStagedChanges(t *testing.T) {
 	t.Parallel()

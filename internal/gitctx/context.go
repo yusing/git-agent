@@ -104,7 +104,10 @@ type ChangeFingerprint struct {
 	NestedRepositories string `json:"nested_repositories,omitempty"`
 }
 
-var ErrChangeSnapshotStale = errors.New("authoritative repository state changed since launch; rerun command")
+var (
+	ErrChangeSnapshotStale = errors.New("authoritative repository state changed since launch; rerun command")
+	ErrNotRepository       = errors.New("not inside a git repository")
+)
 
 type CommitFile struct {
 	Path string
@@ -1338,7 +1341,7 @@ func discoverRoot(start string) (string, error) {
 		}
 		parent := filepath.Dir(abs)
 		if parent == abs {
-			return "", fmt.Errorf("not inside a git repository: %s", start)
+			return "", fmt.Errorf("%w: %s", ErrNotRepository, start)
 		}
 		abs = parent
 	}

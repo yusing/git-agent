@@ -23,16 +23,17 @@ const (
 
 type jqTool struct {
 	repo *gitctx.Repository
+	root string
 	mode ReviewMode
 }
 
 func (t jqTool) Definition() Definition {
 	return Definition{
 		Name: jqToolName,
-		Description: "Retrieve one value from a repository JSON file using a plain RFC 6901 JSON Pointer. " +
+		Description: "Retrieve one value from a codebase JSON file using a plain RFC 6901 JSON Pointer. " +
 			"Use an empty pointer for the document root; jq filter expressions are not supported.",
 		Schema: schema(map[string]any{
-			"path":      stringProp("Repository-relative JSON file path."),
+			"path":      stringProp("Codebase-relative JSON file path."),
 			"source":    fileSourceProp(t.mode),
 			"pointer":   stringProp("Plain RFC 6901 JSON Pointer. Empty selects the document root."),
 			"max_bytes": intProp("Maximum bytes of the formatted selected value to return.", 1, jqMaxSelectedValueBytes),
@@ -63,7 +64,7 @@ func (t jqTool) Execute(ctx context.Context, invocation Invocation) (Result, err
 		return Result{}, fmt.Errorf("max_lines must be between 1 and %d, or zero for the default", jqMaxSelectedValueLines)
 	}
 
-	reader, source, err := openInspectedFile(t.repo, t.mode, args.Path, args.Source)
+	reader, source, err := openInspectedFile(t.repo, t.root, t.mode, args.Path, args.Source)
 	if err != nil {
 		return Result{}, err
 	}

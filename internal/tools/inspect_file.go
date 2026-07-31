@@ -27,6 +27,7 @@ var jsonPointerEscaper = strings.NewReplacer("~", "~0", "/", "~1")
 
 type inspectFileTool struct {
 	repo *gitctx.Repository
+	root string
 	mode ReviewMode
 }
 
@@ -55,7 +56,7 @@ func (b *outlineBuilder) add(entry fileOutlineEntry) bool {
 
 func (t inspectFileTool) Definition() Definition {
 	return Definition{Name: "inspect_file", Description: "Report file size, line count, and a bounded structural outline without returning file content.", Schema: schema(map[string]any{
-		"path":   stringProp("Repository-relative file path."),
+		"path":   stringProp("Codebase-relative file path."),
 		"source": fileSourceProp(t.mode),
 	}, "path"), Strict: true}
 }
@@ -71,7 +72,7 @@ func (t inspectFileTool) Execute(ctx context.Context, invocation Invocation) (Re
 	if args.Path == "" {
 		return Result{}, fmt.Errorf("path is required")
 	}
-	reader, source, err := openInspectedFile(t.repo, t.mode, args.Path, args.Source)
+	reader, source, err := openInspectedFile(t.repo, t.root, t.mode, args.Path, args.Source)
 	if err != nil {
 		return Result{}, err
 	}

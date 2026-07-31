@@ -290,7 +290,9 @@ their own.
 ## Explore
 
 `git-agent explore` combines embedding search with the established read-only
-repository tools and returns a synchronous JSON answer with an opaque ID.
+codebase tools and returns a synchronous JSON answer with an opaque ID. It works
+from either a Git repository or an ordinary directory; non-Git sessions use the
+current directory as their codebase and metadata identity.
 
 ```sh
 # Start a grounded codebase exploration

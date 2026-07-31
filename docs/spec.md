@@ -657,15 +657,19 @@ newline-terminated JSON object to stdout:
 {"id":"opaque-search-id","answer":"agent-ready context pack"}
 ```
 
-The initial form requires a Git repository. It first runs filesystem semantic
-retrieval with the existing search index, default retrieval limits, and the
-code-only filter. It then gives those unverified leads to a bounded Responses
-API agent with `repo_summary`, `list_files`, `read_file`, `inspect_file`, `jq`,
-`grep`, and `find`. The agent must inspect primary implementation owners and
-contract-defining tests, return direct answers with repository-relative
-path-and-line evidence, and avoid delegating ownership or blast-radius
-rediscovery to the caller. Indexing, batch-wait, tool, and provider progress is
-written only to stderr.
+The initial form works in Git repositories and ordinary directories. It first
+runs filesystem semantic retrieval with the existing search index, default
+retrieval limits, and the code-only filter. It then gives those unverified leads
+to a bounded Responses API agent with `repo_summary`, `list_files`, `read_file`,
+`inspect_file`, `jq`, `grep`, and `find`. In a Git repository these tools retain
+Git-aware repository metadata and tracked internal-path handling. In an
+ordinary directory they use the cleaned absolute directory as the codebase root,
+omit Git metadata, reject `index` and `head` file sources, and exclude internal
+state directories. The agent must inspect primary implementation owners and
+contract-defining tests, return direct answers with root-relative path-and-line
+evidence, and avoid delegating ownership or blast-radius rediscovery to the
+caller. Indexing, batch-wait, tool, and provider progress is written only to
+stderr.
 
 Explore is a foreground workflow. It does not detach, create a wait endpoint,
 or support `--wait`. It imposes no internal wall-clock or HTTP timeout on

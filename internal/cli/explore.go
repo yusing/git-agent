@@ -40,14 +40,21 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 		return errors.New("explore requires a question")
 	}
 
-	repo, err := gitctx.Open(".")
+	workspace, err := os.Getwd()
 	if err != nil {
 		return err
 	}
-	if err := migrateProjectMetadata(repo.RootPath); err != nil {
+	identity, err := projectidentity.Resolve(workspace)
+	if err != nil {
 		return err
 	}
-	identity := projectidentity.FromRepository(repo)
+	repo, repoErr := gitctx.Open(workspace)
+	if repoErr != nil && !errors.Is(repoErr, gitctx.ErrNotRepository) {
+		return repoErr
+	}
+	if err := migrateProjectMetadata(identity.Root); err != nil {
+		return err
+	}
 	metadataDir, err := identity.Dir()
 	if err != nil {
 		return err
@@ -68,10 +75,6 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 		}
 	}
 
-	workspace, err := os.Getwd()
-	if err != nil {
-		return err
-	}
 	coordinator := explore.NewCoordinator(store, workspace)
 	if dispositionLog, logErr := explore.NewDispositionLog(projectID); logErr == nil {
 		coordinator.DispositionLog = dispositionLog
@@ -93,7 +96,7 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 	output, err := coordinator.Run(ctx, parent, question, prepare, func(
 		batchCtx context.Context, batchParent *explore.Session, items []explore.BatchItem,
 	) (map[string]explore.BatchResult, error) {
-		return a.runExploreBatch(batchCtx, repo, batchParent, items)
+		return a.runExploreBatch(batchCtx, identity.Root, repo, batchParent, items)
 	})
 	if err != nil {
 		return err
@@ -172,7 +175,7 @@ func (a *App) prepareExploreSearch(ctx context.Context, question string) (explor
 	return explore.Prepared{SemanticResults: string(semantic), GuidancePaths: paths}, nil
 }
 
-func (a *App) runExploreBatch(ctx context.Context, repo *gitctx.Repository, parent *explore.Session, items []explore.BatchItem) (map[string]explore.BatchResult, error) {
+func (a *App) runExploreBatch(ctx context.Context, root string, repo *gitctx.Repository, parent *explore.Session, items []explore.BatchItem) (map[string]explore.BatchResult, error) {
 	cfg, err := config.Resolve(config.Options{})
 	if err != nil {
 		return nil, err
@@ -197,12 +200,12 @@ func (a *App) runExploreBatch(ctx context.Context, repo *gitctx.Repository, pare
 	}
 	renderedGuidance := ""
 	if parent == nil {
-		renderedGuidance, err = resolveGuidanceForPaths(repo, cfg.GuidanceFamily, guidancePaths)
+		renderedGuidance, err = resolveGuidanceForRoot(root, cfg.GuidanceFamily, guidancePaths)
 		if err != nil {
 			return nil, err
 		}
 	}
-	registry := tools.NewReviewRegistry(repo, nil, tools.ReviewModeCodebase, tools.ReviewScope{}, gitctx.ChangeFingerprint{})
+	registry := tools.NewExploreRegistry(root, repo)
 	toolSpecs := registry.Definitions(tools.ExploreToolNames())
 	allowedTools := toolDefinitionNames(toolSpecs)
 	recorder, err := trace.NewStream("explore", a.stderr)
@@ -213,8 +216,12 @@ func (a *App) runExploreBatch(ctx context.Context, repo *gitctx.Repository, pare
 	if parent != nil {
 		parentSearchID = parent.ID
 	}
+	repoSummary := map[string]any{"root_path": root, "work_path": root}
+	if repo != nil {
+		repoSummary = repo.Summary()
+	}
 	if err := recorder.Write("session", map[string]any{
-		"command": "explore", "batch_size": len(items), "parent_id": parentSearchID, "repo": repo.Summary(),
+		"command": "explore", "batch_size": len(items), "parent_id": parentSearchID, "repo": repoSummary,
 	}); err != nil {
 		return nil, err
 	}
@@ -232,7 +239,11 @@ func (a *App) runExploreBatch(ctx context.Context, repo *gitctx.Repository, pare
 	}
 	if parent == nil {
 		request.ToolPolicy = toolPolicy()
-		request.Environment = environmentContext(repo, "explore", "codebase", cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
+		if repo != nil {
+			request.Environment = environmentContext(repo, "explore", "codebase", cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
+		} else {
+			request.Environment = environmentContextForRoot(root, root, "explore", "codebase", cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
+		}
 		request.ProjectGuidance = renderedGuidance
 		request.UserPrompt = userPrompt
 	} else {

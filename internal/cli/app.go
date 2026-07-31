@@ -2163,18 +2163,22 @@ func escapePromptData(text string) string {
 }
 
 func resolveGuidanceForPaths(repo *gitctx.Repository, requestedFamily string, paths []string) (string, error) {
+	return resolveGuidanceForRoot(repo.RootPath, requestedFamily, paths)
+}
+
+func resolveGuidanceForRoot(root, requestedFamily string, paths []string) (string, error) {
 	family, err := guidance.ParseFamily(requestedFamily)
 	if err != nil {
 		return "", err
 	}
-	targets := []string{repo.RootPath}
+	targets := []string{root}
 	if len(paths) > 0 {
 		targets = make([]string, 0, len(paths))
 		for _, path := range paths {
-			targets = append(targets, filepath.Join(repo.RootPath, path))
+			targets = append(targets, filepath.Join(root, path))
 		}
 	}
-	resolved, err := guidance.ResolveForTargets(repo.RootPath, targets, family)
+	resolved, err := guidance.ResolveForTargets(root, targets, family)
 	if err != nil {
 		return "", err
 	}
@@ -2228,9 +2232,13 @@ func reviewToolPolicy() string {
 }
 
 func environmentContext(repo *gitctx.Repository, command, mode, guidanceFamily string, maxSteps, maxToolCalls int) string {
+	return environmentContextForRoot(repo.WorkPath, repo.RootPath, command, mode, guidanceFamily, maxSteps, maxToolCalls)
+}
+
+func environmentContextForRoot(workPath, rootPath, command, mode, guidanceFamily string, maxSteps, maxToolCalls int) string {
 	return renderEnvironmentPrompt(environmentPromptData{
-		WorkPath:       repo.WorkPath,
-		RootPath:       repo.RootPath,
+		WorkPath:       workPath,
+		RootPath:       rootPath,
 		Command:        command,
 		Mode:           mode,
 		GuidanceFamily: guidanceFamily,

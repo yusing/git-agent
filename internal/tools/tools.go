@@ -103,15 +103,11 @@ func NewReviewRegistry(repo *gitctx.Repository, skillManager *skillcmd.Manager, 
 	if repo != nil && mode != ReviewModeCodebase {
 		registry.reviewGuard = &reviewStateGuard{repo: repo, mode: mode, fingerprint: fingerprint}
 	}
-	register(registry, []Tool{
-		repoSummaryTool{repo: repo},
-		listFilesTool{repo: repo, mode: mode},
-		readFileTool{repo: repo, mode: mode},
-		inspectFileTool{repo: repo, mode: mode},
-		jqTool{repo: repo, mode: mode},
-		grepTool{repo: repo, mode: mode},
-		findTool{repo: repo, mode: mode},
-	})
+	root := "."
+	if repo != nil {
+		root = repo.RootPath
+	}
+	registerCodebaseTools(registry, repo, root, mode)
 	if mode != ReviewModeCodebase {
 		register(registry, []Tool{
 			reviewChangesTool{mode: mode, scope: scope},
@@ -123,23 +119,48 @@ func NewReviewRegistry(repo *gitctx.Repository, skillManager *skillcmd.Manager, 
 		register(registry, []Tool{orchestrationArtifactTool{manifest: manifests[0]}})
 	}
 	register(registry, skillTools(skillManager))
-	root := "."
+	docRoot := "."
 	if repo != nil {
-		root = repo.WorkPath
+		docRoot = repo.WorkPath
 	}
+	registerDocumentation(registry, doccmd.Discover(docRoot))
+	return registry
+}
+
+// NewExploreRegistry returns the read-only codebase tools rooted at root. Git
+// metadata is used when repo is non-nil, but ordinary directories need none.
+func NewExploreRegistry(root string, repo *gitctx.Repository) *Registry {
+	registry := &Registry{tools: map[string]Tool{}}
+	registerCodebaseTools(registry, repo, root, ReviewModeCodebase)
 	registerDocumentation(registry, doccmd.Discover(root))
 	return registry
 }
 
+func registerCodebaseTools(registry *Registry, repo *gitctx.Repository, root string, mode ReviewMode) {
+	register(registry, []Tool{
+		repoSummaryTool{repo: repo, root: root},
+		listFilesTool{repo: repo, root: root, mode: mode},
+		readFileTool{repo: repo, root: root, mode: mode},
+		inspectFileTool{repo: repo, root: root, mode: mode},
+		jqTool{repo: repo, root: root, mode: mode},
+		grepTool{repo: repo, root: root, mode: mode},
+		findTool{repo: repo, root: root, mode: mode},
+	})
+}
+
 func NewRegistry(repo *gitctx.Repository, skillManager *skillcmd.Manager) *Registry {
 	registry := &Registry{tools: map[string]Tool{}}
+	root := "."
+	if repo != nil {
+		root = repo.RootPath
+	}
 	register(registry, []Tool{
-		repoSummaryTool{repo: repo},
-		listFilesTool{repo: repo},
-		readFileTool{repo: repo},
-		inspectFileTool{repo: repo},
-		grepTool{repo: repo},
-		findTool{repo: repo},
+		repoSummaryTool{repo: repo, root: root},
+		listFilesTool{repo: repo, root: root},
+		readFileTool{repo: repo, root: root},
+		inspectFileTool{repo: repo, root: root},
+		grepTool{repo: repo, root: root},
+		findTool{repo: repo, root: root},
 		gitStagedPathsTool{repo: repo},
 		gitStagedStatusTool{repo: repo},
 		gitStagedStatTool{repo: repo},
@@ -273,19 +294,23 @@ var skippedDirs = map[string]bool{
 	".omx":       true,
 }
 
-func walkRepository(repo *gitctx.Repository, requested string, visit func(*os.Root, string, string, fs.DirEntry) error) error {
+func walkRepository(repo *gitctx.Repository, rootPath, requested string, visit func(*os.Root, string, string, fs.DirEntry) error) error {
 	walkRoot, err := cleanRepoPath(requested)
 	if err != nil {
 		return err
 	}
-	root, err := os.OpenRoot(repo.RootPath)
+	root, err := os.OpenRoot(rootPath)
 	if err != nil {
 		return err
 	}
-	trackedFiles, trackedDirs, err := trackedRepositoryPaths(repo)
-	if err != nil {
-		_ = root.Close()
-		return err
+	trackedFiles := map[string]bool{}
+	trackedDirs := map[string]bool{}
+	if repo != nil {
+		trackedFiles, trackedDirs, err = trackedRepositoryPaths(repo)
+		if err != nil {
+			_ = root.Close()
+			return err
+		}
 	}
 	walkErr := fs.WalkDir(root.FS(), walkRoot, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -335,6 +360,7 @@ func hasSkippedDir(path string) bool {
 
 type repoTool struct {
 	repo *gitctx.Repository
+	root string
 }
 
 func schema(properties map[string]any, required ...string) map[string]any {
@@ -446,15 +472,22 @@ func cappedSchema() map[string]any {
 type repoSummaryTool repoTool
 
 func (t repoSummaryTool) Definition() Definition {
-	return Definition{Name: "repo_summary", Description: "Return current repository metadata.", Schema: emptySchema(), Strict: true}
+	return Definition{Name: "repo_summary", Description: "Return current codebase metadata.", Schema: emptySchema(), Strict: true}
 }
 
 func (t repoSummaryTool) Execute(context.Context, Invocation) (Result, error) {
+	if t.repo == nil {
+		return jsonResult("repo_summary", map[string]any{
+			"root_path": t.root,
+			"work_path": t.root,
+		}, false)
+	}
 	return jsonResult("repo_summary", t.repo.Summary(), false)
 }
 
 type listFilesTool struct {
 	repo *gitctx.Repository
+	root string
 	mode ReviewMode
 }
 
@@ -488,8 +521,8 @@ func stagedFilePaths(repo *gitctx.Repository, requested string, maxEntries int) 
 }
 
 func (t listFilesTool) Definition() Definition {
-	return Definition{Name: "list_files", Description: "List repository files under an optional directory prefix.", Schema: schema(map[string]any{
-		"path":        stringProp("Repository-relative directory prefix."),
+	return Definition{Name: "list_files", Description: "List codebase files under an optional directory prefix.", Schema: schema(map[string]any{
+		"path":        stringProp("Codebase-relative directory prefix."),
 		"max_entries": intProp("Maximum file entries to return.", 1, 1000),
 	}), Strict: true}
 }
@@ -514,7 +547,7 @@ func (t listFilesTool) Execute(_ context.Context, invocation Invocation) (Result
 		return jsonResult("list_files", map[string]any{"files": files}, truncated)
 	}
 	var files []string
-	err = walkRepository(t.repo, args.Path, func(_ *os.Root, _, path string, entry fs.DirEntry) error {
+	err = walkRepository(t.repo, t.root, args.Path, func(_ *os.Root, _, path string, entry fs.DirEntry) error {
 		if entry.IsDir() {
 			return nil
 		}
@@ -536,12 +569,13 @@ func (t listFilesTool) Execute(_ context.Context, invocation Invocation) (Result
 
 type readFileTool struct {
 	repo *gitctx.Repository
+	root string
 	mode ReviewMode
 }
 
 func (t readFileTool) Definition() Definition {
-	return Definition{Name: "read_file", Description: "Read a UTF-8 repository file with byte and line caps.", Schema: schema(map[string]any{
-		"path":             stringProp("Repository-relative file path."),
+	return Definition{Name: "read_file", Description: "Read a UTF-8 codebase file with byte and line caps.", Schema: schema(map[string]any{
+		"path":             stringProp("Codebase-relative file path."),
 		"source":           fileSourceProp(t.mode),
 		"line_start":       intProp("Optional inclusive first line. Zero starts at line 1.", 0, 10000000),
 		"line_end":         intProp("Optional inclusive last line. Zero reads through EOF.", 0, 10000000),
@@ -575,7 +609,7 @@ func (t readFileTool) Execute(_ context.Context, invocation Invocation) (Result,
 	if args.Path == "" {
 		return Result{}, fmt.Errorf("path is required")
 	}
-	reader, source, err := openInspectedFile(t.repo, t.mode, args.Path, args.Source)
+	reader, source, err := openInspectedFile(t.repo, t.root, t.mode, args.Path, args.Source)
 	if err != nil {
 		return Result{}, err
 	}
@@ -594,7 +628,7 @@ func (t readFileTool) Execute(_ context.Context, invocation Invocation) (Result,
 	}, truncated)
 }
 
-func openInspectedFile(repo *gitctx.Repository, mode ReviewMode, rawPath, source string) (io.ReadCloser, string, error) {
+func openInspectedFile(repo *gitctx.Repository, root string, mode ReviewMode, rawPath, source string) (io.ReadCloser, string, error) {
 	path, err := cleanRepoPath(rawPath)
 	if err != nil {
 		return nil, "", err
@@ -612,6 +646,13 @@ func openInspectedFile(repo *gitctx.Repository, mode ReviewMode, rawPath, source
 	if source != "worktree" && source != "index" && source != "head" {
 		return nil, "", fmt.Errorf("source must be worktree, index, or head")
 	}
+	if repo == nil {
+		if mode != ReviewModeCodebase || source != "worktree" {
+			return nil, "", fmt.Errorf("source %s requires a Git repository", source)
+		}
+		reader, err := openWorktreeFile(root, path)
+		return reader, source, err
+	}
 	var reader io.ReadCloser
 	switch mode {
 	case ReviewModeUncommitted:
@@ -622,6 +663,31 @@ func openInspectedFile(repo *gitctx.Repository, mode ReviewMode, rawPath, source
 		reader, err = repo.OpenFile(gitctx.FileSource(source), path)
 	}
 	return reader, source, err
+}
+
+func openWorktreeFile(rootPath, path string) (io.ReadCloser, error) {
+	// Source: internal/gitctx/context.go:927:957 Repository.OpenFile worktree case.
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return nil, err
+	}
+	info, err := root.Lstat(filepath.FromSlash(path))
+	if err != nil || !info.Mode().IsRegular() {
+		closeErr := root.Close()
+		if err == nil {
+			err = fmt.Errorf("worktree path %q is not a regular file", path)
+		}
+		return nil, errors.Join(err, closeErr)
+	}
+	file, err := root.Open(filepath.FromSlash(path))
+	closeErr := root.Close()
+	if err != nil || closeErr != nil {
+		if file != nil {
+			_ = file.Close()
+		}
+		return nil, errors.Join(err, closeErr)
+	}
+	return file, nil
 }
 
 func enumStringProp(description string, values ...string) map[string]any {
@@ -711,14 +777,15 @@ func validUTF8Prefix(value string) string {
 
 type grepTool struct {
 	repo *gitctx.Repository
+	root string
 	mode ReviewMode
 }
 
 func (t grepTool) Definition() Definition {
-	return Definition{Name: "grep", Description: "Search repository text files with a safe RE2 expression.", Schema: schema(map[string]any{
+	return Definition{Name: "grep", Description: "Search codebase text files with a safe RE2 expression.", Schema: schema(map[string]any{
 		"pattern":     stringProp("RE2 regular expression."),
-		"path":        stringProp("Repository-relative directory prefix."),
-		"glob":        stringProp("Optional repository-relative or basename glob, such as *.go."),
+		"path":        stringProp("Codebase-relative directory prefix."),
+		"glob":        stringProp("Optional codebase-relative or basename glob, such as *.go."),
 		"max_matches": intProp("Maximum matches to return.", 1, 1000),
 	}, "pattern"), Strict: true}
 }
@@ -754,7 +821,7 @@ func (t grepTool) Execute(_ context.Context, invocation Invocation) (Result, err
 	}
 	var matches []map[string]any
 	truncated := false
-	err = walkRepository(t.repo, args.Path, func(root *os.Root, _, path string, entry fs.DirEntry) error {
+	err = walkRepository(t.repo, t.root, args.Path, func(root *os.Root, _, path string, entry fs.DirEntry) error {
 		if entry.IsDir() {
 			return nil
 		}
@@ -878,13 +945,14 @@ func limitMatchText(text string) string {
 
 type findTool struct {
 	repo *gitctx.Repository
+	root string
 	mode ReviewMode
 }
 
 func (t findTool) Definition() Definition {
-	return Definition{Name: "find", Description: "Find repository files or directories by safe glob.", Schema: schema(map[string]any{
-		"path":        stringProp("Repository-relative directory prefix."),
-		"name":        stringProp("Optional basename or repository-relative glob."),
+	return Definition{Name: "find", Description: "Find codebase files or directories by safe glob.", Schema: schema(map[string]any{
+		"path":        stringProp("Codebase-relative directory prefix."),
+		"name":        stringProp("Optional basename or codebase-relative glob."),
 		"type":        enumStringProp("Entry type. Empty means any.", "", "any", "file", "directory"),
 		"max_entries": intProp("Maximum entries to return.", 1, 1000),
 	}), Strict: true}
@@ -914,7 +982,7 @@ func (t findTool) Execute(_ context.Context, invocation Invocation) (Result, err
 	}
 	var entries []map[string]any
 	truncated := false
-	err = walkRepository(t.repo, args.Path, func(_ *os.Root, walkRoot, path string, entry fs.DirEntry) error {
+	err = walkRepository(t.repo, t.root, args.Path, func(_ *os.Root, walkRoot, path string, entry fs.DirEntry) error {
 		if path == walkRoot {
 			return nil
 		}

@@ -22,6 +22,60 @@ func TestExploreToolNamesAreRepositoryReadsOnly(t *testing.T) {
 	}
 }
 
+func TestExploreRegistryReadsDirectoryWithoutGit(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "main.go"), "package demo\n\nfunc Answer() int { return 42 }\n")
+	mustWriteFile(t, filepath.Join(dir, "data.json"), `{"name":"demo"}`)
+	mustWriteFile(t, filepath.Join(dir, ".git-agent", "search", "cache.json"), `{"private":true}`)
+	if err := os.Symlink("main.go", filepath.Join(dir, "linked.go")); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewExploreRegistry(dir, nil)
+
+	tests := []struct {
+		name      string
+		arguments string
+		want      string
+	}{
+		{name: "repo_summary", arguments: `{}`, want: dir},
+		{name: "list_files", arguments: `{}`, want: "main.go"},
+		{name: "read_file", arguments: `{"path":"main.go"}`, want: "func Answer"},
+		{name: "inspect_file", arguments: `{"path":"main.go"}`, want: `"outline_kind": "code"`},
+		{name: "jq", arguments: `{"path":"data.json","pointer":"/name"}`, want: `"value": "demo"`},
+		{name: "grep", arguments: `{"pattern":"Answer"}`, want: `"path": "main.go"`},
+		{name: "find", arguments: `{"name":"*.json","type":"file"}`, want: `"path": "data.json"`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := registry.Execute(t.Context(), Invocation{Name: test.name, Arguments: test.arguments})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(result.Content, test.want) {
+				t.Fatalf("result = %s, want %q", result.Content, test.want)
+			}
+			if strings.Contains(result.Content, ".git-agent/search/cache.json") {
+				t.Fatalf("result exposed internal state: %s", result.Content)
+			}
+		})
+	}
+
+	for _, source := range []string{"index", "head"} {
+		if _, err := registry.Execute(t.Context(), Invocation{
+			Name: "read_file", Arguments: fmt.Sprintf(`{"path":"main.go","source":%q}`, source),
+		}); err == nil || !strings.Contains(err.Error(), "requires a Git repository") {
+			t.Fatalf("%s source error = %v", source, err)
+		}
+	}
+	if _, err := registry.Execute(t.Context(), Invocation{
+		Name: "read_file", Arguments: `{"path":"linked.go"}`,
+	}); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("symlink read error = %v", err)
+	}
+}
+
 func TestErrorResultUsesStableBoundedEnvelope(t *testing.T) {
 	t.Parallel()
 

@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -210,6 +212,48 @@ func TestExploreExecutesEstablishedReadTool(t *testing.T) {
 	}
 	if client.calls.Load() != 2 || !client.read.Load() {
 		t.Fatalf("provider calls = %d, read output observed = %v", client.calls.Load(), client.read.Load())
+	}
+}
+
+func TestExploreExecutesReadToolOutsideGitRepository(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_EMBEDDING_DIMENSIONS", "3")
+	t.Chdir(root)
+	writeFixtureFile(t, root+"/main.go", "package demo\n\nfunc Answer() int { return 42 }\n")
+	client := &exploreReadToolClient{}
+	var stdout bytes.Buffer
+	app := &App{
+		stdin: strings.NewReader(""), stdout: &stdout, stderr: &bytes.Buffer{},
+		responseClient: client, embeddingClient: &exploreFakeEmbedder{},
+	}
+	output := runExploreForTest(t, app, &stdout, "read", "the", "Answer", "implementation")
+	if !strings.Contains(output.Answer, "main.go:3") {
+		t.Fatalf("answer = %q", output.Answer)
+	}
+	if client.calls.Load() != 2 || !client.read.Load() {
+		t.Fatalf("provider calls = %d, read output observed = %v", client.calls.Load(), client.read.Load())
+	}
+}
+
+func TestExploreDoesNotTreatInvalidGitRepositoryAsDirectory(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(root)
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	client := &exploreFakeResponseClient{}
+	app := &App{
+		stdin: strings.NewReader(""), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{},
+		responseClient: client,
+	}
+	if err := app.Run(t.Context(), []string{"explore", "inspect", "the", "codebase"}); err == nil {
+		t.Fatal("explore accepted an invalid Git repository as an ordinary directory")
+	}
+	if client.requestCount() != 0 {
+		t.Fatalf("provider requests = %d, want 0", client.requestCount())
 	}
 }
 
