@@ -171,7 +171,9 @@ func fishCompletionCases(refs, remotes, paths []string) []fishCompletionCase {
 	for _, candidate := range root {
 		add("root partial "+candidate, "git-agent "+candidate, candidatesWithPrefix(root, candidate))
 	}
-	add("root option prefix", "git-agent --", nil)
+	add("root option prefix", "git-agent --", []string{"--cwd"})
+	add("global cwd directories", "git-agent --cwd ", []string{"scope-dir/"})
+	add("global cwd commands", "git-agent --cwd scope-dir ", root)
 	add("unknown root command", "git-agent future ", nil)
 	add("help has no children", "git-agent help ", nil)
 
@@ -222,6 +224,7 @@ func fishCompletionCases(refs, remotes, paths []string) []fishCompletionCase {
 	add("release note conflicting efforts", "git-agent release-note --low --high ", nil)
 
 	commands := fishCompletionCommands(refs, remotes, paths)
+	add("global cwd command options", "git-agent --cwd scope-dir search --", completionOptionNames(completionCommandNamed(commands, "search").options))
 	for _, command := range commands {
 		base := completionOptionNames(command.options)
 		add(command.name+" option surface", "git-agent "+command.name+" --", base)

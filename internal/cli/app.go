@@ -62,9 +62,34 @@ func New() *App {
 	return &App{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr}
 }
 
-func (a *App) Run(ctx context.Context, args []string) error {
+func (a *App) Run(ctx context.Context, args []string) (returnErr error) {
 	if len(args) == 0 {
 		return usageError("")
+	}
+	if args[0] == "--cwd" {
+		if len(args) < 2 || args[1] == "" {
+			return errors.New("--cwd requires a directory")
+		}
+		if len(args) < 3 {
+			return usageError("missing command after --cwd")
+		}
+		if args[2] == "--cwd" {
+			return errors.New("--cwd may only be specified once")
+		}
+
+		originalDir, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("get current working directory for --cwd: %w", err)
+		}
+		if err := os.Chdir(args[1]); err != nil {
+			return fmt.Errorf("change working directory to %q: %w", args[1], err)
+		}
+		defer func() {
+			if err := os.Chdir(originalDir); err != nil {
+				returnErr = errors.Join(returnErr, fmt.Errorf("restore working directory to %q: %w", originalDir, err))
+			}
+		}()
+		args = args[2:]
 	}
 
 	switch args[0] {
@@ -2283,6 +2308,7 @@ func usageError(prefix string) error {
 		b.WriteString("\n\n")
 	}
 	b.WriteString("usage:\n")
+	b.WriteString("  git-agent [--cwd <directory>] <command> [args...]\n\n")
 	b.WriteString("  git-agent commit [--amend] [flags]\n")
 	b.WriteString("  git-agent config [--unset] index.remote [<git-url>]\n")
 	b.WriteString("  git-agent index sync\n")

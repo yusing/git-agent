@@ -56,6 +56,84 @@ func TestRunWithoutArgsReturnsUsage(t *testing.T) {
 	if !strings.Contains(err.Error(), "git-agent index migrate --to v2") {
 		t.Fatalf("usage missing index migration synopsis:\n%s", err)
 	}
+	if !strings.Contains(err.Error(), "git-agent [--cwd <directory>] <command> [args...]") {
+		t.Fatalf("usage missing global cwd synopsis:\n%s", err)
+	}
+}
+
+func TestRunGlobalCWD(t *testing.T) {
+	callerDir := t.TempDir()
+	targetDir := filepath.Join(callerDir, "project")
+	if err := os.Mkdir(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(callerDir)
+	writeFixtureFile(t, filepath.Join(targetDir, "main.go"), "package main\n")
+	if _, err := searchtask.Run(t.Context(), cliListFakeEmbedder{}, searchtask.Options{
+		Root:                targetDir,
+		IndexOnly:           true,
+		MinScore:            searchtask.DefaultMinScore,
+		Limit:               searchtask.DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name string
+		dir  string
+	}{
+		{name: "relative", dir: "project"},
+		{name: "absolute", dir: targetDir},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			app := &App{stdout: &stdout, stderr: io.Discard}
+			if err := app.Run(t.Context(), []string{"--cwd", test.dir, "search", "--ls"}); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(stdout.String(), "filesystem") {
+				t.Fatalf("search output does not describe target index:\n%s", stdout.String())
+			}
+			if got, err := os.Getwd(); err != nil || got != callerDir {
+				t.Fatalf("working directory after Run = %q, %v; want %q", got, err, callerDir)
+			}
+		})
+	}
+}
+
+func TestRunGlobalCWDRejectsInvalidInput(t *testing.T) {
+	callerDir := t.TempDir()
+	t.Chdir(callerDir)
+	file := filepath.Join(callerDir, "file")
+	writeFixtureFile(t, file, "not a directory\n")
+
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing value", args: []string{"--cwd"}, want: "requires a directory"},
+		{name: "empty value", args: []string{"--cwd", ""}, want: "requires a directory"},
+		{name: "missing command", args: []string{"--cwd", callerDir}, want: "missing command"},
+		{name: "duplicate", args: []string{"--cwd", callerDir, "--cwd", callerDir, "search"}, want: "only be specified once"},
+		{name: "missing directory", args: []string{"--cwd", filepath.Join(callerDir, "missing"), "search", "--ls"}, want: "change working directory"},
+		{name: "not a directory", args: []string{"--cwd", file, "search", "--ls"}, want: "change working directory"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			app := &App{stdout: &stdout, stderr: io.Discard}
+			err := app.Run(t.Context(), test.args)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Run(%q) error = %v, want containing %q", test.args, err, test.want)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("Run(%q) stdout = %q, want empty", test.args, stdout.String())
+			}
+		})
+	}
 }
 
 func TestSearchLsAndLsFiles(t *testing.T) {

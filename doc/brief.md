@@ -1,40 +1,29 @@
-# Review and simplify follow-up brief
+# Global working-directory flag brief
 
 ## Outcome
 
-After addressing a completed `review` finding or `simplify` opportunity, an
-operator can launch a fresh detached re-evaluation against current repository
-state and retrieve its strict report through the existing SSE and `--wait`
-workflow.
+An operator can run any Git Agent command against another directory without
+changing the invoking shell's working directory first.
 
 ## First-draft scope
 
-- `review --follow-up <turn-id> <prompt...>` and
-  `simplify --follow-up <turn-id> <prompt...>`.
-- A successful same-command, same-project provider turn as parent.
-- The parent's review mode, current repository state, current configuration,
-  guidance, skills, tools, validation, and checks.
-- One fresh user message containing only prior findings or opportunities plus
-  the required prompt.
-- Existing detached launch, progress, failure, cancellation, storage, and wait
-  behavior.
+- `git-agent --cwd <directory> <command> [args...]` for every command.
+- Relative directories resolved from the caller's original working directory.
+- Absolute directories accepted unchanged.
+- The selected directory applied before command dispatch and all
+  working-directory-sensitive behavior.
+- Existing command output preserved when directory selection succeeds.
 
 ## Non-goals
 
-- Continuing or persisting a provider conversation.
-- A session host, control socket, lineage, host epoch, context threshold, or
-  inherited provider configuration.
-- Preventing multiple independent follow-ups from one historical report.
-- Persisting credentials, provider usage, copied findings, or transcripts.
-- Full inspection of unrelated changes during targeted follow-up.
-- Follow-up from dry-run output.
+- A command-local `--cwd` spelling after the subcommand.
+- A persistent configured working directory or environment-variable alias.
+- Changing the invoking shell's working directory after Git Agent exits.
 
 ## Constraints and assumptions
 
-- `--follow-up` is isolated from all ordinary launch flags and focus.
-- The remaining argv elements are joined with one ASCII space and must contain
-  non-whitespace text.
-- Staged mode still excludes unstaged bytes; diff modes allow an empty current
-  diff for re-evaluation.
-- The provider receives only prior actionable items and the new prompt.
-- Version 3 background records store only mode and optional parent ID.
+- `--cwd` is a global flag and therefore precedes the subcommand.
+- Directory selection fails before dispatch when the value is missing or the
+  selected path cannot become the process working directory.
+- Detached processes inherit the selected directory through the existing
+  process-launch behavior.

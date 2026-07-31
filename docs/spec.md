@@ -1177,6 +1177,17 @@ that batch.
 
 ### Flags
 
+Every command accepts the global form
+`git-agent --cwd <directory> <command> [args...]`. `--cwd` must precede the
+subcommand, requires one nonempty value, and may occur at most once. Relative
+values resolve from the caller's original working directory; absolute values
+are used directly. Git Agent changes to the selected directory before command
+dispatch, so repository discovery, search roots and scopes, guidance, relative
+path arguments, working-directory-sensitive configuration, and detached child
+processes observe that directory. Failure to enter the directory returns
+nonzero before the subcommand runs and emits none of its normal stdout output.
+Without `--cwd`, existing dispatch behavior is unchanged.
+
 Message-generation subcommands reserve this shared flag surface:
 
 - `--model`
@@ -1485,42 +1496,43 @@ including:
 
 ### Agent loop lifecycle
 
-1. parse shared flags and validate auth-independent options
-2. for commit-message tasks, collect staged paths
-3. precompute normal staged context early enough to detect deterministic
+1. apply the optional global `--cwd` directory before command dispatch
+2. parse shared flags and validate auth-independent options
+3. for commit-message tasks, collect staged paths
+4. precompute normal staged context early enough to detect deterministic
    submodule-only messages before provider auth is required
-4. for normal submodule-only staged changes, format and return the local
+5. for normal submodule-only staged changes, format and return the local
    message without the SDK-backed agent loop
-5. resolve provider config and create a stdout-streaming human console trace
+6. resolve provider config and create a stdout-streaming human console trace
    for `commit` / `commit --amend`
-6. precompute task context before the first provider call: staged context for
+7. precompute task context before the first provider call: staged context for
    normal commit messages, amend context for `--amend`, PR context for
    `pr-message`, or release-note context for `release-note` including resolved
    refs, parent commits, submodule gitlink changes, submodule history when
    locally available, and repository ownership/link hints
-7. resolve project guidance for the task target paths, after context prep when
+8. resolve project guidance for the task target paths, after context prep when
    prepared paths define the target scope
-8. when `skills-mgr` is available, call `skills-mgr list`, inject its Markdown
+9. when `skills-mgr` is available, call `skills-mgr list`, inject its Markdown
    output verbatim as a developer prompt layer, then build the remaining task-specific
    instructions, developer context, and initial user prompt, appending any
    `--append-prompt` hint as lower-priority escaped prompt data
-9. send a streaming request to the Responses API through the official OpenAI
+10. send a streaming request to the Responses API through the official OpenAI
    Go SDK
-10. stream each request and response when console or SSE tracing is active;
+11. stream each request and response when console or SSE tracing is active;
     publish retry progress and repeat a retryable interrupted stream once
     without changing request semantics
-11. if the model requests tools, execute only registered read-only tools;
+12. if the model requests tools, execute only registered read-only tools;
     return recoverable non-context execution errors as structured failed tool
     outputs so the model can correct arguments or choose other evidence, but
     abort immediately when the authoritative review snapshot changed
-12. stream each tool call and successful or failed tool output when tracing is active
-13. append complete provider continuation output before local
+13. stream each tool call and successful or failed tool output when tracing is active
+14. append complete provider continuation output before local
     function-call-output items and continue until final text is returned
-14. if the local budget is exhausted, force a no-tool finalization request while
+15. if the local budget is exhausted, force a no-tool finalization request while
     preserving any structured text format required by the task
-15. validate output against task rules
-16. if invalid and repair budget remains, run exactly one repair pass
-17. print final text to stdout for generation-only commands, write it to
+16. validate output against task rules
+17. if invalid and repair budget remains, run exactly one repair pass
+18. print final text to stdout for generation-only commands, write it to
     `--out` for `release-note --out <file>`, or stream human console trace
     lines while generating the message and then print Git's raw commit summary
     after creating or amending through `git commit`

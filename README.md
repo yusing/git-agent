@@ -467,6 +467,20 @@ output, cache, ignore-file, and debug behavior.
 
 ## CLI Reference
 
+Run any command from another directory by placing the global flag before its
+subcommand:
+
+```sh
+git-agent --cwd <directory> <command> [args...]
+git-agent --cwd ../other-repo review --staged
+git-agent --cwd /srv/project search "where is configuration loaded"
+```
+
+Relative directories are resolved from the caller's working directory;
+absolute directories are accepted directly. The selected directory applies to
+repository discovery, search scope, guidance, relative paths, and detached
+tasks. Invalid directories fail before the subcommand runs.
+
 Everyday commands:
 
 ```sh

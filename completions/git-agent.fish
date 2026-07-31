@@ -2,13 +2,33 @@
 
 complete -c git-agent -e
 
-function __git_agent_no_subcommand
+function __git_agent_words
     set -l words (commandline -opc)
+    if test (count $words) -gt 1; and test "$words[2]" = --cwd
+        test (count $words) -gt 2; or return 1
+        printf '%s\n' "$words[1]" $words[4..-1]
+        return
+    end
+    printf '%s\n' $words
+end
+
+function __git_agent_no_subcommand
+    set -l raw_words (commandline -opc)
+    if test (count $raw_words) -gt 1; and test "$raw_words[2]" = --cwd; and test (count $raw_words) -lt 3
+        return 1
+    end
+    set -l words (__git_agent_words)
     test (count $words) -le 1
 end
 
-function __git_agent_config_needs_key
+function __git_agent_cwd_available
     set -l words (commandline -opc)
+    test (count $words) -le 1; and return 0
+    test (count $words) -eq 2; and test "$words[2]" = --cwd
+end
+
+function __git_agent_config_needs_key
+    set -l words (__git_agent_words)
     test (count $words) -gt 1; and test "$words[2]" = config; or return 1
 
     set -l args $words[3..-1]
@@ -17,18 +37,18 @@ function __git_agent_config_needs_key
 end
 
 function __git_agent_config_can_unset
-    set -l words (commandline -opc)
+    set -l words (__git_agent_words)
     test (count $words) -eq 2; and test "$words[2]" = config
 end
 
 function __git_agent_needs_index_subcommand
-    set -l words (commandline -opc)
+    set -l words (__git_agent_words)
     test (count $words) -eq 2; and test "$words[2]" = index
 end
 
 function __git_agent_index_migrate_can_complete
     set -l candidate $argv[1]
-    set -l words (commandline -opc)
+    set -l words (__git_agent_words)
     test (count $words) -gt 2; and test "$words[2]" = index; and test "$words[3]" = migrate; or return 1
 
     set -l seen_to 0
@@ -284,7 +304,7 @@ end
 function __git_agent_option_available
     set -l candidate $argv[1]
     set -l allowed_commands $argv[2..-1]
-    set -l words (commandline -opc)
+    set -l words (__git_agent_words)
     test (count $words) -gt 1; or return 1
 
     set -l command_name $words[2]
@@ -353,7 +373,7 @@ end
 
 function __git_agent_release_note_can_complete
     set -l candidate $argv[1]
-    set -l words (commandline -opc)
+    set -l words (__git_agent_words)
     test (count $words) -gt 1; and test "$words[2]" = release-note; or return 1
 
     set -l seen_options
@@ -418,7 +438,7 @@ end
 
 function __git_agent_search_mode_is_enabled
     set -l mode $argv[1]
-    set -l words (commandline -opc)
+    set -l words (__git_agent_words)
     for word in $words[3..-1]
         if test "$word" = --$mode; or test "$word" = -$mode
             return 0
@@ -454,6 +474,8 @@ function __git_agent_cached_remotes
 end
 
 complete -c git-agent -f
+
+complete -c git-agent -n '__git_agent_cwd_available' -l cwd -r -f -a '(__fish_complete_directories)' -d 'Run from directory'
 
 complete -c git-agent -n '__git_agent_no_subcommand' -a commit -d 'Generate a message and commit staged changes'
 complete -c git-agent -n '__git_agent_no_subcommand' -a config -d 'Read or update persistent configuration'
