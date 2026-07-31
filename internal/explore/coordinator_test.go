@@ -14,6 +14,8 @@ import (
 	"github.com/yusing/git-agent/internal/openai"
 )
 
+const testWorkspace = "test-workspace"
+
 func TestCoordinatorBatchesConcurrentInitialSearches(t *testing.T) {
 	store := testStore(t)
 	first := testCoordinator(store)
@@ -243,10 +245,35 @@ func TestCoordinatorDoesNotBatchDifferentWorkspaces(t *testing.T) {
 	}
 }
 
+func TestCoordinatorRejectsParentFromDifferentWorkspace(t *testing.T) {
+	coordinator := testCoordinator(testStore(t))
+	parent := &Session{Workspace: "other-workspace"}
+	if _, err := coordinator.Run(t.Context(), parent, "continue", nil, answerRunner); err == nil || !strings.Contains(err.Error(), "does not match current workspace") {
+		t.Fatalf("cross-workspace parent error = %v", err)
+	}
+}
+
+func TestSessionValidationRequiresVersionedCleanWorkspace(t *testing.T) {
+	valid := Session{
+		Version: sessionVersion, ID: "AAAAAAAAAAAAAAAAAAAAAAAAAA", Workspace: testWorkspace,
+		Answer: "answer", History: []openai.Item{openai.NewMessage("assistant", "answer")},
+	}
+	legacy := valid
+	legacy.Version = sessionVersion - 1
+	if err := validateSession(legacy); err == nil || !strings.Contains(err.Error(), "unsupported version") {
+		t.Fatalf("legacy session error = %v", err)
+	}
+	dirty := valid
+	dirty.Workspace = "nested/../workspace"
+	if err := validateSession(dirty); err == nil || !strings.Contains(err.Error(), "workspace is not clean") {
+		t.Fatalf("unclean workspace error = %v", err)
+	}
+}
+
 func TestCoordinatorForksConcurrentFollowUpsFromSameParent(t *testing.T) {
 	store := testStore(t)
 	parentOutput := runFresh(t, testCoordinator(store), "root")
-	parent, err := store.FollowUpParent(parentOutput.ID)
+	parent, err := store.FollowUpParent(parentOutput.ID, testWorkspace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,11 +339,11 @@ func TestCoordinatorDoesNotBatchDifferentParents(t *testing.T) {
 	store := testStore(t)
 	firstOutput := runFresh(t, testCoordinator(store), "first root")
 	secondOutput := runFresh(t, testCoordinator(store), "second root")
-	firstParent, err := store.FollowUpParent(firstOutput.ID)
+	firstParent, err := store.FollowUpParent(firstOutput.ID, testWorkspace)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondParent, err := store.FollowUpParent(secondOutput.ID)
+	secondParent, err := store.FollowUpParent(secondOutput.ID, testWorkspace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +382,7 @@ func TestFourthFollowUpResetsToFreshSearch(t *testing.T) {
 	store := testStore(t)
 	output := runFresh(t, testCoordinator(store), "root")
 	for depth := 1; depth <= MaxFollowUps; depth++ {
-		parent, err := store.FollowUpParent(output.ID)
+		parent, err := store.FollowUpParent(output.ID, testWorkspace)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -374,7 +401,7 @@ func TestFourthFollowUpResetsToFreshSearch(t *testing.T) {
 			t.Fatalf("depth = %d, want %d", session.Depth, depth)
 		}
 	}
-	parent, err := store.FollowUpParent(output.ID)
+	parent, err := store.FollowUpParent(output.ID, testWorkspace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +541,7 @@ func testStore(t *testing.T) *Store {
 }
 
 func testCoordinator(store *Store) *Coordinator {
-	coordinator := NewCoordinator(store, "test-workspace")
+	coordinator := NewCoordinator(store, testWorkspace)
 	coordinator.batchWait = time.Second
 	coordinator.joinGrace = 50 * time.Millisecond
 	coordinator.pollInterval = time.Millisecond

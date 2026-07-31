@@ -662,11 +662,16 @@ runs filesystem semantic retrieval with the existing search index, default
 retrieval limits, and the code-only filter. It then gives those unverified leads
 to a bounded Responses API agent with `repo_summary`, `list_files`, `read_file`,
 `inspect_file`, `jq`, `grep`, and `find`. In a Git repository these tools retain
-Git-aware repository metadata and tracked internal-path handling. In an
-ordinary directory they use the cleaned absolute directory as the codebase root,
-omit Git metadata, reject `index` and `head` file sources, and exclude internal
-state directories. The agent must inspect primary implementation owners and
-contract-defining tests, return direct answers with root-relative path-and-line
+Git-aware repository metadata and tracked internal-path handling, but the
+cleaned absolute working directory remains the complete exploration root even
+when an ancestor contains `.git`. Semantic results, guidance, agent environment,
+and every tool path are relative to that working directory; Git-backed
+worktree, index, and HEAD reads rebase those paths through the containing
+repository without exposing files above the exploration root. In an ordinary
+directory the tools use the same working-directory root, omit Git metadata,
+reject `index` and `head` file sources, and exclude internal state directories.
+The agent must inspect primary implementation owners and contract-defining
+tests, return direct answers with exploration-root-relative path-and-line
 evidence, and avoid delegating ownership or blast-radius rediscovery to the
 caller. Indexing, batch-wait, tool, and provider progress is written only to
 stderr.
@@ -688,7 +693,12 @@ was shared with sibling items.
 Successful sessions persist in the current project's owner-only metadata
 directory. A session records its selected answer, parent ID, follow-up depth,
 and replayable Responses API item history. `--follow-up <search-id>` appends the
-new natural-language question to that stored context. The parent remains
+new natural-language question to that stored context only when invoked from
+the same cleaned absolute workspace that created the session. A session ID from
+another workspace under the same project identity fails before semantic or
+provider work, preventing stored context from crossing exploration boundaries.
+Sessions created by versions without workspace provenance are not follow-up
+eligible. The parent remains
 immutable and reusable, so simultaneous follow-ups from one parent create
 distinct sibling IDs rather than serializing through shared mutable state.
 Concurrent sibling questions may batch and each resulting ID can itself be
@@ -1229,6 +1239,12 @@ path arguments, working-directory-sensitive configuration, and detached child
 processes observe that directory. Failure to enter the directory returns
 nonzero before the subcommand runs and emits none of its normal stdout output.
 Without `--cwd`, existing dispatch behavior is unchanged.
+
+For `explore`, the selected directory is also the complete semantic, guidance,
+agent-environment, and read-tool boundary. An ancestor Git repository may still
+provide project identity, session metadata, repository summary fields, tracked
+internal-path handling, and index/HEAD sources, but it does not widen that
+boundary.
 
 Message-generation subcommands reserve this shared flag surface:
 

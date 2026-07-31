@@ -17,19 +17,20 @@ import (
 )
 
 const (
-	sessionVersion  = 1
+	sessionVersion  = 2
 	MaxFollowUps    = 3
 	maxSessionBytes = 64 << 20
 )
 
 // Session is one independently addressable branch of an exploration chain.
 type Session struct {
-	Version  int           `json:"version"`
-	ID       string        `json:"id"`
-	ParentID string        `json:"parent_id,omitempty"`
-	Depth    int           `json:"depth"`
-	Answer   string        `json:"answer"`
-	History  []openai.Item `json:"history"`
+	Version   int           `json:"version"`
+	ID        string        `json:"id"`
+	ParentID  string        `json:"parent_id,omitempty"`
+	Depth     int           `json:"depth"`
+	Workspace string        `json:"workspace"`
+	Answer    string        `json:"answer"`
+	History   []openai.Item `json:"history"`
 }
 
 // Store owns owner-only explore state beneath one project metadata directory.
@@ -89,10 +90,14 @@ func (s *Store) Read(id string) (Session, error) {
 // FollowUpParent returns the replayable parent while its branch still has a
 // context-preserving turn available. A nil parent means the caller must reset
 // to a fresh search.
-func (s *Store) FollowUpParent(id string) (*Session, error) {
+func (s *Store) FollowUpParent(id, workspace string) (*Session, error) {
 	session, err := s.Read(id)
 	if err != nil {
 		return nil, err
+	}
+	workspace = filepath.Clean(workspace)
+	if session.Workspace != workspace {
+		return nil, fmt.Errorf("explore search ID %s belongs to workspace %q, not %q", id, session.Workspace, workspace)
 	}
 	if session.Depth >= MaxFollowUps {
 		return nil, nil
@@ -160,6 +165,12 @@ func validateSession(session Session) error {
 	}
 	if session.Depth > 0 && session.ParentID == "" {
 		return errors.New("follow-up explore session requires a parent")
+	}
+	if strings.TrimSpace(session.Workspace) == "" {
+		return errors.New("explore session requires a workspace")
+	}
+	if filepath.Clean(session.Workspace) != session.Workspace {
+		return fmt.Errorf("explore session workspace is not clean: %q", session.Workspace)
 	}
 	if strings.TrimSpace(session.Answer) == "" {
 		return errors.New("explore session requires an answer")

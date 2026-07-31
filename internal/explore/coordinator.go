@@ -107,6 +107,9 @@ func (c *Coordinator) Run(ctx context.Context, parent *Session, question string,
 	if parent != nil && parent.Depth >= MaxFollowUps {
 		return Output{}, errors.New("context-preserving follow-up limit already exhausted")
 	}
+	if parent != nil && parent.Workspace != c.workspace {
+		return Output{}, fmt.Errorf("explore parent workspace %q does not match current workspace %q", parent.Workspace, c.workspace)
+	}
 	if parent == nil && prepare == nil {
 		return Output{}, errors.New("fresh explore search requires semantic preparation")
 	}
@@ -286,7 +289,7 @@ func (c *Coordinator) runLeader(ctx context.Context, keyDir, batchDir string, pa
 		}
 		session := Session{
 			Version: sessionVersion, ID: item.ID, ParentID: parentID, Depth: depth,
-			Answer: result.Answer,
+			Workspace: c.workspace, Answer: result.Answer,
 			History: append(slices.Clone(result.History), openai.NewMessage(
 				"developer",
 				"Continue only explore branch item_id "+item.ID+" in future turns; treat sibling items as unrelated context.",

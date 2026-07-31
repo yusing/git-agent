@@ -306,7 +306,7 @@ func walkRepository(repo *gitctx.Repository, rootPath, requested string, visit f
 	trackedFiles := map[string]bool{}
 	trackedDirs := map[string]bool{}
 	if repo != nil {
-		trackedFiles, trackedDirs, err = trackedRepositoryPaths(repo)
+		trackedFiles, trackedDirs, err = trackedRepositoryPaths(repo, rootPath)
 		if err != nil {
 			_ = root.Close()
 			return err
@@ -332,7 +332,11 @@ func walkRepository(repo *gitctx.Repository, rootPath, requested string, visit f
 	return errors.Join(walkErr, root.Close())
 }
 
-func trackedRepositoryPaths(repo *gitctx.Repository) (map[string]bool, map[string]bool, error) {
+func trackedRepositoryPaths(repo *gitctx.Repository, rootPath string) (map[string]bool, map[string]bool, error) {
+	prefix, err := repositoryPathPrefix(repo, rootPath)
+	if err != nil {
+		return nil, nil, err
+	}
 	idx, err := repo.Repo.Storer.Index()
 	if err != nil {
 		return nil, nil, err
@@ -341,12 +345,50 @@ func trackedRepositoryPaths(repo *gitctx.Repository) (map[string]bool, map[strin
 	dirs := map[string]bool{".": true}
 	for _, entry := range idx.Entries {
 		path := filepath.ToSlash(entry.Name)
+		if prefix != "." {
+			var found bool
+			path, found = strings.CutPrefix(path, prefix+"/")
+			if !found {
+				continue
+			}
+		}
 		files[path] = true
 		for dir := pathpkg.Dir(path); dir != "."; dir = pathpkg.Dir(dir) {
 			dirs[dir] = true
 		}
 	}
 	return files, dirs, nil
+}
+
+func repositoryPathPrefix(repo *gitctx.Repository, rootPath string) (string, error) {
+	repoRoot, err := filepath.Abs(repo.RootPath)
+	if err != nil {
+		return "", err
+	}
+	root, err := filepath.Abs(rootPath)
+	if err != nil {
+		return "", err
+	}
+	prefix, err := filepath.Rel(repoRoot, root)
+	if err != nil {
+		return "", err
+	}
+	prefix, err = cleanRepoPath(prefix)
+	if err != nil {
+		return "", fmt.Errorf("codebase root %q is outside Git repository %q: %w", rootPath, repo.RootPath, err)
+	}
+	return prefix, nil
+}
+
+func repositoryPath(repo *gitctx.Repository, rootPath, path string) (string, error) {
+	prefix, err := repositoryPathPrefix(repo, rootPath)
+	if err != nil {
+		return "", err
+	}
+	if prefix == "." {
+		return path, nil
+	}
+	return pathpkg.Join(prefix, path), nil
 }
 
 func hasSkippedDir(path string) bool {
@@ -652,6 +694,10 @@ func openInspectedFile(repo *gitctx.Repository, root string, mode ReviewMode, ra
 		}
 		reader, err := openWorktreeFile(root, path)
 		return reader, source, err
+	}
+	path, err = repositoryPath(repo, root, path)
+	if err != nil {
+		return nil, "", err
 	}
 	var reader io.ReadCloser
 	switch mode {

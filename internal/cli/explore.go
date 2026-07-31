@@ -69,7 +69,7 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 	}
 	var parent *explore.Session
 	if followUpID != "" {
-		parent, err = store.FollowUpParent(followUpID)
+		parent, err = store.FollowUpParent(followUpID, workspace)
 		if err != nil {
 			return err
 		}
@@ -96,7 +96,7 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 	output, err := coordinator.Run(ctx, parent, question, prepare, func(
 		batchCtx context.Context, batchParent *explore.Session, items []explore.BatchItem,
 	) (map[string]explore.BatchResult, error) {
-		return a.runExploreBatch(batchCtx, identity.Root, repo, batchParent, items)
+		return a.runExploreBatch(batchCtx, workspace, repo, batchParent, items)
 	})
 	if err != nil {
 		return err
@@ -239,11 +239,7 @@ func (a *App) runExploreBatch(ctx context.Context, root string, repo *gitctx.Rep
 	}
 	if parent == nil {
 		request.ToolPolicy = toolPolicy()
-		if repo != nil {
-			request.Environment = environmentContext(repo, "explore", "codebase", cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
-		} else {
-			request.Environment = environmentContextForRoot(root, root, "explore", "codebase", cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
-		}
+		request.Environment = environmentContextForRoot(root, root, "explore", "codebase", cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
 		request.ProjectGuidance = renderedGuidance
 		request.UserPrompt = userPrompt
 	} else {

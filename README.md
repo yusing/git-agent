@@ -294,6 +294,11 @@ codebase tools and returns a synchronous JSON answer with an opaque ID. It works
 from either a Git repository or an ordinary directory; non-Git sessions use the
 current directory as their codebase and metadata identity.
 
+The current directory is the complete exploration boundary. When it is nested
+inside a Git repository, the ancestor repository still supplies project identity
+and Git metadata, but semantic results, guidance, agent paths, and read tools all
+remain relative to—and confined beneath—the selected directory.
+
 ```sh
 # Start a grounded codebase exploration
 git-agent explore "where is release note evidence prepared?"
@@ -306,6 +311,8 @@ git-agent explore --follow-up <search-id> "which tests define its failure contra
 Concurrent initial calls batch automatically. Concurrent follow-ups naming the
 same parent ID become independent sibling branches. Three follow-ups preserve
 context; the next invocation succeeds as a fresh search with a reset allowance.
+Follow-up IDs are bound to the workspace that created them and are rejected from
+another `--cwd`, even when both directories share an ancestor Git repository.
 Explore adds no internal timeout: it runs until completion or caller
 cancellation. Progress stays on stderr and the result envelope stays on stdout.
 See [the specification](docs/spec.md) for the exact batching, persistence,
@@ -488,7 +495,9 @@ git-agent --cwd /srv/project search "where is configuration loaded"
 Relative directories are resolved from the caller's working directory;
 absolute directories are accepted directly. The selected directory applies to
 repository discovery, search scope, guidance, relative paths, and detached
-tasks. Invalid directories fail before the subcommand runs.
+tasks. For `explore`, it is the complete search and read-tool boundary even when
+an ancestor directory is a Git repository. Invalid directories fail before the
+subcommand runs.
 
 Everyday commands:
 

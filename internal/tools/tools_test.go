@@ -76,6 +76,86 @@ func TestExploreRegistryReadsDirectoryWithoutGit(t *testing.T) {
 	}
 }
 
+func TestExploreRegistryScopesGitRepositoryToWorkspace(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	workspace := filepath.Join(repoRoot, "nested")
+	runGit(t, repoRoot, "init")
+	runGit(t, repoRoot, "config", "user.name", "Test User")
+	runGit(t, repoRoot, "config", "user.email", "test@example.com")
+	mustWriteFile(t, filepath.Join(repoRoot, "root.go"), "package root\n")
+	mustWriteFile(t, filepath.Join(workspace, "nested.go"), "package nested\n\nconst Value = \"head\"\n")
+	mustWriteFile(t, filepath.Join(workspace, "data.json"), `{"name":"nested"}`)
+	mustWriteFile(t, filepath.Join(workspace, ".git-agent", "tracked.txt"), "tracked\n")
+	runGit(t, repoRoot, "add", ".")
+	runGit(t, repoRoot, "commit", "-m", "base")
+	mustWriteFile(t, filepath.Join(workspace, "nested.go"), "package nested\n\nconst Value = \"worktree\"\n")
+	mustWriteFile(t, filepath.Join(workspace, ".git-agent", "private.txt"), "private\n")
+
+	repo, err := gitctx.Open(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewExploreRegistry(workspace, repo)
+	summary, err := registry.Execute(t.Context(), Invocation{Name: "repo_summary", Arguments: `{}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(summary.Content, repoRoot) {
+		t.Fatalf("repo_summary omitted ancestor Git metadata: %s", summary.Content)
+	}
+
+	listed, err := registry.Execute(t.Context(), Invocation{Name: "list_files", Arguments: `{}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"nested.go", ".git-agent/tracked.txt"} {
+		if !strings.Contains(listed.Content, want) {
+			t.Fatalf("list_files missing %q: %s", want, listed.Content)
+		}
+	}
+	for _, outside := range []string{"root.go", ".git-agent/private.txt"} {
+		if strings.Contains(listed.Content, outside) {
+			t.Fatalf("list_files exposed %q: %s", outside, listed.Content)
+		}
+	}
+
+	for source, want := range map[string]string{"worktree": "worktree", "index": "head", "head": "head"} {
+		result, err := registry.Execute(t.Context(), Invocation{
+			Name: "read_file", Arguments: fmt.Sprintf(`{"path":"nested.go","source":%q}`, source),
+		})
+		if err != nil {
+			t.Fatalf("read %s: %v", source, err)
+		}
+		if !strings.Contains(result.Content, want) {
+			t.Fatalf("read %s missing %q: %s", source, want, result.Content)
+		}
+	}
+	if _, err := registry.Execute(t.Context(), Invocation{Name: "read_file", Arguments: `{"path":"root.go"}`}); err == nil {
+		t.Fatal("read_file escaped the explore workspace")
+	}
+
+	for _, test := range []struct {
+		name      string
+		arguments string
+		want      string
+	}{
+		{name: "inspect_file", arguments: `{"path":"nested.go"}`, want: `"outline_kind": "code"`},
+		{name: "jq", arguments: `{"path":"data.json","pointer":"/name"}`, want: `"value": "nested"`},
+		{name: "grep", arguments: `{"pattern":"Value"}`, want: `"path": "nested.go"`},
+		{name: "find", arguments: `{"name":"*.json","type":"file"}`, want: `"path": "data.json"`},
+	} {
+		result, err := registry.Execute(t.Context(), Invocation{Name: test.name, Arguments: test.arguments})
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		if !strings.Contains(result.Content, test.want) {
+			t.Fatalf("%s missing %q: %s", test.name, test.want, result.Content)
+		}
+	}
+}
+
 func TestErrorResultUsesStableBoundedEnvelope(t *testing.T) {
 	t.Parallel()
 

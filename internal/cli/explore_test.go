@@ -76,6 +76,12 @@ func (c *exploreFakeResponseClient) requestCount() int {
 	return len(c.requests)
 }
 
+func (c *exploreFakeResponseClient) recordedRequests() []openai.Request {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]openai.Request(nil), c.requests...)
+}
+
 type exploreFakeEmbedder struct {
 	calls atomic.Int32
 }
@@ -189,6 +195,77 @@ func TestExploreHelpDoesNotResolveProviderConfiguration(t *testing.T) {
 	err := New().Run(t.Context(), []string{"explore", "--help"})
 	if err == nil || !strings.Contains(err.Error(), "Usage: git-agent explore [--follow-up <search-id>] <question...>") {
 		t.Fatalf("help error = %v", err)
+	}
+}
+
+func TestExploreGlobalCWDIsCompleteWorkspaceBoundary(t *testing.T) {
+	repoRoot := t.TempDir()
+	workspace := filepath.Join(repoRoot, "nested")
+	siblingWorkspace := filepath.Join(repoRoot, "sibling")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_EMBEDDING_DIMENSIONS", "3")
+	runGit(t, repoRoot, "init")
+	writeFixtureFile(t, filepath.Join(repoRoot, "root.go"), "package root\n")
+	writeFixtureFile(t, filepath.Join(workspace, "nested.go"), "package nested\n\nfunc Answer() int { return 42 }\n")
+	writeFixtureFile(t, filepath.Join(siblingWorkspace, "sibling.go"), "package sibling\n")
+
+	responses := &exploreFakeResponseClient{}
+	var stdout bytes.Buffer
+	app := &App{
+		stdin: strings.NewReader(""), stdout: &stdout, stderr: &bytes.Buffer{},
+		responseClient: responses, embeddingClient: &exploreFakeEmbedder{},
+	}
+	if err := app.Run(t.Context(), []string{"--cwd", workspace, "explore", "where", "is", "Answer"}); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := responses.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(requests))
+	}
+	var requestText strings.Builder
+	for _, item := range requests[0].Input {
+		requestText.WriteString(item.Content)
+		requestText.WriteByte('\n')
+	}
+	wantEnvironment := "<cwd>" + workspace + "</cwd>\n<repo_root>" + workspace + "</repo_root>"
+	if !strings.Contains(requestText.String(), wantEnvironment) {
+		t.Fatalf("request environment is not workspace-rooted:\n%s", requestText.String())
+	}
+	if !strings.Contains(requestText.String(), "nested.go") {
+		t.Fatalf("semantic results omitted workspace-relative path:\n%s", requestText.String())
+	}
+	if strings.Contains(requestText.String(), "root.go") {
+		t.Fatalf("semantic results escaped workspace:\n%s", requestText.String())
+	}
+
+	var output explore.Output
+	if err := sonic.ConfigStd.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := projectidentity.Resolve(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataDir, err := identity.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := explore.NewStore(metadataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Read(output.ID); err != nil {
+		t.Fatalf("session did not retain ancestor Git project identity: %v", err)
+	}
+	beforeFollowUp := responses.requestCount()
+	err = app.Run(t.Context(), []string{"--cwd", siblingWorkspace, "explore", "--follow-up", output.ID, "continue"})
+	if err == nil || !strings.Contains(err.Error(), "belongs to workspace") {
+		t.Fatalf("cross-workspace follow-up error = %v", err)
+	}
+	if got := responses.requestCount(); got != beforeFollowUp {
+		t.Fatalf("cross-workspace follow-up made %d provider requests, want %d", got, beforeFollowUp)
 	}
 }
 
