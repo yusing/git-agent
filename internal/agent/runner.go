@@ -116,6 +116,7 @@ type OpenAIRunner struct {
 	Trace              *trace.Recorder
 	Budget             BudgetHandler
 	ReasoningSummary   string
+	PromptCacheKey     string
 	ObserveUsage       func(openai.Usage)
 }
 
@@ -161,6 +162,9 @@ func (r *OpenAIRunner) RunNode(ctx context.Context, request Request) (NodeResult
 			messages = append(messages, openai.NewMessage("developer", request.ProjectGuidance))
 		}
 		messages = append(messages, openai.NewMessage("user", request.UserPrompt))
+	}
+	if r.PromptCacheKey != "" {
+		openai.EnsurePromptCacheBreakpoint(messages)
 	}
 
 	toolSpecs := make([]openai.ToolSpec, 0, len(r.ToolSpecs)+1)
@@ -734,6 +738,7 @@ func (r *OpenAIRunner) providerRequest(instructions string, input []openai.Item,
 		APIKey:             r.Config.APIKey,
 		AuthAccountID:      r.Config.AuthAccountID,
 		Instructions:       instructions,
+		PromptCacheKey:     r.PromptCacheKey,
 		Input:              input,
 		Tools:              toolSpecs,
 		HostedCapabilities: hostedCapabilities,

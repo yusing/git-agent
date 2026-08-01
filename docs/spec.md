@@ -333,6 +333,19 @@ natural-language reporting responsibility; path hints accelerate discovery but
 do not restrict repository inspection, evidence, or final validation. Child
 input is the forked provider-visible conversation followed by the selected
 branch function result; Git-agent appends no child-specific developer message.
+The detached review tree assigns every request one cache key derived from its
+task ID. For GPT-5.6-family models, Git-agent sends that key, marks the initial
+conversation's last reusable input-text block with one explicit prompt-cache
+breakpoint, uses explicit-only cache mode, and retains the original marker in
+forked histories rather than moving it onto branch-specific output. These
+controls are best-effort: a changed model, tool catalog, structured-output
+schema, or dynamic instruction prefix can make a child ineligible for a hit.
+Git-agent does not alter branch availability or depth semantics to preserve
+cache identity. Models outside the GPT-5.6 family receive neither the explicit
+breakpoint nor its request options and continue using provider-default caching,
+but official OpenAI requests still carry the stable cache key. Custom endpoints
+receive no prompt-cache fields because Git-agent has no provider capability
+declaration for them.
 Child model and reasoning effort inherit by default or select from the bounded model
 catalog returned by `branch_help` and enforced by the strict `branch` function
 definition. Every required leaf must pass the ordinary report and
@@ -694,13 +707,22 @@ shared with sibling items.
 
 Successful sessions persist in the current project's owner-only metadata
 directory. A session records its selected answer, parent ID, follow-up depth,
-and replayable Responses API item history. `--follow-up <search-id>` appends the
+one prompt-cache key, and replayable Responses API item history. An initial
+batch derives one key from its first sorted item ID and persists that key for
+every sibling. For GPT-5.6-family models, Git-agent sends that key, the initial
+conversation's last reusable input-text block has one explicit breakpoint, and
+requests use explicit-only cache mode. Follow-ups inherit both the key and
+original marker; a depth reset creates a new key. Official OpenAI models outside
+the GPT-5.6 family send the key while retaining provider-default caching. Custom
+endpoints receive no prompt-cache fields. Provider prefix-length, retention,
+routing, and eviction rules remain authoritative, so a nonzero cached-token
+count is not guaranteed. `--follow-up <search-id>` appends the
 new natural-language question to that stored context only when invoked from
 the same cleaned absolute workspace that created the session. A session ID from
 another workspace under the same project identity fails before semantic or
 provider work, preventing stored context from crossing exploration boundaries.
-Sessions created by versions without workspace provenance are not follow-up
-eligible. The parent remains
+Sessions created by versions without workspace provenance or a prompt-cache
+identity are not follow-up eligible. The parent remains
 immutable and reusable, so simultaneous follow-ups from one parent create
 distinct sibling IDs rather than serializing through shared mutable state.
 Concurrent sibling questions may batch and each resulting ID can itself be

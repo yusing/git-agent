@@ -492,6 +492,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		ToolSpecs:          toolSpecs,
 		HostedCapabilities: []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch, MaxCalls: cfg.MaxWebSearches}},
 		ReasoningSummary:   openai.ReasoningSummaryAuto,
+		PromptCacheKey:     "review:" + taskID,
 		Validator: func(text string) []string {
 			return reviewtask.ValidateRepository(kind, text, repo, mode, prepared.Paths, prepared.Fingerprint)
 		},

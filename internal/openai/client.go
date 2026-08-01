@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +39,7 @@ type Request struct {
 	APIKey             string                      `json:"-"`
 	AuthAccountID      string                      `json:"-"`
 	Instructions       string                      `json:"instructions,omitempty"`
+	PromptCacheKey     string                      `json:"prompt_cache_key,omitempty"`
 	Input              []Item                      `json:"input"`
 	Tools              []ToolSpec                  `json:"tools,omitempty"`
 	HostedCapabilities []provider.HostedCapability `json:"hosted_capabilities,omitempty"`
@@ -97,15 +99,33 @@ type TextFormat struct {
 }
 
 type Item struct {
-	Type      string `json:"type"`
-	Role      string `json:"role,omitempty"`
-	Content   string `json:"content,omitempty"`
-	ID        string `json:"id,omitempty"`
-	CallID    string `json:"call_id,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
-	Output    string `json:"output,omitempty"`
-	RawJSON   string `json:"raw_json,omitempty"`
+	Type                  string `json:"type"`
+	Role                  string `json:"role,omitempty"`
+	Content               string `json:"content,omitempty"`
+	PromptCacheBreakpoint bool   `json:"prompt_cache_breakpoint,omitempty"`
+	ID                    string `json:"id,omitempty"`
+	CallID                string `json:"call_id,omitempty"`
+	Name                  string `json:"name,omitempty"`
+	Arguments             string `json:"arguments,omitempty"`
+	Output                string `json:"output,omitempty"`
+	RawJSON               string `json:"raw_json,omitempty"`
+}
+
+// EnsurePromptCacheBreakpoint marks the last reusable input-text block once.
+// Replayed histories retain the original boundary instead of moving it onto a
+// follow-up question or branch-specific function result.
+func EnsurePromptCacheBreakpoint(items []Item) {
+	for _, item := range items {
+		if item.PromptCacheBreakpoint {
+			return
+		}
+	}
+	for index := len(items) - 1; index >= 0; index-- {
+		if items[index].Type == "message" && items[index].Role != "assistant" && items[index].Content != "" {
+			items[index].PromptCacheBreakpoint = true
+			return
+		}
+	}
 }
 
 // PortableItems returns conversation items that can be replayed by another
@@ -833,8 +853,10 @@ func (r Request) toSDKParams() (responses.ResponseNewParams, error) {
 	}
 
 	input := make(responses.ResponseInputParam, 0, len(r.Input))
+	promptCacheKeySupported := r.PromptCacheKey != "" && supportsPromptCacheKey(r)
+	explicitPromptCaching := promptCacheKeySupported && supportsExplicitPromptCaching(r.Model) && hasPromptCacheBreakpoint(r.Input)
 	for _, item := range r.Input {
-		param, err := item.toSDKParam()
+		param, err := item.toSDKParam(explicitPromptCaching)
 		if err != nil {
 			return responses.ResponseNewParams{}, err
 		}
@@ -847,6 +869,12 @@ func (r Request) toSDKParams() (responses.ResponseNewParams, error) {
 		Instructions: openaisdk.String(r.Instructions),
 		Tools:        tools,
 		Store:        openaisdk.Bool(false),
+	}
+	if promptCacheKeySupported {
+		params.PromptCacheKey = openaisdk.String(r.PromptCacheKey)
+	}
+	if explicitPromptCaching {
+		params.PromptCacheOptions = responses.ResponseNewParamsPromptCacheOptions{Mode: "explicit"}
 	}
 	if len(r.HostedCapabilities) > 0 {
 		params.Include = []responses.ResponseIncludable{
@@ -883,7 +911,7 @@ func (r Request) toSDKParams() (responses.ResponseNewParams, error) {
 	return params, nil
 }
 
-func (i Item) toSDKParam() (responses.ResponseInputItemUnionParam, error) {
+func (i Item) toSDKParam(explicitPromptCaching bool) (responses.ResponseInputItemUnionParam, error) {
 	if i.RawJSON != "" {
 		var param responses.ResponseInputItemUnionParam
 		if err := sonic.ConfigStd.UnmarshalFromString(i.RawJSON, &param); err != nil {
@@ -904,11 +932,15 @@ func (i Item) toSDKParam() (responses.ResponseInputItemUnionParam, error) {
 				},
 			}, nil
 		}
+		inputText := responses.ResponseInputTextParam{Text: i.Content}
+		if explicitPromptCaching && i.PromptCacheBreakpoint {
+			inputText.PromptCacheBreakpoint = responses.NewResponseInputTextPromptCacheBreakpointParam()
+		}
 		return responses.ResponseInputItemUnionParam{
 			OfInputMessage: &responses.ResponseInputItemMessageParam{
 				Role: i.Role,
 				Content: responses.ResponseInputMessageContentListParam{{
-					OfInputText: &responses.ResponseInputTextParam{Text: i.Content},
+					OfInputText: &inputText,
 				}},
 			},
 		}, nil
@@ -933,6 +965,29 @@ func (i Item) toSDKParam() (responses.ResponseInputItemUnionParam, error) {
 	default:
 		return responses.ResponseInputItemUnionParam{}, fmt.Errorf("unsupported input item type %q", i.Type)
 	}
+}
+
+func supportsExplicitPromptCaching(model string) bool {
+	return model == "gpt-5.6" || strings.HasPrefix(model, "gpt-5.6-")
+}
+
+func supportsPromptCacheKey(request Request) bool {
+	endpoint, err := url.Parse(request.BaseURL)
+	if err != nil {
+		return false
+	}
+	host := endpoint.Hostname()
+	return strings.EqualFold(host, "api.openai.com") ||
+		(request.AuthAccountID != "" && strings.EqualFold(host, "chatgpt.com"))
+}
+
+func hasPromptCacheBreakpoint(items []Item) bool {
+	for _, item := range items {
+		if item.PromptCacheBreakpoint && item.Type == "message" && item.Role != "assistant" && item.Content != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func NewMessage(role, text string) Item {

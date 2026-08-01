@@ -177,6 +177,12 @@ parallel inside the same detached task. Children retain the selected Git scope,
 tool policy, cancellation, and per-conversation budgets. Git-agent merges
 validated leaf reports mechanically and publishes branch topology and progress
 through the same replayable SSE stream; `--wait` still returns one report.
+One review tree assigns a stable prompt-cache key to every request. On GPT-5.6
+models, Git-agent sends that key, marks an explicit reusable root prefix, and
+preserves the breakpoint in children. Branch-specific tools, instructions, or
+model changes can still prevent a provider cache hit. Other OpenAI models send
+the same stable key while retaining automatic caching; custom endpoints receive
+no undeclared cache controls.
 
 Diff-based runs calculate a bounded step range from effective changed lines,
 changed files, top-level scope dispersion, concrete repository-tool capability
@@ -314,6 +320,13 @@ git-agent explore --follow-up <search-id> "which tests define its failure contra
 Concurrent initial calls batch automatically. Concurrent follow-ups naming the
 same parent ID become independent sibling branches. Three follow-ups preserve
 context; the next invocation succeeds as a fresh search with a reset allowance.
+An initial batch and its context-preserving follow-ups are assigned one
+prompt-cache key. On GPT-5.6 models, Git-agent sends that key, marks the initial
+stable input as an explicit cache breakpoint, and keeps changing follow-up
+questions after it; a fresh reset allocates a new key. Provider cache retention
+and minimum-prefix rules still apply. Other OpenAI models send the stable key
+without GPT-5.6 breakpoint options; custom endpoints receive no undeclared
+cache controls.
 Follow-up IDs are bound to the workspace that created them and are rejected from
 another `--cwd`, even when both directories share an ancestor Git repository.
 Explore adds no internal timeout: it runs until completion or caller

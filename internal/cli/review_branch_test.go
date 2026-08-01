@@ -178,6 +178,46 @@ func TestRunReviewTreeSupportsImmediateNestedFanout(t *testing.T) {
 	}
 }
 
+func TestRunReviewTreePreservesPromptCacheControlsAcrossForks(t *testing.T) {
+	var mu sync.Mutex
+	var requests []openai.Request
+	client := openaiClientFunc(func(_ context.Context, request openai.Request) (openai.Response, error) {
+		mu.Lock()
+		requests = append(requests, request)
+		mu.Unlock()
+		if branchIDFromInput(request.Input) == "" {
+			return branchResponse("root", "first", "second"), nil
+		}
+		return openai.Response{Text: `{"summary":"done","opportunities":[]}`}, nil
+	})
+	recorder, err := trace.NewEventStream("simplify", func(trace.Event) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := agent.OpenAIRunner{
+		Config: config.Config{Model: "gpt-5.6-terra", MaxSteps: 3, MaxToolCalls: 3},
+		Client: client, PromptCacheKey: "review:task-id",
+		Validator: func(text string) []string { return reviewtask.Validate(reviewtask.KindSimplify, text) },
+		Trace:     recorder,
+	}
+	if _, err := runReviewTree(t.Context(), reviewtask.KindSimplify, reviewtask.DepthBalanced, runner, agent.Request{
+		UserPrompt: "inspect", MaxSteps: 3,
+	}, recorder); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 3 {
+		t.Fatalf("provider requests = %d, want 3", len(requests))
+	}
+	for index, request := range requests {
+		if request.PromptCacheKey != "review:task-id" {
+			t.Fatalf("request %d prompt cache key = %q", index, request.PromptCacheKey)
+		}
+		if countPromptCacheBreakpoints(request.Input) != 1 {
+			t.Fatalf("request %d prompt cache breakpoints = %d, want 1", index, countPromptCacheBreakpoints(request.Input))
+		}
+	}
+}
+
 func TestRunReviewTreeCancelsSiblingsAndPublishesNoPartialAggregate(t *testing.T) {
 	siblingCanceled := make(chan struct{})
 	client := openaiClientFunc(func(ctx context.Context, request openai.Request) (openai.Response, error) {

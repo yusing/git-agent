@@ -17,20 +17,21 @@ import (
 )
 
 const (
-	sessionVersion  = 2
+	sessionVersion  = 3
 	MaxFollowUps    = 3
 	maxSessionBytes = 64 << 20
 )
 
 // Session is one independently addressable branch of an exploration chain.
 type Session struct {
-	Version   int           `json:"version"`
-	ID        string        `json:"id"`
-	ParentID  string        `json:"parent_id,omitempty"`
-	Depth     int           `json:"depth"`
-	Workspace string        `json:"workspace"`
-	Answer    string        `json:"answer"`
-	History   []openai.Item `json:"history"`
+	Version        int           `json:"version"`
+	ID             string        `json:"id"`
+	ParentID       string        `json:"parent_id,omitempty"`
+	Depth          int           `json:"depth"`
+	Workspace      string        `json:"workspace"`
+	PromptCacheKey string        `json:"prompt_cache_key"`
+	Answer         string        `json:"answer"`
+	History        []openai.Item `json:"history"`
 }
 
 // Store owns owner-only explore state beneath one project metadata directory.
@@ -171,6 +172,9 @@ func validateSession(session Session) error {
 	}
 	if filepath.Clean(session.Workspace) != session.Workspace {
 		return fmt.Errorf("explore session workspace is not clean: %q", session.Workspace)
+	}
+	if strings.TrimSpace(session.PromptCacheKey) == "" {
+		return errors.New("explore session requires a prompt cache key")
 	}
 	if strings.TrimSpace(session.Answer) == "" {
 		return errors.New("explore session requires an answer")

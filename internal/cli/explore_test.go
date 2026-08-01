@@ -213,9 +213,35 @@ func TestExploreInitialFollowUpsAndFreshReset(t *testing.T) {
 	if got := responses.requestCount(); got != 5 {
 		t.Fatalf("provider requests = %d, want 5", got)
 	}
+	requests := responses.recordedRequests()
+	rootCacheKey := requests[0].PromptCacheKey
+	if rootCacheKey == "" {
+		t.Fatal("initial explore request omitted prompt cache key")
+	}
+	for index, request := range requests[:4] {
+		if request.PromptCacheKey != rootCacheKey {
+			t.Fatalf("request %d prompt cache key = %q, want %q", index, request.PromptCacheKey, rootCacheKey)
+		}
+		if countPromptCacheBreakpoints(request.Input) != 1 {
+			t.Fatalf("request %d prompt cache breakpoints = %d, want 1", index, countPromptCacheBreakpoints(request.Input))
+		}
+	}
+	if requests[4].PromptCacheKey == "" || requests[4].PromptCacheKey == rootCacheKey {
+		t.Fatalf("fresh reset prompt cache key = %q, previous %q", requests[4].PromptCacheKey, rootCacheKey)
+	}
 	if !strings.Contains(stderr.String(), "explore: searching") || !strings.Contains(stderr.String(), "explore: complete") {
 		t.Fatalf("stderr missing progress:\n%s", stderr.String())
 	}
+}
+
+func countPromptCacheBreakpoints(items []openai.Item) int {
+	count := 0
+	for _, item := range items {
+		if item.PromptCacheBreakpoint {
+			count++
+		}
+	}
+	return count
 }
 
 func TestExploreHelpDoesNotResolveProviderConfiguration(t *testing.T) {

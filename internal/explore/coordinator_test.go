@@ -78,6 +78,17 @@ func TestCoordinatorBatchesConcurrentInitialSearches(t *testing.T) {
 	if outputs[0].ID == outputs[1].ID {
 		t.Fatalf("batched outputs share ID %s", outputs[0].ID)
 	}
+	firstSession, err := store.Read(outputs[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSession, err := store.Read(outputs[1].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstSession.PromptCacheKey == "" || firstSession.PromptCacheKey != secondSession.PromptCacheKey {
+		t.Fatalf("batched prompt cache keys = %q and %q", firstSession.PromptCacheKey, secondSession.PromptCacheKey)
+	}
 	for _, output := range outputs {
 		session, err := store.Read(output.ID)
 		if err != nil {
@@ -302,7 +313,8 @@ func TestCoordinatorDoesNotBatchDifferentServiceTiers(t *testing.T) {
 func TestSessionValidationRequiresVersionedCleanWorkspace(t *testing.T) {
 	valid := Session{
 		Version: sessionVersion, ID: "AAAAAAAAAAAAAAAAAAAAAAAAAA", Workspace: testWorkspace,
-		Answer: "answer", History: []openai.Item{openai.NewMessage("assistant", "answer")},
+		PromptCacheKey: "explore:AAAAAAAAAAAAAAAAAAAAAAAAAA",
+		Answer:         "answer", History: []openai.Item{openai.NewMessage("assistant", "answer")},
 	}
 	legacy := valid
 	legacy.Version = sessionVersion - 1

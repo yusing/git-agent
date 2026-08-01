@@ -278,6 +278,7 @@ func (c *Coordinator) runLeader(ctx context.Context, keyDir, batchDir string, pa
 		_ = c.failBatch(ctx, keyDir, batchDir, err)
 		return err
 	}
+	promptCacheKey := PromptCacheKey(parent, items)
 	for _, item := range items {
 		result, ok := results[item.ID]
 		if !ok {
@@ -293,7 +294,7 @@ func (c *Coordinator) runLeader(ctx context.Context, keyDir, batchDir string, pa
 		}
 		session := Session{
 			Version: sessionVersion, ID: item.ID, ParentID: parentID, Depth: depth,
-			Workspace: c.workspace, Answer: result.Answer,
+			Workspace: c.workspace, PromptCacheKey: promptCacheKey, Answer: result.Answer,
 			History: append(slices.Clone(result.History), openai.NewMessage(
 				"developer",
 				"Continue only explore branch item_id "+item.ID+" in future turns; treat sibling items as unrelated context.",

@@ -51,7 +51,7 @@ func TestRunnerReturnsTerminalBranchOutcomeAndPortableForks(t *testing.T) {
 	}}}
 	runner := OpenAIRunner{
 		Config: config.Config{Model: "parent", MaxSteps: 2, MaxToolCalls: 2},
-		Client: client,
+		Client: client, PromptCacheKey: "review:task-id",
 	}
 	outcome, err := runner.RunNode(t.Context(), Request{
 		UserPrompt: "review", MaxSteps: 2, ControlTool: &control,
@@ -68,10 +68,17 @@ func TestRunnerReturnsTerminalBranchOutcomeAndPortableForks(t *testing.T) {
 	if len(client.requests) != 1 || len(client.requests[0].Tools) != 1 || client.requests[0].Tools[0].Name != "branch" {
 		t.Fatalf("request tools = %#v", client.requests)
 	}
+	if client.requests[0].PromptCacheKey != "review:task-id" ||
+		!slices.ContainsFunc(client.requests[0].Input, func(item openai.Item) bool { return item.PromptCacheBreakpoint }) {
+		t.Fatalf("root request cache controls = %#v", client.requests[0])
+	}
 
 	sameModel := outcome.Branch.ForkInput(`{"branch_id":"b1"}`, true)
 	if !slices.ContainsFunc(sameModel, func(item openai.Item) bool { return item.Type == "reasoning" }) {
 		t.Fatalf("same-model fork omitted reasoning: %#v", sameModel)
+	}
+	if !slices.ContainsFunc(sameModel, func(item openai.Item) bool { return item.PromptCacheBreakpoint }) {
+		t.Fatalf("same-model fork omitted prompt cache breakpoint: %#v", sameModel)
 	}
 	crossModel := outcome.Branch.ForkInput(`{"branch_id":"b1"}`, false)
 	if slices.ContainsFunc(crossModel, func(item openai.Item) bool { return item.Type == "reasoning" || item.Type == "web_search_call" }) {

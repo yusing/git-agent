@@ -234,6 +234,7 @@ func (a *App) runExploreBatch(ctx context.Context, root string, repo *gitctx.Rep
 	runner := agent.OpenAIRunner{
 		Config: cfg, Client: client, Tools: registry, ToolSpecs: toolSpecs,
 		Validator: explore.ValidateAnswers(itemIDs), Trace: recorder, Budget: a.budgetHandler(),
+		PromptCacheKey: explore.PromptCacheKey(parent, items),
 	}
 	request := agent.Request{
 		SystemPrompt: explore.SystemPrompt, TextFormat: explore.TextFormat(), AllowedToolNames: allowedTools,
