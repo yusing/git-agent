@@ -1576,7 +1576,10 @@ including:
 - strict function tool definitions
 - provider-neutral hosted capability definitions translated only by adapter
 - `Store: false`
-- `ParallelToolCalls: false` when tools are present
+- request-scoped `ParallelToolCalls`, enabled for explore, non-branch-capable
+  review and simplify nodes, commit-message and commit generation, PR-message
+  generation, and release-note generation; any request with a branch
+  `ControlTool` forces it off
 - `web_search_call.action.sources` and `reasoning.encrypted_content` includes
   when hosted web search is enabled
 - hosted-only `MaxToolCalls` when configured; local function-call ceilings stay
@@ -1609,18 +1612,25 @@ including:
 11. stream each request and response when console or SSE tracing is active;
     publish retry progress and repeat a retryable interrupted stream once
     without changing request semantics
-12. if the model requests tools, execute only registered read-only tools;
+12. if the model requests one or more tools, validate the complete response
+    batch before execution: require every call ID and allowed name, reject
+    repeated calls and repeated batch IDs, keep branch control calls exclusive,
+    and admit the batch only when every call fits the remaining local budget
+13. execute admitted registered read-only tools sequentially in provider order;
     return recoverable non-context execution errors as structured failed tool
     outputs so the model can correct arguments or choose other evidence, but
-    abort immediately when the authoritative review snapshot changed
-13. stream each tool call and successful or failed tool output when tracing is active
-14. append complete provider continuation output before local
-    function-call-output items and continue until final text is returned
-15. if the local budget is exhausted, force a no-tool finalization request while
+    abort immediately on cancellation, deadline, or authoritative review
+    snapshot drift
+14. stream each tool call and successful or failed tool output when tracing is active
+15. append complete provider continuation output followed by one matching
+    function-call-output per executed ordinary call in provider order, then
+    evaluate the next-request context budget after the entire admitted batch
+    and continue until final text is returned
+16. if the local budget is exhausted, force a no-tool finalization request while
     preserving any structured text format required by the task
-16. validate output against task rules
-17. if invalid and repair budget remains, run exactly one repair pass
-18. print final text to stdout for generation-only commands, write it to
+17. validate output against task rules
+18. if invalid and repair budget remains, run exactly one repair pass
+19. print final text to stdout for generation-only commands, write it to
     `--out` for `release-note --out <file>`, or stream human console trace
     lines while generating the message and then print Git's raw commit summary
     after creating or amending through `git commit`

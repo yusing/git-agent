@@ -238,7 +238,7 @@ func (a *App) runExploreBatch(ctx context.Context, root string, repo *gitctx.Rep
 	}
 	request := agent.Request{
 		SystemPrompt: explore.SystemPrompt, TextFormat: explore.TextFormat(), AllowedToolNames: allowedTools,
-		MaxSteps: cfg.MaxSteps, RepairOnValidator: true,
+		ParallelToolCalls: true, MaxSteps: cfg.MaxSteps, RepairOnValidator: true,
 	}
 	if parent == nil {
 		request.ToolPolicy = toolPolicy()

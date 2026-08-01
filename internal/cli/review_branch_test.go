@@ -18,11 +18,22 @@ import (
 type branchClient struct {
 	mu        sync.Mutex
 	models    map[string]string
+	parallel  map[string]bool
 	b2Started chan struct{}
 }
 
 func (c *branchClient) CreateResponse(ctx context.Context, request openai.Request) (openai.Response, error) {
 	branchID := branchIDFromInput(request.Input)
+	requestID := branchID
+	if requestID == "" {
+		requestID = "root"
+	}
+	c.mu.Lock()
+	c.parallel[requestID] = request.ParallelToolCalls
+	if branchID != "" {
+		c.models[branchID] = request.Model + "/" + request.ThinkingMode
+	}
+	c.mu.Unlock()
 	if branchID == "" {
 		return openai.Response{
 			ToolCalls: []openai.ToolCall{{
@@ -34,9 +45,6 @@ func (c *branchClient) CreateResponse(ctx context.Context, request openai.Reques
 			}},
 		}, nil
 	}
-	c.mu.Lock()
-	c.models[branchID] = request.Model + "/" + request.ThinkingMode
-	c.mu.Unlock()
 	if request.OnStreamEvent != nil {
 		if err := request.OnStreamEvent(openai.StreamEvent{
 			Kind: "reasoning_summary.delta", ItemID: "rs_" + branchID,
@@ -58,7 +66,7 @@ func (c *branchClient) CreateResponse(ctx context.Context, request openai.Reques
 }
 
 func TestRunReviewTreeFansOutAggregatesAndPublishesOrderedBranchEvents(t *testing.T) {
-	client := &branchClient{models: map[string]string{}, b2Started: make(chan struct{})}
+	client := &branchClient{models: map[string]string{}, parallel: map[string]bool{}, b2Started: make(chan struct{})}
 	var events []trace.Event
 	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
 		events = append(events, event)
@@ -80,7 +88,7 @@ func TestRunReviewTreeFansOutAggregatesAndPublishesOrderedBranchEvents(t *testin
 	}
 	result, err := runReviewTree(t.Context(), reviewtask.KindReview, reviewtask.DepthBalanced, runner, agent.Request{
 		SystemPrompt: "review", UserPrompt: "inspect", TextFormat: reviewtask.TextFormat(reviewtask.KindReview),
-		MaxSteps: 3,
+		MaxSteps: 3, ParallelToolCalls: true,
 	}, recorder)
 	if err != nil {
 		t.Fatal(err)
@@ -94,6 +102,9 @@ func TestRunReviewTreeFansOutAggregatesAndPublishesOrderedBranchEvents(t *testin
 	}
 	if client.models["b1"] != "gpt-5.6-sol/high" || client.models["b2"] != "custom-parent/medium" {
 		t.Fatalf("effective child models = %#v", client.models)
+	}
+	if client.parallel["root"] || !client.parallel["b1"] || !client.parallel["b2"] {
+		t.Fatalf("review node parallel policies = %#v", client.parallel)
 	}
 
 	fanoutIndex := eventIndex(events, "branch.fanout")
@@ -127,8 +138,18 @@ func TestRunReviewTreeFansOutAggregatesAndPublishesOrderedBranchEvents(t *testin
 }
 
 func TestRunReviewTreeSupportsImmediateNestedFanout(t *testing.T) {
+	var requestMu sync.Mutex
+	parallelByBranch := map[string]bool{}
 	client := openaiClientFunc(func(_ context.Context, request openai.Request) (openai.Response, error) {
-		switch branchIDFromInput(request.Input) {
+		branchID := branchIDFromInput(request.Input)
+		requestID := branchID
+		if requestID == "" {
+			requestID = "root"
+		}
+		requestMu.Lock()
+		parallelByBranch[requestID] = request.ParallelToolCalls
+		requestMu.Unlock()
+		switch branchID {
 		case "":
 			return branchResponse("root", "root one", "root two"), nil
 		case "b1":
@@ -159,13 +180,17 @@ func TestRunReviewTreeSupportsImmediateNestedFanout(t *testing.T) {
 		Trace: recorder,
 	}
 	result, err := runReviewTree(t.Context(), reviewtask.KindSimplify, reviewtask.DepthThorough, runner, agent.Request{
-		UserPrompt: "inspect", MaxSteps: 3,
+		UserPrompt: "inspect", MaxSteps: 3, ParallelToolCalls: true,
 	}, recorder)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if countEvents(events, "branch.fanout") != 2 || countEvents(events, "branch.completed") != 3 {
 		t.Fatalf("events = %#v", eventKinds(events))
+	}
+	if parallelByBranch["root"] || parallelByBranch["b1"] || parallelByBranch["b2"] ||
+		!parallelByBranch["b3"] || !parallelByBranch["b4"] {
+		t.Fatalf("simplify node parallel policies = %#v", parallelByBranch)
 	}
 	wantOrder := []string{"nested one: nested one done", "nested two: nested two done", "root two: root two done"}
 	position := -1

@@ -73,6 +73,40 @@ func TestRequestConvertsToSDKStructuredInputAndTools(t *testing.T) {
 	}
 }
 
+func TestRequestConvertsParallelToolCallPolicy(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name    string
+		enabled bool
+	}{
+		{name: "enabled", enabled: true},
+		{name: "disabled", enabled: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			params, err := Request{
+				Model: "test-model", ParallelToolCalls: test.enabled,
+				Input: []Item{NewMessage("user", "task")},
+				Tools: []ToolSpec{{
+					Name: "repo_summary", Schema: map[string]any{"type": "object"},
+				}},
+			}.toSDKParams()
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := fmt.Sprintf(`"parallel_tool_calls":%t`, test.enabled)
+			if got := string(data); !strings.Contains(got, want) {
+				t.Fatalf("SDK payload missing %s: %s", want, got)
+			}
+		})
+	}
+}
+
 func TestRequestConvertsExplicitPromptCacheControlsForGPT56(t *testing.T) {
 	t.Parallel()
 

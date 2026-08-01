@@ -510,6 +510,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		UserPrompt:        userPrompt,
 		TextFormat:        reviewtask.TextFormat(kind),
 		AllowedToolNames:  allowedTools,
+		ParallelToolCalls: true,
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
 	}, recorder)
@@ -1670,6 +1671,7 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 		ProjectGuidance:   renderedGuidance,
 		UserPrompt:        appendUserPrompt(userPrompt, cfg.AppendPrompt),
 		AllowedToolNames:  allowedTools,
+		ParallelToolCalls: true,
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
 	})
@@ -1817,6 +1819,7 @@ func (a *App) runPRMessage(ctx context.Context, args []string) error {
 		ProjectGuidance:   renderedGuidance,
 		UserPrompt:        appendUserPrompt(commitmsg.UserPromptWithPreparedPRContext(prepared, cfg.MaxSteps, cfg.MaxToolCalls), cfg.AppendPrompt),
 		AllowedToolNames:  allowedTools,
+		ParallelToolCalls: true,
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
 	})
@@ -1943,6 +1946,7 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 		UserPrompt:        appendUserPrompt(releasenote.UserPrompt(prepared, cfg.MaxSteps, cfg.MaxToolCalls), cfg.AppendPrompt),
 		TextFormat:        releasenote.TextFormat(),
 		AllowedToolNames:  allowedTools,
+		ParallelToolCalls: true,
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
 	})

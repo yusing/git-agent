@@ -159,6 +159,9 @@ func TestCommitMsgEndToEndWithRealisticFixture(t *testing.T) {
 
 	mode, cleanup := configureE2EProvider(t, newScriptedResponsesServer(t, []func(string) string{
 		func(body string) string {
+			if !strings.Contains(body, `"parallel_tool_calls":true`) {
+				t.Fatalf("commit-msg request disabled parallel provider tool calls\n%s", body)
+			}
 			for _, want := range []string{
 				`prepared_commit_context`,
 				`staged_stats`,
@@ -311,6 +314,9 @@ func TestCommitMsgAmendEndToEndWithRealisticFixture(t *testing.T) {
 
 	mode, cleanup := configureE2EProvider(t, newScriptedResponsesServer(t, []func(string) string{
 		func(body string) string {
+			if !strings.Contains(body, `"parallel_tool_calls":true`) {
+				t.Fatalf("commit-msg amend request disabled parallel provider tool calls\n%s", body)
+			}
 			for _, want := range []string{
 				`prepared_amend_context`,
 				`original_head_message`,
@@ -511,6 +517,9 @@ func TestReleaseNoteEndToEndWithRealisticFixture(t *testing.T) {
 			var payload map[string]any
 			if err := json.Unmarshal([]byte(body), &payload); err != nil {
 				t.Fatalf("request body is not valid json: %v\n%s", err, body)
+			}
+			if payload["parallel_tool_calls"] != true {
+				t.Fatalf("release-note request disabled parallel provider tool calls\n%s", body)
 			}
 			text, ok := payload["text"].(map[string]any)
 			if !ok {

@@ -214,6 +214,11 @@ func TestExploreInitialFollowUpsAndFreshReset(t *testing.T) {
 		t.Fatalf("provider requests = %d, want 5", got)
 	}
 	requests := responses.recordedRequests()
+	for index, request := range requests {
+		if !request.ParallelToolCalls {
+			t.Fatalf("request %d disabled parallel provider tool calls", index)
+		}
+	}
 	rootCacheKey := requests[0].PromptCacheKey
 	if rootCacheKey == "" {
 		t.Fatal("initial explore request omitted prompt cache key")

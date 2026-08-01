@@ -10,7 +10,9 @@ workflows.
 `git-agent` gathers Git evidence with typed Go code, runs a bounded
 OpenAI-compatible tool-calling loop, and keeps model tools read-only. The
 `commit` command is the only workflow that writes to Git, and it does that after
-message generation by handing the final message to `git commit`.
+message generation by handing the final message to `git commit`. Independent
+read-only tool calls may share a provider turn, while local execution remains
+sequential and deterministic.
 
 TL;DR: use `commit-msg` when you want a grounded commit message on stdout, use
 `commit` when you want the same message created as a Git commit, use

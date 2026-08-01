@@ -40,6 +40,7 @@ type Request struct {
 	AuthAccountID      string                      `json:"-"`
 	Instructions       string                      `json:"instructions,omitempty"`
 	PromptCacheKey     string                      `json:"prompt_cache_key,omitempty"`
+	ParallelToolCalls  bool                        `json:"parallel_tool_calls"`
 	Input              []Item                      `json:"input"`
 	Tools              []ToolSpec                  `json:"tools,omitempty"`
 	HostedCapabilities []provider.HostedCapability `json:"hosted_capabilities,omitempty"`
@@ -897,7 +898,7 @@ func (r Request) toSDKParams() (responses.ResponseNewParams, error) {
 		}
 	}
 	if len(tools) > 0 {
-		params.ParallelToolCalls = openaisdk.Bool(false)
+		params.ParallelToolCalls = openaisdk.Bool(r.ParallelToolCalls)
 	}
 	if r.ServiceTier != "" {
 		params.ServiceTier = responses.ResponseNewParamsServiceTier(r.ServiceTier)

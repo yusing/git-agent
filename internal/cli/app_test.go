@@ -2726,6 +2726,13 @@ func commitMessageSequenceServer(t *testing.T, messages ...string) *httptest.Ser
 		if r.URL.Path != "/responses" {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if providerTools, ok := payload["tools"].([]any); ok && len(providerTools) > 0 && payload["parallel_tool_calls"] != true {
+			t.Fatalf("commit generation disabled parallel provider tool calls: %#v", payload)
+		}
 		idx := min(requestCount, len(responses)-1)
 		requestCount++
 		w.Header().Set("Content-Type", "text/event-stream")
