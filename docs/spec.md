@@ -323,16 +323,25 @@ Both functions are absent from dry-run generation, forced finalization, schema
 repair, aggregation, and conversations already at the selected depth limit.
 `fast`, `balanced`, and `thorough` permit respectively `2`, `3`, and `4`
 immediate children and maximum zero-based conversation depths `1`, `1`, and
-`2`. Accepted children start immediately under the same detached task context;
-there is no separate branch task, queue, or global concurrency setting. Each
-child receives a fresh copy of the invocation's per-conversation step and
-local-tool ceilings.
+`2`. A provider response may contain at most one `branch` call and may include
+ordinary local calls beside it. Git-agent executes those ordinary calls
+concurrently, waits for all of them, and appends their outputs in provider order
+before accepting the branch. In diff modes, Git-agent revalidates the
+authoritative review snapshot after the concurrent calls join and before it
+emits their outputs or accepts the branch. Accepted children then start
+immediately under the same detached task context; there is no separate branch
+task, queue, or global concurrency setting. Each child receives a fresh copy of
+the invocation's per-conversation step and local-tool ceilings.
 
-An accepted branch call retires its calling conversation. Child scope is a
-natural-language reporting responsibility; path hints accelerate discovery but
-do not restrict repository inspection, evidence, or final validation. Child
-input is the forked provider-visible conversation followed by the selected
-branch function result; Git-agent appends no child-specific developer message.
+An accepted branch call retires its calling conversation. A cancellation,
+deadline, or authoritative review-snapshot drift from an ordinary call in the
+same response fails the node before fan-out; recoverable ordinary-call failures
+remain structured outputs in the completed parent continuation. Child scope is
+a natural-language reporting responsibility; path hints accelerate discovery
+but do not restrict repository inspection, evidence, or final validation. Child
+input is the forked provider-visible conversation, including every ordinary
+function-call output from the branch response, followed by the selected branch
+function result; Git-agent appends no child-specific developer message.
 The detached review tree assigns every request one cache key derived from its
 task ID. For GPT-5.6-family models, Git-agent sends that key, marks the initial
 conversation's last reusable input-text block with one explicit prompt-cache
@@ -1614,23 +1623,29 @@ including:
     without changing request semantics
 12. if the model requests one or more tools, validate the complete response
     batch before execution: require every call ID and allowed name, reject
-    repeated calls and repeated batch IDs, keep branch control calls exclusive,
-    and admit the batch only when every call fits the remaining local budget
-13. execute admitted registered read-only tools sequentially in provider order;
+    repeated calls and repeated batch IDs, permit at most one branch control
+    call, and admit the batch only when every call fits the remaining local
+    budget
+13. execute all admitted ordinary registered read-only calls concurrently and
+    collect their results by provider position; after the batch joins, recheck
+    any authoritative diff-review snapshot before emitting outputs or branching;
     return recoverable non-context execution errors as structured failed tool
-    outputs so the model can correct arguments or choose other evidence, but
-    abort immediately on cancellation, deadline, or authoritative review
-    snapshot drift
-14. stream each tool call and successful or failed tool output when tracing is active
+    outputs so the model can correct arguments or choose other evidence, but fail
+    the node on cancellation, deadline, or authoritative review snapshot drift
+14. stream admitted ordinary tool calls in provider order before execution and
+    stream their successful or failed outputs in provider order after the batch
+    completes when tracing is active
 15. append complete provider continuation output followed by one matching
-    function-call-output per executed ordinary call in provider order, then
-    evaluate the next-request context budget after the entire admitted batch
-    and continue until final text is returned
-16. if the local budget is exhausted, force a no-tool finalization request while
+    function-call-output per executed ordinary call in provider order
+16. when the batch contains a branch call, append its selected result after all
+    ordinary outputs and fork from that completed conversation; otherwise
+    evaluate the next-request context budget and continue until final text is
+    returned
+17. if the local budget is exhausted, force a no-tool finalization request while
     preserving any structured text format required by the task
-17. validate output against task rules
-18. if invalid and repair budget remains, run exactly one repair pass
-19. print final text to stdout for generation-only commands, write it to
+18. validate output against task rules
+19. if invalid and repair budget remains, run exactly one repair pass
+20. print final text to stdout for generation-only commands, write it to
     `--out` for `release-note --out <file>`, or stream human console trace
     lines while generating the message and then print Git's raw commit summary
     after creating or amending through `git commit`

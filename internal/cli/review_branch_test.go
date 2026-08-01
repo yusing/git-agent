@@ -103,7 +103,7 @@ func TestRunReviewTreeFansOutAggregatesAndPublishesOrderedBranchEvents(t *testin
 	if client.models["b1"] != "gpt-5.6-sol/high" || client.models["b2"] != "custom-parent/medium" {
 		t.Fatalf("effective child models = %#v", client.models)
 	}
-	if client.parallel["root"] || !client.parallel["b1"] || !client.parallel["b2"] {
+	if !client.parallel["root"] || !client.parallel["b1"] || !client.parallel["b2"] {
 		t.Fatalf("review node parallel policies = %#v", client.parallel)
 	}
 
@@ -188,7 +188,7 @@ func TestRunReviewTreeSupportsImmediateNestedFanout(t *testing.T) {
 	if countEvents(events, "branch.fanout") != 2 || countEvents(events, "branch.completed") != 3 {
 		t.Fatalf("events = %#v", eventKinds(events))
 	}
-	if parallelByBranch["root"] || parallelByBranch["b1"] || parallelByBranch["b2"] ||
+	if !parallelByBranch["root"] || !parallelByBranch["b1"] || !parallelByBranch["b2"] ||
 		!parallelByBranch["b3"] || !parallelByBranch["b4"] {
 		t.Fatalf("simplify node parallel policies = %#v", parallelByBranch)
 	}

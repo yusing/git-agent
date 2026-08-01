@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -183,7 +184,7 @@ func (r *OpenAIRunner) RunNode(ctx context.Context, request Request) (NodeResult
 	}
 
 	state := &runState{hostedCapabilities: slices.Clone(r.HostedCapabilities)}
-	parallelToolCalls := request.ParallelToolCalls && request.ControlTool == nil
+	parallelToolCalls := request.ParallelToolCalls
 	runResult, err := r.runUntilOutcome(ctx, request.SystemPrompt, messages, toolSpecs, request.TextFormat, request.MaxSteps, state, controlToolName, parallelToolCalls)
 	if err != nil {
 		return NodeResult{}, err
@@ -335,7 +336,7 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, instructions string,
 			}
 			return NodeResult{}, err
 		}
-		if !batch.control && r.Tools == nil {
+		if r.Tools == nil && (!batch.control || len(batch.calls) > 1) {
 			return NodeResult{}, errors.New("provider requested tools but no registry is configured")
 		}
 		batchMessages := appendToolCallBatch(messages, response, batch.calls)
@@ -374,20 +375,29 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, instructions string,
 		for _, call := range batch.calls {
 			seenCallIDs[call.CallID] = struct{}{}
 		}
-		if batch.control {
-			call := batch.calls[0]
-			return NodeResult{Branch: &BranchRequest{
-				CallID: call.CallID, Arguments: call.Arguments,
-				ToolCalls: result.ToolCalls + 1, RepairCalls: result.RepairCalls,
-				ToolCallsByName: addToolCall(result.ToolCallsByName, call.Name),
-				UsedSkills:      slices.Clone(result.UsedSkills), messages: messages,
-			}}, nil
-		}
+		localCalls := make([]openai.ToolCall, 0, len(batch.calls))
+		var controlCall openai.ToolCall
 		for _, call := range batch.calls {
+			if controlToolName != "" && call.Name == controlToolName {
+				controlCall = call
+				continue
+			}
+			localCalls = append(localCalls, call)
+		}
+		for _, call := range localCalls {
 			if err := r.Trace.Write("tool-call", call); err != nil {
 				return NodeResult{}, err
 			}
-			toolResult, err := r.Tools.Execute(ctx, tools.Invocation{Name: call.Name, Arguments: call.Arguments})
+		}
+		executions := r.executeToolCalls(ctx, localCalls)
+		if len(localCalls) > 0 {
+			if err := r.Tools.CheckReviewSnapshot(); err != nil {
+				return NodeResult{}, err
+			}
+		}
+		for index, call := range localCalls {
+			toolResult := executions[index].result
+			err := executions[index].err
 			toolSucceeded := err == nil
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return NodeResult{}, fmt.Errorf("tool %s canceled: %w", call.Name, ctxErr)
@@ -415,6 +425,16 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, instructions string,
 				result.UsedSkills = append(result.UsedSkills, skill)
 			}
 			messages = append(messages, openai.NewFunctionCallOutput(call.CallID, toolResult.Content))
+		}
+		if batch.control {
+			result.ToolCalls++
+			result.ToolCallsByName = addToolCall(result.ToolCallsByName, controlCall.Name)
+			return NodeResult{Branch: &BranchRequest{
+				CallID: controlCall.CallID, Arguments: controlCall.Arguments,
+				ToolCalls: result.ToolCalls, RepairCalls: result.RepairCalls,
+				ToolCallsByName: result.ToolCallsByName,
+				UsedSkills:      slices.Clone(result.UsedSkills), messages: messages,
+			}}, nil
 		}
 		nextRequest := r.providerRequest(effectiveInstructions, messages, toolSpecs, state.hostedCapabilities, textFormat, parallelToolCalls)
 		nextTokens := estimateRequestTokens(nextRequest)
@@ -531,6 +551,25 @@ type toolCallBatch struct {
 	duplicateTool string
 }
 
+type toolExecution struct {
+	result tools.Result
+	err    error
+}
+
+func (r *OpenAIRunner) executeToolCalls(ctx context.Context, calls []openai.ToolCall) []toolExecution {
+	executions := make([]toolExecution, len(calls))
+	var wait sync.WaitGroup
+	for index, call := range calls {
+		wait.Go(func() {
+			executions[index].result, executions[index].err = r.Tools.Execute(ctx, tools.Invocation{
+				Name: call.Name, Arguments: call.Arguments,
+			})
+		})
+	}
+	wait.Wait()
+	return executions
+}
+
 func validateToolCallBatch(
 	calls []openai.ToolCall,
 	toolSpecs []openai.ToolSpec,
@@ -544,8 +583,8 @@ func validateToolCallBatch(
 			controlCalls++
 		}
 	}
-	if controlCalls > 0 && len(calls) != 1 {
-		return toolCallBatch{}, fmt.Errorf("%s must be the only local function call in a provider response", controlToolName)
+	if controlCalls > 1 {
+		return toolCallBatch{}, fmt.Errorf("%s may be called at most once in a provider response", controlToolName)
 	}
 
 	batch := toolCallBatch{

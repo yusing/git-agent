@@ -228,6 +228,15 @@ func (r *Registry) Execute(ctx context.Context, invocation Invocation) (Result, 
 	return tool.Execute(ctx, invocation)
 }
 
+// CheckReviewSnapshot verifies that a guarded diff review still matches its
+// launch snapshot after a batch of repository tools completes.
+func (r *Registry) CheckReviewSnapshot() error {
+	if r.reviewGuard == nil {
+		return nil
+	}
+	return r.reviewGuard.check()
+}
+
 func (g *reviewStateGuard) check() error {
 	switch g.mode {
 	case ReviewModeStaged:

@@ -378,8 +378,8 @@ func TestDetachedSimplifyBranchesThroughExistingTaskAndPersistsMergedFinal(t *te
 			if err := json.Unmarshal([]byte(body), &request); err != nil {
 				t.Fatal(err)
 			}
-			if request["parallel_tool_calls"] != false {
-				t.Fatalf("branch-capable root enabled parallel tool calls: %s", body)
+			if request["parallel_tool_calls"] != true {
+				t.Fatalf("branch-capable root disabled parallel tool calls: %s", body)
 			}
 			tools, ok := request["tools"].([]any)
 			if !ok {
@@ -529,8 +529,8 @@ func responseWithProviderUsage(t *testing.T, responseJSON string, inputTokens, c
 
 func assertBranchHelpOutput(t *testing.T, body string) {
 	t.Helper()
-	if !strings.Contains(body, `"parallel_tool_calls":false`) {
-		t.Fatalf("branch-capable request did not disable parallel tool calls: %s", body)
+	if !strings.Contains(body, `"parallel_tool_calls":true`) {
+		t.Fatalf("branch-capable request disabled parallel tool calls: %s", body)
 	}
 	var request struct {
 		Input []struct {

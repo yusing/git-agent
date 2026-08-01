@@ -10,7 +10,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/gitctx"
@@ -35,26 +38,86 @@ func (fakeSkillRunner) Run(context.Context, skillcmd.Command) (skillcmd.Output, 
 	return skillcmd.Output{Stdout: "skill instructions"}, nil
 }
 
+type executionLog struct {
+	mu    sync.Mutex
+	order []string
+}
+
+func (l *executionLog) add(name string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.order = append(l.order, name)
+}
+
+func (l *executionLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.order)
+}
+
 type recordingTool struct {
 	name    string
-	order   *[]string
+	order   *executionLog
 	content string
 	err     error
 }
 
-func (t recordingTool) Definition() tools.Definition {
+type delayedTool struct {
+	name    string
+	delay   time.Duration
+	content string
+}
+
+func testToolDefinition(name string) tools.Definition {
 	return tools.Definition{
-		Name: t.name, Strict: true,
+		Name: name, Strict: true,
 		Schema: map[string]any{"type": "object", "additionalProperties": true},
 	}
 }
 
+func (t delayedTool) Definition() tools.Definition { return testToolDefinition(t.name) }
+
+func (t delayedTool) Execute(ctx context.Context, _ tools.Invocation) (tools.Result, error) {
+	timer := time.NewTimer(t.delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return tools.Result{}, ctx.Err()
+	case <-timer.C:
+		return tools.Result{Content: t.content}, nil
+	}
+}
+
+func (t recordingTool) Definition() tools.Definition { return testToolDefinition(t.name) }
+
 func (t recordingTool) Execute(_ context.Context, invocation tools.Invocation) (tools.Result, error) {
-	*t.order = append(*t.order, invocation.Name)
+	t.order.add(invocation.Name)
 	if t.err != nil {
 		return tools.Result{}, t.err
 	}
 	return tools.Result{Content: t.content}, nil
+}
+
+type blockingTool struct {
+	name    string
+	started chan<- string
+	release <-chan struct{}
+}
+
+func (t blockingTool) Definition() tools.Definition { return testToolDefinition(t.name) }
+
+func (t blockingTool) Execute(ctx context.Context, _ tools.Invocation) (tools.Result, error) {
+	select {
+	case t.started <- t.name:
+	case <-ctx.Done():
+		return tools.Result{}, ctx.Err()
+	}
+	select {
+	case <-t.release:
+		return tools.Result{Content: t.name + " output"}, nil
+	case <-ctx.Done():
+		return tools.Result{}, ctx.Err()
+	}
 }
 
 func TestRunnerReturnsTerminalBranchOutcomeAndPortableForks(t *testing.T) {
@@ -90,8 +153,8 @@ func TestRunnerReturnsTerminalBranchOutcomeAndPortableForks(t *testing.T) {
 	if len(client.requests) != 1 || len(client.requests[0].Tools) != 1 || client.requests[0].Tools[0].Name != "branch" {
 		t.Fatalf("request tools = %#v", client.requests)
 	}
-	if client.requests[0].ParallelToolCalls {
-		t.Fatalf("control-tool request enabled parallel calls: %#v", client.requests[0])
+	if !client.requests[0].ParallelToolCalls {
+		t.Fatalf("control-tool request disabled parallel calls: %#v", client.requests[0])
 	}
 	if client.requests[0].PromptCacheKey != "review:task-id" ||
 		!slices.ContainsFunc(client.requests[0].Input, func(item openai.Item) bool { return item.PromptCacheBreakpoint }) {
@@ -124,55 +187,213 @@ func TestResultHistoryReturnsClone(t *testing.T) {
 	}
 }
 
-func TestRunnerExecutesAdmittedToolBatchSequentially(t *testing.T) {
+func TestRunnerExecutesAdmittedToolBatchConcurrently(t *testing.T) {
 	t.Parallel()
 
-	var executionOrder []string
-	registry := tools.NewRegistry(nil, nil)
-	names := []string{"first_tool", "second_tool", "third_tool"}
-	for _, name := range names {
-		registry.Register(recordingTool{name: name, order: &executionOrder, content: name + " output"})
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan string)
+		release := make(chan struct{})
+		registry := tools.NewRegistry(nil, nil)
+		names := []string{"first_tool", "second_tool", "third_tool"}
+		for _, name := range names {
+			registry.Register(blockingTool{name: name, started: started, release: release})
+		}
+		client := &fakeClient{responses: []openai.Response{
+			{ToolCalls: []openai.ToolCall{
+				{ID: "fc_1", CallID: "call_1", Name: names[0], Arguments: `{"value":1}`},
+				{ID: "fc_2", CallID: "call_2", Name: names[1], Arguments: `{"value":2}`},
+				{ID: "fc_3", CallID: "call_3", Name: names[2], Arguments: `{"value":3}`},
+			}},
+			{Text: "done"},
+		}}
+		var events []trace.Event
+		recorder, err := trace.NewEventStream("explore", func(event trace.Event) error {
+			events = append(events, event)
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runner := OpenAIRunner{
+			Config: config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 3},
+			Client: client, Tools: registry, ToolSpecs: registry.Definitions(names), Trace: recorder,
+		}
+		result := make(chan Result, 1)
+		errResult := make(chan error, 1)
+		go func() {
+			got, err := runner.Run(t.Context(), Request{
+				UserPrompt: "inspect", MaxSteps: 3, ParallelToolCalls: true,
+			})
+			result <- got
+			errResult <- err
+		}()
+
+		startedNames := make([]string, 0, len(names))
+		for range names {
+			startedNames = append(startedNames, <-started)
+		}
+		close(release)
+		got := <-result
+		if err := <-errResult; err != nil {
+			t.Fatal(err)
+		}
+		slices.Sort(startedNames)
+		wantStarted := slices.Clone(names)
+		slices.Sort(wantStarted)
+		if !slices.Equal(startedNames, wantStarted) {
+			t.Fatalf("started tools = %v, want %v", startedNames, wantStarted)
+		}
+		if got.Text != "done" || got.ToolCalls != 3 || len(client.requests) != 2 {
+			t.Fatalf("result = %#v, requests = %d", got, len(client.requests))
+		}
+		if !client.requests[0].ParallelToolCalls || !client.requests[1].ParallelToolCalls {
+			t.Fatalf("parallel policy was not preserved across requests: %#v", client.requests)
+		}
+		var outputCallIDs []string
+		for _, item := range client.requests[1].Input {
+			if item.Type == "function_call_output" {
+				outputCallIDs = append(outputCallIDs, item.CallID)
+			}
+		}
+		if !slices.Equal(outputCallIDs, []string{"call_1", "call_2", "call_3"}) {
+			t.Fatalf("output call IDs = %v", outputCallIDs)
+		}
+		var toolEvents []string
+		for _, event := range events {
+			if event.Kind == "tool-call" || event.Kind == "tool-output" {
+				toolEvents = append(toolEvents, event.Kind)
+			}
+		}
+		if !slices.Equal(toolEvents, []string{
+			"tool-call", "tool-call", "tool-call",
+			"tool-output", "tool-output", "tool-output",
+		}) {
+			t.Fatalf("tool event order = %v", toolEvents)
+		}
+		for _, name := range names {
+			if got.ToolCallsByName[name] != 1 {
+				t.Fatalf("tool counts = %#v", got.ToolCallsByName)
+			}
+		}
+	})
+}
+
+func TestRunnerRejectsConcurrentBatchWhenReviewSnapshotChanges(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.name", "Test User")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	path := filepath.Join(dir, "app.txt")
+	if err := os.WriteFile(path, []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	client := &fakeClient{responses: []openai.Response{
-		{ToolCalls: []openai.ToolCall{
-			{ID: "fc_1", CallID: "call_1", Name: names[0], Arguments: `{"value":1}`},
-			{ID: "fc_2", CallID: "call_2", Name: names[1], Arguments: `{"value":2}`},
-			{ID: "fc_3", CallID: "call_3", Name: names[2], Arguments: `{"value":3}`},
-		}},
-		{Text: "done"},
-	}}
-	runner := OpenAIRunner{
-		Config: config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 3},
-		Client: client, Tools: registry, ToolSpecs: registry.Definitions(names),
+	runGit(t, dir, "add", "app.txt")
+	runGit(t, dir, "commit", "-m", "base")
+	if err := os.WriteFile(path, []byte("launch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := gitctx.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := repo.UncommittedFingerprint()
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	result, err := runner.Run(t.Context(), Request{
-		UserPrompt: "inspect", MaxSteps: 3, ParallelToolCalls: true,
+	control := tools.Definition{Name: "branch", Strict: true, Schema: map[string]any{"type": "object"}}
+	started := make(chan string)
+	release := make(chan struct{})
+	names := []string{"read_file", "grep"}
+	registry := tools.NewReviewRegistry(repo, nil, tools.ReviewModeUncommitted, tools.ReviewScope{}, fingerprint)
+	for _, name := range names {
+		registry.Register(blockingTool{name: name, started: started, release: release})
+	}
+	client := &fakeClient{responses: []openai.Response{{ToolCalls: []openai.ToolCall{
+		{ID: "fc_1", CallID: "call_1", Name: "branch", Arguments: `{"branches":[]}`},
+		{ID: "fc_2", CallID: "call_2", Name: names[0], Arguments: `{}`},
+		{ID: "fc_3", CallID: "call_3", Name: names[1], Arguments: `{}`},
+	}}}}
+	var events []trace.Event
+	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
+		events = append(events, event)
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(executionOrder, names) {
-		t.Fatalf("execution order = %v, want %v", executionOrder, names)
+	runner := OpenAIRunner{
+		Config: config.Config{MaxSteps: 2, MaxToolCalls: 3}, Client: client,
+		Tools: registry, ToolSpecs: registry.Definitions(names), Trace: recorder,
 	}
-	if result.Text != "done" || result.ToolCalls != 3 || len(client.requests) != 2 {
-		t.Fatalf("result = %#v, requests = %d", result, len(client.requests))
+	outcomeResult := make(chan NodeResult, 1)
+	errResult := make(chan error, 1)
+	go func() {
+		outcome, err := runner.RunNode(t.Context(), Request{
+			UserPrompt: "review", MaxSteps: 2, ControlTool: &control, ParallelToolCalls: true,
+		})
+		outcomeResult <- outcome
+		errResult <- err
+	}()
+
+	startedNames := []string{<-started, <-started}
+	if err := os.WriteFile(path, []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if !client.requests[0].ParallelToolCalls || !client.requests[1].ParallelToolCalls {
-		t.Fatalf("parallel policy was not preserved across requests: %#v", client.requests)
+	close(release)
+	outcome := <-outcomeResult
+	err = <-errResult
+	slices.Sort(startedNames)
+	wantStarted := slices.Clone(names)
+	slices.Sort(wantStarted)
+	if !slices.Equal(startedNames, wantStarted) {
+		t.Fatalf("started tools = %v, want %v", startedNames, wantStarted)
 	}
-	var outputCallIDs []string
-	for _, item := range client.requests[1].Input {
-		if item.Type == "function_call_output" {
-			outputCallIDs = append(outputCallIDs, item.CallID)
-		}
+	if !errors.Is(err, gitctx.ErrChangeSnapshotStale) {
+		t.Fatalf("error = %v, want stale snapshot", err)
 	}
-	if !slices.Equal(outputCallIDs, []string{"call_1", "call_2", "call_3"}) {
-		t.Fatalf("output call IDs = %v", outputCallIDs)
+	if outcome.Branch != nil || outcome.Final != nil {
+		t.Fatalf("stale batch produced outcome = %#v", outcome)
 	}
+	if slices.ContainsFunc(events, func(event trace.Event) bool { return event.Kind == "tool-output" }) {
+		t.Fatalf("stale batch traced tool output: %#v", events)
+	}
+}
+
+func BenchmarkRunnerExploreToolBatch(b *testing.B) {
+	const toolDelay = 2 * time.Millisecond
+	names := []string{"list_files", "grep", "read_file"}
+	registry := tools.NewRegistry(nil, nil)
 	for _, name := range names {
-		if result.ToolCallsByName[name] != 1 {
-			t.Fatalf("tool counts = %#v", result.ToolCallsByName)
+		registry.Register(delayedTool{name: name, delay: toolDelay, content: name + " output"})
+	}
+	toolSpecs := registry.Definitions(names)
+	b.ReportMetric(float64(len(names)), "tools/op")
+	b.ResetTimer()
+
+	for b.Loop() {
+		client := &fakeClient{responses: []openai.Response{
+			{ToolCalls: []openai.ToolCall{
+				{ID: "fc_1", CallID: "call_1", Name: names[0], Arguments: `{}`},
+				{ID: "fc_2", CallID: "call_2", Name: names[1], Arguments: `{}`},
+				{ID: "fc_3", CallID: "call_3", Name: names[2], Arguments: `{}`},
+			}},
+			{Text: "done"},
+		}}
+		runner := OpenAIRunner{
+			Config: config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 3},
+			Client: client, Tools: registry, ToolSpecs: toolSpecs,
+		}
+		result, err := runner.Run(b.Context(), Request{
+			UserPrompt: "explore", MaxSteps: 3, ParallelToolCalls: true,
+		})
+		if err != nil {
+			b.Fatal(err)
+		}
+		if result.Text != "done" || result.ToolCalls != len(names) {
+			b.Fatalf("result = %#v", result)
 		}
 	}
 }
@@ -213,7 +434,7 @@ func TestRunnerRejectsInvalidToolBatchBeforeExecution(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			var executionOrder []string
+			var executionOrder executionLog
 			registry := tools.NewRegistry(nil, nil)
 			names := []string{"first_tool", "second_tool"}
 			for _, name := range names {
@@ -229,8 +450,8 @@ func TestRunnerRejectsInvalidToolBatchBeforeExecution(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 				t.Fatalf("error = %v, want %q", err, test.wantErr)
 			}
-			if len(executionOrder) != 0 {
-				t.Fatalf("executed invalid batch members: %v", executionOrder)
+			if len(executionOrder.snapshot()) != 0 {
+				t.Fatalf("executed invalid batch members: %v", executionOrder.snapshot())
 			}
 		})
 	}
@@ -239,7 +460,7 @@ func TestRunnerRejectsInvalidToolBatchBeforeExecution(t *testing.T) {
 func TestRunnerDetectsDuplicateCallsWithinBatchBeforeExecution(t *testing.T) {
 	t.Parallel()
 
-	var executionOrder []string
+	var executionOrder executionLog
 	registry := tools.NewRegistry(nil, nil)
 	registry.Register(recordingTool{name: "first_tool", order: &executionOrder, content: "output"})
 	client := &fakeClient{responses: []openai.Response{
@@ -258,8 +479,8 @@ func TestRunnerDetectsDuplicateCallsWithinBatchBeforeExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Text != "finalized" || result.ToolCalls != 0 || len(executionOrder) != 0 {
-		t.Fatalf("result = %#v, execution order = %v", result, executionOrder)
+	if result.Text != "finalized" || result.ToolCalls != 0 || len(executionOrder.snapshot()) != 0 {
+		t.Fatalf("result = %#v, execution order = %v", result, executionOrder.snapshot())
 	}
 	if len(client.requests) != 2 || client.requests[1].ParallelToolCalls {
 		t.Fatalf("forced-finalization requests = %#v", client.requests)
@@ -278,7 +499,7 @@ func TestRunnerDetectsDuplicateCallsWithinBatchBeforeExecution(t *testing.T) {
 func TestRunnerRejectsBatchContainingCallRepeatedFromPriorStep(t *testing.T) {
 	t.Parallel()
 
-	var executionOrder []string
+	var executionOrder executionLog
 	registry := tools.NewRegistry(nil, nil)
 	names := []string{"first_tool", "second_tool"}
 	for _, name := range names {
@@ -304,15 +525,15 @@ func TestRunnerRejectsBatchContainingCallRepeatedFromPriorStep(t *testing.T) {
 	if result.Text != "finalized" || result.ToolCalls != 1 {
 		t.Fatalf("result = %#v", result)
 	}
-	if !slices.Equal(executionOrder, []string{"first_tool"}) {
-		t.Fatalf("execution order = %v, want only the prior admitted call", executionOrder)
+	if !slices.Equal(executionOrder.snapshot(), []string{"first_tool"}) {
+		t.Fatalf("execution order = %v, want only the prior admitted call", executionOrder.snapshot())
 	}
 }
 
 func TestRunnerRejectsCallIDInheritedFromBranchContinuation(t *testing.T) {
 	t.Parallel()
 
-	var executionOrder []string
+	var executionOrder executionLog
 	registry := tools.NewRegistry(nil, nil)
 	registry.Register(recordingTool{name: "first_tool", order: &executionOrder, content: "output"})
 	client := &fakeClient{responses: []openai.Response{{ToolCalls: []openai.ToolCall{{
@@ -333,15 +554,15 @@ func TestRunnerRejectsCallIDInheritedFromBranchContinuation(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), `duplicate function call ID "call_parent"`) {
 		t.Fatalf("error = %v, want inherited call-ID rejection", err)
 	}
-	if len(executionOrder) != 0 {
-		t.Fatalf("executed call with inherited ID: %v", executionOrder)
+	if len(executionOrder.snapshot()) != 0 {
+		t.Fatalf("executed call with inherited ID: %v", executionOrder.snapshot())
 	}
 }
 
 func TestRunnerDetectsInvocationRepeatedFromInheritedHistory(t *testing.T) {
 	t.Parallel()
 
-	var executionOrder []string
+	var executionOrder executionLog
 	registry := tools.NewRegistry(nil, nil)
 	registry.Register(recordingTool{name: "first_tool", order: &executionOrder, content: "output"})
 	client := &fakeClient{responses: []openai.Response{
@@ -365,15 +586,15 @@ func TestRunnerDetectsInvocationRepeatedFromInheritedHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Text != "finalized" || result.ToolCalls != 0 || len(executionOrder) != 0 {
-		t.Fatalf("result = %#v, execution order = %v", result, executionOrder)
+	if result.Text != "finalized" || result.ToolCalls != 0 || len(executionOrder.snapshot()) != 0 {
+		t.Fatalf("result = %#v, execution order = %v", result, executionOrder.snapshot())
 	}
 }
 
 func TestRunnerChecksContextBudgetAfterCompletingAdmittedBatch(t *testing.T) {
 	t.Parallel()
 
-	var executionOrder []string
+	var executionOrder executionLog
 	registry := tools.NewRegistry(nil, nil)
 	names := []string{"first_tool", "second_tool", "third_tool"}
 	largeOutput := strings.Repeat("x", 5000)
@@ -397,8 +618,10 @@ func TestRunnerChecksContextBudgetAfterCompletingAdmittedBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Text != "context final" || result.ToolCalls != 3 || !slices.Equal(executionOrder, names) {
-		t.Fatalf("result = %#v, execution order = %v", result, executionOrder)
+	executed := executionOrder.snapshot()
+	slices.Sort(executed)
+	if result.Text != "context final" || result.ToolCalls != 3 || !slices.Equal(executed, names) {
+		t.Fatalf("result = %#v, executed tools = %v", result, executed)
 	}
 	if len(client.requests) != 2 || len(client.requests[1].Tools) != 0 {
 		t.Fatalf("context finalization requests = %#v", client.requests)
@@ -417,7 +640,7 @@ func TestRunnerChecksContextBudgetAfterCompletingAdmittedBatch(t *testing.T) {
 func TestRunnerCompletesBatchAfterEncodedToolFailure(t *testing.T) {
 	t.Parallel()
 
-	var executionOrder []string
+	var executionOrder executionLog
 	registry := tools.NewRegistry(nil, nil)
 	registry.Register(recordingTool{name: "failing_tool", order: &executionOrder, err: errors.New("expected failure")})
 	registry.Register(recordingTool{name: "successful_tool", order: &executionOrder, content: "success"})
@@ -438,8 +661,10 @@ func TestRunnerCompletesBatchAfterEncodedToolFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Text != "recovered" || result.ToolCalls != 2 || !slices.Equal(executionOrder, names) {
-		t.Fatalf("result = %#v, execution order = %v", result, executionOrder)
+	executed := executionOrder.snapshot()
+	slices.Sort(executed)
+	if result.Text != "recovered" || result.ToolCalls != 2 || !slices.Equal(executed, names) {
+		t.Fatalf("result = %#v, executed tools = %v", result, executed)
 	}
 	var outputs []openai.Item
 	for _, item := range client.requests[1].Input {
@@ -455,25 +680,184 @@ func TestRunnerCompletesBatchAfterEncodedToolFailure(t *testing.T) {
 	}
 }
 
-func TestRunnerRejectsBranchMixedWithRepositoryCall(t *testing.T) {
+func TestRunnerCompletesOrdinaryCallsBeforeForkingMixedBranchBatch(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		control := tools.Definition{Name: "branch", Strict: true, Schema: map[string]any{"type": "object"}}
+		started := make(chan string)
+		release := make(chan struct{})
+		names := []string{"read_file", "grep"}
+		registry := tools.NewRegistry(nil, nil)
+		for _, name := range names {
+			registry.Register(blockingTool{name: name, started: started, release: release})
+		}
+		client := &fakeClient{responses: []openai.Response{{
+			ToolCalls: []openai.ToolCall{
+				{ID: "fc_1", CallID: "call_1", Name: "branch", Arguments: `{"branches":[]}`},
+				{ID: "fc_2", CallID: "call_2", Name: names[0], Arguments: `{}`},
+				{ID: "fc_3", CallID: "call_3", Name: names[1], Arguments: `{}`},
+			},
+		}}}
+		runner := OpenAIRunner{
+			Config: config.Config{MaxSteps: 2, MaxToolCalls: 3}, Client: client,
+			Tools: registry, ToolSpecs: registry.Definitions(names),
+		}
+		outcomeResult := make(chan NodeResult, 1)
+		errResult := make(chan error, 1)
+		go func() {
+			outcome, err := runner.RunNode(t.Context(), Request{
+				UserPrompt: "review", MaxSteps: 2, ControlTool: &control, ParallelToolCalls: true,
+			})
+			outcomeResult <- outcome
+			errResult <- err
+		}()
+
+		startedNames := []string{<-started, <-started}
+		close(release)
+		outcome := <-outcomeResult
+		if err := <-errResult; err != nil {
+			t.Fatal(err)
+		}
+		slices.Sort(startedNames)
+		wantStarted := slices.Clone(names)
+		slices.Sort(wantStarted)
+		if !slices.Equal(startedNames, wantStarted) {
+			t.Fatalf("started tools = %v, want %v", startedNames, wantStarted)
+		}
+		if outcome.Final != nil || outcome.Branch == nil || outcome.Branch.ToolCalls != 3 {
+			t.Fatalf("outcome = %#v", outcome)
+		}
+		if outcome.Branch.ToolCallsByName["branch"] != 1 ||
+			outcome.Branch.ToolCallsByName[names[0]] != 1 || outcome.Branch.ToolCallsByName[names[1]] != 1 {
+			t.Fatalf("tool calls by name = %#v", outcome.Branch.ToolCallsByName)
+		}
+		if len(client.requests) != 1 || !client.requests[0].ParallelToolCalls {
+			t.Fatalf("mixed control request policy = %#v", client.requests)
+		}
+		fork := outcome.Branch.ForkInput(`{"branch_id":"b1"}`, true)
+		var outputCallIDs []string
+		for _, item := range fork {
+			if item.Type == "function_call_output" {
+				outputCallIDs = append(outputCallIDs, item.CallID)
+			}
+		}
+		if !slices.Equal(outputCallIDs, []string{"call_2", "call_3", "call_1"}) {
+			t.Fatalf("fork output call IDs = %v, want ordinary outputs before branch output", outputCallIDs)
+		}
+	})
+}
+
+func TestRunnerRejectsMultipleBranchCallsBeforeOrdinaryExecution(t *testing.T) {
 	t.Parallel()
 
 	control := tools.Definition{Name: "branch", Strict: true, Schema: map[string]any{"type": "object"}}
-	client := &fakeClient{responses: []openai.Response{{
-		ToolCalls: []openai.ToolCall{
-			{ID: "fc_1", CallID: "call_1", Name: "branch", Arguments: `{}`},
-			{ID: "fc_2", CallID: "call_2", Name: "read_file", Arguments: `{}`},
-		},
-	}}}
-	runner := OpenAIRunner{Config: config.Config{MaxSteps: 2, MaxToolCalls: 2}, Client: client}
+	var executionOrder executionLog
+	registry := tools.NewRegistry(nil, nil)
+	registry.Register(recordingTool{name: "read_file", order: &executionOrder, content: "file content"})
+	client := &fakeClient{responses: []openai.Response{{ToolCalls: []openai.ToolCall{
+		{ID: "fc_1", CallID: "call_1", Name: "branch", Arguments: `{"branches":[]}`},
+		{ID: "fc_2", CallID: "call_2", Name: "read_file", Arguments: `{}`},
+		{ID: "fc_3", CallID: "call_3", Name: "branch", Arguments: `{"branches":[{}]}`},
+	}}}}
+	runner := OpenAIRunner{
+		Config: config.Config{MaxSteps: 2, MaxToolCalls: 3}, Client: client,
+		Tools: registry, ToolSpecs: registry.Definitions([]string{"read_file"}),
+	}
 	_, err := runner.RunNode(t.Context(), Request{
 		UserPrompt: "review", MaxSteps: 2, ControlTool: &control, ParallelToolCalls: true,
 	})
-	if err == nil || !strings.Contains(err.Error(), "must be the only local function call") {
+	if err == nil || !strings.Contains(err.Error(), "may be called at most once") {
 		t.Fatalf("error = %v", err)
 	}
-	if len(client.requests) != 1 || client.requests[0].ParallelToolCalls {
-		t.Fatalf("mixed control request policy = %#v", client.requests)
+	if len(executionOrder.snapshot()) != 0 {
+		t.Fatalf("executed tools from invalid batch = %v", executionOrder.snapshot())
+	}
+	if len(client.requests) != 1 || !client.requests[0].ParallelToolCalls {
+		t.Fatalf("multiple-control request policy = %#v", client.requests)
+	}
+}
+
+func TestRunnerMixedBranchBatchReturnsRecoverableOrdinaryErrorBeforeFork(t *testing.T) {
+	t.Parallel()
+
+	control := tools.Definition{Name: "branch", Strict: true, Schema: map[string]any{"type": "object"}}
+	var executionOrder executionLog
+	registry := tools.NewRegistry(nil, nil)
+	registry.Register(recordingTool{name: "read_file", order: &executionOrder, err: errors.New("missing file")})
+	client := &fakeClient{responses: []openai.Response{{ToolCalls: []openai.ToolCall{
+		{ID: "fc_1", CallID: "call_1", Name: "branch", Arguments: `{"branches":[]}`},
+		{ID: "fc_2", CallID: "call_2", Name: "read_file", Arguments: `{}`},
+	}}}}
+	runner := OpenAIRunner{
+		Config: config.Config{MaxSteps: 2, MaxToolCalls: 2}, Client: client,
+		Tools: registry, ToolSpecs: registry.Definitions([]string{"read_file"}),
+	}
+	outcome, err := runner.RunNode(t.Context(), Request{
+		UserPrompt: "review", MaxSteps: 2, ControlTool: &control, ParallelToolCalls: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Branch == nil {
+		t.Fatalf("outcome = %#v", outcome)
+	}
+	fork := outcome.Branch.ForkInput(`{"branch_id":"b1"}`, true)
+	var outputs []openai.Item
+	for _, item := range fork {
+		if item.Type == "function_call_output" {
+			outputs = append(outputs, item)
+		}
+	}
+	if len(outputs) != 2 || outputs[0].CallID != "call_2" || !strings.Contains(outputs[0].Output, "missing file") ||
+		outputs[1].CallID != "call_1" {
+		t.Fatalf("fork outputs = %#v", outputs)
+	}
+}
+
+func TestRunnerMixedBranchBatchDoesNotForkAfterFatalOrdinaryError(t *testing.T) {
+	t.Parallel()
+
+	control := tools.Definition{Name: "branch", Strict: true, Schema: map[string]any{"type": "object"}}
+	var executionOrder executionLog
+	registry := tools.NewRegistry(nil, nil)
+	registry.Register(recordingTool{name: "read_file", order: &executionOrder, err: gitctx.ErrChangeSnapshotStale})
+	client := &fakeClient{responses: []openai.Response{{ToolCalls: []openai.ToolCall{
+		{ID: "fc_1", CallID: "call_1", Name: "branch", Arguments: `{"branches":[]}`},
+		{ID: "fc_2", CallID: "call_2", Name: "read_file", Arguments: `{}`},
+	}}}}
+	runner := OpenAIRunner{
+		Config: config.Config{MaxSteps: 2, MaxToolCalls: 2}, Client: client,
+		Tools: registry, ToolSpecs: registry.Definitions([]string{"read_file"}),
+	}
+	outcome, err := runner.RunNode(t.Context(), Request{
+		UserPrompt: "review", MaxSteps: 2, ControlTool: &control, ParallelToolCalls: true,
+	})
+	if !errors.Is(err, gitctx.ErrChangeSnapshotStale) {
+		t.Fatalf("error = %v, want stale snapshot", err)
+	}
+	if outcome.Branch != nil || outcome.Final != nil {
+		t.Fatalf("fatal ordinary error produced outcome = %#v", outcome)
+	}
+}
+
+func TestRunnerRejectsMixedBranchBatchWithoutRegistry(t *testing.T) {
+	t.Parallel()
+
+	control := tools.Definition{Name: "branch", Strict: true, Schema: map[string]any{"type": "object"}}
+	client := &fakeClient{responses: []openai.Response{{ToolCalls: []openai.ToolCall{
+		{ID: "fc_1", CallID: "call_1", Name: "branch", Arguments: `{"branches":[]}`},
+		{ID: "fc_2", CallID: "call_2", Name: "read_file", Arguments: `{}`},
+	}}}}
+	runner := OpenAIRunner{
+		Config: config.Config{MaxSteps: 2, MaxToolCalls: 2}, Client: client,
+		ToolSpecs: []tools.Definition{{Name: "read_file", Strict: true, Schema: map[string]any{"type": "object"}}},
+	}
+	_, err := runner.RunNode(t.Context(), Request{
+		UserPrompt: "review", MaxSteps: 2, ControlTool: &control, ParallelToolCalls: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "no registry is configured") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
@@ -1546,7 +1930,7 @@ func TestRunnerFinalizesWhenStepBudgetRunsOut(t *testing.T) {
 func TestRunnerFinalizesWhenToolBudgetRunsOut(t *testing.T) {
 	t.Parallel()
 
-	var executionOrder []string
+	var executionOrder executionLog
 	registry := tools.NewRegistry(nil, nil)
 	names := []string{"first_tool", "second_tool"}
 	for _, name := range names {
@@ -1577,8 +1961,8 @@ func TestRunnerFinalizesWhenToolBudgetRunsOut(t *testing.T) {
 	if result.Text != "Add parser" || result.ToolCalls != 0 {
 		t.Fatalf("result = %#v", result)
 	}
-	if len(executionOrder) != 0 {
-		t.Fatalf("executed over-budget batch members: %v", executionOrder)
+	if len(executionOrder.snapshot()) != 0 {
+		t.Fatalf("executed over-budget batch members: %v", executionOrder.snapshot())
 	}
 	if len(client.requests) != 2 {
 		t.Fatalf("requests = %d, want 2", len(client.requests))

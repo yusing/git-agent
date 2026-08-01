@@ -11,8 +11,8 @@ workflows.
 OpenAI-compatible tool-calling loop, and keeps model tools read-only. The
 `commit` command is the only workflow that writes to Git, and it does that after
 message generation by handing the final message to `git commit`. Independent
-read-only tool calls may share a provider turn, while local execution remains
-sequential and deterministic.
+read-only tool calls in one provider turn execute concurrently, while their
+outputs return to the conversation in provider order for deterministic replay.
 
 TL;DR: use `commit-msg` when you want a grounded commit message on stdout, use
 `commit` when you want the same message created as a Git commit, use
@@ -179,6 +179,11 @@ parallel inside the same detached task. Children retain the selected Git scope,
 tool policy, cancellation, and per-conversation budgets. Git-agent merges
 validated leaf reports mechanically and publishes branch topology and progress
 through the same replayable SSE stream; `--wait` still returns one report.
+When a provider turn combines `branch` with ordinary read calls, Git-agent
+completes those reads concurrently, appends their outputs in provider order,
+and only then forks the completed conversation. Diff-mode runs revalidate their
+authoritative snapshot after the reads join, so drift aborts before outputs or
+fan-out.
 One review tree assigns a stable prompt-cache key to every request. On GPT-5.6
 models, Git-agent sends that key, marks an explicit reusable root prefix, and
 preserves the breakpoint in children. Branch-specific tools, instructions, or
