@@ -100,7 +100,7 @@ function __git_agent_command_has_option
         case pr-message
             contains -- "$option" $shared
         case explore
-            contains -- "$option" follow-up
+            contains -- "$option" fast follow-up
         case release-note
             contains -- "$option" out $shared
         case review simplify
