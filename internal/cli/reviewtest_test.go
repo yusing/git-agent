@@ -77,9 +77,9 @@ func TestDryRunEventsEndWithValidReportForEachKind(t *testing.T) {
 	for _, kind := range []reviewtask.Kind{reviewtask.KindReview, reviewtask.KindSimplify} {
 		var results []checks.Result
 		if kind == reviewtask.KindReview {
-			result, err := checks.NewSkipped("fixture-checker", "fixture has no eligible input")
-			if err != nil {
-				t.Fatal(err)
+			result := checks.Result{
+				Name: "fixture-checker", Status: checks.StatusSkipped,
+				Diagnostics: []checks.Diagnostic{}, Reason: "fixture has no eligible input",
 			}
 			results = []checks.Result{result}
 		}

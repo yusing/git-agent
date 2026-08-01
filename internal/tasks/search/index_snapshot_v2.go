@@ -175,14 +175,18 @@ func (sync *indexSync) writeSnapshotV2(target indexSyncTarget, compatible []vect
 		return 0, err
 	}
 	records := compatible
+	var existing []vectorRecord
 	if _, err := os.Stat(path); err == nil {
-		existing, err := sync.loadV2Snapshot(path, target)
+		existing, err = sync.loadV2Snapshot(path, target)
 		if err != nil {
 			return 0, err
 		}
 		records, err = mergeCompatibleRecordsStrict(existing, compatible, target.model, target.dimensions)
 		if err != nil {
 			return 0, err
+		}
+		if vectorRecordsEqual(existing, records) {
+			return len(compatible), nil
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return 0, err

@@ -90,9 +90,9 @@ func TestFollowUpReusesDetachedReviewPipeline(t *testing.T) {
 	if err := store.AttachTurn(followUpParentTaskID, backgroundtask.TurnMetadata{Mode: "staged"}); err != nil {
 		t.Fatal(err)
 	}
-	check, err := checks.NewSkipped("golangci-lint", "not run")
-	if err != nil {
-		t.Fatal(err)
+	check := checks.Result{
+		Name: "golangci-lint", Status: checks.StatusSkipped,
+		Diagnostics: []checks.Diagnostic{}, Reason: "not run",
 	}
 	parentReport := reviewtask.FinalReviewReport{
 		Summary: "old summary", Recommendation: "COMMENT",

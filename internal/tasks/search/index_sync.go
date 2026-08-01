@@ -261,8 +261,8 @@ func (sync *indexSync) rebaseOnto(ctx context.Context, remoteHash plumbing.Hash)
 	if headErr != nil {
 		return headErr
 	}
-	if localHead.Hash() == remoteHash {
-		return sync.checkoutBranch(remoteHash)
+	if localHead.Hash() == remoteHash && localHead.Name() == sync.branch {
+		return nil
 	}
 	localCommit, err := sync.repo.CommitObject(localHead.Hash())
 	if err != nil {
@@ -491,6 +491,9 @@ func (sync *indexSync) writeSnapshot(target indexSyncTarget, compatible []vector
 		if err != nil {
 			return 0, err
 		}
+		if vectorRecordsEqual(remote.Records, snapshot.Records) {
+			return len(compatible), nil
+		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return 0, err
 	}
@@ -511,6 +514,24 @@ func compatibleIndexRecords(records []vectorRecord, model string, dimensions int
 	byKey := make(map[string]vectorRecord, len(records))
 	allCompatible := collectCompatibleRecords(byKey, records, model, dimensions, false)
 	return sortedRecordValues(byKey), allCompatible
+}
+
+func vectorRecordsEqual(a, b []vectorRecord) bool {
+	return slices.EqualFunc(a, b, func(a, b vectorRecord) bool {
+		return a.ChunkID == b.ChunkID &&
+			a.Path == b.Path &&
+			a.Source == b.Source &&
+			a.Blob == b.Blob &&
+			a.StartLine == b.StartLine &&
+			a.EndLine == b.EndLine &&
+			a.ContentHash == b.ContentHash &&
+			a.EmbeddingInputHash == b.EmbeddingInputHash &&
+			a.EmbeddingModel == b.EmbeddingModel &&
+			a.Dimensions == b.Dimensions &&
+			a.Size == b.Size &&
+			a.MTimeUnixNano == b.MTimeUnixNano &&
+			slices.Equal(a.Vector, b.Vector)
+	})
 }
 
 func mergeImportedRecords(local, remote []vectorRecord, model string, dimensions int) ([]vectorRecord, bool, error) {

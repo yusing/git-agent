@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -115,6 +116,205 @@ func TestVectorPackRoundTripAndValidation(t *testing.T) {
 	if _, err := decodeVectorPack(overflow, ""); err == nil || !strings.Contains(err.Error(), "size") {
 		t.Fatalf("overflowing pack size error = %v", err)
 	}
+}
+
+func TestValidateCachedVectorPackCatalogAcrossPacks(t *testing.T) {
+	root := t.TempDir()
+	catalog := writeTestVectorPackCatalog(t, root, 3, 4, 8)
+	if !validateCachedVectorPackCatalog(root, catalog) {
+		t.Fatal("valid cached vector pack catalog was rejected")
+	}
+
+	for _, byDigest := range catalog {
+		for digest, slot := range byDigest {
+			slot.Slot = ^uint32(0)
+			byDigest[digest] = slot
+			if validateCachedVectorPackCatalog(root, catalog) {
+				t.Fatal("cached catalog with an invalid slot was accepted")
+			}
+			return
+		}
+	}
+	t.Fatal("test catalog was empty")
+}
+
+func BenchmarkValidateCachedVectorPackCatalog(b *testing.B) {
+	root := b.TempDir()
+	const (
+		packCount  = 32
+		packItems  = 128
+		dimensions = 256
+	)
+	catalog := writeTestVectorPackCatalog(b, root, packCount, packItems, dimensions)
+	b.ReportAllocs()
+	b.SetBytes(packCount * packItems * dimensions * 4)
+	b.ResetTimer()
+
+	for b.Loop() {
+		if !validateCachedVectorPackCatalog(root, catalog) {
+			b.Fatal("valid cached vector pack catalog was rejected")
+		}
+	}
+}
+
+func TestWriteSnapshotV2SkipsUnchangedCatalogRebuild(t *testing.T) {
+	root := t.TempDir()
+	if err := writeIndexSyncSchema(root, indexSyncSchemaV2); err != nil {
+		t.Fatal(err)
+	}
+	sync := &indexSync{dir: root, schema: indexSyncSchemaV2}
+	target := indexSyncTarget{
+		origin:     "https://example.test/acme/catalog-noop.git",
+		revision:   strings.Repeat("1", 40),
+		model:      "test-model",
+		dimensions: 3,
+	}
+	record := testSyncedVectorRecord("stable-input", []float64{1, 0, 0})
+	if _, err := sync.writeSnapshotV2(target, []vectorRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+
+	sync.packCatalog = nil
+	if _, err := sync.writeSnapshotV2(target, []vectorRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+	if sync.packCatalog != nil {
+		t.Fatal("unchanged snapshot reloaded the global vector pack catalog")
+	}
+}
+
+func TestWriteSnapshotV1SkipsUnchangedFileRewrite(t *testing.T) {
+	root := t.TempDir()
+	if err := writeIndexSyncSchema(root, indexSyncSchemaV1); err != nil {
+		t.Fatal(err)
+	}
+	sync := &indexSync{dir: root, schema: indexSyncSchemaV1}
+	target := indexSyncTarget{
+		origin:     "https://example.test/acme/snapshot-noop.git",
+		revision:   strings.Repeat("2", 40),
+		model:      "test-model",
+		dimensions: 3,
+	}
+	record := testSyncedVectorRecord("stable-input", []float64{1, 0, 0})
+	if _, err := sync.writeSnapshot(target, []vectorRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+
+	path, err := sync.snapshotPath(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Unix(1, 0)
+	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sync.writeSnapshot(target, []vectorRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(oldTime) {
+		t.Fatalf("unchanged snapshot modification time = %s, want %s", info.ModTime(), oldTime)
+	}
+}
+
+func TestRebaseOntoCurrentCommitUpdatesBranchBeforeTakingNoOpPath(t *testing.T) {
+	root := t.TempDir()
+	repo, err := git.PlainInit(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeIndexSyncSchema(root, indexSyncSchemaV2); err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worktree.Add("schema.json"); err != nil {
+		t.Fatal(err)
+	}
+	signature := &object.Signature{Name: "Search Test", Email: "search@example.test", When: time.Unix(1, 0)}
+	hash, err := worktree.Commit("initialize", &git.CommitOptions{Author: signature, Committer: signature})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sync := &indexSync{
+		dir:      root,
+		branch:   plumbing.NewBranchReferenceName("renamed"),
+		repo:     repo,
+		worktree: worktree,
+	}
+	if err := sync.rebaseOnto(t.Context(), hash); err != nil {
+		t.Fatal(err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.Name() != sync.branch || head.Hash() != hash {
+		t.Fatalf("HEAD = %s %s, want %s %s", head.Name(), head.Hash(), sync.branch, hash)
+	}
+
+	sync.packCatalog = vectorPackCatalog{"sentinel": {}}
+	if err := sync.rebaseOnto(t.Context(), hash); err != nil {
+		t.Fatal(err)
+	}
+	if sync.packCatalog == nil {
+		t.Fatal("same-branch no-op reset the in-memory catalog")
+	}
+}
+
+func writeTestVectorPackCatalog(tb testing.TB, root string, packCount, packItems, dimensions int) vectorPackCatalog {
+	tb.Helper()
+	model := "catalog-benchmark-model"
+	modelKey := syncModelKey(model, dimensions)
+	modelDir := filepath.Join(root, "packs", digestHex(modelKey))
+	if err := os.MkdirAll(modelDir, 0o700); err != nil {
+		tb.Fatal(err)
+	}
+	catalog := vectorPackCatalog{}
+	for packIndex := range packCount {
+		items := make([]vectorPackItem, packItems)
+		for itemIndex := range packItems {
+			input := fmt.Sprintf("pack-%04d-item-%04d", packIndex, itemIndex)
+			embeddingKey, err := decodeDigest(vectorStoreKey(input, model, dimensions))
+			if err != nil {
+				tb.Fatal(err)
+			}
+			vector := make([]float64, dimensions)
+			vector[(packIndex+itemIndex)%dimensions] = 1
+			data := encodeVector(vector)
+			items[itemIndex] = vectorPackItem{
+				EmbeddingKey: embeddingKey,
+				VectorDigest: vectorPayloadDigest(data),
+				Data:         data,
+			}
+		}
+		encoded, err := encodeVectorPack(dimensions, modelKey, items)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		digest := digestHex(vectorPayloadDigest(encoded))
+		path := filepath.Join(modelDir, digest+".pack")
+		if err := os.WriteFile(path, encoded, 0o600); err != nil {
+			tb.Fatal(err)
+		}
+		pack, err := decodeVectorPack(encoded, digest)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		for slot, entry := range pack.Entries {
+			catalog.add(digestHex(entry.EmbeddingKey), digestHex(entry.VectorDigest), vectorPackSlot{
+				Pack: digest,
+				Slot: uint32(slot),
+			})
+		}
+	}
+	return catalog
 }
 
 func FuzzDecodeVectorPack(f *testing.F) {

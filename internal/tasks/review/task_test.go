@@ -21,9 +21,9 @@ import (
 func TestFollowUpPromptContainsOnlyPriorItemsAndPrompt(t *testing.T) {
 	t.Parallel()
 
-	check, err := checks.NewSkipped("golangci-lint", "no eligible Go targets")
-	if err != nil {
-		t.Fatal(err)
+	check := checks.Result{
+		Name: "golangci-lint", Status: checks.StatusSkipped,
+		Diagnostics: []checks.Diagnostic{}, Reason: "no eligible Go targets",
 	}
 	reviewPrompt, err := FollowUpPrompt(KindReview, FinalReviewReport{
 		Summary: "old summary", Recommendation: "COMMENT",

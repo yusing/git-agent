@@ -226,19 +226,6 @@ func NewResult(name string, diagnostics []Diagnostic) (Result, error) {
 	}, nil
 }
 
-func NewSkipped(name, reason string) (Result, error) {
-	result := Result{
-		Name:        name,
-		Status:      StatusSkipped,
-		Diagnostics: []Diagnostic{},
-		Reason:      singleLine(reason, MaxResultReason),
-	}
-	if err := ValidateResult(result); err != nil {
-		return Result{}, err
-	}
-	return result, nil
-}
-
 func NewError(name string, err error) (Result, error) {
 	message := "static check failed"
 	if err != nil {

@@ -513,7 +513,7 @@ func TestIndexSyncDisablesCommitSigning(t *testing.T) {
 	}
 }
 
-func TestFetchRemoteUsesDefaultSSHKeyWithoutAgent(t *testing.T) {
+func TestPreflightRemoteRevisionUsesDefaultSSHKeyWithoutAgent(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("SSH_AUTH_SOCK", "")
@@ -536,11 +536,7 @@ func TestFetchRemoteUsesDefaultSSHKeyWithoutAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	const remoteURL = "ssh://git@127.0.0.1:1/repo.git"
-	repo, err := initRemoteRepo(filepath.Join(t.TempDir(), "repo.git"), remoteURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = fetchRemote(t.Context(), repo, remoteURL, false, nil)
+	_, err = preflightRemoteRevision(t.Context(), remoteURL, "HEAD", false, nil)
 	if err == nil {
 		t.Fatal("SSH fetch unexpectedly succeeded")
 	}
@@ -3394,14 +3390,57 @@ func TestExactReuseStopsAfterAllInputsResolve(t *testing.T) {
 	defer lock.Unlock()
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
-	records, err := loadExactReuseVectors(canceled, metadataDir, filepath.Join(metadataDir, "search", "target"), []Chunk{chunk}, Options{
+	opts := Options{
 		EmbeddingModel: "test-model", EmbeddingDimensions: 3,
-	})
+	}
+	records, err := loadExactReuseVectorsForHashes(canceled, metadataDir, filepath.Join(metadataDir, "search", "target"), missingReusableInputHashes([]Chunk{chunk}, nil, opts), opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(records) != 1 || records[0].EmbeddingInputHash != inputHash {
 		t.Fatalf("records = %#v", records)
+	}
+}
+
+func TestWarmSameTargetReuseDoesNotWaitForHistoricalIndex(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	writeFile(t, root, "ready.go", "package ready\n\nfunc Ready() {}\n")
+	opts := Options{
+		Root:                root,
+		IndexOnly:           true,
+		MinScore:            DefaultMinScore,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+	}
+	first, err := Run(t.Context(), fakeEmbedder{}, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedDir := filepath.Join(metadataDirForIndex(first.Diagnostics.IndexDir), "search", "000-blocked")
+	if err := os.MkdirAll(blockedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(blockedDir, "manifest.json"), manifest{
+		Version: legacyIndexVersion, EmbeddingModel: opts.EmbeddingModel, Dimensions: opts.EmbeddingDimensions,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := lockIndex(t.Context(), blockedDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Unlock()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	second, err := Run(ctx, fakeEmbedder{}, opts, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Diagnostics.ReusedChunks == 0 || second.Diagnostics.EmbeddedChunks != 0 {
+		t.Fatalf("warm diagnostics = %#v, want same-target reuse without embeddings", second.Diagnostics)
 	}
 }
 

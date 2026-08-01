@@ -57,7 +57,12 @@ func (sync *indexSync) loadVectorPackCatalog() (vectorPackCatalog, error) {
 }
 
 func validateCachedVectorPackCatalog(root string, catalog vectorPackCatalog) bool {
-	packs := map[string]vectorPack{}
+	type expectedSlot struct {
+		embeddingKey [32]byte
+		vectorDigest [32]byte
+		slot         uint32
+	}
+	expectedByPack := map[string][]expectedSlot{}
 	for embeddingKey, byDigest := range catalog {
 		expectedEmbedding, err := decodeDigest(embeddingKey)
 		if err != nil {
@@ -68,23 +73,28 @@ func validateCachedVectorPackCatalog(root string, catalog vectorPackCatalog) boo
 			if err != nil {
 				return false
 			}
-			pack, ok := packs[slot.Pack]
-			if !ok {
-				paths, err := filepath.Glob(filepath.Join(root, "packs", "*", slot.Pack+".pack"))
-				if err != nil || len(paths) != 1 {
-					return false
-				}
-				pack, err = readVectorPack(paths[0], slot.Pack)
-				if err != nil {
-					return false
-				}
-				packs[slot.Pack] = pack
-			}
-			if uint64(slot.Slot) >= uint64(len(pack.Entries)) {
+			expectedByPack[slot.Pack] = append(expectedByPack[slot.Pack], expectedSlot{
+				embeddingKey: expectedEmbedding,
+				vectorDigest: expectedVector,
+				slot:         slot.Slot,
+			})
+		}
+	}
+	for packDigest, expected := range expectedByPack {
+		paths, err := filepath.Glob(filepath.Join(root, "packs", "*", packDigest+".pack"))
+		if err != nil || len(paths) != 1 {
+			return false
+		}
+		pack, err := readVectorPack(paths[0], packDigest)
+		if err != nil {
+			return false
+		}
+		for _, item := range expected {
+			if uint64(item.slot) >= uint64(len(pack.Entries)) {
 				return false
 			}
-			entry := pack.Entries[slot.Slot]
-			if entry.EmbeddingKey != expectedEmbedding || entry.VectorDigest != expectedVector {
+			entry := pack.Entries[item.slot]
+			if entry.EmbeddingKey != item.embeddingKey || entry.VectorDigest != item.vectorDigest {
 				return false
 			}
 		}

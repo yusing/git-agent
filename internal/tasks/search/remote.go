@@ -422,33 +422,6 @@ func initRemoteRepo(path, remote string) (*git.Repository, error) {
 	return repo, nil
 }
 
-func fetchRemote(ctx context.Context, repo *git.Repository, remoteURL string, shallow bool, progressLog func(Progress) error) error {
-	depth := 0
-	if shallow {
-		depth = 1
-	}
-	progress := newRemoteProgressWriter(progressLog, remoteURL, ProgressStatusFetching)
-	err := repo.FetchContext(ctx, &git.FetchOptions{
-		RemoteName:    "origin",
-		RemoteURL:     remoteURL,
-		ClientOptions: remoteClientOptions(),
-		RefSpecs:      remoteFetchRefSpecs(),
-		Depth:         depth,
-		Tags:          plumbing.NoTags,
-		Force:         true,
-		Prune:         true,
-		Progress:      progress,
-	})
-	var progressErr error
-	if progress != nil {
-		progressErr = progress.Flush()
-	}
-	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
-		return err
-	}
-	return progressErr
-}
-
 func remoteFetchRefSpecs() []gitconfig.RefSpec {
 	return []gitconfig.RefSpec{
 		gitconfig.RefSpec("+HEAD:refs/remotes/origin/HEAD"),

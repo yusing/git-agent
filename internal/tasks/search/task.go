@@ -562,21 +562,25 @@ func run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}()
 	var oldVectors []vectorRecord
 	var exactVectors []vectorRecord
-	if !opts.Reindex && selection.remoteFiles == nil {
-		if err := unlockIndex(); err != nil {
-			return fail(err)
-		}
-		exactVectors, err = loadExactReuseVectors(ctx, selection.metadataDir, indexDir, chunks, opts)
-		if err != nil {
-			return fail(err)
-		}
-		indexLock, err = lockIndex(ctx, indexDir)
-		if err != nil {
-			return fail(err)
-		}
-		indexLocked = true
-	}
 	oldVectors, _ = loadVectors(indexDir)
+	if !opts.Reindex && selection.remoteFiles == nil {
+		missingHashes := missingReusableInputHashes(chunks, oldVectors, opts)
+		if len(missingHashes) > 0 {
+			if err := unlockIndex(); err != nil {
+				return fail(err)
+			}
+			exactVectors, err = loadExactReuseVectorsForHashes(ctx, selection.metadataDir, indexDir, missingHashes, opts)
+			if err != nil {
+				return fail(err)
+			}
+			indexLock, err = lockIndex(ctx, indexDir)
+			if err != nil {
+				return fail(err)
+			}
+			indexLocked = true
+			oldVectors, _ = loadVectors(indexDir)
+		}
+	}
 	reuseOpts := opts
 	if opts.Reindex && indexBuiltSince(indexDir, started) {
 		reuseOpts.Reindex = false
@@ -1612,16 +1616,64 @@ func loadLegacyVectors(dir string) ([]vectorRecord, error) {
 	return records, nil
 }
 
-func loadExactReuseVectors(ctx context.Context, metadataDir, targetDir string, chunks []Chunk, opts Options) ([]vectorRecord, error) {
-	if opts.Reindex || len(chunks) == 0 {
+func loadExactReuseVectorsForHashes(ctx context.Context, metadataDir, targetDir string, targetHashes map[string]bool, opts Options) ([]vectorRecord, error) {
+	if opts.Reindex || len(targetHashes) == 0 {
 		return nil, nil
 	}
-	targetHashes := make(map[string]bool, len(chunks))
-	for _, chunk := range chunks {
-		targetHashes[chunkEmbeddingInputHash(chunk, opts.EmbeddingMaxInput)] = true
-	}
 	byHash := make(map[string]vectorRecord, len(targetHashes))
-	sharedHashes := make(map[string]bool, len(targetHashes))
+	sharedFailed := make(map[string]bool)
+	store := newVectorStore(metadataDir)
+	var catalog vectorStoreCatalog
+	var payload *os.File
+	var catalogLoaded bool
+	var sharedUnavailable bool
+	defer func() {
+		if payload != nil {
+			_ = payload.Close()
+		}
+	}()
+	loadShared := func(inputHash string) (vectorRecord, bool, error) {
+		if sharedUnavailable {
+			return vectorRecord{}, false, nil
+		}
+		if !catalogLoaded {
+			var err error
+			catalog, _, err = store.loadCatalog()
+			if errors.Is(err, fs.ErrNotExist) {
+				sharedUnavailable = true
+				return vectorRecord{}, false, nil
+			}
+			if err != nil {
+				return vectorRecord{}, false, err
+			}
+			catalogLoaded = true
+		}
+		entry, ok := catalog.Entries[vectorStoreKey(inputHash, opts.EmbeddingModel, opts.EmbeddingDimensions)]
+		if !ok || entry.Dimensions != opts.EmbeddingDimensions {
+			return vectorRecord{}, false, nil
+		}
+		if payload == nil {
+			var err error
+			payload, err = os.Open(filepath.Join(store.dir, vectorStorePayloadName))
+			if errors.Is(err, fs.ErrNotExist) {
+				sharedUnavailable = true
+				return vectorRecord{}, false, nil
+			}
+			if err != nil {
+				return vectorRecord{}, false, err
+			}
+		}
+		vector, err := readStoredVector(payload, entry)
+		if err != nil {
+			return vectorRecord{}, false, nil
+		}
+		return vectorRecord{
+			EmbeddingInputHash: inputHash,
+			EmbeddingModel:     opts.EmbeddingModel,
+			Dimensions:         opts.EmbeddingDimensions,
+			Vector:             vector,
+		}, true, nil
+	}
 	errReuseComplete := errors.New("exact vector reuse complete")
 	complete := func() bool { return len(byHash) == len(targetHashes) }
 	searchRoot := filepath.Join(metadataDir, "search")
@@ -1657,12 +1709,18 @@ func loadExactReuseVectors(ctx context.Context, metadataDir, targetDir string, c
 				}
 				for _, record := range records {
 					if targetHashes[record.EmbeddingInputHash] && byHash[record.EmbeddingInputHash].EmbeddingInputHash == "" &&
+						!sharedFailed[record.EmbeddingInputHash] &&
 						record.VectorKey == vectorStoreKey(record.EmbeddingInputHash, opts.EmbeddingModel, opts.EmbeddingDimensions) {
-						sharedHashes[record.EmbeddingInputHash] = true
+						loaded, ok, err := loadShared(record.EmbeddingInputHash)
+						if err != nil {
+							return err
+						}
+						if ok {
+							byHash[record.EmbeddingInputHash] = loaded
+						} else {
+							sharedFailed[record.EmbeddingInputHash] = true
+						}
 					}
-				}
-				if err := loadSharedExactVectors(metadataDir, sharedHashes, opts, byHash); err != nil {
-					return err
 				}
 				if complete() {
 					return errReuseComplete
@@ -1687,9 +1745,6 @@ func loadExactReuseVectors(ctx context.Context, metadataDir, targetDir string, c
 	if err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, errReuseComplete) {
 		return nil, err
 	}
-	if err := loadSharedExactVectors(metadataDir, sharedHashes, opts, byHash); err != nil {
-		return nil, err
-	}
 	result := make([]vectorRecord, 0, len(byHash))
 	for _, record := range byHash {
 		result = append(result, record)
@@ -1697,35 +1752,21 @@ func loadExactReuseVectors(ctx context.Context, metadataDir, targetDir string, c
 	return result, nil
 }
 
-func loadSharedExactVectors(metadataDir string, targetHashes map[string]bool, opts Options, dst map[string]vectorRecord) error {
-	store := newVectorStore(metadataDir)
-	catalog, _, err := store.loadCatalog()
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	payload, err := os.Open(filepath.Join(store.dir, vectorStorePayloadName))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer payload.Close()
-	for inputHash := range targetHashes {
-		entry, ok := catalog.Entries[vectorStoreKey(inputHash, opts.EmbeddingModel, opts.EmbeddingDimensions)]
-		if !ok || entry.Dimensions != opts.EmbeddingDimensions {
-			continue
+func missingReusableInputHashes(chunks []Chunk, records []vectorRecord, opts Options) map[string]bool {
+	available := make(map[string]bool, len(records))
+	for _, record := range records {
+		if reusableVectorRecord(record, opts) {
+			available[record.EmbeddingInputHash] = true
 		}
-		vector, err := readStoredVector(payload, entry)
-		if err != nil {
-			continue
-		}
-		dst[inputHash] = vectorRecord{EmbeddingInputHash: inputHash, EmbeddingModel: opts.EmbeddingModel, Dimensions: opts.EmbeddingDimensions, Vector: vector}
 	}
-	return nil
+	missing := make(map[string]bool)
+	for _, chunk := range chunks {
+		hash := chunkEmbeddingInputHash(chunk, opts.EmbeddingMaxInput)
+		if !available[hash] {
+			missing[hash] = true
+		}
+	}
+	return missing
 }
 
 func reuseVectors(chunks []Chunk, old []vectorRecord, opts Options) (map[string][]float64, []vectorRecord, int) {
@@ -1964,7 +2005,8 @@ func indexRemoteFileStream(ctx context.Context, client openai.EmbeddingClient, f
 		if len(candidates) == 0 {
 			return nil
 		}
-		exact, err := loadExactReuseVectors(ctx, metadataDir, indexDir, candidates, opts)
+		missingHashes := missingReusableInputHashes(candidates, current, opts)
+		exact, err := loadExactReuseVectorsForHashes(ctx, metadataDir, indexDir, missingHashes, opts)
 		if err != nil {
 			return err
 		}

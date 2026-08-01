@@ -12,9 +12,9 @@ func TestBuildFinalReviewReportPreservesProviderAndFutureCheckerResults(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	future, err := checks.NewSkipped("future-language-checker", "no supported project")
-	if err != nil {
-		t.Fatal(err)
+	future := checks.Result{
+		Name: "future-language-checker", Status: checks.StatusSkipped,
+		Diagnostics: []checks.Diagnostic{}, Reason: "no supported project",
 	}
 	results := []checks.Result{first, future}
 	report, err := BuildFinalReviewReport(
