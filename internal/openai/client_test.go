@@ -147,7 +147,7 @@ func TestRequestOmitsPromptCacheControlsForCustomEndpoint(t *testing.T) {
 	}
 }
 
-func TestRequestConvertsPromptCacheControlsForChatGPTEndpoint(t *testing.T) {
+func TestRequestUsesStableCacheKeyWithoutExplicitControlsForChatGPTEndpoint(t *testing.T) {
 	t.Parallel()
 
 	stable := NewMessage("user", "stable context")
@@ -164,10 +164,11 @@ func TestRequestConvertsPromptCacheControlsForChatGPTEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := string(data)
-	for _, want := range []string{`"prompt_cache_key":"review:task-id"`, `"prompt_cache_options":{"mode":"explicit"}`, `"prompt_cache_breakpoint":{"mode":"explicit"}`} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("ChatGPT payload missing %s: %s", want, got)
-		}
+	if !strings.Contains(got, `"prompt_cache_key":"review:task-id"`) {
+		t.Fatalf("ChatGPT payload omitted prompt cache key: %s", got)
+	}
+	if strings.Contains(got, `"prompt_cache_options"`) || strings.Contains(got, `"prompt_cache_breakpoint"`) {
+		t.Fatalf("ChatGPT payload contains unsupported explicit cache controls: %s", got)
 	}
 }
 

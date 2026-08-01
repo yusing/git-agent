@@ -343,9 +343,11 @@ schema, or dynamic instruction prefix can make a child ineligible for a hit.
 Git-agent does not alter branch availability or depth semantics to preserve
 cache identity. Models outside the GPT-5.6 family receive neither the explicit
 breakpoint nor its request options and continue using provider-default caching,
-but official OpenAI requests still carry the stable cache key. Custom endpoints
-receive no prompt-cache fields because Git-agent has no provider capability
-declaration for them.
+but official OpenAI requests still carry the stable cache key. The authenticated
+ChatGPT Codex endpoint also receives only that key because it does not accept
+the explicit options or content-block breakpoint. Custom endpoints receive no
+prompt-cache fields because Git-agent has no provider capability declaration
+for them.
 Child model and reasoning effort inherit by default or select from the bounded model
 catalog returned by `branch_help` and enforced by the strict `branch` function
 definition. Every required leaf must pass the ordinary report and
@@ -713,7 +715,8 @@ every sibling. For GPT-5.6-family models, Git-agent sends that key, the initial
 conversation's last reusable input-text block has one explicit breakpoint, and
 requests use explicit-only cache mode. Follow-ups inherit both the key and
 original marker; a depth reset creates a new key. Official OpenAI models outside
-the GPT-5.6 family send the key while retaining provider-default caching. Custom
+the GPT-5.6 family send the key while retaining provider-default caching. The
+authenticated ChatGPT Codex endpoint also sends only the stable key. Custom
 endpoints receive no prompt-cache fields. Provider prefix-length, retention,
 routing, and eviction rules remain authoritative, so a nonzero cached-token
 count is not guaranteed. `--follow-up <search-id>` appends the

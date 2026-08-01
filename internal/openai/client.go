@@ -854,7 +854,7 @@ func (r Request) toSDKParams() (responses.ResponseNewParams, error) {
 
 	input := make(responses.ResponseInputParam, 0, len(r.Input))
 	promptCacheKeySupported := r.PromptCacheKey != "" && supportsPromptCacheKey(r)
-	explicitPromptCaching := promptCacheKeySupported && supportsExplicitPromptCaching(r.Model) && hasPromptCacheBreakpoint(r.Input)
+	explicitPromptCaching := promptCacheKeySupported && supportsExplicitPromptCaching(r) && hasPromptCacheBreakpoint(r.Input)
 	for _, item := range r.Input {
 		param, err := item.toSDKParam(explicitPromptCaching)
 		if err != nil {
@@ -967,8 +967,12 @@ func (i Item) toSDKParam(explicitPromptCaching bool) (responses.ResponseInputIte
 	}
 }
 
-func supportsExplicitPromptCaching(model string) bool {
-	return model == "gpt-5.6" || strings.HasPrefix(model, "gpt-5.6-")
+func supportsExplicitPromptCaching(request Request) bool {
+	if request.Model != "gpt-5.6" && !strings.HasPrefix(request.Model, "gpt-5.6-") {
+		return false
+	}
+	endpoint, err := url.Parse(request.BaseURL)
+	return err == nil && strings.EqualFold(endpoint.Hostname(), "api.openai.com")
 }
 
 func supportsPromptCacheKey(request Request) bool {
