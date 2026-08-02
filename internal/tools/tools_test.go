@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/yusing/git-agent/internal/gitctx"
@@ -731,6 +732,40 @@ func TestInspectFileBoundsOutlineAndSkipsFencedMarkdown(t *testing.T) {
 	cancel()
 	if _, _, _, _, err := inspectContent(ctx, strings.NewReader("content"), true); !errors.Is(err, context.Canceled) {
 		t.Fatalf("inspectContent error = %v, want context cancellation", err)
+	}
+}
+
+func TestTrackedRepositoryPathsConcurrently(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	for i := range 512 {
+		mustWriteFile(t, filepath.Join(dir, "files", fmt.Sprintf("%04d.txt", i)), "needle\n")
+	}
+	runGit(t, dir, "add", ".")
+
+	repo, err := gitctx.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	errs := make(chan error, 64)
+	var wait sync.WaitGroup
+	for range 64 {
+		wait.Go(func() {
+			<-start
+			_, _, err := trackedRepositoryPaths(repo, dir)
+			errs <- err
+		})
+	}
+	close(start)
+	wait.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

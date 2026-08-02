@@ -20,7 +20,7 @@ import (
 var emptyStatusNodeHash = make([]byte, 24)
 
 func (r *Repository) status() (git.Status, error) {
-	index, err := r.Repo.Storer.Index()
+	index, err := r.ReadIndex()
 	if err != nil {
 		return nil, err
 	}

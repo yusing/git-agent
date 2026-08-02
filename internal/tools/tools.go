@@ -346,7 +346,7 @@ func trackedRepositoryPaths(repo *gitctx.Repository, rootPath string) (map[strin
 	if err != nil {
 		return nil, nil, err
 	}
-	idx, err := repo.Repo.Storer.Index()
+	idx, err := repo.ReadIndex()
 	if err != nil {
 		return nil, nil, err
 	}

@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	git "github.com/go-git/go-git/v6"
@@ -37,6 +38,7 @@ type Repository struct {
 	HeadSHA    string
 	IsDetached bool
 	Repo       *git.Repository
+	indexMu    sync.Mutex
 }
 
 type CommitInfo struct {
@@ -180,6 +182,14 @@ func repositoryFromHead(root, workPath string, repo *git.Repository) (*Repositor
 		}
 	}
 	return result, nil
+}
+
+// ReadIndex serializes go-git's filesystem index decoder, which reuses mutable
+// hash state and is unsafe to call concurrently through one repository.
+func (r *Repository) ReadIndex() (*index.Index, error) {
+	r.indexMu.Lock()
+	defer r.indexMu.Unlock()
+	return r.Repo.Storer.Index()
 }
 
 func (r *Repository) Summary() map[string]any {
@@ -949,7 +959,7 @@ func (r *Repository) OpenFile(source FileSource, path string) (io.ReadCloser, er
 		}
 		return file, nil
 	case FileSourceIndex:
-		idx, err := r.Repo.Storer.Index()
+		idx, err := r.ReadIndex()
 		if err != nil {
 			return nil, err
 		}
@@ -1302,7 +1312,7 @@ func (r *Repository) diffIndexAgainstHead() (string, error) {
 }
 
 func (r *Repository) indexFileContent(path string) (string, error) {
-	idx, err := r.Repo.Storer.Index()
+	idx, err := r.ReadIndex()
 	if err != nil {
 		return "", err
 	}
@@ -1500,7 +1510,7 @@ func hashWorktreePath(hasher hash.Hash, root *os.Root, path string) error {
 }
 
 func (r *Repository) worktreeTree(status git.Status) (*object.Tree, error) {
-	idx, err := r.Repo.Storer.Index()
+	idx, err := r.ReadIndex()
 	if err != nil {
 		return nil, err
 	}
@@ -1759,7 +1769,7 @@ func (r *Repository) headTree() (*object.Tree, error) {
 }
 
 func (r *Repository) indexTree() (*object.Tree, error) {
-	idx, err := r.Repo.Storer.Index()
+	idx, err := r.ReadIndex()
 	if err != nil {
 		return nil, err
 	}

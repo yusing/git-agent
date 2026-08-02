@@ -185,7 +185,7 @@ func reviewSubmoduleRegistrations(repo *Repository, baseHashes map[string]string
 	if err != nil {
 		return submoduleRegistrations{}, err
 	}
-	index, err := repo.Repo.Storer.Index()
+	index, err := repo.ReadIndex()
 	if err != nil {
 		return submoduleRegistrations{}, err
 	}
