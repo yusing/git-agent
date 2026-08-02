@@ -234,7 +234,9 @@ Explicit worktree-source requests for `read_file`,
 selected source and applies byte/line caps before materializing content. Report
 validation verifies every evidence path and inclusive line end against the
 authoritative worktree/index source, with HEAD fallback for deleted diff
-evidence and one-line synthetic evidence for changed gitlinks.
+evidence and one-line synthetic evidence for changed gitlinks. For a nonempty
+text source ending in a newline, the immediately following blank EOF line is
+also valid; later lines remain out of range.
 
 Review examines correctness, security, reliability, performance,
 maintainability, tests, and style. Style findings are preserved alongside other

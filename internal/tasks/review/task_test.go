@@ -233,25 +233,29 @@ func TestStrictJSONBoundaryRejectsExtensionsAndTrailingValues(t *testing.T) {
 	}
 }
 
-func TestValidateRepositoryRejectsMissingAndOutOfRangeEvidence(t *testing.T) {
+func TestValidateRepositoryAllowsTrailingBlankEOFLineAndRejectsOutOfRangeEvidence(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	if _, err := git.PlainInit(dir, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "app.go"), []byte("package app\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "app.go"), []byte(strings.Repeat("line\n", 62)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	repo, err := gitctx.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	report := `{"summary":"one","recommendation":"COMMENT","findings":[{"severity":"MEDIUM","aspect":"correctness","title":"bad","impact":"bad result","evidences":[{"title":"location","path":"app.go","line_start":1,"line_end":2}],"proposed_fix":"fix"}]}`
-	if errs := ValidateRepository(KindReview, report, repo, ModeCodebase, nil, gitctx.ChangeFingerprint{}); !containsError(errs, "line_end 2 exceeds") {
+	report := `{"summary":"one","recommendation":"COMMENT","findings":[{"severity":"MEDIUM","aspect":"correctness","title":"bad","impact":"bad result","evidences":[{"title":"location","path":"app.go","line_start":59,"line_end":63}],"proposed_fix":"fix"}]}`
+	if errs := ValidateRepository(KindReview, report, repo, ModeCodebase, nil, gitctx.ChangeFingerprint{}); len(errs) != 0 {
+		t.Fatalf("trailing blank EOF line errors = %v", errs)
+	}
+	report = strings.Replace(report, `"line_end":63`, `"line_end":64`, 1)
+	if errs := ValidateRepository(KindReview, report, repo, ModeCodebase, nil, gitctx.ChangeFingerprint{}); !containsError(errs, "line_end 64 exceeds") {
 		t.Fatalf("out-of-range errors = %v", errs)
 	}
-	report = strings.Replace(report, `"path":"app.go","line_start":1,"line_end":2`, `"path":"missing.go","line_start":1,"line_end":1`, 1)
+	report = strings.Replace(report, `"path":"app.go","line_start":59,"line_end":64`, `"path":"missing.go","line_start":1,"line_end":1`, 1)
 	if errs := ValidateRepository(KindReview, report, repo, ModeCodebase, nil, gitctx.ChangeFingerprint{}); !containsError(errs, "does not exist") {
 		t.Fatalf("missing-path errors = %v", errs)
 	}

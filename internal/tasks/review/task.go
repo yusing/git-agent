@@ -562,10 +562,14 @@ func validateEvidenceLocation(repo *gitctx.Repository, mode Mode, evidence Evide
 
 func readerHasLine(reader io.Reader, wanted int) (bool, error) {
 	line := 1
+	hasContent := false
+	endsWithNewline := false
 	buffer := make([]byte, 32*1024)
 	for {
 		n, err := reader.Read(buffer)
 		for _, value := range buffer[:n] {
+			hasContent = true
+			endsWithNewline = value == '\n'
 			if line >= wanted {
 				return true, nil
 			}
@@ -575,7 +579,7 @@ func readerHasLine(reader io.Reader, wanted int) (bool, error) {
 		}
 		if err != nil {
 			if err == io.EOF {
-				return false, nil
+				return hasContent && endsWithNewline && line >= wanted, nil
 			}
 			return false, err
 		}
