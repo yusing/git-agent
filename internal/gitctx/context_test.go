@@ -452,6 +452,75 @@ func TestUncommittedSnapshotHonorsRepositoryExcludeFile(t *testing.T) {
 	}
 }
 
+func TestUncommittedSnapshotMatchesGitGlobalIgnoreSemantics(t *testing.T) {
+	home := t.TempDir()
+	globalConfig := filepath.Join(home, ".gitconfig")
+	globalIgnore := filepath.Join(home, ".gitignore_global")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+	repoDir := initTempRepo(t)
+	writeFile(t, globalIgnore, "*.local\n")
+	runGit(t, repoDir, "config", "--file", globalConfig, "core.excludesFile", "~/.gitignore_global")
+	writeFile(t, filepath.Join(repoDir, ".gitignore"), "!keep.local\n")
+	runGit(t, repoDir, "add", ".gitignore")
+	runGit(t, repoDir, "commit", "-m", "base")
+	for _, path := range []string{"ignored.local", "keep.local", "visible.txt"} {
+		writeFile(t, filepath.Join(repoDir, path), path+"\n")
+	}
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repo.UncommittedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"ignored.local", "keep.local", "visible.txt"} {
+		gotIgnored := !slices.Contains(snapshot.Paths, path)
+		wantIgnored := gitPathIgnored(t, repoDir, path)
+		if gotIgnored != wantIgnored {
+			t.Errorf("ignore decision for %q = %v, Git says %v; snapshot paths: %#v", path, gotIgnored, wantIgnored, snapshot.Paths)
+		}
+	}
+}
+
+func TestUncommittedSnapshotMatchesGitDefaultGlobalIgnoreSemantics(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(home, ".config")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("GIT_CONFIG_GLOBAL", "")
+	if err := os.Unsetenv("GIT_CONFIG_GLOBAL"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(xdg, "git", "ignore"), "*.default-ignore\n")
+	writeFile(t, filepath.Join(repoDir, "ignored.default-ignore"), "ignored\n")
+	writeFile(t, filepath.Join(repoDir, "visible.txt"), "visible\n")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repo.UncommittedSnapshot(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"ignored.default-ignore", "visible.txt"} {
+		gotIgnored := !slices.Contains(snapshot.Paths, path)
+		wantIgnored := gitPathIgnored(t, repoDir, path)
+		if gotIgnored != wantIgnored {
+			t.Errorf("ignore decision for %q = %v, Git says %v; snapshot paths: %#v", path, gotIgnored, wantIgnored, snapshot.Paths)
+		}
+	}
+}
+
 func TestUncommittedSnapshotScopesNestedBasenameRules(t *testing.T) {
 	t.Parallel()
 
@@ -1313,6 +1382,22 @@ func gitHead(t *testing.T, dir string) string {
 		t.Fatalf("git rev-parse HEAD failed: %v\n%s", err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func gitPathIgnored(t *testing.T, dir, path string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "check-ignore", "--quiet", "--no-index", "--", path)
+	cmd.Dir = dir
+	err := cmd.Run()
+	if err == nil {
+		return true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false
+	}
+	t.Fatalf("git check-ignore %q failed: %v", path, err)
+	return false
 }
 
 func writeFile(t *testing.T, path, content string) {

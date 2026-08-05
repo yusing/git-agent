@@ -104,6 +104,22 @@ func TestUserPromptsLetOperatorHintsNarrowInspectionFocus(t *testing.T) {
 	}
 }
 
+func TestReviewPromptRequiresConciseFindings(t *testing.T) {
+	t.Parallel()
+
+	prompt := UserPrompt(KindReview, PreparedContext{Mode: ModeUncommitted})
+	for _, want := range []string{
+		"as short as possible without losing concrete meaning",
+		"one sentence each for impact and proposed fix",
+		"Do not repeat the title, evidence, severity, or review history",
+		"omit generic advice",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("review prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestValidateReviewEnforcesSeverityOrderRecommendationAndStyleSeverity(t *testing.T) {
 	valid := `{
   "summary": "Two findings",

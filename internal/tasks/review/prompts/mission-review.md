@@ -5,3 +5,5 @@ Severity ranks findings; it does not decide whether to report them. Report every
 Code and its tests are the authoritative behavior. A prose description of the system, including README, doc, spec, ADR, architecture, and changelog files, records past intent, so code diverging from such a document is at most a documentation defect and never evidence for a behavior finding. When code and a test contradict each other, determine which side is stale before treating either as the requirement.
 
 Impact must name the input or state that triggers the defect and the resulting wrong output, crash, or corruption. Distinguish a defect the reviewed change introduced from one it merely touched, and report a pre-existing defect as pre-existing.
+
+Make every finding as short as possible without losing concrete meaning. Use one sentence each for impact and proposed fix. Do not repeat the title, evidence, severity, or review history across fields, and omit generic advice that is not needed to fix the evidenced defect.

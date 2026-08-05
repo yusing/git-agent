@@ -6,14 +6,18 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strings"
 
 	"github.com/go-git/go-billy/v6"
 	git "github.com/go-git/go-git/v6"
+	gitconfig "github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/utils/merkletrie"
 	filesystemnode "github.com/go-git/go-git/v6/utils/merkletrie/filesystem"
 	indexnode "github.com/go-git/go-git/v6/utils/merkletrie/index"
 	"github.com/go-git/go-git/v6/utils/merkletrie/noder"
+	"github.com/go-git/go-git/v6/x/plugin"
 	ignorectx "github.com/yusing/git-agent/internal/ignore"
 )
 
@@ -94,6 +98,12 @@ func (r *Repository) status() (git.Status, error) {
 
 func (r *Repository) worktreeIgnoreMatcher() (ignorectx.Matcher, error) {
 	matcher := ignorectx.New()
+	globalExclude, err := r.globalExclude()
+	if err != nil {
+		return ignorectx.Matcher{}, err
+	}
+	matcher = matcher.Append(globalExclude, nil)
+
 	exclude, err := r.repositoryExclude()
 	if err != nil {
 		return ignorectx.Matcher{}, err
@@ -135,6 +145,111 @@ func (r *Repository) worktreeIgnoreMatcher() (ignorectx.Matcher, error) {
 		return ignorectx.Matcher{}, err
 	}
 	return matcher.Append(".git-agent/\n.omx/\n", nil), nil
+}
+
+func (r *Repository) globalExclude() (string, error) {
+	path, configured, err := r.configuredExcludesFile()
+	if err != nil {
+		return "", err
+	}
+	if !configured {
+		path, err = defaultGlobalExcludePath()
+		if err != nil {
+			return "", err
+		}
+	}
+	if path == "" {
+		return "", nil
+	}
+	path, err = expandGlobalExcludePath(path, r.RootPath)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	return string(data), err
+}
+
+func (r *Repository) configuredExcludesFile() (string, bool, error) {
+	source, err := plugin.Get(plugin.ConfigLoader())
+	if err != nil {
+		return "", false, err
+	}
+
+	var path string
+	var configured bool
+	for _, scope := range []gitconfig.Scope{gitconfig.SystemScope, gitconfig.GlobalScope} {
+		storer, err := source.Load(scope)
+		if err != nil {
+			return "", false, err
+		}
+		cfg, err := storer.Config()
+		if err != nil {
+			return "", false, err
+		}
+		if value, ok := excludesFileOption(cfg); ok {
+			path, configured = value, true
+		}
+	}
+
+	local, err := r.Repo.Config()
+	if err != nil {
+		return "", false, err
+	}
+	if value, ok := excludesFileOption(local); ok {
+		path, configured = value, true
+	}
+	return path, configured, nil
+}
+
+func excludesFileOption(cfg *gitconfig.Config) (string, bool) {
+	if cfg == nil || cfg.Raw == nil || !cfg.Raw.HasSection("core") {
+		return "", false
+	}
+	section := cfg.Raw.Section("core")
+	if !section.HasOption("excludesFile") {
+		return "", false
+	}
+	return section.Option("excludesFile"), true
+}
+
+func defaultGlobalExcludePath() (string, error) {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "git", "ignore"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", "git", "ignore"), nil
+}
+
+func expandGlobalExcludePath(path, root string) (string, error) {
+	if !strings.HasPrefix(path, "~") {
+		if filepath.IsAbs(path) {
+			return filepath.Clean(path), nil
+		}
+		return filepath.Join(root, path), nil
+	}
+
+	name, rest, _ := strings.Cut(strings.TrimPrefix(filepath.ToSlash(path), "~"), "/")
+	var home string
+	if name == "" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+	} else {
+		account, err := user.Lookup(name)
+		if err != nil {
+			return "", err
+		}
+		home = account.HomeDir
+	}
+	return filepath.Join(home, filepath.FromSlash(rest)), nil
 }
 
 type repositoryFilesystemProvider interface {
