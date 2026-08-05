@@ -203,6 +203,62 @@ func TestRunReviewTreeSupportsImmediateNestedFanout(t *testing.T) {
 	}
 }
 
+func TestRunReviewTreePreservesSiblingWhenChildReportsIncomplete(t *testing.T) {
+	client := openaiClientFunc(func(_ context.Context, request openai.Request) (openai.Response, error) {
+		switch branchIDFromInput(request.Input) {
+		case "":
+			return branchResponse("root", "incomplete", "completed"), nil
+		case "b1":
+			return openai.Response{Text: `{"summary":"Inspection incomplete: tool budget prevented repository inspection.","opportunities":[]}`}, nil
+		case "b2":
+			return openai.Response{Text: `{"summary":"Completed inspection.","opportunities":[{"aspect":"clarity","title":"Flatten control flow","body":"The nested branch is redundant.","evidences":[{"title":"Nested branch","path":"a.go","line_start":1,"line_end":1}],"proposed_change":"Return early."}]}`}, nil
+		default:
+			return openai.Response{}, errors.New("unexpected branch")
+		}
+	})
+	var events []trace.Event
+	recorder, err := trace.NewEventStream("simplify", func(event trace.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := agent.OpenAIRunner{
+		Config: config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 3},
+		Client: client,
+		Validator: func(text string) []string {
+			return reviewtask.Validate(reviewtask.KindSimplify, text)
+		},
+		Trace: recorder,
+	}
+	result, err := runReviewTree(t.Context(), reviewtask.KindSimplify, reviewtask.DepthBalanced, runner, agent.Request{
+		UserPrompt: "inspect", MaxSteps: 3,
+	}, recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var report reviewtask.SimplifyReport
+	if err := json.Unmarshal([]byte(result.Text), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Opportunities) != 1 || report.Opportunities[0].Title != "Flatten control flow" {
+		t.Fatalf("opportunities = %#v", report.Opportunities)
+	}
+	for _, want := range []string{
+		"incomplete: Inspection incomplete: tool budget prevented repository inspection.",
+		"completed: Completed inspection.",
+	} {
+		if !strings.Contains(report.Summary, want) {
+			t.Errorf("summary missing %q: %s", want, report.Summary)
+		}
+	}
+	if countEvents(events, "branch.completed") != 2 || countEvents(events, "branch.failed") != 0 {
+		t.Fatalf("events = %#v", eventKinds(events))
+	}
+}
+
 func TestRunReviewTreePreservesPromptCacheControlsAcrossForks(t *testing.T) {
 	var mu sync.Mutex
 	var requests []openai.Request

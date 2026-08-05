@@ -360,15 +360,19 @@ ChatGPT Codex endpoint also receives only that key because it does not accept
 the explicit options or content-block breakpoint. Custom endpoints receive no
 prompt-cache fields because Git-agent has no provider capability declaration
 for them.
-Child model and reasoning effort inherit by default or select from the bounded model
-catalog returned by `branch_help` and enforced by the strict `branch` function
-definition. Every required leaf must pass the ordinary report and
-repository-evidence validators. Git-agent then
+Child model and reasoning effort inherit by default or select from the bounded
+model catalog returned by `branch_help` and enforced by the strict `branch`
+function. Every required leaf must pass the ordinary report and
+repository-evidence validators. A delegated scope that cannot be fully inspected
+returns a validator-valid leaf which describes the concrete coverage limitation
+only in its summary and contains no findings or opportunities. Git-agent treats
+that leaf as completed, retains its summary and successful sibling items, then
 concatenates leaf items in recursive child-array order, applies the existing
 stable review severity ordering and recommendation rule, concatenates
 scope-labeled summaries, and validates the assembled report without a reducer
-model. Review static checks run once after that merge. Any required child
-failure cancels remaining siblings and fails the one detached task instead of
+model. Review static checks run once after that merge. A provider, transport,
+parse, validation, cancellation, or deadline failure is instead a required-child
+failure: it cancels remaining siblings and fails the one detached task without
 publishing a partial report.
 
 Both commands always bind an HTTP server to a private local Unix-domain socket

@@ -104,6 +104,38 @@ func TestUserPromptsLetOperatorHintsNarrowInspectionFocus(t *testing.T) {
 	}
 }
 
+func TestSystemPromptsKeepIncompleteDelegationOutOfReportItems(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		kind       Kind
+		emptyItems string
+		rerunItem  string
+	}{
+		{kind: KindReview, emptyItems: "`findings: []`", rerunItem: "request to rerun as a finding"},
+		{kind: KindSimplify, emptyItems: "`opportunities: []`", rerunItem: "request to rerun as an opportunity"},
+	}
+	for _, test := range tests {
+		t.Run(string(test.kind), func(t *testing.T) {
+			t.Parallel()
+			prompt := SystemPrompt(test.kind)
+			for _, want := range []string{
+				"coverage limitation only in `summary`",
+				test.emptyItems,
+				"Never represent incomplete work",
+				"never cite repository files as evidence for an operational limitation",
+			} {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("%s prompt missing %q:\n%s", test.kind, want, prompt)
+				}
+			}
+			if !strings.Contains(prompt, test.rerunItem) {
+				t.Errorf("%s prompt missing %q:\n%s", test.kind, test.rerunItem, prompt)
+			}
+		})
+	}
+}
+
 func TestReviewPromptRequiresConciseFindings(t *testing.T) {
 	t.Parallel()
 
