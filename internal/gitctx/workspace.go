@@ -16,6 +16,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	ignorectx "github.com/yusing/git-agent/internal/ignore"
 	"github.com/yusing/git-agent/internal/textutil"
 )
 
@@ -461,15 +462,14 @@ func prefixRepoPath(prefix, path string) string {
 	return prefix + "/" + filepath.ToSlash(path)
 }
 
-func (r *Repository) ReviewComponentPaths() ([]string, error) {
+func (r *Repository) walkReviewRepositories(visit func(*Repository, string) error) error {
 	baseTree, err := r.headTree()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	var paths []string
 	visited := map[string]bool{}
-	var collect func(*Repository, string, *object.Tree) error
-	collect = func(repo *Repository, prefix string, base *object.Tree) error {
+	var walk func(*Repository, string, *object.Tree) error
+	walk = func(repo *Repository, prefix string, base *object.Tree) error {
 		root, err := filepath.EvalSymlinks(repo.RootPath)
 		if err != nil {
 			return err
@@ -478,21 +478,66 @@ func (r *Repository) ReviewComponentPaths() ([]string, error) {
 			return nil
 		}
 		visited[root] = true
-		paths = append(paths, prefix)
+		if err := visit(repo, prefix); err != nil {
+			return err
+		}
 		submodules, err := initializedSubmodules(repo, base)
 		if err != nil {
 			return err
 		}
 		for _, submodule := range submodules {
-			if err := collect(submodule.repo, prefixRepoPath(prefix, submodule.path), submodule.baseTree); err != nil {
+			if err := walk(submodule.repo, prefixRepoPath(prefix, submodule.path), submodule.baseTree); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	if err := collect(r, "", baseTree); err != nil {
+	return walk(r, "", baseTree)
+}
+
+func (r *Repository) ReviewComponentPaths() ([]string, error) {
+	var paths []string
+	if err := r.walkReviewRepositories(func(_ *Repository, prefix string) error {
+		paths = append(paths, prefix)
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	slices.Sort(paths)
 	return slices.Compact(paths), nil
+}
+
+// ReviewTrackedPaths returns index paths from the repository and initialized submodules.
+func (r *Repository) ReviewTrackedPaths() ([]string, error) {
+	var paths []string
+	if err := r.walkReviewRepositories(func(repo *Repository, prefix string) error {
+		index, err := repo.ReadIndex()
+		if err != nil {
+			return err
+		}
+		for _, entry := range index.Entries {
+			paths = append(paths, prefixRepoPath(prefix, entry.Name))
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	slices.Sort(paths)
+	return slices.Compact(paths), nil
+}
+
+// ReviewIgnoreMatchers returns effective ignore rules for each repository component.
+func (r *Repository) ReviewIgnoreMatchers() (map[string]ignorectx.Matcher, error) {
+	matchers := map[string]ignorectx.Matcher{}
+	if err := r.walkReviewRepositories(func(repo *Repository, prefix string) error {
+		matcher, err := repo.WorktreeIgnoreMatcher()
+		if err != nil {
+			return err
+		}
+		matchers[prefix] = matcher
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return matchers, nil
 }

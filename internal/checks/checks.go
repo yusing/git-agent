@@ -3,11 +3,14 @@ package checks
 import (
 	"fmt"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"unicode/utf8"
+
+	ignorectx "github.com/yusing/git-agent/internal/ignore"
 )
 
 const (
@@ -28,10 +31,12 @@ const (
 )
 
 type Scope struct {
-	kind       ScopeKind
-	root       string
-	paths      []string
-	components []string
+	kind           ScopeKind
+	root           string
+	paths          []string
+	components     []string
+	ignoreMatchers map[string]ignorectx.Matcher
+	trackedPaths   map[string]bool
 }
 
 func NewChangedScope(root string, paths, components []string) (Scope, error) {
@@ -55,8 +60,49 @@ func NewChangedScope(root string, paths, components []string) (Scope, error) {
 	return scope, nil
 }
 
-func NewCodebaseScope(root string, components []string) (Scope, error) {
-	return newScope(ScopeCodebase, root, components)
+func NewCodebaseScope(
+	root string,
+	components []string,
+	ignoreMatchers map[string]ignorectx.Matcher,
+	trackedPaths []string,
+) (Scope, error) {
+	scope, err := newScope(ScopeCodebase, root, components)
+	if err != nil {
+		return Scope{}, err
+	}
+	scope.ignoreMatchers = make(map[string]ignorectx.Matcher, len(ignoreMatchers))
+	for component, matcher := range ignoreMatchers {
+		normalized := component
+		if component != "" {
+			normalized, err = normalizeRepositoryPath(component)
+			if err != nil {
+				return Scope{}, fmt.Errorf("codebase checker scope ignore matcher: %w", err)
+			}
+		}
+		if _, exists := scope.ignoreMatchers[normalized]; exists {
+			return Scope{}, fmt.Errorf("codebase checker scope has duplicate ignore matcher for component %q", normalized)
+		}
+		scope.ignoreMatchers[normalized] = matcher
+	}
+	for _, component := range scope.components {
+		if _, exists := scope.ignoreMatchers[component]; !exists {
+			return Scope{}, fmt.Errorf("codebase checker scope requires ignore matcher for component %q", component)
+		}
+	}
+	if len(scope.ignoreMatchers) != len(scope.components) {
+		return Scope{}, fmt.Errorf("codebase checker scope ignore matchers do not match repository components")
+	}
+	scope.trackedPaths = make(map[string]bool, len(trackedPaths))
+	for _, trackedPath := range trackedPaths {
+		normalized, err := normalizeRepositoryPath(trackedPath)
+		if err != nil {
+			return Scope{}, fmt.Errorf("codebase checker scope tracked path: %w", err)
+		}
+		for current := normalized; current != "."; current = pathpkg.Dir(current) {
+			scope.trackedPaths[current] = true
+		}
+	}
+	return scope, nil
 }
 
 func newScope(kind ScopeKind, root string, components []string) (Scope, error) {
@@ -108,6 +154,29 @@ func (s Scope) Kind() ScopeKind {
 
 func (s Scope) Root() string {
 	return s.root
+}
+
+func (s Scope) Ignored(path string, isDir bool) bool {
+	normalized, err := normalizeRepositoryPath(path)
+	if err != nil {
+		return false
+	}
+	if s.trackedPaths[normalized] {
+		return false
+	}
+	component := ""
+	for _, candidate := range s.components {
+		if candidate != "" &&
+			(normalized == candidate || strings.HasPrefix(normalized, candidate+"/")) &&
+			len(candidate) > len(component) {
+			component = candidate
+		}
+	}
+	relative := normalized
+	if component != "" {
+		relative = strings.TrimPrefix(strings.TrimPrefix(normalized, component), "/")
+	}
+	return s.ignoreMatchers[component].Match(ignorectx.PathParts(relative), isDir)
 }
 
 func (s Scope) Paths() []string {
@@ -165,6 +234,14 @@ func (s Scope) validate() error {
 	case ScopeCodebase:
 		if len(s.paths) != 0 {
 			return fmt.Errorf("codebase checker scope must not contain paths")
+		}
+		if len(s.ignoreMatchers) != len(s.components) {
+			return fmt.Errorf("codebase checker scope ignore matchers are invalid")
+		}
+		for _, component := range s.components {
+			if _, exists := s.ignoreMatchers[component]; !exists {
+				return fmt.Errorf("codebase checker scope ignore matchers are invalid")
+			}
 		}
 	default:
 		return fmt.Errorf("unknown checker scope kind %q", s.kind)

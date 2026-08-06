@@ -240,7 +240,10 @@ fail before contacting the provider.
 Review final reports also include built-in static-check results. For changed Go
 files, the bundled golangci-lint check analyzes each affected package with its
 complete production and test file context, while reporting diagnostics only for
-files in the selected review scope.
+files in the selected review scope. Codebase checks apply effective Git ignore
+rules separately in each initialized repository component. They prune ignored
+untracked directories before module discovery. Tracked paths remain in scope,
+while ignored private and generated data cannot block inspection.
 
 Both commands offer provider-hosted web search on every normal model step using
 the existing OpenAI API-key or ChatGPT/Codex-plan login. API-key auth caps hosted

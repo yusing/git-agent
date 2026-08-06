@@ -32,7 +32,7 @@ func (r *Repository) status() (git.Status, error) {
 	if err != nil {
 		return nil, err
 	}
-	matcher, err := r.worktreeIgnoreMatcher()
+	matcher, err := r.WorktreeIgnoreMatcher()
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +96,8 @@ func (r *Repository) status() (git.Status, error) {
 	return status, nil
 }
 
-func (r *Repository) worktreeIgnoreMatcher() (ignorectx.Matcher, error) {
+// WorktreeIgnoreMatcher returns the effective Git ignore rules for the worktree.
+func (r *Repository) WorktreeIgnoreMatcher() (ignorectx.Matcher, error) {
 	matcher := ignorectx.New()
 	globalExclude, err := r.globalExclude()
 	if err != nil {
@@ -127,6 +128,11 @@ func (r *Repository) worktreeIgnoreMatcher() (ignorectx.Matcher, error) {
 			}
 			if matcher.Match(ignorectx.PathParts(rel), true) {
 				return filepath.SkipDir
+			}
+			if _, gitErr := os.Lstat(filepath.Join(path, ".git")); gitErr == nil {
+				return filepath.SkipDir
+			} else if !errors.Is(gitErr, fs.ErrNotExist) {
+				return gitErr
 			}
 		}
 

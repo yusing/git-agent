@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/yusing/git-agent/internal/checks"
+	ignorectx "github.com/yusing/git-agent/internal/ignore"
 )
 
 func TestPlanChangedTargetsEachAffectedPackageOnce(t *testing.T) {
@@ -103,7 +104,7 @@ func TestPlanCodebaseFindsEveryModuleWithoutRootFallback(t *testing.T) {
 	if err := os.Symlink(filepath.Join(root, "linked"), filepath.Join(root, "symlinked")); err != nil {
 		t.Fatal(err)
 	}
-	scope, err := checks.NewCodebaseScope(root, []string{""})
+	scope, err := checks.NewCodebaseScope(root, []string{""}, map[string]ignorectx.Matcher{"": ignorectx.New()}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,6 +118,62 @@ func TestPlanCodebaseFindsEveryModuleWithoutRootFallback(t *testing.T) {
 		{moduleRoot: filepath.Join(root, "one"), targets: []string{"./..."}},
 		{moduleRoot: filepath.Join(root, "two"), targets: []string{"./..."}},
 		{moduleRoot: filepath.Join(root, "two", "nested"), targets: []string{"./..."}},
+	}
+	if !reflect.DeepEqual(plan.invocations, want) {
+		t.Fatalf("invocations:\n got %#v\nwant %#v", plan.invocations, want)
+	}
+}
+
+func TestPlanCodebasePrunesIgnoredUntrackedModuleTree(t *testing.T) {
+	root := t.TempDir()
+	writePlanFile(t, root, "go.mod", "module root\n")
+	writePlanFile(t, root, ".local/share/containers/storage/overlay/cache/go.mod", "module ignored\n")
+	writePlanFile(t, root, ".local/share/tracked/go.mod", "module tracked\n")
+	matcher := ignorectx.New().Append("*\n!go.mod\n!.local/\n!.local/share/\n!.local/share/keep.txt\n", nil)
+	scope, err := checks.NewCodebaseScope(root, []string{""}, map[string]ignorectx.Matcher{"": matcher}, []string{".local/share/tracked/go.mod"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	genericPlan, err := New().Plan(scope)
+	if err != nil {
+		t.Fatalf("ignored container subtree blocked planning: %v", err)
+	}
+	plan := genericPlan.(*checkerPlan)
+	want := []invocation{
+		{moduleRoot: root, targets: []string{"./..."}},
+		{moduleRoot: filepath.Join(root, ".local", "share", "tracked"), targets: []string{"./..."}},
+	}
+	if !reflect.DeepEqual(plan.invocations, want) {
+		t.Fatalf("invocations:\n got %#v\nwant %#v", plan.invocations, want)
+	}
+}
+
+func TestPlanCodebaseAppliesIgnoreRulesWithinRepositoryComponents(t *testing.T) {
+	root := t.TempDir()
+	writePlanFile(t, root, "go.mod", "module root\n")
+	writePlanFile(t, root, "sub/go.mod", "module sub\n")
+	writePlanFile(t, root, "sub/generated/go.mod", "module generated\n")
+	writePlanFile(t, root, "sub/cache/go.mod", "module cache\n")
+
+	matchers := map[string]ignorectx.Matcher{
+		"":    ignorectx.New().Append("generated/\n", nil),
+		"sub": ignorectx.New().Append("cache/\n", nil),
+	}
+	scope, err := checks.NewCodebaseScope(root, []string{"", "sub"}, matchers, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	genericPlan, err := New().Plan(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := genericPlan.(*checkerPlan)
+	want := []invocation{
+		{moduleRoot: root, targets: []string{"./..."}},
+		{moduleRoot: filepath.Join(root, "sub"), targets: []string{"./..."}},
+		{moduleRoot: filepath.Join(root, "sub", "generated"), targets: []string{"./..."}},
 	}
 	if !reflect.DeepEqual(plan.invocations, want) {
 		t.Fatalf("invocations:\n got %#v\nwant %#v", plan.invocations, want)

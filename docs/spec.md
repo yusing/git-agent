@@ -276,13 +276,19 @@ The built-in `golangci-lint` check applies only when it selects at least one Go
 target from the authoritative review scope; otherwise it is absent from
 `checks`. Uncommitted review uses the verified worktree; staged review uses the
 verified materialized index snapshot; codebase review runs `./...` once for each
-discovered Go module. In changed modes, existing regular `.go` paths select the
-nearest Go module without crossing a repository-component boundary, then select
-their exact package directories. Duplicate paths and mixed production/test
-paths in one directory produce one package invocation. Non-Go, deleted,
-nonexistent, symlinked, escaping, and module-less paths do not become linter
-arguments. Renames therefore select the existing destination and skip a missing
-source.
+discovered Go module. Codebase module discovery applies ignore rules separately
+within the top-level repository and each initialized submodule. Each repository
+component uses its effective global exclude file, `$GIT_COMMON_DIR/info/exclude`,
+nested `.gitignore` files, and private `.git-agent/` and `.omx/` exclusions
+before traversal enters an untracked directory. Tracked paths remain in scope.
+Access failures in unignored directories remain planning errors. In changed
+modes, existing regular `.go`
+paths select the nearest Go module without crossing a repository-component
+boundary, then select their exact package
+directories. Duplicate paths and mixed production/test paths in one directory
+produce one package invocation. Non-Go, deleted, nonexistent, symlinked,
+escaping, and module-less paths do not become linter arguments. Renames
+therefore select the existing destination and skip a missing source.
 
 Each selected changed package is passed to golangci-lint as an exact local
 package pattern, not as individual `.go` files, so parsing and type checking see

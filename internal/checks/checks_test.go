@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	ignorectx "github.com/yusing/git-agent/internal/ignore"
 )
 
 type fakePlan struct {
@@ -103,7 +105,7 @@ func TestSetRunsRegisteredCheckersInOrderWithImmutableScope(t *testing.T) {
 }
 
 func TestSetOmitsInapplicableCheckersWithoutProgressOrExecution(t *testing.T) {
-	scope, err := NewCodebaseScope(t.TempDir(), []string{""})
+	scope, err := NewCodebaseScope(t.TempDir(), []string{""}, map[string]ignorectx.Matcher{"": ignorectx.New()}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +163,7 @@ func TestSetRejectsMalformedDuplicateAndMismatchedContracts(t *testing.T) {
 		})
 	}
 
-	scope, err := NewCodebaseScope(t.TempDir(), []string{""})
+	scope, err := NewCodebaseScope(t.TempDir(), []string{""}, map[string]ignorectx.Matcher{"": ignorectx.New()}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

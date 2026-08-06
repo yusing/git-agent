@@ -58,7 +58,15 @@ func newReviewCheckSession(
 			return repo.CheckStagedReviewFingerprint(prepared.Fingerprint)
 		}
 	case reviewtask.ModeCodebase:
-		scope, err = checks.NewCodebaseScope(repo.RootPath, prepared.Components)
+		ignoreMatchers, matcherErr := repo.ReviewIgnoreMatchers()
+		if matcherErr != nil {
+			return nil, fmt.Errorf("prepare codebase ignore rules: %w", matcherErr)
+		}
+		trackedPaths, trackedErr := repo.ReviewTrackedPaths()
+		if trackedErr != nil {
+			return nil, fmt.Errorf("prepare codebase tracked paths: %w", trackedErr)
+		}
+		scope, err = checks.NewCodebaseScope(repo.RootPath, prepared.Components, ignoreMatchers, trackedPaths)
 		session.verify = func() error { return nil }
 	default:
 		return nil, fmt.Errorf("unknown review mode %q", mode)

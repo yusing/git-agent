@@ -132,6 +132,16 @@ func planCodebase(scope checks.Scope) ([]invocation, error) {
 		if walkErr != nil {
 			return fmt.Errorf("walk checker workspace %q: %w", path, walkErr)
 		}
+		repositoryPath, err := filepath.Rel(scope.Root(), path)
+		if err != nil {
+			return fmt.Errorf("locate checker workspace path %q: %w", path, err)
+		}
+		if repositoryPath != "." && scope.Ignored(repositoryPath, entry.IsDir()) {
+			if entry.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
 		if entry.IsDir() {
 			if path != scope.Root() && (entry.Name() == ".git" || entry.Name() == "vendor") {
 				return fs.SkipDir
