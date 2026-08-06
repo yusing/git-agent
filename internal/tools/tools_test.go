@@ -17,7 +17,10 @@ import (
 )
 
 func TestExploreToolNamesAreRepositoryReadsOnly(t *testing.T) {
-	want := []string{"repo_summary", "list_files", "read_file", "inspect_file", "jq", "grep", "find"}
+	want := []string{
+		"repo_summary", "list_files", "read_file", "inspect_file", "jq", "grep", "find",
+		"git_recent_commits", "git_head_show", "git_diff_against_parent", "git_show_file_at_rev", "git_log_range",
+	}
 	if got := ExploreToolNames(); !slices.Equal(got, want) {
 		t.Fatalf("explore tools = %v, want %v", got, want)
 	}
@@ -34,6 +37,9 @@ func TestExploreRegistryReadsDirectoryWithoutGit(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := NewExploreRegistry(dir, nil)
+	if definitions := registry.Definitions(ExploreToolNames()); len(definitions) != 7 {
+		t.Fatalf("ordinary-directory explore definitions = %d, want 7 codebase tools", len(definitions))
+	}
 
 	tests := []struct {
 		name      string
@@ -85,12 +91,19 @@ func TestExploreRegistryScopesGitRepositoryToWorkspace(t *testing.T) {
 	runGit(t, repoRoot, "init")
 	runGit(t, repoRoot, "config", "user.name", "Test User")
 	runGit(t, repoRoot, "config", "user.email", "test@example.com")
-	mustWriteFile(t, filepath.Join(repoRoot, "root.go"), "package root\n")
-	mustWriteFile(t, filepath.Join(workspace, "nested.go"), "package nested\n\nconst Value = \"head\"\n")
+	mustWriteFile(t, filepath.Join(repoRoot, "root.go"), "package root\n\nconst Outside = \"base\"\n")
+	mustWriteFile(t, filepath.Join(workspace, "nested.go"), "package nested\n\nconst Value = \"base\"\n")
 	mustWriteFile(t, filepath.Join(workspace, "data.json"), `{"name":"nested"}`)
 	mustWriteFile(t, filepath.Join(workspace, ".git-agent", "tracked.txt"), "tracked\n")
 	runGit(t, repoRoot, "add", ".")
 	runGit(t, repoRoot, "commit", "-m", "base")
+	mustWriteFile(t, filepath.Join(repoRoot, "root.go"), "package root\n\nconst Outside = \"outside history\"\n")
+	mustWriteFile(t, filepath.Join(workspace, "nested.go"), "package nested\n\nconst Value = \"history\"\n")
+	runGit(t, repoRoot, "add", ".")
+	runGit(t, repoRoot, "commit", "-m", "scoped change")
+	mustWriteFile(t, filepath.Join(repoRoot, "root.go"), "package root\n\nconst Outside = \"outside only\"\n")
+	runGit(t, repoRoot, "add", "root.go")
+	runGit(t, repoRoot, "commit", "-m", "outside only")
 	mustWriteFile(t, filepath.Join(workspace, "nested.go"), "package nested\n\nconst Value = \"worktree\"\n")
 	mustWriteFile(t, filepath.Join(workspace, ".git-agent", "private.txt"), "private\n")
 
@@ -122,7 +135,7 @@ func TestExploreRegistryScopesGitRepositoryToWorkspace(t *testing.T) {
 		}
 	}
 
-	for source, want := range map[string]string{"worktree": "worktree", "index": "head", "head": "head"} {
+	for source, want := range map[string]string{"worktree": "worktree", "index": "history", "head": "history"} {
 		result, err := registry.Execute(t.Context(), Invocation{
 			Name: "read_file", Arguments: fmt.Sprintf(`{"path":"nested.go","source":%q}`, source),
 		})
@@ -135,6 +148,50 @@ func TestExploreRegistryScopesGitRepositoryToWorkspace(t *testing.T) {
 	}
 	if _, err := registry.Execute(t.Context(), Invocation{Name: "read_file", Arguments: `{"path":"root.go"}`}); err == nil {
 		t.Fatal("read_file escaped the explore workspace")
+	}
+
+	historyTests := []struct {
+		name      string
+		arguments string
+		want      string
+		notWant   string
+	}{
+		{name: "git_recent_commits", arguments: `{"limit":10}`, want: "scoped change", notWant: "outside only"},
+		{name: "git_head_show", arguments: `{}`, want: `"show": ""`, notWant: "outside only"},
+		{name: "git_diff_against_parent", arguments: `{}`, want: `"diff": ""`, notWant: "outside only"},
+		{name: "git_show_file_at_rev", arguments: `{"rev":"HEAD","path":"nested.go"}`, want: `Value = \"history\"`},
+		{name: "git_log_range", arguments: `{"base":"HEAD^^","release":"HEAD","limit":10}`, want: "scoped change", notWant: "outside only"},
+	}
+	for _, test := range historyTests {
+		result, err := registry.Execute(t.Context(), Invocation{Name: test.name, Arguments: test.arguments})
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		if !strings.Contains(result.Content, test.want) {
+			t.Fatalf("%s missing %q: %s", test.name, test.want, result.Content)
+		}
+		if test.notWant != "" && strings.Contains(result.Content, test.notWant) {
+			t.Fatalf("%s exposed out-of-scope history %q: %s", test.name, test.notWant, result.Content)
+		}
+	}
+	capped, err := registry.Execute(t.Context(), Invocation{
+		Name: "git_recent_commits", Arguments: `{"limit":10,"max_bytes":128,"max_lines":10}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !capped.Truncated || !strings.Contains(capped.Content, `"truncated": true`) {
+		t.Fatalf("bounded commit metadata was not marked truncated: %s", capped.Content)
+	}
+	if _, err := registry.Execute(t.Context(), Invocation{
+		Name: "git_show_file_at_rev", Arguments: `{"rev":"HEAD","path":"../root.go"}`,
+	}); err == nil || !strings.Contains(err.Error(), "escapes repository") {
+		t.Fatalf("revision path escape error = %v", err)
+	}
+	if _, err := registry.Execute(t.Context(), Invocation{
+		Name: "git_show_file_at_rev", Arguments: `{"rev":"HEAD","path":"root.go"}`,
+	}); err == nil {
+		t.Fatal("revision file read escaped the explore workspace")
 	}
 
 	for _, test := range []struct {
@@ -827,7 +884,6 @@ func TestLegacyReleaseNoteToolsAreMarkedDeprecated(t *testing.T) {
 	registry := NewRegistry(repo, nil)
 	for _, def := range registry.Definitions([]string{
 		"resolve_ref",
-		"git_log_range",
 		"gitmodules_table",
 		"submodule_gitlink_range",
 		"submodule_log_range",

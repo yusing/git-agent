@@ -698,15 +698,23 @@ The initial form works in Git repositories and ordinary directories. It first
 runs filesystem semantic retrieval with the existing search index, default
 retrieval limits, and the code-only filter. It then gives those unverified leads
 to a bounded Responses API agent with `repo_summary`, `list_files`, `read_file`,
-`inspect_file`, `jq`, `grep`, and `find`. In a Git repository these tools retain
-Git-aware repository metadata and tracked internal-path handling, but the
-cleaned absolute working directory remains the complete exploration root even
-when an ancestor contains `.git`. Semantic results, guidance, agent environment,
-and every tool path are relative to that working directory; Git-backed
-worktree, index, and HEAD reads rebase those paths through the containing
-repository without exposing files above the exploration root. In an ordinary
-directory the tools use the same working-directory root, omit Git metadata,
-reject `index` and `head` file sources, and exclude internal state directories.
+`inspect_file`, `jq`, `grep`, and `find`. In a Git repository the agent also
+receives `git_recent_commits`, `git_head_show`, `git_diff_against_parent`,
+`git_show_file_at_rev`, and `git_log_range`. The history tools return bounded
+commit metadata, HEAD patches, revision-range logs, and file content from a
+specified revision. Commit lists include only commits that change paths beneath
+the exploration root. `git_head_show` returns no metadata when HEAD has no
+change beneath that root. Patch and file-content results include only paths
+beneath the exploration root and render those paths relative to that root.
+The tools retain Git-aware repository metadata and tracked internal-path handling, but
+the cleaned absolute working directory remains the complete exploration root
+even when an ancestor contains `.git`. Semantic results, guidance, agent
+environment, and every tool path are relative to that working directory.
+Git-backed worktree, index, HEAD, and revision reads rebase those paths through
+the containing repository without exposing files above the exploration root.
+In an ordinary directory the tools use the same working-directory root, omit
+Git metadata and history tools, reject `index` and `head` file sources, and
+exclude internal state directories.
 The agent must inspect primary implementation owners and contract-defining
 tests, return direct answers with exploration-root-relative path-and-line
 evidence, and avoid delegating ownership or blast-radius rediscovery to the

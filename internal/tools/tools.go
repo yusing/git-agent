@@ -128,10 +128,19 @@ func NewReviewRegistry(repo *gitctx.Repository, skillManager *skillcmd.Manager, 
 }
 
 // NewExploreRegistry returns the read-only codebase tools rooted at root. Git
-// metadata is used when repo is non-nil, but ordinary directories need none.
+// metadata and history are available when repo is non-nil.
 func NewExploreRegistry(root string, repo *gitctx.Repository) *Registry {
 	registry := &Registry{tools: map[string]Tool{}}
 	registerCodebaseTools(registry, repo, root, ReviewModeCodebase)
+	if repo != nil {
+		register(registry, []Tool{
+			gitRecentCommitsTool{repo: repo, root: root},
+			gitHeadShowTool{repo: repo, root: root},
+			gitDiffAgainstParentTool{repo: repo, root: root},
+			gitShowFileAtRevTool{repo: repo, root: root},
+			gitLogRangeTool{repo: repo, root: root},
+		})
+	}
 	registerDocumentation(registry, doccmd.Discover(root))
 	return registry
 }
@@ -281,7 +290,10 @@ func ReviewToolCandidates(mode ReviewMode) []string {
 }
 
 func ExploreToolNames() []string {
-	return []string{"repo_summary", "list_files", "read_file", "inspect_file", jqToolName, "grep", "find"}
+	return []string{
+		"repo_summary", "list_files", "read_file", "inspect_file", jqToolName, "grep", "find",
+		"git_recent_commits", "git_head_show", "git_diff_against_parent", "git_show_file_at_rev", "git_log_range",
+	}
 }
 
 func SkillToolNames() []string {
@@ -1318,14 +1330,18 @@ func (t gitStagedDiffForPathsTool) Execute(_ context.Context, invocation Invocat
 type gitRecentCommitsTool repoTool
 
 func (t gitRecentCommitsTool) Definition() Definition {
-	return Definition{Name: "git_recent_commits", Description: "Return recent commits for style reference.", Schema: schema(map[string]any{
-		"limit": intProp("Maximum commits to return.", 1, 100),
+	return Definition{Name: "git_recent_commits", Description: "Return bounded recent commit metadata.", Schema: schema(map[string]any{
+		"limit":     intProp("Maximum commits to return.", 1, 100),
+		"max_bytes": intProp("Maximum metadata bytes to return.", 1, 65536),
+		"max_lines": intProp("Maximum metadata lines to return.", 1, 2000),
 	}), Strict: true}
 }
 
 func (t gitRecentCommitsTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
 	args, err := parseArgs[struct {
-		Limit int `json:"limit"`
+		Limit    int `json:"limit"`
+		MaxBytes int `json:"max_bytes"`
+		MaxLines int `json:"max_lines"`
 	}](invocation.Arguments)
 	if err != nil {
 		return Result{}, err
@@ -1333,11 +1349,24 @@ func (t gitRecentCommitsTool) Execute(_ context.Context, invocation Invocation) 
 	if args.Limit <= 0 {
 		args.Limit = 10
 	}
-	commits, err := t.repo.RecentCommits(args.Limit)
+	var commits []gitctx.CommitInfo
+	if t.root == "" {
+		commits, err = t.repo.RecentCommits(args.Limit)
+	} else {
+		var prefix string
+		prefix, err = repositoryPathPrefix(t.repo, t.root)
+		if err == nil {
+			commits, err = t.repo.RecentCommitsForPath(prefix, args.Limit)
+		}
+	}
 	if err != nil {
 		return Result{}, err
 	}
-	return jsonResult("git_recent_commits", commits, false)
+	commits, capTruncated, err := limitCommitInfos(commits, args.MaxBytes, args.MaxLines)
+	if err != nil {
+		return Result{}, err
+	}
+	return jsonResult("git_recent_commits", commits, capTruncated || len(commits) >= args.Limit)
 }
 
 type gitHeadShowTool repoTool
@@ -1351,7 +1380,18 @@ func (t gitHeadShowTool) Execute(_ context.Context, invocation Invocation) (Resu
 	if err != nil {
 		return Result{}, err
 	}
-	text, truncated, err := t.repo.HeadShow(normalizeCaps(args.MaxBytes, args.MaxLines))
+	maxBytes, maxLines := normalizeCaps(args.MaxBytes, args.MaxLines)
+	var text string
+	var truncated bool
+	if t.root == "" {
+		text, truncated, err = t.repo.HeadShow(maxBytes, maxLines)
+	} else {
+		var prefix string
+		prefix, err = repositoryPathPrefix(t.repo, t.root)
+		if err == nil {
+			text, truncated, err = t.repo.HeadShowForPath(prefix, maxBytes, maxLines)
+		}
+	}
 	if err != nil {
 		return Result{}, err
 	}
@@ -1369,7 +1409,18 @@ func (t gitDiffAgainstParentTool) Execute(_ context.Context, invocation Invocati
 	if err != nil {
 		return Result{}, err
 	}
-	text, truncated, err := t.repo.DiffAgainstParent(normalizeCaps(args.MaxBytes, args.MaxLines))
+	maxBytes, maxLines := normalizeCaps(args.MaxBytes, args.MaxLines)
+	var text string
+	var truncated bool
+	if t.root == "" {
+		text, truncated, err = t.repo.DiffAgainstParent(maxBytes, maxLines)
+	} else {
+		var prefix string
+		prefix, err = repositoryPathPrefix(t.repo, t.root)
+		if err == nil {
+			text, truncated, err = t.repo.DiffAgainstParentForPath(prefix, maxBytes, maxLines)
+		}
+	}
 	if err != nil {
 		return Result{}, err
 	}
@@ -1415,9 +1466,13 @@ func (t gitAmendDeltaTool) Execute(_ context.Context, invocation Invocation) (Re
 type gitShowFileAtRevTool repoTool
 
 func (t gitShowFileAtRevTool) Definition() Definition {
+	pathDescription := "Repository-relative file path."
+	if t.root != "" {
+		pathDescription = "Codebase-relative file path."
+	}
 	return Definition{Name: "git_show_file_at_rev", Description: "Read a file from a commit-ish.", Schema: schema(map[string]any{
 		"rev":       stringProp("Commit-ish revision to read from."),
-		"path":      stringProp("Repository-relative file path."),
+		"path":      stringProp(pathDescription),
 		"max_bytes": intProp("Maximum bytes to return.", 1, 65536),
 		"max_lines": intProp("Maximum lines to return.", 1, 2000),
 	}, "rev", "path"), Strict: true}
@@ -1433,8 +1488,18 @@ func (t gitShowFileAtRevTool) Execute(_ context.Context, invocation Invocation) 
 	if err != nil {
 		return Result{}, err
 	}
+	path := args.Path
+	if t.root != "" {
+		path, err = cleanRepoPath(path)
+		if err == nil {
+			path, err = repositoryPath(t.repo, t.root, path)
+		}
+		if err != nil {
+			return Result{}, err
+		}
+	}
 	maxBytes, maxLines := normalizeCaps(args.MaxBytes, args.MaxLines)
-	text, truncated, err := t.repo.ShowFileAtRev(args.Rev, args.Path, maxBytes, maxLines)
+	text, truncated, err := t.repo.ShowFileAtRev(args.Rev, path, maxBytes, maxLines)
 	if err != nil {
 		return Result{}, err
 	}
@@ -1556,18 +1621,22 @@ func (t resolveRefTool) Execute(_ context.Context, invocation Invocation) (Resul
 type gitLogRangeTool repoTool
 
 func (t gitLogRangeTool) Definition() Definition {
-	return Definition{Name: "git_log_range", Description: deprecatedReleaseNoteToolPrefix + "Return commits reachable from release and stopping before base.", Schema: schema(map[string]any{
-		"base":    stringProp("Base ref excluded from the range."),
-		"release": stringProp("Release ref included as range tip."),
-		"limit":   intProp("Maximum commits to return.", 1, 500),
+	return Definition{Name: "git_log_range", Description: "Return bounded commit metadata for a revision range.", Schema: schema(map[string]any{
+		"base":      stringProp("Base ref excluded from the range."),
+		"release":   stringProp("Release ref included as range tip."),
+		"limit":     intProp("Maximum commits to return.", 1, 500),
+		"max_bytes": intProp("Maximum metadata bytes to return.", 1, 65536),
+		"max_lines": intProp("Maximum metadata lines to return.", 1, 2000),
 	}, "base", "release"), Strict: true}
 }
 
 func (t gitLogRangeTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
 	args, err := parseArgs[struct {
-		Base    string `json:"base"`
-		Release string `json:"release"`
-		Limit   int    `json:"limit"`
+		Base     string `json:"base"`
+		Release  string `json:"release"`
+		Limit    int    `json:"limit"`
+		MaxBytes int    `json:"max_bytes"`
+		MaxLines int    `json:"max_lines"`
 	}](invocation.Arguments)
 	if err != nil {
 		return Result{}, err
@@ -1575,11 +1644,24 @@ func (t gitLogRangeTool) Execute(_ context.Context, invocation Invocation) (Resu
 	if args.Limit <= 0 {
 		args.Limit = 200
 	}
-	commits, err := t.repo.LogFrom(args.Base, args.Release, args.Limit)
+	var commits []gitctx.CommitInfo
+	if t.root == "" {
+		commits, err = t.repo.LogFrom(args.Base, args.Release, args.Limit)
+	} else {
+		var prefix string
+		prefix, err = repositoryPathPrefix(t.repo, t.root)
+		if err == nil {
+			commits, err = t.repo.LogFromForPath(args.Base, args.Release, prefix, args.Limit)
+		}
+	}
 	if err != nil {
 		return Result{}, err
 	}
-	return jsonResult("git_log_range", commits, len(commits) >= args.Limit)
+	commits, capTruncated, err := limitCommitInfos(commits, args.MaxBytes, args.MaxLines)
+	if err != nil {
+		return Result{}, err
+	}
+	return jsonResult("git_log_range", commits, capTruncated || len(commits) >= args.Limit)
 }
 
 type gitmodulesTableTool repoTool
@@ -1701,6 +1783,30 @@ func normalizeCaps(maxBytes, maxLines int) (int, int) {
 		maxLines = defaultMaxLines
 	}
 	return maxBytes, maxLines
+}
+
+func limitCommitInfos(commits []gitctx.CommitInfo, maxBytes, maxLines int) ([]gitctx.CommitInfo, bool, error) {
+	maxBytes, maxLines = normalizeCaps(maxBytes, maxLines)
+	fieldMaxBytes := max(1, maxBytes/4)
+	fieldMaxLines := max(1, maxLines/4)
+	limited := make([]gitctx.CommitInfo, 0, len(commits))
+	truncated := false
+	for _, commit := range commits {
+		var summaryTruncated, authorTruncated bool
+		commit.Summary, summaryTruncated = textutil.Limit(commit.Summary, fieldMaxBytes, fieldMaxLines)
+		commit.Author, authorTruncated = textutil.Limit(commit.Author, fieldMaxBytes, fieldMaxLines)
+		candidate := append(limited, commit)
+		data, err := sonic.MarshalIndent(candidate, "", "  ")
+		if err != nil {
+			return nil, false, err
+		}
+		if len(data) > maxBytes || bytes.Count(data, []byte{'\n'})+1 > maxLines {
+			return limited, true, nil
+		}
+		limited = candidate
+		truncated = truncated || summaryTruncated || authorTruncated
+	}
+	return limited, truncated, nil
 }
 
 func cleanRepoPath(rel string) (string, error) {

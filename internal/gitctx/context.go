@@ -774,6 +774,10 @@ func (r *Repository) RecentCommits(limit int) ([]CommitInfo, error) {
 	return r.LogFrom("", "", limit)
 }
 
+func (r *Repository) RecentCommitsForPath(path string, limit int) ([]CommitInfo, error) {
+	return r.LogFromForPath("", "", path, limit)
+}
+
 func (r *Repository) HeadInfo() (CommitInfo, error) {
 	head, err := r.headCommit()
 	if err != nil {
@@ -803,6 +807,27 @@ func (r *Repository) HeadShow(maxBytes, maxLines int) (string, bool, error) {
 	return limited, truncated, nil
 }
 
+func (r *Repository) HeadShowForPath(path string, maxBytes, maxLines int) (string, bool, error) {
+	head, err := r.headCommit()
+	if err != nil {
+		return "", false, err
+	}
+	patch, err := patchCommitAgainstFirstParentForPath(head, path)
+	if err != nil {
+		return "", false, err
+	}
+	patchText := patch.String()
+	if path != "" && path != "." && patchText == "" {
+		return "", false, nil
+	}
+	text := formatCommit(head)
+	if patchText != "" {
+		text += "\n" + patchText
+	}
+	limited, truncated := textutil.Limit(text, maxBytes, maxLines)
+	return limited, truncated, nil
+}
+
 func (r *Repository) HeadMessage() (string, error) {
 	head, err := r.headCommit()
 	if err != nil {
@@ -813,6 +838,19 @@ func (r *Repository) HeadMessage() (string, error) {
 
 func (r *Repository) DiffAgainstParent(maxBytes, maxLines int) (string, bool, error) {
 	patch, err := r.patchHeadAgainstParent()
+	if err != nil {
+		return "", false, err
+	}
+	limited, truncated := textutil.Limit(patch.String(), maxBytes, maxLines)
+	return limited, truncated, nil
+}
+
+func (r *Repository) DiffAgainstParentForPath(path string, maxBytes, maxLines int) (string, bool, error) {
+	head, err := r.headCommit()
+	if err != nil {
+		return "", false, err
+	}
+	patch, err := patchCommitAgainstFirstParentForPath(head, path)
 	if err != nil {
 		return "", false, err
 	}
@@ -1119,21 +1157,45 @@ func (r *Repository) PullRequestCommits(limit int) ([]CommitInfo, error) {
 }
 
 func (r *Repository) LogFrom(base, release string, limit int) ([]CommitInfo, error) {
+	return r.logFrom(base, release, limit, nil)
+}
+
+func (r *Repository) LogFromForPath(base, release, path string, limit int) ([]CommitInfo, error) {
+	if path == "" || path == "." {
+		return r.LogFrom(base, release, limit)
+	}
+	return r.logFrom(base, release, limit, func(commit *object.Commit) (bool, error) {
+		patch, err := patchCommitAgainstFirstParentForPath(commit, path)
+		if err != nil {
+			return false, err
+		}
+		return len(patch.FilePatches()) > 0, nil
+	})
+}
+
+func (r *Repository) logFrom(base, release string, limit int, include func(*object.Commit) (bool, error)) ([]CommitInfo, error) {
 	from, err := r.resolveLogStart(release)
 	if err != nil {
 		return nil, err
 	}
-
 	excluded, err := r.reachableCommitSet(base)
 	if err != nil {
 		return nil, err
 	}
-
 	iter := object.NewCommitPreorderIter(from, excluded, nil)
 	defer iter.Close()
 
 	var commits []CommitInfo
 	err = iter.ForEach(func(commit *object.Commit) error {
+		if include != nil {
+			included, err := include(commit)
+			if err != nil {
+				return err
+			}
+			if !included {
+				return nil
+			}
+		}
 		commits = append(commits, commitInfo(commit))
 		if limit > 0 && len(commits) >= limit {
 			return stopeach{}
@@ -2128,6 +2190,46 @@ func patchCommitAgainstFirstParent(commit *object.Commit) (*object.Patch, error)
 		return nil, err
 	}
 	return parent.Patch(commit)
+}
+
+func patchCommitAgainstFirstParentForPath(commit *object.Commit, path string) (*object.Patch, error) {
+	to, err := commit.Tree()
+	if err != nil {
+		return nil, err
+	}
+	to, err = treeForPath(to, path)
+	if err != nil {
+		return nil, err
+	}
+	from := &object.Tree{}
+	if commit.NumParents() > 0 {
+		parent, err := commit.Parent(0)
+		if err != nil {
+			return nil, err
+		}
+		from, err = parent.Tree()
+		if err != nil {
+			return nil, err
+		}
+		from, err = treeForPath(from, path)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return patchBetweenTrees(from, to)
+}
+
+func treeForPath(tree *object.Tree, path string) (*object.Tree, error) {
+	if path == "" || path == "." {
+		return tree, nil
+	}
+	subtree, err := tree.Tree(path)
+	if errors.Is(err, object.ErrDirectoryNotFound) ||
+		errors.Is(err, object.ErrFileNotFound) ||
+		errors.Is(err, object.ErrEntryNotFound) {
+		return &object.Tree{}, nil
+	}
+	return subtree, err
 }
 
 func commitFileChangesFromPatch(patch *object.Patch) []CommitFileChange {

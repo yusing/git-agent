@@ -283,6 +283,17 @@ func TestExploreGlobalCWDIsCompleteWorkspaceBoundary(t *testing.T) {
 	if len(requests) != 1 {
 		t.Fatalf("provider requests = %d, want 1", len(requests))
 	}
+	toolNames := make(map[string]bool, len(requests[0].Tools))
+	for _, tool := range requests[0].Tools {
+		toolNames[tool.Name] = true
+	}
+	for _, name := range []string{
+		"git_recent_commits", "git_head_show", "git_diff_against_parent", "git_show_file_at_rev", "git_log_range",
+	} {
+		if !toolNames[name] {
+			t.Fatalf("Git explore request omitted history tool %q", name)
+		}
+	}
 	var requestText strings.Builder
 	for _, item := range requests[0].Input {
 		requestText.WriteString(item.Content)

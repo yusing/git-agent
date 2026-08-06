@@ -317,6 +317,11 @@ inside a Git repository, the ancestor repository still supplies project identity
 and Git metadata, but semantic results, guidance, agent paths, and read tools all
 remain relative to—and confined beneath—the selected directory.
 
+In a Git repository, explore can inspect bounded commit lists, HEAD patches,
+revision ranges, and files at specified revisions. Commit lists and HEAD
+metadata include only changes inside the current-directory boundary. Patch and
+file results stay inside that boundary and use paths relative to that directory.
+
 ```sh
 # Start a grounded codebase exploration
 git-agent explore "where is release note evidence prepared?"
