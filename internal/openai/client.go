@@ -40,6 +40,7 @@ type Request struct {
 	AuthAccountID      string                      `json:"-"`
 	Instructions       string                      `json:"instructions,omitempty"`
 	PromptCacheKey     string                      `json:"prompt_cache_key,omitempty"`
+	TurnState          string                      `json:"-"`
 	ParallelToolCalls  bool                        `json:"parallel_tool_calls"`
 	Input              []Item                      `json:"input"`
 	Tools              []ToolSpec                  `json:"tools,omitempty"`
@@ -142,6 +143,7 @@ type Response struct {
 	Continuation    []Item           `json:"continuation,omitempty"`
 	HostedToolCalls []HostedToolCall `json:"hosted_tool_calls,omitempty"`
 	FinishKind      string           `json:"finish_kind,omitempty"`
+	TurnState       string           `json:"-"`
 	Usage           Usage            `json:"usage"`
 }
 
@@ -187,6 +189,7 @@ const DefaultDialTimeout = 5 * time.Second
 
 // Source: codex-rs/login/src/auth/default_client.rs:42:352 default_headers
 const codexClientIdentity = "codex_cli_rs"
+const codexTurnStateHeader = "x-codex-turn-state"
 
 func NewHTTPClient(client *http.Client) *SDKClient {
 	return &SDKClient{HTTPClient: withDefaultDialTimeout(client)}
@@ -218,31 +221,39 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 	if err != nil {
 		return Response{}, err
 	}
-	response, streamErr := createStreamingResponse(ctx, client, params, 1, request.OnStreamEvent)
+	codexTurnStateEnabled := supportsCodexTurnState(request)
+	turnState := request.TurnState
+	if !codexTurnStateEnabled {
+		turnState = ""
+	}
+	response, streamErr := createStreamingResponse(ctx, client, params, 1, codexTurnStateEnabled, turnState, request.OnStreamEvent)
 	if streamErr == nil {
 		return response, nil
 	}
+	if response.TurnState != "" {
+		turnState = response.TurnState
+	}
 	if _, localPublishFailure := errors.AsType[*streamEventPublishError](streamErr); localPublishFailure {
-		return Response{}, streamErr
+		return response, streamErr
 	}
 	reason, retry := streamRetryReason(streamErr)
 	if !retry {
-		return Response{}, responseError(streamErr, request)
+		return response, responseError(streamErr, request)
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return Response{}, responseError(errors.Join(streamErr, ctxErr), request)
+		return response, responseError(errors.Join(streamErr, ctxErr), request)
 	}
 	if request.OnRetry != nil {
 		if err := request.OnRetry(RetryEvent{Attempt: 1, MaxAttempts: maxStreamRetryAttempts, Reason: reason}); err != nil {
-			return Response{}, fmt.Errorf("publishing provider retry event: %w", err)
+			return response, fmt.Errorf("publishing provider retry event: %w", err)
 		}
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return Response{}, responseError(errors.Join(streamErr, ctxErr), request)
+		return response, responseError(errors.Join(streamErr, ctxErr), request)
 	}
-	retried, retryErr := createStreamingResponse(ctx, client, params, 2, request.OnStreamEvent)
+	retried, retryErr := createStreamingResponse(ctx, client, params, 2, codexTurnStateEnabled, turnState, request.OnStreamEvent)
 	if retryErr != nil {
-		return Response{}, responseError(errors.Join(streamErr, retryErr), request)
+		return retried, responseError(errors.Join(streamErr, retryErr), request)
 	}
 	return retried, nil
 }
@@ -258,8 +269,25 @@ func (e *streamEventPublishError) Error() string {
 }
 func (e *streamEventPublishError) Unwrap() error { return e.err }
 
-func createStreamingResponse(ctx context.Context, client openaisdk.Client, params responses.ResponseNewParams, providerAttempt int, onStreamEvent func(StreamEvent) error) (Response, error) {
-	stream := client.Responses.NewStreaming(ctx, params)
+func createStreamingResponse(ctx context.Context, client openaisdk.Client, params responses.ResponseNewParams, providerAttempt int, codexTurnStateEnabled bool, turnState string, onStreamEvent func(StreamEvent) error) (Response, error) {
+	var rawResponse *http.Response
+	requestOptions := make([]option.RequestOption, 0, 2)
+	if codexTurnStateEnabled {
+		requestOptions = append(requestOptions, option.WithResponseInto(&rawResponse))
+		if turnState != "" {
+			requestOptions = append(requestOptions, option.WithHeader(codexTurnStateHeader, turnState))
+		}
+	}
+	captureTurnState := func(result Response) Response {
+		result.TurnState = turnState
+		if rawResponse != nil {
+			if value := strings.TrimSpace(rawResponse.Header.Get(codexTurnStateHeader)); value != "" {
+				result.TurnState = value
+			}
+		}
+		return result
+	}
+	stream := client.Responses.NewStreaming(ctx, params, requestOptions...)
 	defer stream.Close()
 	var final *responses.Response
 	accum := newStreamAccumulator()
@@ -271,7 +299,7 @@ func createStreamingResponse(ctx context.Context, client openaisdk.Client, param
 			if ok {
 				streamEvent.ProviderAttempt = providerAttempt
 				if err := onStreamEvent(streamEvent); err != nil {
-					return Response{}, &streamEventPublishError{err: err}
+					return captureTurnState(Response{}), &streamEventPublishError{err: err}
 				}
 			}
 		}
@@ -281,10 +309,10 @@ func createStreamingResponse(ctx context.Context, client openaisdk.Client, param
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return Response{}, err
+		return captureTurnState(Response{}), err
 	}
 	if final == nil {
-		return Response{}, errIncompleteProviderStream
+		return captureTurnState(Response{}), errIncompleteProviderStream
 	}
 
 	result := responseFromCompleted(final)
@@ -292,7 +320,7 @@ func createStreamingResponse(ctx context.Context, client openaisdk.Client, param
 		result.Text = accum.text()
 	}
 	result.ToolCalls = mergeToolCalls(result.ToolCalls, accum.toolCalls())
-	return result, nil
+	return captureTurnState(result), nil
 }
 
 func reasoningSummaryStreamEvent(event responses.ResponseStreamEventUnion) (StreamEvent, bool) {
@@ -947,6 +975,11 @@ func supportsPromptCacheKey(request Request) bool {
 	host := endpoint.Hostname()
 	return strings.EqualFold(host, "api.openai.com") ||
 		(request.AuthAccountID != "" && strings.EqualFold(host, "chatgpt.com"))
+}
+
+func supportsCodexTurnState(request Request) bool {
+	endpoint, err := url.Parse(request.BaseURL)
+	return err == nil && request.AuthAccountID != "" && strings.EqualFold(endpoint.Hostname(), "chatgpt.com")
 }
 
 func hasPromptCacheBreakpoint(items []Item) bool {

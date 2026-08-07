@@ -1172,15 +1172,18 @@ func (f *fakeClient) CreateResponse(_ context.Context, request openai.Request) (
 			}
 		}
 	}
+	var resp openai.Response
+	if len(f.responses) > 0 {
+		resp = f.responses[0]
+		f.responses = f.responses[1:]
+	}
 	if len(f.responseErrors) > 0 {
 		err := f.responseErrors[0]
 		f.responseErrors = f.responseErrors[1:]
 		if err != nil {
-			return openai.Response{}, err
+			return resp, err
 		}
 	}
-	resp := f.responses[0]
-	f.responses = f.responses[1:]
 	return resp, nil
 }
 
@@ -1202,6 +1205,7 @@ func TestRunnerDisablesRejectedHostedCapabilityAndRetriesStepOnce(t *testing.T) 
 			nil,
 		},
 		responses: []openai.Response{
+			{TurnState: "sticky-route"},
 			{
 				Continuation: []openai.Item{
 					{Type: "reasoning", RawJSON: `{"id":"rs_1","type":"reasoning","summary":[],"encrypted_content":"cipher"}`},
@@ -1244,6 +1248,9 @@ func TestRunnerDisablesRejectedHostedCapabilityAndRetriesStepOnce(t *testing.T) 
 	}
 	if !strings.Contains(client.requests[0].Instructions, "web_search (provider-hosted)") {
 		t.Fatalf("initial request does not advertise hosted web search: %s", client.requests[0].Instructions)
+	}
+	if client.requests[0].TurnState != "" || client.requests[1].TurnState != "sticky-route" || client.requests[2].TurnState != "sticky-route" {
+		t.Fatalf("request turn states = %q, %q, %q", client.requests[0].TurnState, client.requests[1].TurnState, client.requests[2].TurnState)
 	}
 	for index := 1; index < len(client.requests); index++ {
 		if len(client.requests[index].HostedCapabilities) != 0 {
@@ -1497,7 +1504,7 @@ func TestRunnerExecutesToolCallRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &fakeClient{responses: []openai.Response{
-		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: "{}"}}},
+		{TurnState: "sticky-route", ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: "{}"}}},
 		{Text: "Add parser"},
 	}}
 	registry := tools.NewRegistry(repo, nil)
@@ -1524,6 +1531,9 @@ func TestRunnerExecutesToolCallRoundTrip(t *testing.T) {
 		return item.Type == "function_call_output" && item.CallID == "call_1"
 	}) {
 		t.Fatalf("missing tool output input: %#v", client.requests[1].Input)
+	}
+	if client.requests[0].TurnState != "" || client.requests[1].TurnState != "sticky-route" {
+		t.Fatalf("request turn states = %q, %q", client.requests[0].TurnState, client.requests[1].TurnState)
 	}
 	if client.requests[0].Instructions != client.requests[1].Instructions {
 		t.Fatalf("instructions changed between cacheable requests")

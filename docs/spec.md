@@ -786,19 +786,21 @@ stable-instruction target, active target, one prompt-cache key, and replayable
 Responses API item history. Missing target fields in an existing session mean
 the universal target.
 An initial batch derives one key from its first sorted item ID and persists that
-key for
-Every model request within one agent run keeps `instructions` byte-stable.
-Changing model-step and remaining-tool budgets are appended as developer input
-and persisted in replay history, so each completed request input is an exact
-prefix of the next request input. Hosted-capability failure notices are also
-appended instead of rewriting instructions. For GPT-5.6-family models, each
-appended budget message is an explicit cache breakpoint and requests use
-explicit-only cache mode. Follow-ups inherit the key and replayable input; a
-depth reset creates a new key. Official OpenAI models outside the GPT-5.6 family
-send the key while retaining provider-default caching. The authenticated
-ChatGPT Codex endpoint also sends only the stable key. Custom endpoints receive
-no prompt-cache fields. Provider prefix-length, retention, routing, and eviction
-rules remain authoritative, so a nonzero cached-token count is not guaranteed.
+key for every sibling. Every model request within one agent run keeps
+`instructions` byte-stable. Changing model-step and remaining-tool budgets are
+appended as developer input and persisted in replay history, so each completed
+request input is an exact prefix of the next request input. Hosted-capability
+failure notices are also appended instead of rewriting instructions. For
+GPT-5.6-family models, each appended budget message is an explicit cache
+breakpoint and requests use explicit-only cache mode. Follow-ups inherit the key
+and replayable input; a depth reset creates a new key. Official OpenAI models
+outside the GPT-5.6 family send the key while retaining provider-default caching.
+The authenticated ChatGPT Codex endpoint sends the stable key without explicit
+breakpoint options, captures the opaque `x-codex-turn-state` response header, and
+replays it on every later request in that agent run to preserve sticky routing.
+Custom endpoints receive no prompt-cache fields or Codex turn-state header.
+Provider prefix-length, retention, routing, and eviction rules remain
+authoritative, so a nonzero cached-token count is not guaranteed.
 `--follow-up <search-id>` appends the new natural-language question to stored
 context only when invoked from the same cleaned absolute workspace that created
 the session. A follow-up without `--for` inherits the parent's active target.

@@ -206,6 +206,97 @@ func TestRequestUsesStableCacheKeyWithoutExplicitControlsForChatGPTEndpoint(t *t
 	}
 }
 
+func TestCreateResponseReplaysCodexTurnStateOnlyForChatGPT(t *testing.T) {
+	t.Parallel()
+
+	const turnState = "sticky-route"
+	requestCount := 0
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requestCount++
+		wantTurnState := ""
+		if requestCount == 2 {
+			wantTurnState = turnState
+		}
+		if got := request.Header.Get(codexTurnStateHeader); got != wantTurnState {
+			t.Fatalf("request %d turn state = %q, want %q", requestCount, got, wantTurnState)
+		}
+		headers := make(http.Header)
+		headers.Set("Content-Type", "text/event-stream")
+		if requestCount == 1 {
+			headers.Set(codexTurnStateHeader, turnState)
+		} else if requestCount == 3 {
+			headers.Set(codexTurnStateHeader, "ignored-custom-route")
+		}
+		body := "data: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"output\":[]}}\n\ndata: [DONE]\n\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     headers,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    request,
+		}, nil
+	})}
+	client := NewHTTPClient(httpClient)
+	request := Request{
+		Model: "gpt-5.6-sol", BaseURL: "https://chatgpt.com/backend-api/codex",
+		APIKey: "test-key", AuthAccountID: "account-id", Input: []Item{NewMessage("user", "task")},
+	}
+	first, err := client.CreateResponse(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.TurnState != turnState {
+		t.Fatalf("first response turn state = %q, want %q", first.TurnState, turnState)
+	}
+	request.TurnState = first.TurnState
+	second, err := client.CreateResponse(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.TurnState != turnState {
+		t.Fatalf("second response turn state = %q, want %q", second.TurnState, turnState)
+	}
+
+	request.BaseURL = "https://provider.example/v1"
+	custom, err := client.CreateResponse(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if custom.TurnState != "" {
+		t.Fatalf("custom response retained Codex turn state %q", custom.TurnState)
+	}
+}
+
+func TestCreateResponseReturnsCodexTurnStateWithProviderError(t *testing.T) {
+	t.Parallel()
+
+	const turnState = "sticky-route"
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		headers := make(http.Header)
+		headers.Set("Content-Type", "application/json")
+		headers.Set(codexTurnStateHeader, turnState)
+		body := `{"error":{"message":"web_search is not supported","type":"invalid_request_error","param":"tools[0].type","code":"unsupported_value"}}`
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     headers,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    request,
+		}, nil
+	})}
+	response, err := NewHTTPClient(httpClient).CreateResponse(t.Context(), Request{
+		Model: "gpt-5.6-sol", BaseURL: "https://chatgpt.com/backend-api/codex",
+		APIKey: "test-key", AuthAccountID: "account-id",
+		Input:              []Item{NewMessage("user", "task")},
+		HostedCapabilities: []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch}},
+	})
+	unsupported, ok := errors.AsType[*provider.UnsupportedCapabilityError](err)
+	if !ok || unsupported.Failure.Capability != provider.HostedCapabilityWebSearch {
+		t.Fatalf("error = %v, want hosted web-search capability rejection", err)
+	}
+	if response.TurnState != turnState {
+		t.Fatalf("error response turn state = %q, want %q", response.TurnState, turnState)
+	}
+}
+
 func TestRequestConvertsHostedWebSearchCapability(t *testing.T) {
 	t.Parallel()
 

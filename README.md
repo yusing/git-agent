@@ -356,9 +356,11 @@ prompt-cache key. Git-agent keeps agent instructions unchanged across model
 steps and appends each changing budget as replayable developer input, making
 each completed request input an exact prefix of the next request input. On
 GPT-5.6 models, each appended budget is an explicit cache breakpoint. Provider
-cache retention and minimum-prefix rules still apply. Other OpenAI models and
-the authenticated ChatGPT Codex endpoint send the stable key without GPT-5.6
-breakpoint options; custom endpoints receive no undeclared cache controls.
+cache retention and minimum-prefix rules still apply. Other OpenAI models use
+provider-default caching. The authenticated ChatGPT Codex endpoint sends the
+stable key without explicit breakpoint options and replays the server's opaque
+turn-state header on later requests for sticky routing. Custom endpoints receive
+no undeclared cache or Codex routing controls.
 `--for diagnose`, `change`, `behavior`, or `owner` uses one compact,
 target-neutral system prompt and adds the selected use-case guidance as a
 developer message; omission keeps the full universal prompt. A follow-up

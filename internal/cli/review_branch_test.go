@@ -16,10 +16,11 @@ import (
 )
 
 type branchClient struct {
-	mu        sync.Mutex
-	models    map[string]string
-	parallel  map[string]bool
-	b2Started chan struct{}
+	mu         sync.Mutex
+	models     map[string]string
+	parallel   map[string]bool
+	turnStates map[string]string
+	b2Started  chan struct{}
 }
 
 func (c *branchClient) CreateResponse(ctx context.Context, request openai.Request) (openai.Response, error) {
@@ -30,11 +31,13 @@ func (c *branchClient) CreateResponse(ctx context.Context, request openai.Reques
 	}
 	c.mu.Lock()
 	c.parallel[requestID] = request.ParallelToolCalls
+	c.turnStates[requestID] = request.TurnState
 	if branchID != "" {
 		c.models[branchID] = request.Model + "/" + request.ThinkingMode
 	}
 	c.mu.Unlock()
 	if branchID == "" {
+		const turnState = "sticky-route"
 		return openai.Response{
 			ToolCalls: []openai.ToolCall{{
 				ID: "fc_root", CallID: "call_root", Name: reviewtask.BranchToolName,
@@ -43,6 +46,7 @@ func (c *branchClient) CreateResponse(ctx context.Context, request openai.Reques
 					{"scope":"Inspect the second responsibility.","path_hints":[],"model":"inherit","reasoning_effort":"inherit"}
 				]}`,
 			}},
+			TurnState: turnState,
 		}, nil
 	}
 	if request.OnStreamEvent != nil {
@@ -66,7 +70,7 @@ func (c *branchClient) CreateResponse(ctx context.Context, request openai.Reques
 }
 
 func TestRunReviewTreeFansOutAggregatesAndPublishesOrderedBranchEvents(t *testing.T) {
-	client := &branchClient{models: map[string]string{}, parallel: map[string]bool{}, b2Started: make(chan struct{})}
+	client := &branchClient{models: map[string]string{}, parallel: map[string]bool{}, turnStates: map[string]string{}, b2Started: make(chan struct{})}
 	var events []trace.Event
 	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
 		events = append(events, event)
@@ -105,6 +109,9 @@ func TestRunReviewTreeFansOutAggregatesAndPublishesOrderedBranchEvents(t *testin
 	}
 	if !client.parallel["root"] || !client.parallel["b1"] || !client.parallel["b2"] {
 		t.Fatalf("review node parallel policies = %#v", client.parallel)
+	}
+	if client.turnStates["root"] != "" || client.turnStates["b1"] != "sticky-route" || client.turnStates["b2"] != "sticky-route" {
+		t.Fatalf("review node turn states = %#v", client.turnStates)
 	}
 
 	fanoutIndex := eventIndex(events, "branch.fanout")
