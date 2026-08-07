@@ -377,7 +377,7 @@ func fishCompletionCommands(refs, remotes, paths []string) []fishCompletionComma
 	return []fishCompletionCommand{
 		{name: "commit", options: withShared(fishCompletionOption{name: "amend"})},
 		{name: "commit-msg", options: withShared(fishCompletionOption{name: "amend"})},
-		{name: "explore", options: []fishCompletionOption{{name: "debug"}, {name: "fast"}, {name: "follow-up", takesValue: true, value: "AAAAAAAAAAAAAAAAAAAAAAAAAA"}}},
+		{name: "explore", options: []fishCompletionOption{{name: "debug"}, {name: "fast"}, {name: "for", takesValue: true, value: "diagnose", valueCandidates: []string{"behavior", "change", "diagnose", "owner"}}, {name: "follow-up", takesValue: true, value: "AAAAAAAAAAAAAAAAAAAAAAAAAA"}}},
 		{name: "pr-message", options: slices.Clone(shared)},
 		{name: "release-note", options: withShared(fishCompletionOption{name: "out", takesValue: true, value: "notes.md", valueCandidates: slices.Clone(paths)})},
 		{name: "review", options: slices.Clone(review)},

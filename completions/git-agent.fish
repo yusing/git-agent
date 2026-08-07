@@ -100,7 +100,7 @@ function __git_agent_command_has_option
         case pr-message
             contains -- "$option" $shared
         case explore
-            contains -- "$option" debug fast follow-up
+            contains -- "$option" debug fast for follow-up
         case release-note
             contains -- "$option" out $shared
         case review simplify
@@ -113,7 +113,7 @@ function __git_agent_command_has_option
 end
 
 function __git_agent_option_takes_value
-    contains -- "$argv[1]" model base-url timeout max-steps guidance-family append-prompt pprof wait follow-up depth max-web-searches orchestration-artifact out rev remote scope min-score limit format embedding-model embedding-dimensions
+    contains -- "$argv[1]" model base-url timeout max-steps guidance-family append-prompt pprof wait follow-up for depth max-web-searches orchestration-artifact out rev remote scope min-score limit format embedding-model embedding-dimensions
 end
 
 function __git_agent_option_value_is_valid
@@ -122,6 +122,8 @@ function __git_agent_option_value_is_valid
     set -l value $argv[3]
 
     switch $option
+        case for
+            test "$command_name" = explore; and contains -- "$value" diagnose change behavior owner
         case depth
             contains -- "$command_name" review simplify; and contains -- "$value" fast balanced thorough
         case guidance-family
@@ -515,6 +517,7 @@ complete -c git-agent -n '__git_agent_option_available staged review simplify' -
 complete -c git-agent -n '__git_agent_option_available wait review simplify' -l wait -r -f -d 'Wait for a detached task ID and print its report'
 complete -c git-agent -n '__git_agent_option_available follow-up review simplify' -l follow-up -r -f -d 'Re-evaluate a successful provider turn ID'
 complete -c git-agent -n '__git_agent_option_available follow-up explore' -l follow-up -r -f -d 'Fork a completed explore search ID'
+complete -c git-agent -n '__git_agent_option_available for explore' -l for -r -f -a 'diagnose change behavior owner' -d 'Select exploration query target'
 complete -c git-agent -n '__git_agent_option_available depth review' -l depth -r -f -a 'fast balanced thorough' -d 'Select depth and reasoning default: fast=low, balanced=medium, thorough=high'
 complete -c git-agent -n '__git_agent_option_available depth simplify' -l depth -r -f -a 'fast balanced thorough' -d 'Select depth and reasoning default: fast=low, balanced=low, thorough=medium'
 complete -c git-agent -n '__git_agent_option_available max-web-searches review simplify' -l max-web-searches -r -f -d 'Cap provider-hosted web searches'

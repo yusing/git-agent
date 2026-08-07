@@ -30,16 +30,28 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("explore", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var followUpID string
+	var targetValue string
 	var fast bool
 	var debug bool
 	fs.StringVar(&followUpID, "follow-up", "", "fork a completed explore search")
+	fs.StringVar(&targetValue, "for", "", "select query target: diagnose, change, behavior, or owner")
 	fs.BoolVar(&fast, "fast", false, "use priority service tier")
 	fs.BoolVar(&debug, "debug", false, "enable debug output on stderr")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return exploreUsageError()
 		}
-		return err
+		return errors.Join(err, exploreUsageError())
+	}
+	targetSpecified := false
+	fs.Visit(func(option *flag.Flag) {
+		if option.Name == "for" {
+			targetSpecified = true
+		}
+	})
+	selectedTarget, err := explore.ParseQueryTarget(targetValue)
+	if err != nil {
+		return errors.Join(err, exploreUsageError())
 	}
 	question := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if question == "" {
@@ -84,14 +96,18 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 		return err
 	}
 	var parent *explore.Session
+	var inheritedTarget explore.QueryTarget
 	if followUpID != "" {
-		parent, err = store.FollowUpParent(followUpID, workspace)
+		parent, inheritedTarget, err = store.FollowUpParent(followUpID, workspace)
 		if err != nil {
 			return err
 		}
 	}
+	if followUpID != "" && !targetSpecified {
+		selectedTarget = inheritedTarget
+	}
 
-	coordinator := explore.NewCoordinator(store, workspace, fast)
+	coordinator := explore.NewCoordinator(store, workspace, fast, selectedTarget)
 	if debug {
 		coordinator.Timing = timing.recordSimple
 	}
@@ -217,6 +233,11 @@ func (a *App) runExploreBatch(
 	if err != nil {
 		return nil, err
 	}
+	selectedTarget := items[0].QueryTarget
+	instructionTarget := selectedTarget
+	if parent != nil {
+		instructionTarget = parent.InstructionTarget
+	}
 	promptItems := make([]explore.PromptItem, 0, len(items))
 	itemIDs := make([]string, 0, len(items))
 	var guidancePaths []string
@@ -281,7 +302,7 @@ func (a *App) runExploreBatch(
 		}
 	}
 	request := agent.Request{
-		SystemPrompt: explore.SystemPrompt, TextFormat: explore.TextFormat(), AllowedToolNames: allowedTools,
+		SystemPrompt: explore.SystemPromptFor(instructionTarget), TextFormat: explore.TextFormat(), AllowedToolNames: allowedTools,
 		ParallelToolCalls: true, MaxSteps: cfg.MaxSteps, RepairOnValidator: true,
 	}
 	if parent == nil {
@@ -290,7 +311,7 @@ func (a *App) runExploreBatch(
 		request.ProjectGuidance = renderedGuidance
 		request.UserPrompt = userPrompt
 	} else {
-		request.Input = explore.FollowUpInput(*parent, userPrompt)
+		request.Input = explore.FollowUpInput(*parent, userPrompt, selectedTarget)
 	}
 	timing.recordSimple("prompt_setup", time.Since(promptSetupStarted))
 
@@ -321,7 +342,7 @@ func (a *App) runExploreBatch(
 
 func exploreUsageError() error {
 	var usage strings.Builder
-	usage.WriteString("Usage: git-agent explore [--debug] [--fast] [--follow-up <search-id>] <question...>\n\n")
-	usage.WriteString("Flags:\n  --debug\n      enable debug output on stderr\n  --fast\n      use priority service tier\n  --follow-up <search-id>\n      fork a completed explore search")
+	usage.WriteString("Usage: git-agent explore [--debug] [--fast] [--for <diagnose|change|behavior|owner>] [--follow-up <search-id>] <question...>\n\n")
+	usage.WriteString("Flags:\n  --debug\n      enable debug output on stderr\n  --fast\n      use priority service tier\n  --for <target>\n      select diagnose, change, behavior, or owner guidance\n  --follow-up <search-id>\n      fork a completed explore search")
 	return errors.New(usage.String())
 }

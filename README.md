@@ -58,7 +58,7 @@ directory is on `PATH`.
 | Staged review | `git-agent review --staged` | Detached staged-review launch JSON |
 | Re-review a completed turn | `git-agent review [--fast] --follow-up <turn-id> <prompt...>` | New detached task launch JSON |
 | Codebase simplification audit | `git-agent simplify --codebase` | Detached codebase-audit launch JSON |
-| Agent-ready codebase exploration | `git-agent explore <question...>` | Search ID and grounded answer JSON |
+| Agent-ready codebase exploration | `git-agent explore [--for <target>] <question...>` | Search ID and grounded answer JSON |
 | Continue an exploration | `git-agent explore --follow-up <search-id> <question...>` | New branch ID and answer JSON |
 | Print search project identity | `git-agent project_id` | Stable project hash on stdout |
 | Agent context search | `git-agent search --agent <query...>` | Brief results, plus progress endpoint when indexing |
@@ -331,15 +331,25 @@ git-agent explore "where is release note evidence prepared?"
 # Request priority Responses API processing
 git-agent explore --fast "where is release note evidence prepared?"
 
+# Focus the answer on diagnosis, change readiness, behavior, or ownership
+git-agent explore --for diagnose "why is warm search discovery slow?"
+git-agent explore --for change "what must change to avoid this lookup?"
+git-agent explore --for behavior "what is the follow-up reset contract?"
+git-agent explore --for owner "which package owns batch compatibility?"
+
 # Include console trace and phase timing events on stderr
 git-agent explore --debug "where is release note evidence prepared?"
 
 # Continue that exact context; the result receives another independently usable ID
 git-agent explore --follow-up <search-id> "which tests define its failure contract?"
+
+# Keep the same context and change only the answer target
+git-agent explore --follow-up <search-id> --for owner "which callers reach it?"
 ```
 
-Concurrent initial calls batch automatically. Concurrent follow-ups naming the
-same parent ID become independent sibling branches. Three follow-ups preserve
+Concurrent initial calls with the same service tier and query target batch
+automatically. Concurrent follow-ups naming the same parent ID, service tier,
+and query target become independent sibling branches. Three follow-ups preserve
 context; the next invocation succeeds as a fresh search with a reset allowance.
 An initial batch and its context-preserving follow-ups are assigned one
 prompt-cache key. Git-agent keeps agent instructions unchanged across model
@@ -349,6 +359,14 @@ GPT-5.6 models, each appended budget is an explicit cache breakpoint. Provider
 cache retention and minimum-prefix rules still apply. Other OpenAI models and
 the authenticated ChatGPT Codex endpoint send the stable key without GPT-5.6
 breakpoint options; custom endpoints receive no undeclared cache controls.
+`--for diagnose`, `change`, `behavior`, or `owner` adds use-case guidance to the
+stable initial system prompt; omission keeps the universal prompt. A
+context-preserving follow-up inherits its active target unless `--for` selects
+another one. A changed target appends one replayable developer message with the
+new target guidance while retaining the original system instructions, history
+prefix, and prompt-cache key; selecting the active target adds no duplicate.
+A depth reset inherits the exhausted session's active target unless `--for`
+selects another.
 Follow-up IDs are bound to the workspace that created them and are rejected from
 another `--cwd`, even when both directories share an ancestor Git repository.
 Explore adds no internal timeout: it runs until completion or caller

@@ -24,14 +24,16 @@ const (
 
 // Session is one independently addressable branch of an exploration chain.
 type Session struct {
-	Version        int           `json:"version"`
-	ID             string        `json:"id"`
-	ParentID       string        `json:"parent_id,omitempty"`
-	Depth          int           `json:"depth"`
-	Workspace      string        `json:"workspace"`
-	PromptCacheKey string        `json:"prompt_cache_key"`
-	Answer         string        `json:"answer"`
-	History        []openai.Item `json:"history"`
+	Version           int           `json:"version"`
+	ID                string        `json:"id"`
+	ParentID          string        `json:"parent_id,omitempty"`
+	Depth             int           `json:"depth"`
+	Workspace         string        `json:"workspace"`
+	PromptCacheKey    string        `json:"prompt_cache_key"`
+	InstructionTarget QueryTarget   `json:"instruction_target,omitempty"`
+	ActiveTarget      QueryTarget   `json:"active_target,omitempty"`
+	Answer            string        `json:"answer"`
+	History           []openai.Item `json:"history"`
 }
 
 // Store owns owner-only explore state beneath one project metadata directory.
@@ -89,21 +91,21 @@ func (s *Store) Read(id string) (Session, error) {
 }
 
 // FollowUpParent returns the replayable parent while its branch still has a
-// context-preserving turn available. A nil parent means the caller must reset
-// to a fresh search.
-func (s *Store) FollowUpParent(id, workspace string) (*Session, error) {
+// context-preserving turn available and always returns the requested session's
+// active target. A nil parent means the caller must reset to a fresh search.
+func (s *Store) FollowUpParent(id, workspace string) (*Session, QueryTarget, error) {
 	session, err := s.Read(id)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	workspace = filepath.Clean(workspace)
 	if session.Workspace != workspace {
-		return nil, fmt.Errorf("explore search ID %s belongs to workspace %q, not %q", id, session.Workspace, workspace)
+		return nil, "", fmt.Errorf("explore search ID %s belongs to workspace %q, not %q", id, session.Workspace, workspace)
 	}
 	if session.Depth >= MaxFollowUps {
-		return nil, nil
+		return nil, session.ActiveTarget, nil
 	}
-	return &session, nil
+	return &session, session.ActiveTarget, nil
 }
 
 func (s *Store) create(session Session) error {
@@ -175,6 +177,12 @@ func validateSession(session Session) error {
 	}
 	if strings.TrimSpace(session.PromptCacheKey) == "" {
 		return errors.New("explore session requires a prompt cache key")
+	}
+	if _, err := ParseQueryTarget(string(session.InstructionTarget)); err != nil {
+		return fmt.Errorf("invalid instruction target: %w", err)
+	}
+	if _, err := ParseQueryTarget(string(session.ActiveTarget)); err != nil {
+		return fmt.Errorf("invalid active target: %w", err)
 	}
 	if strings.TrimSpace(session.Answer) == "" {
 		return errors.New("explore session requires an answer")

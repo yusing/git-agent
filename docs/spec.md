@@ -28,7 +28,7 @@ Supported workflows:
 - `git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 - `git-agent review --wait <id>`
 - `git-agent review [--fast] --follow-up <turn-id> <prompt...>`
-- `git-agent explore [--debug] [--fast] [--follow-up <search-id>] <question...>`
+- `git-agent explore [--debug] [--fast] [--for <diagnose|change|behavior|owner>] [--follow-up <search-id>] <question...>`
 - `git-agent project_id`
 - `git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 - `git-agent simplify --wait <id>`
@@ -687,7 +687,7 @@ share an identifier, while repositories without an origin and non-Git
 directories remain path-specific. The command does not create an index or call
 a provider.
 
-#### `git-agent explore [--debug] [--fast] [--follow-up <search-id>] <question...>`
+#### `git-agent explore [--debug] [--fast] [--for <diagnose|change|behavior|owner>] [--follow-up <search-id>] <question...>`
 
 Run a synchronous, read-only codebase exploration and write exactly one
 newline-terminated JSON object to stdout:
@@ -726,6 +726,16 @@ stderr. With `--fast`, the Responses API request sends only
 effort, budget, cache policy, or search path. Without it, `service_tier` is
 omitted.
 
+`--for` selects use-case guidance in the stable exploration system prompt.
+`diagnose` prioritizes the reproducer, immediate failure mechanism, bottleneck, or
+regression cause; `change` prioritizes the implementation boundary, affected
+behavior, and focused validation; `behavior` prioritizes current semantics,
+contracts, and invariants; and `owner` prioritizes authoritative implementation,
+callers, and subsystem boundaries. Omitting `--for` retains the universal prompt.
+A missing or unsupported value fails before semantic retrieval or a provider
+request. Query-target selection uses this fixed vocabulary and never reads Codex
+session history or `~/.codex` at runtime.
+
 Without `--debug`, stderr contains progress and per-request `llm.usage` metrics.
 With `--debug`, every invocation starts one stderr console trace and writes
 `explore.phase` events
@@ -758,16 +768,22 @@ intent before semantic retrieval. Compatible ready intents elect one foreground
 leader and form batches of at most three; followers wait for the leader and
 receive only their own result. A batch is confined to one cleaned absolute
 working directory even when project metadata is shared by clones with the same
-origin. Initial searches in that workspace are mutually compatible only when
-they use the same service tier. Follow-ups are compatible only when they name
-the same parent search ID and use the same service tier. Every successful batch
-item receives a distinct opaque ID even when its provider conversation was
+origin.
+Initial searches in that workspace are mutually compatible only when
+they use the same service tier and selected query target. Follow-ups are
+compatible only when they name the same parent search ID and use the same
+service tier and selected query target.
+Every successful batch item receives a distinct opaque ID even when its provider
+conversation was
 shared with sibling items.
 
 Successful sessions persist in the current project's owner-only metadata
 directory. A session records its selected answer, parent ID, follow-up depth,
-one prompt-cache key, and replayable Responses API item history. An initial
-batch derives one key from its first sorted item ID and persists that key for
+stable-instruction target, active target, one prompt-cache key, and replayable
+Responses API item history. Missing target fields in an existing session mean
+the universal target.
+An initial batch derives one key from its first sorted item ID and persists that
+key for
 every sibling. Every request in one agent branch keeps `instructions` byte-stable.
 Changing model-step and remaining-tool budgets are appended as developer input
 and persisted in replay history, so each completed request input is an exact
@@ -780,11 +796,17 @@ send the key while retaining provider-default caching. The authenticated
 ChatGPT Codex endpoint also sends only the stable key. Custom endpoints receive
 no prompt-cache fields. Provider prefix-length, retention, routing, and eviction
 rules remain authoritative, so a nonzero cached-token count is not guaranteed.
-`--follow-up <search-id>` appends the
-new natural-language question to that stored context only when invoked from
-the same cleaned absolute workspace that created the session. A session ID from
-another workspace under the same project identity fails before semantic or
-provider work, preventing stored context from crossing exploration boundaries.
+`--follow-up <search-id>` appends the new natural-language question to that
+stored context only when invoked from the same cleaned absolute workspace that
+created the session. A context-preserving follow-up without `--for` inherits the
+parent's active target. Selecting the already-active target adds no target
+message. Selecting a different target keeps the original `instructions`, input
+history, and prompt-cache key, then appends exactly one replayable developer
+message beginning `Query target changed: <target>` followed by that target's
+guidance before the new user question. A target change alone does not run
+semantic retrieval. A session ID from another workspace under the same project
+identity fails before semantic or provider work, preventing stored context from
+crossing exploration boundaries.
 Sessions created by versions without workspace provenance or a prompt-cache
 identity are not follow-up eligible. The parent remains
 immutable and reusable, so simultaneous follow-ups from one parent create
@@ -795,9 +817,11 @@ used as the parent of another concurrent batch.
 Each branch permits three context-preserving follow-ups after its initial
 search. Follow-up depths one through three reuse stored context. A follow-up
 against a depth-three ID still succeeds, but it performs a new semantic search,
-has no parent, returns a new ID at depth zero, and resets the three-follow-up
-allowance. An unknown, malformed, unsuccessful, or unreadable ID fails before a
-provider request. Any semantic, provider, validation, persistence, leader, or
+has no parent, returns a new ID at depth zero, resets the three-follow-up
+allowance, and inherits the exhausted session's active target unless `--for`
+explicitly selects another target. The reset receives a new prompt-cache key.
+An unknown, malformed, unsuccessful, or unreadable ID fails before a provider
+request. Any semantic, provider, validation, persistence, leader, or
 batch-splitting failure returns nonzero and does not emit a success object on
 stdout.
 

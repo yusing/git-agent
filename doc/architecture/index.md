@@ -4,11 +4,12 @@ pjdoc:
   kind: architecture
   scope: root
   status: draft
-  revision: ARCH-2
+  revision: ARCH-4
   files:
     - review-static-checks.md
     - review-follow-up.md
     - branched-review.md
+    - explore-query-target.md
 ---
 # Git Agent planned-increment architecture
 
@@ -29,9 +30,13 @@ Current increment owners:
   parent/mode metadata.
 - `internal/agent`: terminal branch control calls and portable conversation
   forks.
+- `internal/explore`: query-target guidance, replay input, and durable explore
+  target metadata.
 
 - [Review static-check architecture](review-static-checks.md)
 
 - [Review and simplify follow-up architecture](review-follow-up.md)
 
 - [Branched review and simplify architecture](branched-review.md)
+
+- [Explore query-target architecture](explore-query-target.md)

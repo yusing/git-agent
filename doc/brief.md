@@ -57,3 +57,36 @@ or created from a follow-up branch.
 - Origin-backed clones share the identity already used by search; projects
   without an origin remain absolute-path-specific.
 - The log follows `search_code` disposition timing and non-fatal behavior.
+
+## Explore query targets
+
+### Outcome
+
+An agent or operator can select the kind of grounded answer needed from
+`explore` without changing search behavior or using `--fast` as a semantic
+shortcut.
+
+### First-draft scope
+
+- `explore --for diagnose|change|behavior|owner <question...>`.
+- The current universal guidance remains the default.
+- Context-preserving follow-ups inherit the active target.
+- A changed follow-up target is appended once as replayable developer input.
+- A depth reset starts fresh with the selected target.
+
+### Non-goals
+
+- Free-form, configured, or automatically inferred query targets.
+- A separate review target or changes to the dedicated `review` command.
+- Runtime access to Codex session history or `~/.codex`.
+- Any model, reasoning, budget, cache, or search semantic attached to `--fast`.
+
+### Query-target constraints
+
+- Responses `instructions` remain stable within a cache branch.
+- A changed-target developer message contains
+  `Query target changed: <target>` followed by that target's instructions.
+- The four values come from the accepted local-history analysis; the universal
+  prompt covers mixed or unclear questions.
+- Provider batching requires the same service tier, parent identity, and selected
+  query target.

@@ -2334,7 +2334,7 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent index sync\n")
 	b.WriteString("  git-agent index migrate --to v2 [--dry-run]\n")
 	b.WriteString("  git-agent commit-msg [--amend] [flags]\n")
-	b.WriteString("  git-agent explore [--debug] [--fast] [--follow-up <search-id>] <question...>\n")
+	b.WriteString("  git-agent explore [--debug] [--fast] [--for <diagnose|change|behavior|owner>] [--follow-up <search-id>] <question...>\n")
 	b.WriteString("  git-agent pr-message [flags]\n")
 	b.WriteString("  git-agent project_id\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")

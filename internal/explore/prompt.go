@@ -29,6 +29,57 @@ Every answer must begin with the direct answer, then use dense labeled blocks as
 
 Return only the strict JSON object required by the response schema. Emit exactly one answer for every input item, copying each opaque item_id exactly.`
 
+type QueryTarget string
+
+const (
+	QueryTargetUniversal QueryTarget = ""
+	QueryTargetDiagnose  QueryTarget = "diagnose"
+	QueryTargetChange    QueryTarget = "change"
+	QueryTargetBehavior  QueryTarget = "behavior"
+	QueryTargetOwner     QueryTarget = "owner"
+
+	queryTargetDiagnoseInstructions = "Prioritize the concrete reproducer, current failure path, immediate mechanism, and evidence-backed bottleneck or regression cause. Distinguish symptoms from the violated invariant and authoritative owner."
+	queryTargetChangeInstructions   = "Prioritize operation-ready change context: the authoritative implementation boundary, affected contracts and call sites, edge cases, and focused validation that would falsify the change. Do not propose code that is not grounded in the repository."
+	queryTargetBehaviorInstructions = "Prioritize current behavior: executable semantics, contract-defining tests, inputs and outputs, invariants, and success and failure paths. Separate observed behavior from unsupported assumptions."
+	queryTargetOwnerInstructions    = "Prioritize ownership: the authoritative implementation, entry points, callers and consumers, subsystem boundaries, and relevant interfaces. Exclude incidental mentions and identify concrete absences."
+)
+
+func ParseQueryTarget(value string) (QueryTarget, error) {
+	target := QueryTarget(value)
+	switch target {
+	case QueryTargetUniversal, QueryTargetDiagnose, QueryTargetChange, QueryTargetBehavior, QueryTargetOwner:
+		return target, nil
+	default:
+		return QueryTargetUniversal, fmt.Errorf(
+			"unsupported explore query target %q (want diagnose, change, behavior, or owner)",
+			value,
+		)
+	}
+}
+
+func (target QueryTarget) Instructions() string {
+	switch target {
+	case QueryTargetDiagnose:
+		return queryTargetDiagnoseInstructions
+	case QueryTargetChange:
+		return queryTargetChangeInstructions
+	case QueryTargetBehavior:
+		return queryTargetBehaviorInstructions
+	case QueryTargetOwner:
+		return queryTargetOwnerInstructions
+	default:
+		return ""
+	}
+}
+
+func SystemPromptFor(target QueryTarget) string {
+	instructions := target.Instructions()
+	if instructions == "" {
+		return SystemPrompt
+	}
+	return SystemPrompt + "\n\nQuery target: " + string(target) + "\n" + instructions
+}
+
 type PromptItem struct {
 	ItemID          string `json:"item_id"`
 	Question        string `json:"question"`
@@ -134,8 +185,15 @@ func ParseAnswers(text string) (map[string]string, error) {
 	return answers, nil
 }
 
-func FollowUpInput(parent Session, prompt string) []openai.Item {
+func FollowUpInput(parent Session, prompt string, target QueryTarget) []openai.Item {
 	items := slices.Clone(parent.History)
+	if parent.ActiveTarget != target {
+		change := "Query target changed: " + string(target)
+		if instructions := target.Instructions(); instructions != "" {
+			change += "\n" + instructions
+		}
+		items = append(items, openai.NewMessage("developer", change))
+	}
 	return append(items, openai.NewMessage("user", prompt))
 }
 

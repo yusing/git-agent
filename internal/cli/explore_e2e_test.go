@@ -29,7 +29,7 @@ func TestExploreCommandEndToEndChainResetAndReadTool(t *testing.T) {
 	configureExploreE2EEnvironment(t, responses.URL, embeddings.URL)
 	projectID := runProjectIDProcess(t, executable, repoDir)
 
-	initial := runSuccessfulExploreProcess(t, executable, repoDir, "read-owner", "of", "Answer")
+	initial := runSuccessfulExploreProcess(t, executable, repoDir, "--for", "owner", "read-owner", "of", "Answer")
 	if !strings.Contains(initial.output.Answer, "main.go:3") {
 		t.Fatalf("initial answer = %q", initial.output.Answer)
 	}
@@ -84,6 +84,9 @@ func TestExploreCommandEndToEndChainResetAndReadTool(t *testing.T) {
 	}
 	if resetSession.Depth != 0 || resetSession.ParentID != "" {
 		t.Fatalf("reset session = %#v", resetSession)
+	}
+	if resetSession.InstructionTarget != explore.QueryTargetOwner || resetSession.ActiveTarget != explore.QueryTargetOwner {
+		t.Fatalf("reset targets = %q/%q, want inherited owner", resetSession.InstructionTarget, resetSession.ActiveTarget)
 	}
 	if got := embeddingStats.calls(); got <= initialEmbeddingCalls {
 		t.Fatalf("fourth follow-up embedding calls = %d, want > %d", got, initialEmbeddingCalls)
@@ -167,6 +170,62 @@ func TestExploreCommandEndToEndBatchesAndForks(t *testing.T) {
 		t.Fatalf("different-parent provider batch sizes = %v, want [3 3 3 1 1]", got)
 	}
 	assertExploreBatchLog(t, projectID)
+}
+
+func TestExploreCommandEndToEndSeparatesTargetsAndChangesFollowUpGuidance(t *testing.T) {
+	repoDir := newExploreE2ERepository(t)
+	executable := buildExploreE2EBinary(t)
+	responses, responseStats := newExploreE2EResponsesServer(t)
+	defer responses.Close()
+	embeddings, embeddingStats := newSearchEmbeddingsServer(t)
+	defer embeddings.Close()
+	configureExploreE2EEnvironment(t, responses.URL, embeddings.URL)
+
+	initial := runConcurrentExploreProcesses(t, executable, repoDir, [][]string{
+		{"--for", "diagnose", "why", "is", "search", "slow"},
+		{"--for", "owner", "who", "owns", "search"},
+	})
+	assertDistinctExploreOutputs(t, initial)
+	if got := responseStats.answerBatchSizes(); !slices.Equal(got, []int{1, 1}) {
+		t.Fatalf("different-target provider batch sizes = %v, want [1 1]", got)
+	}
+	store, err := explore.NewStore(projectMetadataDir(t, repoDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var diagnose explore.Session
+	for _, result := range initial {
+		session, readErr := store.Read(result.output.ID)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if session.InstructionTarget == explore.QueryTargetDiagnose {
+			diagnose = session
+		}
+	}
+	if diagnose.ID == "" {
+		t.Fatal("targeted initial searches did not persist diagnose target")
+	}
+	initialEmbeddingCalls := embeddingStats.calls()
+	changed := runSuccessfulExploreProcess(
+		t, executable, repoDir,
+		"--follow-up", diagnose.ID, "--for", "owner", "which", "callers", "reach", "it",
+	)
+	if strings.Contains(changed.stderr, "explore: searching") {
+		t.Fatalf("target-only follow-up repeated semantic retrieval:\n%s", changed.stderr)
+	}
+	if got := embeddingStats.calls(); got != initialEmbeddingCalls {
+		t.Fatalf("target-only follow-up embedding calls = %d, want %d", got, initialEmbeddingCalls)
+	}
+	changedSession, err := store.Read(changed.output.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedSession.InstructionTarget != explore.QueryTargetDiagnose ||
+		changedSession.ActiveTarget != explore.QueryTargetOwner ||
+		changedSession.PromptCacheKey != diagnose.PromptCacheKey {
+		t.Fatalf("changed follow-up session = %#v", changedSession)
+	}
 }
 
 func TestExploreCommandEndToEndRejectsUnknownIDWithoutProvider(t *testing.T) {

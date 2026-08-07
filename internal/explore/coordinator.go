@@ -36,10 +36,11 @@ type Prepared struct {
 }
 
 type BatchItem struct {
-	ID              string   `json:"id"`
-	Question        string   `json:"question"`
-	SemanticResults string   `json:"semantic_results,omitempty"`
-	GuidancePaths   []string `json:"guidance_paths,omitempty"`
+	ID              string      `json:"id"`
+	Question        string      `json:"question"`
+	QueryTarget     QueryTarget `json:"query_target,omitempty"`
+	SemanticResults string      `json:"semantic_results,omitempty"`
+	GuidancePaths   []string    `json:"guidance_paths,omitempty"`
 }
 
 type BatchResult struct {
@@ -61,6 +62,7 @@ type BatchRunner func(context.Context, *Session, []BatchItem) (map[string]BatchR
 type Coordinator struct {
 	store             *Store
 	workspace         string
+	target            QueryTarget
 	workspaceKey      string
 	batchSize         int
 	batchWait         time.Duration
@@ -73,9 +75,9 @@ type Coordinator struct {
 	Timing            func(string, time.Duration)
 }
 
-func NewCoordinator(store *Store, workspace string, fast bool) *Coordinator {
+func NewCoordinator(store *Store, workspace string, fast bool, target QueryTarget) *Coordinator {
 	workspace = filepath.Clean(workspace)
-	batchIdentity := workspace
+	batchIdentity := workspace + "\x00target=" + string(target)
 	if fast {
 		batchIdentity += "\x00priority"
 	}
@@ -83,6 +85,7 @@ func NewCoordinator(store *Store, workspace string, fast bool) *Coordinator {
 	return &Coordinator{
 		store:             store,
 		workspace:         workspace,
+		target:            target,
 		workspaceKey:      hex.EncodeToString(sum[:]),
 		batchSize:         defaultBatchSize,
 		batchWait:         defaultBatchWait,
@@ -149,7 +152,7 @@ func (c *Coordinator) Run(ctx context.Context, parent *Session, question string,
 		_ = os.Remove(ownerPath)
 	}()
 
-	record := BatchItem{ID: itemID, Question: question}
+	record := BatchItem{ID: itemID, Question: question, QueryTarget: c.target}
 	requestPath := filepath.Join(intentDir, "request.json")
 	if err := writeJSONAtomic(intentDir, requestPath, record); err != nil {
 		_ = os.RemoveAll(intentDir)
@@ -296,6 +299,18 @@ func (c *Coordinator) runLeader(ctx context.Context, keyDir, batchDir string, pa
 		_ = c.failBatch(ctx, keyDir, batchDir, err)
 		return err
 	}
+	for _, item := range items {
+		if item.QueryTarget != c.target {
+			err := fmt.Errorf(
+				"explore batch item %s target %q does not match coordinator target %q",
+				item.ID, item.QueryTarget, c.target,
+			)
+			c.timing("batch_collection", batchCollectionStarted)
+			_ = c.failBatch(ctx, keyDir, batchDir, err)
+			return err
+		}
+	}
+
 	if c.DispositionLog != nil {
 		_ = c.DispositionLog.AppendBatch(ctx, filepath.Base(batchDir), c.workspace, parent, items)
 	}
@@ -318,13 +333,16 @@ func (c *Coordinator) runLeader(ctx context.Context, keyDir, batchDir string, pa
 			}
 			depth := 0
 			parentID := ""
+			instructionTarget := item.QueryTarget
 			if parent != nil {
 				depth = parent.Depth + 1
 				parentID = parent.ID
+				instructionTarget = parent.InstructionTarget
 			}
 			session := Session{
 				Version: sessionVersion, ID: item.ID, ParentID: parentID, Depth: depth,
 				Workspace: c.workspace, PromptCacheKey: promptCacheKey, Answer: result.Answer,
+				InstructionTarget: instructionTarget, ActiveTarget: item.QueryTarget,
 				History: append(slices.Clone(result.History), openai.NewMessage(
 					"developer",
 					"Continue only explore branch item_id "+item.ID+" in future turns; treat sibling items as unrelated context.",

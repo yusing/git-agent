@@ -236,6 +236,126 @@ func TestExploreFastRequestsPriorityServiceTier(t *testing.T) {
 	}
 }
 
+func TestExploreQueryTargetPersistsAndChangesWithoutBreakingCache(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_EMBEDDING_DIMENSIONS", "3")
+	t.Chdir(root)
+	runGit(t, root, "init")
+	writeFixtureFile(t, root+"/main.go", "package demo\n")
+
+	responses := &exploreFakeResponseClient{}
+	embedder := &exploreFakeEmbedder{}
+	var stdout bytes.Buffer
+	app := &App{
+		stdin: strings.NewReader(""), stdout: &stdout, stderr: &bytes.Buffer{},
+		responseClient: responses, embeddingClient: embedder,
+	}
+	initial := runExploreForTest(t, app, &stdout, "--for", "diagnose", "why", "is", "search", "slow")
+	initialEmbeddingCalls := embedder.calls.Load()
+	inherited := runExploreForTest(t, app, &stdout, "--follow-up", initial.ID, "what", "failed")
+	changed := runExploreForTest(t, app, &stdout, "--follow-up", inherited.ID, "--for", "owner", "who", "owns", "it")
+	exhausted := runExploreForTest(t, app, &stdout, "--follow-up", changed.ID, "--for", "owner", "which", "callers")
+	if got := embedder.calls.Load(); got != initialEmbeddingCalls {
+		t.Fatalf("targeted follow-ups embedding calls = %d, want %d", got, initialEmbeddingCalls)
+	}
+	reset := runExploreForTest(t, app, &stdout, "--follow-up", exhausted.ID, "fresh", "context")
+
+	requests := responses.recordedRequests()
+	if len(requests) != 5 {
+		t.Fatalf("provider requests = %d, want 5", len(requests))
+	}
+	instructions := requests[0].Instructions
+	if !strings.Contains(instructions, "Query target: diagnose") {
+		t.Fatalf("initial instructions omitted diagnose target: %s", instructions)
+	}
+	cacheKey := requests[0].PromptCacheKey
+	for index, request := range requests[:4] {
+		if request.Instructions != instructions {
+			t.Fatalf("request %d rewrote stable instructions", index)
+		}
+		if request.PromptCacheKey != cacheKey {
+			t.Fatalf("request %d cache key = %q, want %q", index, request.PromptCacheKey, cacheKey)
+		}
+	}
+	if !strings.Contains(requests[4].Instructions, "Query target: owner") {
+		t.Fatalf("reset instructions omitted inherited owner target: %s", requests[4].Instructions)
+	}
+	if requests[4].PromptCacheKey == cacheKey {
+		t.Fatal("reset reused the exhausted chain's prompt cache key")
+	}
+	targetChanges := func(items []openai.Item) int {
+		count := 0
+		for _, item := range items {
+			if item.Role == "developer" && strings.HasPrefix(item.Content, "Query target changed: ") {
+				count++
+			}
+		}
+		return count
+	}
+	if got := targetChanges(requests[1].Input); got != 0 {
+		t.Fatalf("inherited target change messages = %d, want 0", got)
+	}
+	if got := targetChanges(requests[2].Input); got != 1 {
+		t.Fatalf("changed target messages = %d, want 1", got)
+	}
+	if got := targetChanges(requests[3].Input); got != 1 {
+		t.Fatalf("same active target messages = %d, want retained single message", got)
+	}
+	if got := targetChanges(requests[4].Input); got != 0 {
+		t.Fatalf("reset target change messages = %d, want 0", got)
+	}
+	wantChange := "Query target changed: owner\n" + explore.QueryTargetOwner.Instructions()
+	exactChanges := 0
+	for _, item := range requests[2].Input {
+		if item.Role == "developer" && item.Content == wantChange {
+			exactChanges++
+		}
+	}
+	if exactChanges != 1 {
+		t.Fatalf("exact target-change messages = %d, want 1", exactChanges)
+	}
+
+	identity, err := projectidentity.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataDir, err := identity.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := explore.NewStore(metadataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialSession, err := store.Read(initial.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initialSession.InstructionTarget != explore.QueryTargetDiagnose ||
+		initialSession.ActiveTarget != explore.QueryTargetDiagnose {
+		t.Fatalf("initial targets = %q/%q", initialSession.InstructionTarget, initialSession.ActiveTarget)
+	}
+	changedSession, err := store.Read(changed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedSession.InstructionTarget != explore.QueryTargetDiagnose ||
+		changedSession.ActiveTarget != explore.QueryTargetOwner {
+		t.Fatalf("changed targets = %q/%q", changedSession.InstructionTarget, changedSession.ActiveTarget)
+	}
+	resetSession, err := store.Read(reset.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resetSession.InstructionTarget != explore.QueryTargetOwner ||
+		resetSession.ActiveTarget != explore.QueryTargetOwner ||
+		resetSession.Depth != 0 || resetSession.ParentID != "" {
+		t.Fatalf("reset session = %#v", resetSession)
+	}
+}
+
 func (c *exploreFakeResponseClient) requestCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -325,7 +445,7 @@ func TestExploreInitialFollowUpsAndFreshReset(t *testing.T) {
 		}
 	}
 	beforeReset := embedder.calls.Load()
-	output = runExploreForTest(t, app, &stdout, "--follow-up", output.ID, "start", "fresh")
+	output = runExploreForTest(t, app, &stdout, "--follow-up", output.ID, "--for", "owner", "start", "fresh")
 	if got := embedder.calls.Load(); got <= beforeReset {
 		t.Fatalf("fourth follow-up embedding calls = %d, want > %d", got, beforeReset)
 	}
@@ -345,7 +465,7 @@ func TestExploreInitialFollowUpsAndFreshReset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if session.Depth != 0 || session.ParentID != "" {
+	if session.Depth != 0 || session.ParentID != "" || session.InstructionTarget != explore.QueryTargetOwner || session.ActiveTarget != explore.QueryTargetOwner {
 		t.Fatalf("reset session = %#v", session)
 	}
 	if got := responses.requestCount(); got != 5 {
@@ -372,6 +492,9 @@ func TestExploreInitialFollowUpsAndFreshReset(t *testing.T) {
 	if requests[4].PromptCacheKey == "" || requests[4].PromptCacheKey == rootCacheKey {
 		t.Fatalf("fresh reset prompt cache key = %q, previous %q", requests[4].PromptCacheKey, rootCacheKey)
 	}
+	if !strings.Contains(requests[4].Instructions, "Query target: owner") {
+		t.Fatalf("fresh reset instructions omitted owner target: %s", requests[4].Instructions)
+	}
 	if !strings.Contains(stderr.String(), "explore: searching") || !strings.Contains(stderr.String(), "explore: complete") {
 		t.Fatalf("stderr missing progress:\n%s", stderr.String())
 	}
@@ -387,10 +510,31 @@ func countPromptCacheBreakpoints(items []openai.Item) int {
 	return count
 }
 
+func TestExploreRejectsInvalidQueryTargetBeforeSearchOrProviderWork(t *testing.T) {
+	responses := &exploreFakeResponseClient{}
+	embedder := &exploreFakeEmbedder{}
+	app := &App{
+		stdin: strings.NewReader(""), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{},
+		responseClient: responses, embeddingClient: embedder,
+	}
+	err := app.Run(t.Context(), []string{"explore", "--for", "review", "inspect"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported explore query target") {
+		t.Fatalf("invalid target error = %v", err)
+	}
+	err = app.Run(t.Context(), []string{"explore", "--for"})
+	if err == nil || !strings.Contains(err.Error(), "flag needs an argument") ||
+		!strings.Contains(err.Error(), "Usage: git-agent explore") {
+		t.Fatalf("missing target error = %v", err)
+	}
+	if responses.requestCount() != 0 || embedder.calls.Load() != 0 {
+		t.Fatalf("invalid target performed provider=%d embedding=%d work", responses.requestCount(), embedder.calls.Load())
+	}
+}
+
 func TestExploreHelpDoesNotResolveProviderConfiguration(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 	err := New().Run(t.Context(), []string{"explore", "--help"})
-	if err == nil || !strings.Contains(err.Error(), "Usage: git-agent explore [--debug] [--fast] [--follow-up <search-id>] <question...>") {
+	if err == nil || !strings.Contains(err.Error(), "Usage: git-agent explore [--debug] [--fast] [--for <diagnose|change|behavior|owner>] [--follow-up <search-id>] <question...>") {
 		t.Fatalf("help error = %v", err)
 	}
 }

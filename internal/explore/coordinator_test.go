@@ -213,8 +213,8 @@ func TestCoordinatorCapsConcurrentBatchAtThree(t *testing.T) {
 
 func TestCoordinatorDoesNotBatchDifferentWorkspaces(t *testing.T) {
 	store := testStore(t)
-	first := NewCoordinator(store, "/workspace/one", false)
-	second := NewCoordinator(store, "/workspace/two", false)
+	first := NewCoordinator(store, "/workspace/one", false, QueryTargetUniversal)
+	second := NewCoordinator(store, "/workspace/two", false, QueryTargetUniversal)
 	for _, coordinator := range []*Coordinator{first, second} {
 		coordinator.pollInterval = time.Millisecond
 		coordinator.heartbeatInterval = 5 * time.Millisecond
@@ -267,8 +267,8 @@ func TestCoordinatorRejectsParentFromDifferentWorkspace(t *testing.T) {
 
 func TestCoordinatorDoesNotBatchDifferentServiceTiers(t *testing.T) {
 	store := testStore(t)
-	standard := NewCoordinator(store, testWorkspace, false)
-	priority := NewCoordinator(store, testWorkspace, true)
+	standard := NewCoordinator(store, testWorkspace, false, QueryTargetUniversal)
+	priority := NewCoordinator(store, testWorkspace, true, QueryTargetUniversal)
 	for _, coordinator := range []*Coordinator{standard, priority} {
 		coordinator.pollInterval = time.Millisecond
 		coordinator.heartbeatInterval = 5 * time.Millisecond
@@ -311,6 +311,52 @@ func TestCoordinatorDoesNotBatchDifferentServiceTiers(t *testing.T) {
 	}
 }
 
+func TestCoordinatorDoesNotBatchDifferentQueryTargets(t *testing.T) {
+	store := testStore(t)
+	universal := NewCoordinator(store, testWorkspace, false, QueryTargetUniversal)
+	diagnose := NewCoordinator(store, testWorkspace, false, QueryTargetDiagnose)
+	for _, coordinator := range []*Coordinator{universal, diagnose} {
+		coordinator.pollInterval = time.Millisecond
+		coordinator.heartbeatInterval = 5 * time.Millisecond
+		coordinator.heartbeatStale = 100 * time.Millisecond
+	}
+	var prepared atomic.Int32
+	release := make(chan struct{})
+	prepare := func(context.Context) (Prepared, error) {
+		if prepared.Add(1) == 2 {
+			close(release)
+		}
+		<-release
+		return Prepared{SemanticResults: `{"results":[]}`}, nil
+	}
+	var runs atomic.Int32
+	runner := func(ctx context.Context, _ *Session, items []BatchItem) (map[string]BatchResult, error) {
+		if len(items) != 1 {
+			return nil, fmt.Errorf("different query targets formed batch of %d", len(items))
+		}
+		runs.Add(1)
+		return answerRunner(ctx, nil, items)
+	}
+	var wg sync.WaitGroup
+	errors := make(chan error, 2)
+	for index, coordinator := range []*Coordinator{universal, diagnose} {
+		wg.Go(func() {
+			_, err := coordinator.Run(t.Context(), nil, fmt.Sprintf("target %d", index), prepare, runner)
+			errors <- err
+		})
+	}
+	wg.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if runs.Load() != 2 {
+		t.Fatalf("batch runs = %d, want 2", runs.Load())
+	}
+}
+
 func TestSessionValidationRequiresVersionedCleanWorkspace(t *testing.T) {
 	valid := Session{
 		Version: sessionVersion, ID: "AAAAAAAAAAAAAAAAAAAAAAAAAA", Workspace: testWorkspace,
@@ -327,12 +373,22 @@ func TestSessionValidationRequiresVersionedCleanWorkspace(t *testing.T) {
 	if err := validateSession(dirty); err == nil || !strings.Contains(err.Error(), "workspace is not clean") {
 		t.Fatalf("unclean workspace error = %v", err)
 	}
+	invalidTarget := valid
+	invalidTarget.ActiveTarget = QueryTarget("review")
+	if err := validateSession(invalidTarget); err == nil || !strings.Contains(err.Error(), "invalid active target") {
+		t.Fatalf("invalid active target error = %v", err)
+	}
+	invalidTarget = valid
+	invalidTarget.InstructionTarget = QueryTarget("review")
+	if err := validateSession(invalidTarget); err == nil || !strings.Contains(err.Error(), "invalid instruction target") {
+		t.Fatalf("invalid instruction target error = %v", err)
+	}
 }
 
 func TestCoordinatorForksConcurrentFollowUpsFromSameParent(t *testing.T) {
 	store := testStore(t)
 	parentOutput := runFresh(t, testCoordinator(store), "root")
-	parent, err := store.FollowUpParent(parentOutput.ID, testWorkspace)
+	parent, _, err := store.FollowUpParent(parentOutput.ID, testWorkspace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,11 +454,11 @@ func TestCoordinatorDoesNotBatchDifferentParents(t *testing.T) {
 	store := testStore(t)
 	firstOutput := runFresh(t, testCoordinator(store), "first root")
 	secondOutput := runFresh(t, testCoordinator(store), "second root")
-	firstParent, err := store.FollowUpParent(firstOutput.ID, testWorkspace)
+	firstParent, _, err := store.FollowUpParent(firstOutput.ID, testWorkspace)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondParent, err := store.FollowUpParent(secondOutput.ID, testWorkspace)
+	secondParent, _, err := store.FollowUpParent(secondOutput.ID, testWorkspace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +497,7 @@ func TestFourthFollowUpResetsToFreshSearch(t *testing.T) {
 	store := testStore(t)
 	output := runFresh(t, testCoordinator(store), "root")
 	for depth := 1; depth <= MaxFollowUps; depth++ {
-		parent, err := store.FollowUpParent(output.ID, testWorkspace)
+		parent, _, err := store.FollowUpParent(output.ID, testWorkspace)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -460,12 +516,15 @@ func TestFourthFollowUpResetsToFreshSearch(t *testing.T) {
 			t.Fatalf("depth = %d, want %d", session.Depth, depth)
 		}
 	}
-	parent, err := store.FollowUpParent(output.ID, testWorkspace)
+	parent, target, err := store.FollowUpParent(output.ID, testWorkspace)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if parent != nil {
 		t.Fatalf("exhausted parent = %#v, want nil", parent)
+	}
+	if target != QueryTargetUniversal {
+		t.Fatalf("exhausted target = %q, want universal", target)
 	}
 	var prepared atomic.Bool
 	output, err = testCoordinator(store).Run(t.Context(), nil, "fourth follow-up", func(context.Context) (Prepared, error) {
@@ -626,7 +685,7 @@ func testStore(t *testing.T) *Store {
 }
 
 func testCoordinator(store *Store) *Coordinator {
-	coordinator := NewCoordinator(store, testWorkspace, false)
+	coordinator := NewCoordinator(store, testWorkspace, false, QueryTargetUniversal)
 	coordinator.batchWait = time.Second
 	coordinator.joinGrace = 50 * time.Millisecond
 	coordinator.pollInterval = time.Millisecond
