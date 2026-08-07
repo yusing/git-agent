@@ -29,6 +29,12 @@ var forcedFinalizationPrompt string
 //go:embed prompts/repair.md.tmpl
 var repairPromptSource string
 
+//go:embed prompts/explore.md
+var explorePrompt string
+
+//go:embed prompts/explore-target.md
+var exploreTargetPrompt string
+
 var (
 	requestPromptTemplate         = template.Must(template.New("agent-request").Parse(requestPromptSource))
 	budgetStatusPromptTemplate    = template.Must(template.New("agent-budget-status").Parse(budgetStatusPromptSource))
@@ -74,4 +80,12 @@ func renderBudgetExhaustedPrompt(data budgetExhaustedPromptData) string {
 
 func renderRepairPrompt(errs []string) string {
 	return strings.TrimSpace(textutil.ExecuteTemplate(repairPromptTemplate, struct{ Errors []string }{Errors: errs}))
+}
+
+// ExploreSystemPrompt returns the embedded exploration prompt for the selected mode.
+func ExploreSystemPrompt(targeted bool) string {
+	if targeted {
+		return strings.TrimSpace(exploreTargetPrompt)
+	}
+	return strings.TrimSpace(explorePrompt)
 }

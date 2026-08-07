@@ -45,6 +45,7 @@
   docs when changing them.
 - Do not log API keys, bearer tokens, or auth files in traces, debug output, or
   errors.
+- Store long model prompts in `internal/agent/prompts`; do not hardcode them in Go code.
 - Prefer tests that use temporary repositories and fake servers over tests that
   depend on local Git configuration, network access, or real provider calls.
 
