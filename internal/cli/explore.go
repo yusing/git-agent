@@ -234,10 +234,7 @@ func (a *App) runExploreBatch(
 		return nil, err
 	}
 	selectedTarget := items[0].QueryTarget
-	instructionTarget := selectedTarget
-	if parent != nil {
-		instructionTarget = parent.InstructionTarget
-	}
+	instructionTarget := explore.SystemPromptTarget(parent, selectedTarget)
 	promptItems := make([]explore.PromptItem, 0, len(items))
 	itemIDs := make([]string, 0, len(items))
 	var guidancePaths []string
@@ -309,6 +306,7 @@ func (a *App) runExploreBatch(
 		request.ToolPolicy = toolPolicy()
 		request.Environment = environmentContextForRoot(root, root, "explore", "codebase", cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
 		request.ProjectGuidance = renderedGuidance
+		request.DeveloperInstructions = explore.InitialTargetInstruction(selectedTarget)
 		request.UserPrompt = userPrompt
 	} else {
 		request.Input = explore.FollowUpInput(*parent, userPrompt, selectedTarget)

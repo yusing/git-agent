@@ -29,6 +29,14 @@ Every answer must begin with the direct answer, then use dense labeled blocks as
 
 Return only the strict JSON object required by the response schema. Emit exactly one answer for every input item, copying each opaque item_id exactly.`
 
+const TargetSystemPrompt = `Produce repository-grounded codebase context for the active query target.
+
+Treat semantic_results as unverified leads. Use the available read-only repository tools to inspect authoritative implementation and contract-defining tests. Follow the latest developer instruction beginning "Query target:" or "Query target changed:"; it replaces earlier target-specific priorities.
+
+Answer each item independently and directly. Include only evidence needed for the active target, cite concrete claims with repository-relative path and line ranges as path/to/file.ext:START-END, and state concrete absences when relevant. Do not use markdown links, absolute paths, progress chatter, dangling leads, or closing restatements.
+
+Return only the strict JSON object required by the response schema. Emit exactly one answer for every input item, copying each opaque item_id exactly.`
+
 type QueryTarget string
 
 const (
@@ -72,12 +80,33 @@ func (target QueryTarget) Instructions() string {
 	}
 }
 
+func InitialTargetInstruction(target QueryTarget) string {
+	if target.Instructions() == "" {
+		return ""
+	}
+	return targetInstruction("Query target:", target)
+}
+
+func targetInstruction(prefix string, target QueryTarget) string {
+	text := prefix + " " + string(target)
+	if instructions := target.Instructions(); instructions != "" {
+		text += "\n" + instructions
+	}
+	return text
+}
+
 func SystemPromptFor(target QueryTarget) string {
-	instructions := target.Instructions()
-	if instructions == "" {
+	if target.Instructions() == "" {
 		return SystemPrompt
 	}
-	return SystemPrompt + "\n\nQuery target: " + string(target) + "\n" + instructions
+	return TargetSystemPrompt
+}
+
+func SystemPromptTarget(parent *Session, selected QueryTarget) QueryTarget {
+	if parent != nil && parent.InstructionTarget != QueryTargetUniversal {
+		return parent.InstructionTarget
+	}
+	return selected
 }
 
 type PromptItem struct {
@@ -188,11 +217,7 @@ func ParseAnswers(text string) (map[string]string, error) {
 func FollowUpInput(parent Session, prompt string, target QueryTarget) []openai.Item {
 	items := slices.Clone(parent.History)
 	if parent.ActiveTarget != target {
-		change := "Query target changed: " + string(target)
-		if instructions := target.Instructions(); instructions != "" {
-			change += "\n" + instructions
-		}
-		items = append(items, openai.NewMessage("developer", change))
+		items = append(items, openai.NewMessage("developer", targetInstruction("Query target changed:", target)))
 	}
 	return append(items, openai.NewMessage("user", prompt))
 }

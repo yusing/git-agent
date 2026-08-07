@@ -333,11 +333,10 @@ func (c *Coordinator) runLeader(ctx context.Context, keyDir, batchDir string, pa
 			}
 			depth := 0
 			parentID := ""
-			instructionTarget := item.QueryTarget
+			instructionTarget := SystemPromptTarget(parent, item.QueryTarget)
 			if parent != nil {
 				depth = parent.Depth + 1
 				parentID = parent.ID
-				instructionTarget = parent.InstructionTarget
 			}
 			session := Session{
 				Version: sessionVersion, ID: item.ID, ParentID: parentID, Depth: depth,

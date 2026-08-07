@@ -44,16 +44,28 @@ func TestSystemPromptForQueryTarget(t *testing.T) {
 	for _, target := range []QueryTarget{
 		QueryTargetDiagnose, QueryTargetChange, QueryTargetBehavior, QueryTargetOwner,
 	} {
-		got := SystemPromptFor(target)
-		if !strings.HasPrefix(got, SystemPrompt) ||
-			!strings.Contains(got, "Query target: "+string(target)) ||
-			!strings.Contains(got, target.Instructions()) {
-			t.Fatalf("system prompt for %q omitted target guidance: %s", target, got)
+		if got := SystemPromptFor(target); got != TargetSystemPrompt {
+			t.Fatalf("system prompt for %q is not the stable target prompt: %s", target, got)
+		}
+		wantInstruction := "Query target: " + string(target) + "\n" + target.Instructions()
+		if got := InitialTargetInstruction(target); got != wantInstruction {
+			t.Fatalf("initial target instruction for %q = %q, want %q", target, got, wantInstruction)
 		}
 		parsed, err := ParseQueryTarget(string(target))
 		if err != nil || parsed != target {
 			t.Fatalf("parse target %q = %q, %v", target, parsed, err)
 		}
+	}
+	if got := InitialTargetInstruction(QueryTargetUniversal); got != "" {
+		t.Fatalf("universal initial target instruction = %q, want empty", got)
+	}
+	universalParent := &Session{InstructionTarget: QueryTargetUniversal}
+	if got := SystemPromptTarget(universalParent, QueryTargetOwner); got != QueryTargetOwner {
+		t.Fatalf("universal-to-target prompt target = %q, want owner", got)
+	}
+	targetedParent := &Session{InstructionTarget: QueryTargetDiagnose}
+	if got := SystemPromptTarget(targetedParent, QueryTargetOwner); got != QueryTargetDiagnose {
+		t.Fatalf("target-to-target prompt target = %q, want stable diagnose family", got)
 	}
 	if _, err := ParseQueryTarget("review"); err == nil {
 		t.Fatal("unsupported query target was accepted")

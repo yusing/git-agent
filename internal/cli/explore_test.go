@@ -267,20 +267,21 @@ func TestExploreQueryTargetPersistsAndChangesWithoutBreakingCache(t *testing.T) 
 		t.Fatalf("provider requests = %d, want 5", len(requests))
 	}
 	instructions := requests[0].Instructions
-	if !strings.Contains(instructions, "Query target: diagnose") {
-		t.Fatalf("initial instructions omitted diagnose target: %s", instructions)
+	if !strings.HasPrefix(instructions, explore.TargetSystemPrompt) ||
+		strings.Contains(instructions, explore.QueryTargetDiagnose.Instructions()) {
+		t.Fatalf("initial instructions are not the neutral target prompt: %s", instructions)
 	}
 	cacheKey := requests[0].PromptCacheKey
 	for index, request := range requests[:4] {
 		if request.Instructions != instructions {
-			t.Fatalf("request %d rewrote stable instructions", index)
+			t.Fatalf("request %d rewrote stable target-mode instructions", index)
 		}
 		if request.PromptCacheKey != cacheKey {
 			t.Fatalf("request %d cache key = %q, want %q", index, request.PromptCacheKey, cacheKey)
 		}
 	}
-	if !strings.Contains(requests[4].Instructions, "Query target: owner") {
-		t.Fatalf("reset instructions omitted inherited owner target: %s", requests[4].Instructions)
+	if requests[4].Instructions != instructions {
+		t.Fatalf("reset instructions = %q, want stable target-mode instructions", requests[4].Instructions)
 	}
 	if requests[4].PromptCacheKey == cacheKey {
 		t.Fatal("reset reused the exhausted chain's prompt cache key")
@@ -293,6 +294,16 @@ func TestExploreQueryTargetPersistsAndChangesWithoutBreakingCache(t *testing.T) 
 			}
 		}
 		return count
+	}
+	wantInitial := explore.InitialTargetInstruction(explore.QueryTargetDiagnose)
+	exactInitials := 0
+	for _, item := range requests[0].Input {
+		if item.Role == "developer" && item.Content == wantInitial {
+			exactInitials++
+		}
+	}
+	if exactInitials != 1 {
+		t.Fatalf("initial target messages = %d, want 1", exactInitials)
 	}
 	if got := targetChanges(requests[1].Input); got != 0 {
 		t.Fatalf("inherited target change messages = %d, want 0", got)
@@ -353,6 +364,50 @@ func TestExploreQueryTargetPersistsAndChangesWithoutBreakingCache(t *testing.T) 
 		resetSession.ActiveTarget != explore.QueryTargetOwner ||
 		resetSession.Depth != 0 || resetSession.ParentID != "" {
 		t.Fatalf("reset session = %#v", resetSession)
+	}
+}
+
+func TestExploreAddingQueryTargetReplacesUniversalSystemPrompt(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_EMBEDDING_DIMENSIONS", "3")
+	t.Chdir(root)
+	runGit(t, root, "init")
+	writeFixtureFile(t, root+"/main.go", "package demo\n")
+
+	responses := &exploreFakeResponseClient{}
+	var stdout bytes.Buffer
+	app := &App{
+		stdin: strings.NewReader(""), stdout: &stdout, stderr: &bytes.Buffer{},
+		responseClient: responses, embeddingClient: &exploreFakeEmbedder{},
+	}
+	initial := runExploreForTest(t, app, &stdout, "describe", "behavior")
+	runExploreForTest(t, app, &stdout, "--follow-up", initial.ID, "--for", "behavior", "focus", "behavior")
+
+	requests := responses.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(requests))
+	}
+	if !strings.HasPrefix(requests[0].Instructions, explore.SystemPrompt) {
+		t.Fatalf("initial instructions omitted universal prompt: %s", requests[0].Instructions)
+	}
+	if !strings.HasPrefix(requests[1].Instructions, explore.TargetSystemPrompt) ||
+		requests[1].Instructions == requests[0].Instructions {
+		t.Fatalf("targeted follow-up did not replace universal instructions: %s", requests[1].Instructions)
+	}
+	if requests[1].PromptCacheKey != requests[0].PromptCacheKey {
+		t.Fatalf("targeted follow-up cache key = %q, want %q", requests[1].PromptCacheKey, requests[0].PromptCacheKey)
+	}
+	want := "Query target changed: behavior\n" + explore.QueryTargetBehavior.Instructions()
+	count := 0
+	for _, item := range requests[1].Input {
+		if item.Role == "developer" && item.Content == want {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("target-change messages = %d, want 1", count)
 	}
 }
 
@@ -492,8 +547,15 @@ func TestExploreInitialFollowUpsAndFreshReset(t *testing.T) {
 	if requests[4].PromptCacheKey == "" || requests[4].PromptCacheKey == rootCacheKey {
 		t.Fatalf("fresh reset prompt cache key = %q, previous %q", requests[4].PromptCacheKey, rootCacheKey)
 	}
-	if !strings.Contains(requests[4].Instructions, "Query target: owner") {
-		t.Fatalf("fresh reset instructions omitted owner target: %s", requests[4].Instructions)
+	wantOwnerTarget := explore.InitialTargetInstruction(explore.QueryTargetOwner)
+	ownerTargetMessages := 0
+	for _, item := range requests[4].Input {
+		if item.Role == "developer" && item.Content == wantOwnerTarget {
+			ownerTargetMessages++
+		}
+	}
+	if ownerTargetMessages != 1 {
+		t.Fatalf("fresh reset owner target messages = %d, want 1", ownerTargetMessages)
 	}
 	if !strings.Contains(stderr.String(), "explore: searching") || !strings.Contains(stderr.String(), "explore: complete") {
 		t.Fatalf("stderr missing progress:\n%s", stderr.String())

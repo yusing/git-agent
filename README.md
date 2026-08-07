@@ -359,12 +359,14 @@ GPT-5.6 models, each appended budget is an explicit cache breakpoint. Provider
 cache retention and minimum-prefix rules still apply. Other OpenAI models and
 the authenticated ChatGPT Codex endpoint send the stable key without GPT-5.6
 breakpoint options; custom endpoints receive no undeclared cache controls.
-`--for diagnose`, `change`, `behavior`, or `owner` adds use-case guidance to the
-stable initial system prompt; omission keeps the universal prompt. A
-context-preserving follow-up inherits its active target unless `--for` selects
-another one. A changed target appends one replayable developer message with the
-new target guidance while retaining the original system instructions, history
-prefix, and prompt-cache key; selecting the active target adds no duplicate.
+`--for diagnose`, `change`, `behavior`, or `owner` uses one compact,
+target-neutral system prompt and adds the selected use-case guidance as a
+developer message; omission keeps the full universal prompt. A follow-up
+inherits its active target unless `--for` selects another one. Switching target
+values keeps the neutral system prompt and appends one replayable developer
+message with the new guidance. Adding `--for` to a universal-prompt branch
+replaces the system prompt, so that transition may miss the prefix cache.
+Selecting the active target adds no duplicate.
 A depth reset inherits the exhausted session's active target unless `--for`
 selects another.
 Follow-up IDs are bound to the workspace that created them and are rejected from

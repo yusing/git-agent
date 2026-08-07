@@ -726,15 +726,18 @@ stderr. With `--fast`, the Responses API request sends only
 effort, budget, cache policy, or search path. Without it, `service_tier` is
 omitted.
 
-`--for` selects use-case guidance in the stable exploration system prompt.
-`diagnose` prioritizes the reproducer, immediate failure mechanism, bottleneck, or
-regression cause; `change` prioritizes the implementation boundary, affected
-behavior, and focused validation; `behavior` prioritizes current semantics,
-contracts, and invariants; and `owner` prioritizes authoritative implementation,
-callers, and subsystem boundaries. Omitting `--for` retains the universal prompt.
-A missing or unsupported value fails before semantic retrieval or a provider
-request. Query-target selection uses this fixed vocabulary and never reads Codex
-session history or `~/.codex` at runtime.
+`--for` selects a compact, target-neutral exploration system prompt and supplies
+the selected target as a separate developer instruction. `diagnose` prioritizes
+the reproducer, immediate failure mechanism, bottleneck, or regression cause;
+`change` prioritizes the implementation boundary, affected behavior, and focused
+validation; `behavior` prioritizes current semantics, contracts, and invariants;
+and `owner` prioritizes authoritative implementation, callers, and subsystem
+boundaries. Every target uses the same system prompt, so changing between target
+values cannot leave conflicting target priorities in system instructions.
+Omitting `--for` retains the full universal prompt. A missing or unsupported
+value fails before semantic retrieval or a provider request. Query-target
+selection uses this fixed vocabulary and never reads Codex session history or
+`~/.codex` at runtime.
 
 Without `--debug`, stderr contains progress and per-request `llm.usage` metrics.
 With `--debug`, every invocation starts one stderr console trace and writes
@@ -784,7 +787,7 @@ Responses API item history. Missing target fields in an existing session mean
 the universal target.
 An initial batch derives one key from its first sorted item ID and persists that
 key for
-every sibling. Every request in one agent branch keeps `instructions` byte-stable.
+Every model request within one agent run keeps `instructions` byte-stable.
 Changing model-step and remaining-tool budgets are appended as developer input
 and persisted in replay history, so each completed request input is an exact
 prefix of the next request input. Hosted-capability failure notices are also
@@ -796,17 +799,20 @@ send the key while retaining provider-default caching. The authenticated
 ChatGPT Codex endpoint also sends only the stable key. Custom endpoints receive
 no prompt-cache fields. Provider prefix-length, retention, routing, and eviction
 rules remain authoritative, so a nonzero cached-token count is not guaranteed.
-`--follow-up <search-id>` appends the new natural-language question to that
-stored context only when invoked from the same cleaned absolute workspace that
-created the session. A context-preserving follow-up without `--for` inherits the
-parent's active target. Selecting the already-active target adds no target
-message. Selecting a different target keeps the original `instructions`, input
-history, and prompt-cache key, then appends exactly one replayable developer
-message beginning `Query target changed: <target>` followed by that target's
-guidance before the new user question. A target change alone does not run
-semantic retrieval. A session ID from another workspace under the same project
-identity fails before semantic or provider work, preventing stored context from
-crossing exploration boundaries.
+`--follow-up <search-id>` appends the new natural-language question to stored
+context only when invoked from the same cleaned absolute workspace that created
+the session. A follow-up without `--for` inherits the parent's active target.
+Selecting the already-active target adds no target message. Selecting a
+different target appends exactly one replayable developer message beginning
+`Query target changed: <target>` followed by that target's guidance before the
+new user question. When the parent already uses the target-neutral system
+prompt, its `instructions`, input history, and prompt-cache key remain unchanged.
+Adding `--for` to a parent that used the full universal prompt replaces
+`instructions` with the target-neutral prompt while preserving replayable input
+history and the prompt-cache key; the resulting prefix cache miss is accepted.
+A target change alone does not run semantic retrieval. A session ID from another
+workspace under the same project identity fails before semantic or provider
+work, preventing stored context from crossing exploration boundaries.
 Sessions created by versions without workspace provenance or a prompt-cache
 identity are not follow-up eligible. The parent remains
 immutable and reusable, so simultaneous follow-ups from one parent create

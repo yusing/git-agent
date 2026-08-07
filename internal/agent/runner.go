@@ -26,19 +26,20 @@ type Runner interface {
 }
 
 type Request struct {
-	SystemPrompt      string
-	ToolPolicy        string
-	Environment       string
-	SkillInstructions string
-	ProjectGuidance   string
-	UserPrompt        string
-	TextFormat        *openai.TextFormat
-	AllowedToolNames  []string
-	ParallelToolCalls bool
-	MaxSteps          int
-	RepairOnValidator bool
-	Input             []openai.Item
-	ControlTool       *tools.Definition
+	SystemPrompt          string
+	ToolPolicy            string
+	Environment           string
+	SkillInstructions     string
+	ProjectGuidance       string
+	DeveloperInstructions string
+	UserPrompt            string
+	TextFormat            *openai.TextFormat
+	AllowedToolNames      []string
+	ParallelToolCalls     bool
+	MaxSteps              int
+	RepairOnValidator     bool
+	Input                 []openai.Item
+	ControlTool           *tools.Definition
 }
 
 type Result struct {
@@ -172,6 +173,9 @@ func (r *OpenAIRunner) RunNode(ctx context.Context, request Request) (NodeResult
 		}
 		if request.ProjectGuidance != "" {
 			messages = append(messages, openai.NewMessage("developer", request.ProjectGuidance))
+		}
+		if request.DeveloperInstructions != "" {
+			messages = append(messages, openai.NewMessage("developer", request.DeveloperInstructions))
 		}
 		messages = append(messages, openai.NewMessage("user", request.UserPrompt))
 	}
