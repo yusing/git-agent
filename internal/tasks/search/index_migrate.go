@@ -53,7 +53,7 @@ func MigrateIndex(ctx context.Context, remoteURL string, opts IndexMigrationOpti
 	if opts.DryRun {
 		sync, cleanup, err = cloneIndexSyncReadOnly(ctx, remoteURL, opts.ProgressLog, repair)
 	} else {
-		sync, err = openIndexSyncWithMigration(ctx, remoteURL, opts.ProgressLog, repair)
+		sync, err = openIndexSyncWithMigration(ctx, remoteURL, opts.ProgressLog, repair, time.Time{})
 		if err == nil {
 			cleanup = sync.close
 		}

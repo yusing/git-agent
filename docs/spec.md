@@ -727,7 +727,8 @@ effort, budget, cache policy, or search path. Without it, `service_tier` is
 omitted.
 
 Without `--debug`, stderr contains progress and per-request `llm.usage` metrics.
-invocation starts one stderr console trace and writes `explore.phase` events
+With `--debug`, every invocation starts one stderr console trace and writes
+`explore.phase` events
 throughout its owned foreground path. Each event contains `phase`, nonnegative
 integer `duration_ms`, and cumulative integer `elapsed_ms` measured from command
 entry. Provider-request, tool-batch, and individual-tool timings additionally
@@ -737,7 +738,7 @@ The command reports `setup`, `reservation`, `semantic_search`, `join_grace`,
 `tool_batch`, `validation`, `repair` when used, `agent`, `answer_processing`,
 `persistence`, `result_wait`, and `output` when those phases execute.
 Fresh-search diagnostics also report `semantic_search.<step>` for the
-search-owned `discover`, `chunk`, `cache`, `embed_index`, `persist`,
+search-owned `sync`, `discover`, `chunk`, `cache`, `embed_index`, `persist`,
 `embed_query`, `score`, and `replay` phases that complete. Timings are emitted
 after their measured action and may therefore overlap their enclosing
 `semantic_search`, `repair`, or `agent` timing.
@@ -945,13 +946,19 @@ them into the final hybrid score, and then applies `--min-score`. Surviving
 candidates are ordered by that same final score. Output and replay history keep
 the original query string, not the framed embedding input.
 
-When global `index.remote` is configured, search synchronizes selected revision
-records through that dedicated Git remote before checking local index freshness.
-Filesystem mode selects local repository's committed `HEAD`; local revision mode
-selects resolved `--rev`; remote mode selects resolved `--remote` revision.
-Remote must be reachable; list, fetch, or push transport failures fail command
-explicitly instead of falling back to independent local rebuild. Non-Git
-directories and local repositories without `origin` remain local-only.
+When global `index.remote` is configured, every search confirms the selected
+revision store against the remote before returning results. A search either
+lists the remote refs itself or, when blocked behind an overlapping producer,
+reuses a successful confirmation whose remote observation completed after that
+search began. Sequential searches do not reuse an earlier confirmation. A
+matching remote-tracking ref and locally present commit skip object fetch; a
+clean synchronized worktree skips commit and push. Failed synchronization never
+publishes a reusable confirmation. Filesystem mode selects the local repository's
+committed `HEAD`; local revision mode selects resolved `--rev`; remote mode selects
+resolved `--remote` revision. Remote must be reachable; list, fetch, or push
+transport failures fail command explicitly instead of falling back to
+independent local rebuild. Non-Git directories and local repositories without
+`origin` remain local-only.
 
 Sync implements `pull --rebase` behavior without invoking Git executable. It
 commits pending local index-store changes, fetches remote default branch, and

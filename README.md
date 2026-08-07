@@ -353,12 +353,14 @@ Follow-up IDs are bound to the workspace that created them and are rejected from
 another `--cwd`, even when both directories share an ancestor Git repository.
 Explore adds no internal timeout: it runs until completion or caller
 cancellation. Progress stays on stderr and the result envelope stays on stdout.
-Every completed Responses request also writes an `llm.usage` line to stderr with input, cached-input, cache-write-input, and output token counts.
+Every completed Responses request also writes an `llm.usage` line to stderr with
+input, cached-input, cache-write-input, and output token counts.
 With `--debug`, Explore additionally streams its console trace and
 `explore.phase` timing events to stderr. Every timing event includes the phase
 duration and elapsed command time in milliseconds; provider and tool events
 additionally identify their model step, and individual tool events name the
-tool. Fresh searches report semantic discovery, chunking, cache, embedding,
+tool. Fresh searches report semantic synchronization, discovery, chunking, cache,
+embedding,
 persistence, query embedding, scoring, and replay subphases. Batch leaders
 report collection, prompt setup, agent execution, answer processing, and
 persistence; followers report their own coordination and result-wait time.
@@ -425,13 +427,20 @@ git-agent config --unset index.remote
 ```
 
 Normal search syncs selected revision: committed `HEAD` for filesystem search,
-resolved `--rev`, or selected `--remote` revision. Working-tree-only vectors
-remain local. `git-agent index sync` additively publishes every completed local
-revision index without embedding new content. Index repository must be
-dedicated to `git-agent`; unreachable remote fails explicitly. Sync progress is
-reported on stderr in terminals and redirected output, including bracketed
-fetch/push object-transfer progress, while final summary remains on stdout. See
-[docs/spec.md](docs/spec.md) for exact sync contracts.
+resolved `--rev`, or selected `--remote` revision. Every search confirms remote
+freshness before returning. Overlapping searches batch one confirmation when
+its remote observation completes after each waiting search began; sequential
+searches perform a new remote ref listing. Warm stores skip object fetch when
+the advertised commit is already present and skip commit/push when no local
+index data changed. Failed synchronization does not publish reusable
+confirmation.
+Working-tree-only vectors remain local. `git-agent index sync` additively
+publishes every completed local revision index without embedding new content.
+Index repository must be dedicated to `git-agent`; unreachable remote fails
+explicitly. Sync progress is reported on stderr in terminals and redirected
+output, including bracketed fetch/push object-transfer progress, while final
+summary remains on stdout. See [docs/spec.md](docs/spec.md) for exact sync
+contracts.
 
 Generated index-store commits are always unsigned. This is enforced only in
 the dedicated local index-sync repository and does not change signing settings

@@ -23,6 +23,8 @@ import (
 
 const indexSyncVersion = indexSyncSchemaV1
 
+const indexSyncConfirmationSuffix = ".confirmed"
+
 type syncedIndex struct {
 	Version    int            `json:"version"`
 	Origin     string         `json:"origin"`
@@ -56,10 +58,12 @@ type indexSync struct {
 	packCatalogDirty bool
 	migrationRepair  *indexMigrationRepair
 	fetchingReported bool
+	confirmedAt      time.Time
+	pushRequired     bool
 }
 
-func prepareIndexSync(ctx context.Context, remoteURL string, target indexSyncTarget, progressLog func(Progress) error) (*indexSync, error) {
-	sync, err := openIndexSync(ctx, remoteURL, progressLog)
+func prepareIndexSync(ctx context.Context, remoteURL string, target indexSyncTarget, confirmedAfter time.Time, progressLog func(Progress) error) (*indexSync, error) {
+	sync, err := openIndexSyncWithMigration(ctx, remoteURL, progressLog, nil, confirmedAfter)
 	if err != nil {
 		return nil, err
 	}
@@ -71,10 +75,10 @@ func prepareIndexSync(ctx context.Context, remoteURL string, target indexSyncTar
 }
 
 func openIndexSync(ctx context.Context, remoteURL string, progressLog func(Progress) error) (result *indexSync, err error) {
-	return openIndexSyncWithMigration(ctx, remoteURL, progressLog, nil)
+	return openIndexSyncWithMigration(ctx, remoteURL, progressLog, nil, time.Time{})
 }
 
-func openIndexSyncWithMigration(ctx context.Context, remoteURL string, progressLog func(Progress) error, repair *indexMigrationRepair) (result *indexSync, err error) {
+func openIndexSyncWithMigration(ctx context.Context, remoteURL string, progressLog func(Progress) error, repair *indexMigrationRepair, confirmedAfter time.Time) (result *indexSync, err error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -121,8 +125,24 @@ func openIndexSyncWithMigration(ctx context.Context, remoteURL string, progressL
 		}
 		sync.fetchingReported = true
 	}
+	if !confirmedAfter.IsZero() {
+		if confirmedAt, ok := readIndexSyncConfirmation(sync.dir, confirmedAfter); ok {
+			head, headErr := sync.repo.Head()
+			if headErr == nil && head.Name().IsBranch() {
+				sync.branch = head.Name()
+				if err := sync.ensureSchema(); err != nil {
+					return nil, err
+				}
+				sync.confirmedAt = confirmedAt
+				return sync, nil
+			}
+		}
+	}
 	if err := sync.reconcile(ctx); err != nil {
 		return nil, err
+	}
+	if !confirmedAfter.IsZero() {
+		sync.confirmedAt = time.Now().UTC()
 	}
 	return sync, nil
 }
@@ -185,9 +205,16 @@ func (sync *indexSync) reconcile(ctx context.Context) error {
 		if err := sync.commitPending("Initialize git-agent index store"); err != nil {
 			return err
 		}
+		sync.pushRequired = true
 		return nil
 	}
 	sync.branch = branch
+	tracking, trackingErr := sync.repo.Reference(remoteTrackingRef(branch), true)
+	if trackingErr == nil && tracking.Hash() == remoteHash {
+		if _, commitErr := sync.repo.CommitObject(remoteHash); commitErr == nil {
+			return sync.rebaseOnto(ctx, remoteHash)
+		}
+	}
 	refspec := gitconfig.RefSpec("+" + branch.String() + ":" + remoteTrackingRef(branch).String())
 	progress := newRemoteProgressWriter(sync.progressLog, sync.remoteURL, ProgressStatusFetching)
 	err = sync.repo.FetchContext(ctx, &git.FetchOptions{
@@ -436,8 +463,17 @@ func (sync *indexSync) exportAndPush(ctx context.Context, target indexSyncTarget
 	if _, err := sync.exportIndex(ctx, target); err != nil {
 		return err
 	}
-	if err := sync.commitPending("Update index " + target.revision[:min(12, len(target.revision))]); err != nil {
+	status, err := sync.worktree.Status()
+	if err != nil {
 		return err
+	}
+	if status.IsClean() && !sync.pushRequired {
+		return nil
+	}
+	if !status.IsClean() {
+		if err := sync.commitPending("Update index " + target.revision[:min(12, len(target.revision))]); err != nil {
+			return err
+		}
 	}
 	return sync.pushWithRetry(ctx)
 }
@@ -789,7 +825,26 @@ func (sync *indexSync) push(ctx context.Context) error {
 	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return sync.remoteError("push", err)
 	}
+	if progressErr == nil {
+		sync.pushRequired = false
+	}
 	return progressErr
+}
+
+func readIndexSyncConfirmation(dir string, started time.Time) (time.Time, bool) {
+	data, err := os.ReadFile(dir + indexSyncConfirmationSuffix)
+	if err != nil {
+		return time.Time{}, false
+	}
+	confirmedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+	return confirmedAt, err == nil && !confirmedAt.Before(started)
+}
+
+func (sync *indexSync) publishConfirmation() error {
+	if sync.confirmedAt.IsZero() {
+		return nil
+	}
+	return os.WriteFile(sync.dir+indexSyncConfirmationSuffix, []byte(sync.confirmedAt.Format(time.RFC3339Nano)+"\n"), 0o600)
 }
 
 func (sync *indexSync) remoteError(action string, err error) error {

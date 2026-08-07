@@ -429,7 +429,7 @@ func TestIndexMigrationDeduplicatesAndImportsV2(t *testing.T) {
 		root:        t.TempDir(),
 		source:      Source{Mode: "revision", ResolvedRev: strings.Repeat("1", 40), OriginIdentity: origin},
 	}
-	importSync, err := prepareIndexSync(t.Context(), remote, target, nil)
+	importSync, err := prepareIndexSync(t.Context(), remote, target, time.Time{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

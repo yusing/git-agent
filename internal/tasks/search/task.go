@@ -419,7 +419,7 @@ func run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 			err = errors.Join(err, unlockProducer())
 		}()
 	}
-	selection, err := resolveIndexSelection(ctx, rootOpt, opts.Remote, opts.Rev, filters, opts.Reindex, started, true, opts.ProgressLog)
+	selection, err := resolveIndexSelection(ctx, rootOpt, opts.Remote, opts.Rev, filters, opts.Reindex, true, opts.ProgressLog)
 	if err != nil {
 		return fail(err)
 	}
@@ -440,7 +440,7 @@ func run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	if !opts.skipIndexSync && strings.TrimSpace(opts.IndexRemote) != "" {
 		if target, ok := selectedSyncTarget(opts, selection); ok {
 			syncTarget = target
-			activeSync, err = prepareIndexSync(ctx, opts.IndexRemote, syncTarget, opts.ProgressLog)
+			activeSync, err = prepareIndexSync(ctx, opts.IndexRemote, syncTarget, started, opts.ProgressLog)
 			if err != nil {
 				return fail(err)
 			}
@@ -466,6 +466,9 @@ func run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 				if err := activeSync.exportAndPush(ctx, syncTarget); err != nil {
 					return fail(err)
 				}
+				if err := activeSync.publishConfirmation(); err != nil {
+					return fail(err)
+				}
 				if err := activeSync.close(); err != nil {
 					return fail(err)
 				}
@@ -473,6 +476,7 @@ func run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 			}
 		}
 	}
+	mark("sync")
 
 	chunkBodies, err := newChunkBodyStore()
 	if err != nil {
@@ -492,8 +496,12 @@ func run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	var dimensions int
 	var embeddedChunks int
 	var embeddedDone int
+	reuseOpts := opts
+	if opts.Reindex && indexBuiltSince(selection.indexDir, started) {
+		reuseOpts.Reindex = false
+	}
 	if selection.remoteFiles != nil {
-		streamResult, streamErr := indexRemoteFileStream(selection.remoteFiles.ctx, client, selection.remoteFiles.Files, selection.metadataDir, selection.indexDir, opts, filters.Code, chunkBodies)
+		streamResult, streamErr := indexRemoteFileStream(selection.remoteFiles.ctx, client, selection.remoteFiles.Files, selection.metadataDir, selection.indexDir, reuseOpts, filters.Code, chunkBodies)
 		if streamErr != nil {
 			if selection.remoteFiles.ctx.Err() != nil {
 				if _, readyErr := selection.remoteFiles.Wait(); readyErr != nil {
@@ -580,10 +588,6 @@ func run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 			indexLocked = true
 			oldVectors, _ = loadVectors(indexDir)
 		}
-	}
-	reuseOpts := opts
-	if opts.Reindex && indexBuiltSince(indexDir, started) {
-		reuseOpts.Reindex = false
 	}
 	if selection.remoteFiles == nil {
 		reusePool := make([]vectorRecord, 0, len(exactVectors)+len(oldVectors))
@@ -798,6 +802,9 @@ func run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}
 	if activeSync != nil {
 		if err := activeSync.exportAndPush(ctx, syncTarget); err != nil {
+			return fail(err)
+		}
+		if err := activeSync.publishConfirmation(); err != nil {
 			return fail(err)
 		}
 		if err := activeSync.close(); err != nil {

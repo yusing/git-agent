@@ -98,6 +98,80 @@ func TestConcurrentRemoteSearchUsesOneGlobalFlight(t *testing.T) {
 	}
 }
 
+func TestWaitingRemoteReindexFetchesHeadAfterPriorBuild(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	remote := t.TempDir()
+	writeFile(t, remote, "remote.txt", "remote alpha content\n")
+	firstRev := commitSearchRepo(t, remote)
+
+	embedder := newBlockingEmbedder()
+	t.Cleanup(embedder.releaseEmbeddings)
+	waiting := make(chan struct{}, 1)
+	opts := Options{
+		Root:                t.TempDir(),
+		Remote:              remote,
+		IndexOnly:           true,
+		Reindex:             true,
+		MinScore:            DefaultMinScore,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+		ProgressLog: func(progress Progress) error {
+			if progress.Status == ProgressStatusWaiting {
+				waiting <- struct{}{}
+			}
+			return nil
+		},
+	}
+	type runResult struct {
+		output Output
+		err    error
+	}
+	firstDone := make(chan runResult, 1)
+	secondDone := make(chan runResult, 1)
+	go func() {
+		output, err := Run(t.Context(), embedder, opts, "")
+		firstDone <- runResult{output: output, err: err}
+	}()
+	select {
+	case <-embedder.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first remote reindex did not reach embedding")
+	}
+
+	go func() {
+		output, err := Run(t.Context(), embedder, opts, "")
+		secondDone <- runResult{output: output, err: err}
+	}()
+	select {
+	case <-waiting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second remote reindex did not wait for the global producer")
+	}
+
+	writeFile(t, remote, "remote.txt", "remote beta content\n")
+	secondRev := commitSearchRepoChange(t, remote, "second")
+	embedder.releaseEmbeddings()
+
+	first := <-firstDone
+	if first.err != nil {
+		t.Fatal(first.err)
+	}
+	if first.output.Source.ResolvedRev != firstRev {
+		t.Fatalf("first resolved rev = %q, want %q", first.output.Source.ResolvedRev, firstRev)
+	}
+	second := <-secondDone
+	if second.err != nil {
+		t.Fatal(second.err)
+	}
+	if second.output.Source.ResolvedRev != secondRev {
+		t.Fatalf("waiting resolved rev = %q, want fresh %q", second.output.Source.ResolvedRev, secondRev)
+	}
+	if got := embedder.calls.Load(); got != 2 {
+		t.Fatalf("embedding calls = %d, want old and advanced HEAD builds", got)
+	}
+}
+
 func TestGlobalSearchFlightSerializesUnrelatedIndexesWithoutCoalescing(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	firstRoot := t.TempDir()

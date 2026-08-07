@@ -234,16 +234,15 @@ func TestRemoteCodeSearchSyncFiltersPreservedLegacyRecords(t *testing.T) {
 	}
 }
 
-func TestSearchIndexSyncPreservesConfiguredProgressLog(t *testing.T) {
+func TestSearchIndexSyncConfirmsWarmRemoteWithoutRepushing(t *testing.T) {
 	syncRemote := newEmptySyncRemote(t)
-	origin := "https://example.test/acme/widget.git"
 	root := t.TempDir()
 	writeFile(t, root, "app.go", "package app\n\nfunc Stable() {}\n")
 	commitSearchRepo(t, root)
-	setTestOrigin(t, root, origin)
+	setTestOrigin(t, root, "https://example.test/acme/widget.git")
 
 	var progress []Progress
-	_, err := Run(t.Context(), fakeEmbedder{}, Options{
+	opts := Options{
 		Root:                root,
 		IndexRemote:         syncRemote,
 		IndexOnly:           true,
@@ -255,18 +254,134 @@ func TestSearchIndexSyncPreservesConfiguredProgressLog(t *testing.T) {
 			progress = append(progress, update)
 			return nil
 		},
-	}, "")
-	if err != nil {
+	}
+	if _, err := Run(t.Context(), fakeEmbedder{}, opts, ""); err != nil {
 		t.Fatal(err)
 	}
-	var phases []string
-	for _, update := range progress {
-		if update.Status != "" && update.Detail == "" {
-			phases = append(phases, update.Status)
-		}
+	if want := []string{ProgressStatusFetching, ProgressStatusPushing}; !slices.Equal(operationPhases(progress), want) {
+		t.Fatalf("first index sync phases = %#v, want %#v; all progress = %#v", operationPhases(progress), want, progress)
 	}
-	if want := []string{ProgressStatusFetching, ProgressStatusPushing}; !slices.Equal(phases, want) {
-		t.Fatalf("index sync phases = %#v, want %#v; all progress = %#v", phases, want, progress)
+
+	progress = nil
+	if _, err := Run(t.Context(), fakeEmbedder{}, opts, ""); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{ProgressStatusFetching}; !slices.Equal(operationPhases(progress), want) {
+		t.Fatalf("warm index sync phases = %#v, want %#v; all progress = %#v", operationPhases(progress), want, progress)
+	}
+}
+
+func TestConcurrentSearchesShareCompletedFreshnessConfirmation(t *testing.T) {
+	syncRemote := newEmptySyncRemote(t)
+	root := t.TempDir()
+	writeFile(t, root, "app.go", "package app\n\nfunc Stable() {}\n")
+	commitSearchRepo(t, root)
+	setTestOrigin(t, root, "https://example.test/acme/concurrent.git")
+
+	base := Options{
+		Root:                root,
+		IndexRemote:         syncRemote,
+		IndexOnly:           true,
+		MinScore:            DefaultMinScore,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+	}
+	fetching := make(chan struct{})
+	release := make(chan struct{})
+	var fetchingOnce sync.Once
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+
+	firstOpts := base
+	firstOpts.ProgressLog = func(update Progress) error {
+		if update.Status == ProgressStatusFetching && update.Detail == "" {
+			fetchingOnce.Do(func() { close(fetching) })
+			<-release
+		}
+		return nil
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := Run(t.Context(), fakeEmbedder{}, firstOpts, "")
+		firstDone <- err
+	}()
+	select {
+	case <-fetching:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first search did not begin remote confirmation")
+	}
+
+	waiting := make(chan struct{}, 1)
+	var secondProgress []Progress
+	secondOpts := base
+	secondOpts.ProgressLog = func(update Progress) error {
+		secondProgress = append(secondProgress, update)
+		if update.Status == ProgressStatusWaiting {
+			waiting <- struct{}{}
+		}
+		return nil
+	}
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := Run(t.Context(), fakeEmbedder{}, secondOpts, "")
+		secondDone <- err
+	}()
+	select {
+	case <-waiting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second search did not wait for the active confirmation")
+	}
+	releaseOnce.Do(func() { close(release) })
+
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{ProgressStatusWaiting}; !slices.Equal(operationPhases(secondProgress), want) {
+		t.Fatalf("second search phases = %#v, want %#v; all progress = %#v", operationPhases(secondProgress), want, secondProgress)
+	}
+}
+
+func TestFailedIndexPushDoesNotPublishFreshnessConfirmation(t *testing.T) {
+	syncRemote := newEmptySyncRemote(t)
+	root := t.TempDir()
+	writeFile(t, root, "app.go", "package app\n\nfunc Stable() {}\n")
+	commitSearchRepo(t, root)
+	setTestOrigin(t, root, "https://example.test/acme/retry.git")
+
+	wantErr := errors.New("stop before index push")
+	opts := Options{
+		Root:                root,
+		IndexRemote:         syncRemote,
+		IndexOnly:           true,
+		MinScore:            DefaultMinScore,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+		ProgressLog: func(update Progress) error {
+			if update.Status == ProgressStatusPushing && update.Detail == "" {
+				return wantErr
+			}
+			return nil
+		},
+	}
+	if _, err := Run(t.Context(), fakeEmbedder{}, opts, ""); !errors.Is(err, wantErr) {
+		t.Fatalf("first search error = %v, want %v", err, wantErr)
+	}
+
+	var retryProgress []Progress
+	opts.ProgressLog = func(update Progress) error {
+		retryProgress = append(retryProgress, update)
+		return nil
+	}
+	if _, err := Run(t.Context(), fakeEmbedder{}, opts, ""); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{ProgressStatusFetching, ProgressStatusPushing}; !slices.Equal(operationPhases(retryProgress), want) {
+		t.Fatalf("retry phases = %#v, want %#v; all progress = %#v", operationPhases(retryProgress), want, retryProgress)
 	}
 }
 
@@ -451,6 +566,16 @@ func TestSyncAllPublishesEveryCompletedRevisionOnly(t *testing.T) {
 	if _, err := os.Stat(remotePath); err != nil {
 		t.Fatalf("remote revision was not synced: %v", err)
 	}
+}
+
+func operationPhases(progress []Progress) []string {
+	var phases []string
+	for _, update := range progress {
+		if update.Status != "" && update.Detail == "" {
+			phases = append(phases, update.Status)
+		}
+	}
+	return phases
 }
 
 func newEmptySyncRemote(t *testing.T) string {
@@ -2156,7 +2281,7 @@ func TestFilesystemAndRevisionIndexesShareVectorPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, time.Time{}, false, nil)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2190,7 +2315,7 @@ func TestChangedRevisionAppendsOnlyNewSharedVectorPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, time.Time{}, false, nil)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2217,7 +2342,7 @@ func TestLegacyLocalVectorIndexMigratesWithoutEmbedding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, time.Time{}, false, nil)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2290,7 +2415,7 @@ func TestCorruptSharedVectorIsRebuilt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, time.Time{}, false, nil)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2340,7 +2465,7 @@ func TestFailedIndexWriteInvalidatesSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, time.Time{}, false, nil)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2415,7 +2540,7 @@ func TestReindexAppendsSharedVectorWithoutChangingOtherSnapshot(t *testing.T) {
 	if _, err := loadVectors(revision.Diagnostics.IndexDir); err != nil {
 		t.Fatalf("load original revision snapshot: %v", err)
 	}
-	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, time.Time{}, false, nil)
+	selection, err := resolveIndexSelection(t.Context(), root, "", "", Filters{}, false, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3087,6 +3212,48 @@ func TestRemoteSearchReindexFetchesUpdatedHead(t *testing.T) {
 	}
 	if len(second.Results) == 0 || !strings.Contains(second.Results[0].Excerpt, "remote beta content") {
 		t.Fatalf("results = %#v, want beta content", second.Results)
+	}
+}
+
+func TestRemoteSearchTreatsFutureFetchTimestampAsStale(t *testing.T) {
+	remote := t.TempDir()
+	writeFile(t, remote, "remote.txt", "remote alpha content\n")
+	firstRev := commitSearchRepo(t, remote)
+	opts := Options{
+		Root:                t.TempDir(),
+		Remote:              remote,
+		MinScore:            DefaultMinScore,
+		Limit:               DefaultLimit,
+		EmbeddingModel:      "test-model",
+		EmbeddingDimensions: 3,
+	}
+	first, err := Run(t.Context(), fakeEmbedder{}, opts, "remote alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Source.ResolvedRev != firstRev {
+		t.Fatalf("resolved rev = %q, want %q", first.Source.ResolvedRev, firstRev)
+	}
+
+	metadataDir, err := metadata.RemoteDir(giturl.Sanitize(remote))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(metadataDir, "remote.json")
+	cache := loadRemoteCache(cachePath)
+	cache.LastFetchedAt = time.Now().Add(time.Hour)
+	if err := saveRemoteCache(cachePath, cache); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, remote, "remote.txt", "remote beta content\n")
+	secondRev := commitSearchRepoChange(t, remote, "second")
+
+	second, err := Run(t.Context(), fakeEmbedder{}, opts, "remote beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Source.ResolvedRev != secondRev {
+		t.Fatalf("resolved rev = %q, want fresh %q", second.Source.ResolvedRev, secondRev)
 	}
 }
 
