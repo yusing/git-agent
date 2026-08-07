@@ -13,9 +13,11 @@ import (
 	"testing"
 
 	"github.com/bytedance/sonic"
+	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/explore"
 	"github.com/yusing/git-agent/internal/openai"
 	"github.com/yusing/git-agent/internal/projectidentity"
+	searchtask "github.com/yusing/git-agent/internal/tasks/search"
 )
 
 type exploreTimingFailWriter struct{ buffer bytes.Buffer }
@@ -25,6 +27,89 @@ func (w *exploreTimingFailWriter) Write(data []byte) (int, error) {
 		return 0, errors.New("write explore timing")
 	}
 	return w.buffer.Write(data)
+}
+
+func TestRunWithExploreFreshnessOverlapsAndWaits(t *testing.T) {
+	freshnessStarted := make(chan struct{})
+	releaseFreshness := make(chan struct{})
+	var waited atomic.Bool
+	freshnessErr := errors.New("freshness failed")
+	value, output, err := runWithExploreFreshness(
+		t.Context(),
+		true,
+		func(context.Context) (searchtask.Output, error) {
+			close(freshnessStarted)
+			<-releaseFreshness
+			return searchtask.Output{Query: "confirmed"}, freshnessErr
+		},
+		func(context.Context) (string, error) {
+			<-freshnessStarted
+			return "agent result", nil
+		},
+		func() {
+			waited.Store(true)
+			close(releaseFreshness)
+		},
+	)
+	if value != "agent result" || output.Query != "confirmed" {
+		t.Fatalf("overlapped result = %q, output = %#v", value, output)
+	}
+	if !waited.Load() || !errors.Is(err, freshnessErr) {
+		t.Fatalf("waited = %v, error = %v", waited.Load(), err)
+	}
+}
+
+func TestRunWithExploreFreshnessCancelsProviderOnConfirmationFailure(t *testing.T) {
+	providerStarted := make(chan struct{})
+	freshnessErr := errors.New("freshness failed")
+	_, _, err := runWithExploreFreshness(
+		t.Context(),
+		true,
+		func(context.Context) (searchtask.Output, error) {
+			<-providerStarted
+			return searchtask.Output{}, freshnessErr
+		},
+		func(ctx context.Context) (string, error) {
+			close(providerStarted)
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+		nil,
+	)
+	if !errors.Is(err, freshnessErr) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("overlap error = %v, want freshness failure and cancellation", err)
+	}
+}
+
+func TestPrepareExploreSearchDefersFreshnessOnlyForWarmIndex(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_EMBEDDING_DIMENSIONS", "3")
+	writeFixtureFile(t, filepath.Join(root, "app.go"), "package app\n\nfunc Stable() {}\n")
+	runGit(t, root, "add", "app.go")
+	runGit(t, root, "commit", "-m", "base")
+	runGit(t, root, "remote", "add", "origin", "https://example.test/acme/widget.git")
+	syncRemote := t.TempDir()
+	runGit(t, syncRemote, "init", "--bare")
+	if err := config.SaveFile(config.File{Index: config.IndexConfig{Remote: syncRemote}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	app := &App{stderr: &bytes.Buffer{}, embeddingClient: &exploreFakeEmbedder{}}
+	cold, err := app.prepareExploreSearch(t.Context(), "find stable", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cold.DeferredFreshness {
+		t.Fatal("cold explore deferred freshness")
+	}
+	warm, err := app.prepareExploreSearch(t.Context(), "find stable", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !warm.DeferredFreshness {
+		t.Fatal("warm explore kept freshness on the semantic-search critical path")
+	}
 }
 
 type exploreFakeResponseClient struct {

@@ -955,8 +955,10 @@ After acquiring the lock, a waiter re-evaluates the selected source and index;
 concurrent requests for the same missing index reuse the completed index, and
 concurrent `--reindex` requests for the same selected index perform one fetch
 and one rebuild in total. An unrelated request runs afterward and builds its
-own index normally. The global lock is released after index persistence and
-remote completion, before query embedding and scoring.
+own index normally. Ordinary search releases the global lock after index
+persistence and remote completion, before query embedding and scoring. The warm
+`explore` path releases it after local retrieval, then the batch leader
+reacquires it for the deferred confirmation described below.
 
 SSH transport tries identities from an available SSH agent first, including
 Pageant or the native agent on Windows, then unencrypted default private keys at
@@ -982,15 +984,26 @@ When global `index.remote` is configured, every search confirms the selected
 revision store against the remote before returning results. A search either
 lists the remote refs itself or, when blocked behind an overlapping producer,
 reuses a successful confirmation whose remote observation completed after that
-search began. Sequential searches do not reuse an earlier confirmation. A
-matching remote-tracking ref and locally present commit skip object fetch; a
+search began. Sequential searches do not reuse an earlier confirmation.
+
+A fresh `explore` first performs a warm-only local search. When every selected
+chunk already has a compatible vector, it publishes those semantic leads to the
+batch immediately. After batch collection, the leader starts one ordinary
+index-only synchronization beside the Responses API request; it waits for both
+operations before persisting sessions or publishing answers. Because that
+remote observation starts after the batch is collected, it confirms freshness
+for every included search. A missing vector makes the warm-only probe stop
+before embedding and rerun the original blocking synchronization path. Remote
+failure remains terminal even when provider work already completed.
+
+A matching remote-tracking ref and locally present commit skip object fetch; a
 clean synchronized worktree skips commit and push. Failed synchronization never
-publishes a reusable confirmation. Filesystem mode selects the local repository's
-committed `HEAD`; local revision mode selects resolved `--rev`; remote mode selects
-resolved `--remote` revision. Remote must be reachable; list, fetch, or push
-transport failures fail command explicitly instead of falling back to
-independent local rebuild. Non-Git directories and local repositories without
-`origin` remain local-only.
+publishes a reusable confirmation. Filesystem mode selects the local
+repository's committed `HEAD`; local revision mode selects resolved `--rev`;
+remote mode selects resolved `--remote` revision. Remote must be reachable;
+list, fetch, or push transport failures fail command explicitly instead of
+falling back to independent local rebuild. Non-Git directories and local
+repositories without `origin` remain local-only.
 
 Sync implements `pull --rebase` behavior without invoking Git executable. It
 commits pending local index-store changes, fetches remote default branch, and
@@ -1002,10 +1015,13 @@ rejection fetches, merges compatible records, and retries. Empty remote is
 initialized on `main`; otherwise default branch is preserved. Remote repository
 is wholly owned by `git-agent` and must not contain unrelated files.
 
-Search imports selected revision records before ensuring selected local index is
-complete, then publishes compatible records after persistence. Filesystem mode
-first ensures and publishes committed HEAD revision index, then builds or
-queries actual working tree. Filesystem discovery continues to include staged,
+Ordinary search imports selected revision records before ensuring the selected
+local index is complete, then publishes compatible records after persistence.
+The warm `explore` path may query an already complete working index first; its
+deferred index-only synchronization still imports and publishes compatible
+records before any answer is persisted. Filesystem mode ensures and publishes
+the committed HEAD revision index without exporting working-tree-only vectors,
+then builds or queries the actual working tree.
 unstaged, and untracked files, but dirty-worktree-only vectors, query history,
 absolute roots, locks, temporary files, auth data, and cached bare
 repositories are never exported.

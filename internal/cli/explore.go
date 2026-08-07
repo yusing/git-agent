@@ -143,61 +143,87 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 	return errors.Join(err, timing.err())
 }
 
-func (a *App) prepareExploreSearch(ctx context.Context, question string, timing *explorePhaseTrace) (explore.Prepared, error) {
-	root, err := os.Getwd()
-	if err != nil {
-		return explore.Prepared{}, err
-	}
+func (a *App) exploreSearchOptions(root string) (openai.EmbeddingClient, searchtask.Options, error) {
 	embeddingCfg, err := config.ResolveEmbeddings(config.Options{})
 	if err != nil {
-		return explore.Prepared{}, err
+		return nil, searchtask.Options{}, err
 	}
 	dimensions, err := config.ResolveEmbeddingDimensions(0)
 	if err != nil {
-		return explore.Prepared{}, err
+		return nil, searchtask.Options{}, err
 	}
 	maxInput, err := config.ResolveEmbeddingMaxInput(searchtask.DefaultEmbeddingMaxInputChars)
 	if err != nil {
-		return explore.Prepared{}, err
+		return nil, searchtask.Options{}, err
 	}
 	batchInputs, err := config.ResolveEmbeddingBatchInputs(searchtask.DefaultEmbeddingBatchInputs)
 	if err != nil {
-		return explore.Prepared{}, err
+		return nil, searchtask.Options{}, err
 	}
 	batchMaxChars, err := config.ResolveEmbeddingBatchMaxChars(searchtask.DefaultEmbeddingBatchMaxChars)
 	if err != nil {
-		return explore.Prepared{}, err
+		return nil, searchtask.Options{}, err
 	}
 	concurrency, err := config.ResolveEmbeddingConcurrency(0)
 	if err != nil {
-		return explore.Prepared{}, err
+		return nil, searchtask.Options{}, err
 	}
 	fileCfg, err := config.LoadFile()
 	if err != nil {
-		return explore.Prepared{}, err
+		return nil, searchtask.Options{}, err
 	}
 	client := a.embeddingClient
 	if client == nil {
 		client = openai.NewHTTPClient(&http.Client{})
 	}
-	lastStatus := ""
-	output, err := searchtask.Run(ctx, client, searchtask.Options{
+	return client, searchtask.Options{
 		Root: root, IndexRemote: fileCfg.Index.Remote, MinScore: searchtask.DefaultMinScore,
 		Limit: searchtask.DefaultLimit, CodeOnly: true,
 		EmbeddingModel: config.ResolveEmbeddingModel(""), EmbeddingDimensions: dimensions,
 		EmbeddingMaxInput: maxInput, EmbeddingBatchInputs: batchInputs,
 		EmbeddingBatchMaxChars: batchMaxChars, EmbeddingConcurrency: concurrency,
 		APIKey: embeddingCfg.APIKey, BaseURL: embeddingCfg.BaseURL,
-		ProgressLog: func(progress searchtask.Progress) error {
-			status := strings.TrimSpace(progress.Status)
-			if status == "" || status == lastStatus {
-				return nil
+	}, nil
+}
+
+func (a *App) prepareExploreSearch(ctx context.Context, question string, timing *explorePhaseTrace) (explore.Prepared, error) {
+	root, err := os.Getwd()
+	if err != nil {
+		return explore.Prepared{}, err
+	}
+	client, opts, err := a.exploreSearchOptions(root)
+	if err != nil {
+		return explore.Prepared{}, err
+	}
+	lastStatus := ""
+	opts.ProgressLog = func(progress searchtask.Progress) error {
+		status := strings.TrimSpace(progress.Status)
+		if status == "" || status == lastStatus {
+			return nil
+		}
+		lastStatus = status
+		_, writeErr := fmt.Fprintf(a.stderr, "explore search: %s\n", status)
+		return writeErr
+	}
+
+	var output searchtask.Output
+	deferredFreshness := false
+	if strings.TrimSpace(opts.IndexRemote) != "" {
+		warmOpts := opts
+		warmOpts.IndexRemote = ""
+		warmOpts.RequireWarmIndex = true
+		output, err = searchtask.Run(ctx, client, warmOpts, question)
+		if errors.Is(err, searchtask.ErrIndexNotWarm) {
+			for _, phase := range output.Diagnostics.Timings {
+				timing.recordSimple("semantic_search.warm_probe."+phase.Step, phase.Duration)
 			}
-			lastStatus = status
-			_, writeErr := fmt.Fprintf(a.stderr, "explore search: %s\n", status)
-			return writeErr
-		},
-	}, question)
+			output, err = searchtask.Run(ctx, client, opts, question)
+		} else if err == nil && output.Source.OriginIdentity != "" {
+			deferredFreshness = true
+		}
+	} else {
+		output, err = searchtask.Run(ctx, client, opts, question)
+	}
 	for _, phase := range output.Diagnostics.Timings {
 		timing.recordSimple("semantic_search."+phase.Step, phase.Duration)
 	}
@@ -214,7 +240,62 @@ func (a *App) prepareExploreSearch(ctx context.Context, question string, timing 
 			paths = append(paths, result.Path)
 		}
 	}
-	return explore.Prepared{SemanticResults: string(semantic), GuidancePaths: paths}, nil
+	return explore.Prepared{
+		SemanticResults:   string(semantic),
+		GuidancePaths:     paths,
+		DeferredFreshness: deferredFreshness,
+	}, nil
+}
+
+func (a *App) confirmExploreIndexFreshness(ctx context.Context, root string) (searchtask.Output, error) {
+	client, opts, err := a.exploreSearchOptions(root)
+	if err != nil {
+		return searchtask.Output{}, err
+	}
+	opts.IndexOnly = true
+	return searchtask.Run(ctx, client, opts, "")
+}
+
+type exploreFreshnessResult struct {
+	output searchtask.Output
+	err    error
+}
+
+func runWithExploreFreshness[T any](
+	ctx context.Context,
+	required bool,
+	confirm func(context.Context) (searchtask.Output, error),
+	run func(context.Context) (T, error),
+	waiting func(),
+) (T, searchtask.Output, error) {
+	if !required {
+		value, err := run(ctx)
+		return value, searchtask.Output{}, err
+	}
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	freshness := make(chan exploreFreshnessResult, 1)
+	go func() {
+		output, err := confirm(workCtx)
+		if err != nil {
+			cancel()
+		}
+		freshness <- exploreFreshnessResult{output: output, err: err}
+	}()
+	value, runErr := run(workCtx)
+	if runErr != nil {
+		cancel()
+	}
+	var result exploreFreshnessResult
+	select {
+	case result = <-freshness:
+	default:
+		if waiting != nil {
+			waiting()
+		}
+		result = <-freshness
+	}
+	return value, result.output, errors.Join(runErr, result.err)
 }
 
 func (a *App) runExploreBatch(
@@ -313,9 +394,36 @@ func (a *App) runExploreBatch(
 	}
 	timing.recordSimple("prompt_setup", time.Since(promptSetupStarted))
 
-	agentStarted := time.Now()
-	result, err := runner.Run(ctx, request)
-	timing.recordSimple("agent", time.Since(agentStarted))
+	freshnessRequired := parent == nil && slices.ContainsFunc(items, func(item explore.BatchItem) bool {
+		return item.DeferredFreshness
+	})
+	var freshnessWaitStarted time.Time
+	result, freshnessOutput, err := runWithExploreFreshness(
+		ctx,
+		freshnessRequired,
+		func(confirmCtx context.Context) (searchtask.Output, error) {
+			return a.confirmExploreIndexFreshness(confirmCtx, root)
+		},
+		func(runCtx context.Context) (agent.Result, error) {
+			agentStarted := time.Now()
+			result, err := runner.Run(runCtx, request)
+			timing.recordSimple("agent", time.Since(agentStarted))
+			return result, err
+		},
+		func() {
+			freshnessWaitStarted = time.Now()
+			_, _ = fmt.Fprintln(a.stderr, "explore: confirming_freshness")
+		},
+	)
+	if freshnessRequired {
+		for _, phase := range freshnessOutput.Diagnostics.Timings {
+			timing.recordSimple("remote_freshness."+phase.Step, phase.Duration)
+		}
+		timing.recordSimple("remote_freshness", freshnessOutput.Diagnostics.Total)
+		if !freshnessWaitStarted.IsZero() {
+			timing.recordSimple("freshness_join", time.Since(freshnessWaitStarted))
+		}
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -28,7 +28,7 @@ func TestCoordinatorBatchesConcurrentInitialSearches(t *testing.T) {
 			close(release)
 		}
 		<-release
-		return Prepared{SemanticResults: `{"results":[]}`}, nil
+		return Prepared{SemanticResults: `{"results":[]}`, DeferredFreshness: true}, nil
 	}
 	var runs atomic.Int32
 	runner := func(_ context.Context, parent *Session, items []BatchItem) (map[string]BatchResult, error) {
@@ -37,6 +37,9 @@ func TestCoordinatorBatchesConcurrentInitialSearches(t *testing.T) {
 		}
 		if len(items) != 2 {
 			return nil, fmt.Errorf("batch size = %d, want 2", len(items))
+		}
+		if slices.ContainsFunc(items, func(item BatchItem) bool { return !item.DeferredFreshness }) {
+			return nil, fmt.Errorf("batch dropped deferred freshness: %#v", items)
 		}
 		runs.Add(1)
 		results := make(map[string]BatchResult, len(items))

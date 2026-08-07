@@ -450,12 +450,15 @@ git-agent config --unset index.remote
 
 Normal search syncs selected revision: committed `HEAD` for filesystem search,
 resolved `--rev`, or selected `--remote` revision. Every search confirms remote
-freshness before returning. Overlapping searches batch one confirmation when
-its remote observation completes after each waiting search began; sequential
-searches perform a new remote ref listing. Warm stores skip object fetch when
-the advertised commit is already present and skip commit/push when no local
-index data changed. Failed synchronization does not publish reusable
-confirmation.
+freshness before returning. Fresh `explore` calls with a complete warm local
+index perform semantic retrieval immediately, then overlap one post-batch
+freshness confirmation with the model request and wait for it before publishing
+answers. Cold or incomplete indexes retain blocking synchronization. Overlapping
+searches batch one confirmation when its remote observation completes after each
+waiting search began; sequential searches perform a new remote ref listing. Warm
+stores skip object fetch when the advertised commit is already present and skip
+commit/push when no local index data changed. Failed synchronization does not
+publish reusable confirmation.
 Working-tree-only vectors remain local. `git-agent index sync` additively
 publishes every completed local revision index without embedding new content.
 Index repository must be dedicated to `git-agent`; unreachable remote fails

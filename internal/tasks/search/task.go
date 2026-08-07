@@ -62,6 +62,9 @@ var searchIgnoreFileNames = map[string]bool{
 
 var searchIgnoreFileOrder = []string{".gitignore", ".gitagentignore"}
 
+// ErrIndexNotWarm reports that warm-only retrieval would require chunk embedding.
+var ErrIndexNotWarm = errors.New("search index is not warm")
+
 var defaultSearchIgnorePatterns = []gitignore.Pattern{
 	gitignore.ParsePattern("*.lock", nil),
 	gitignore.ParsePattern("*.lockfile", nil),
@@ -111,6 +114,7 @@ type Options struct {
 	Limit                  int
 	IndexOnly              bool
 	Reindex                bool
+	RequireWarmIndex       bool
 	CodeOnly               bool
 	NoTests                bool
 	Scope                  []string
@@ -605,6 +609,10 @@ func run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 		}
 	}
 	missing := missingChunks(chunks, vectors)
+	if opts.RequireWarmIndex && len(missing) > 0 {
+		mark("embed_index")
+		return fail(ErrIndexNotWarm)
+	}
 	diag.EmbeddedChunks += len(missing)
 	if len(missing) > 0 {
 		progressStatus := ""

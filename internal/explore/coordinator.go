@@ -31,16 +31,18 @@ const (
 )
 
 type Prepared struct {
-	SemanticResults string
-	GuidancePaths   []string
+	SemanticResults   string
+	GuidancePaths     []string
+	DeferredFreshness bool
 }
 
 type BatchItem struct {
-	ID              string      `json:"id"`
-	Question        string      `json:"question"`
-	QueryTarget     QueryTarget `json:"query_target,omitempty"`
-	SemanticResults string      `json:"semantic_results,omitempty"`
-	GuidancePaths   []string    `json:"guidance_paths,omitempty"`
+	ID                string      `json:"id"`
+	Question          string      `json:"question"`
+	QueryTarget       QueryTarget `json:"query_target,omitempty"`
+	SemanticResults   string      `json:"semantic_results,omitempty"`
+	GuidancePaths     []string    `json:"guidance_paths,omitempty"`
+	DeferredFreshness bool        `json:"deferred_freshness,omitempty"`
 }
 
 type BatchResult struct {
@@ -170,6 +172,7 @@ func (c *Coordinator) Run(ctx context.Context, parent *Session, question string,
 		}
 		record.SemanticResults = prepared.SemanticResults
 		record.GuidancePaths = prepared.GuidancePaths
+		record.DeferredFreshness = prepared.DeferredFreshness
 		if err := writeJSONAtomic(intentDir, requestPath, record); err != nil {
 			_ = os.RemoveAll(intentDir)
 			c.timing("semantic_search", semanticStarted)

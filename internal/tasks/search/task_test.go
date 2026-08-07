@@ -271,6 +271,44 @@ func TestSearchIndexSyncConfirmsWarmRemoteWithoutRepushing(t *testing.T) {
 	}
 }
 
+func TestRequireWarmIndexStopsBeforeEmbedding(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	writeFile(t, root, "app.go", "package app\n\nfunc Stable() {}\n")
+	embedder := &countingEmbedder{}
+	opts := Options{
+		Root: root, MinScore: DefaultMinScore, Limit: DefaultLimit,
+		EmbeddingModel: "test-model", EmbeddingDimensions: 3,
+		RequireWarmIndex: true,
+	}
+	_, err := Run(t.Context(), embedder, opts, "find stable")
+	if !errors.Is(err, ErrIndexNotWarm) {
+		t.Fatalf("cold warm-only search error = %v, want %v", err, ErrIndexNotWarm)
+	}
+	if calls := embedder.calls.Load(); calls != 0 {
+		t.Fatalf("cold warm-only search embedding calls = %d, want 0", calls)
+	}
+
+	opts.RequireWarmIndex = false
+	opts.IndexOnly = true
+	if _, err := Run(t.Context(), embedder, opts, ""); err != nil {
+		t.Fatal(err)
+	}
+	callsAfterBuild := embedder.calls.Load()
+	opts.RequireWarmIndex = true
+	opts.IndexOnly = false
+	output, err := Run(t.Context(), embedder, opts, "find stable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Retrieval.Index != "hit" || output.Diagnostics.EmbeddedChunks != 0 {
+		t.Fatalf("warm-only retrieval = %#v, diagnostics = %#v", output.Retrieval, output.Diagnostics)
+	}
+	if calls := embedder.calls.Load(); calls != callsAfterBuild+1 {
+		t.Fatalf("warm-only search embedding calls = %d, want one query call after %d", calls, callsAfterBuild)
+	}
+}
+
 func TestConcurrentSearchesShareCompletedFreshnessConfirmation(t *testing.T) {
 	syncRemote := newEmptySyncRemote(t)
 	root := t.TempDir()
