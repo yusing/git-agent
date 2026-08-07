@@ -204,7 +204,7 @@ func TestReviewRunsConfiguredPostInspectionHookWithUsageAndFindings(t *testing.T
 				t.Fatal(err)
 			}
 			response["usage"] = map[string]any{
-				"input_tokens": 41, "input_tokens_details": map[string]any{"cached_tokens": 11},
+				"input_tokens": 41, "input_tokens_details": map[string]any{"cached_tokens": 11, "cache_write_tokens": 6},
 				"output_tokens": 9, "output_tokens_details": map[string]any{"reasoning_tokens": 7},
 				"total_tokens": 50,
 			}
@@ -239,7 +239,7 @@ func TestReviewRunsConfiguredPostInspectionHookWithUsageAndFindings(t *testing.T
 	}
 	metrics := payload["metrics"].(map[string]any)
 	usage := metrics["usage"].(map[string]any)
-	if usage["input_tokens"] != float64(41) || usage["cached_input_tokens"] != float64(11) || usage["uncached_input_tokens"] != float64(30) || usage["output_tokens"] != float64(9) || usage["reasoning_tokens"] != float64(7) {
+	if usage["input_tokens"] != float64(41) || usage["cached_input_tokens"] != float64(11) || usage["cache_write_input_tokens"] != float64(6) || usage["uncached_input_tokens"] != float64(30) || usage["output_tokens"] != float64(9) || usage["reasoning_tokens"] != float64(7) {
 		t.Fatalf("usage = %#v", usage)
 	}
 	if metrics["branches_created"] != float64(0) || len(metrics["branches"].([]any)) != 0 {

@@ -31,6 +31,7 @@ type exploreFakeResponseClient struct {
 	mu       sync.Mutex
 	requests []openai.Request
 	deadline atomic.Bool
+	usage    openai.Usage
 }
 
 func (c *exploreFakeResponseClient) CreateResponse(ctx context.Context, request openai.Request) (openai.Response, error) {
@@ -55,7 +56,7 @@ func (c *exploreFakeResponseClient) CreateResponse(ctx context.Context, request 
 	if err != nil {
 		return openai.Response{}, err
 	}
-	return openai.Response{Text: text, Continuation: []openai.Item{openai.NewMessage("assistant", text)}}, nil
+	return openai.Response{Text: text, Continuation: []openai.Item{openai.NewMessage("assistant", text)}, Usage: c.usage}, nil
 }
 
 func TestExploreDoesNotApplyRequestTimeoutToWholeBatch(t *testing.T) {
@@ -103,6 +104,39 @@ func TestExploreWithoutDebugReportsOnlyProgress(t *testing.T) {
 	}
 	if strings.Contains(progress, " INF ") || strings.Contains(progress, "explore.phase") {
 		t.Fatalf("stderr contains debug trace without --debug:\n%s", progress)
+	}
+}
+
+func TestExploreReportsProviderUsageWithoutChangingStdout(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_EMBEDDING_DIMENSIONS", "3")
+	t.Chdir(root)
+	runGit(t, root, "init")
+	writeFixtureFile(t, root+"/main.go", "package demo\n")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{
+		stdin: strings.NewReader(""), stdout: &stdout, stderr: &stderr,
+		responseClient: &exploreFakeResponseClient{
+			usage: openai.Usage{InputTokens: 120, CachedInputTokens: 80, CacheWriteInputTokens: 40, OutputTokens: 12, TotalTokens: 132},
+		},
+		embeddingClient: &exploreFakeEmbedder{},
+	}
+	runExploreForTest(t, app, &stdout, "inspect", "the", "repository")
+
+	if !sonic.Valid(stdout.Bytes()) {
+		t.Fatalf("stdout is not JSON: %q", stdout.String())
+	}
+	for _, want := range []string{
+		"llm.usage", "step=1", "input_tokens=120", "cached_input_tokens=80",
+		"cache_write_input_tokens=40", "output_tokens=12",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr missing %q:\n%s", want, stderr.String())
+		}
 	}
 }
 
@@ -331,8 +365,8 @@ func TestExploreInitialFollowUpsAndFreshReset(t *testing.T) {
 		if request.PromptCacheKey != rootCacheKey {
 			t.Fatalf("request %d prompt cache key = %q, want %q", index, request.PromptCacheKey, rootCacheKey)
 		}
-		if countPromptCacheBreakpoints(request.Input) != 1 {
-			t.Fatalf("request %d prompt cache breakpoints = %d, want 1", index, countPromptCacheBreakpoints(request.Input))
+		if got := countPromptCacheBreakpoints(request.Input); got != index+1 {
+			t.Fatalf("request %d prompt cache breakpoints = %d, want %d", index, got, index+1)
 		}
 	}
 	if requests[4].PromptCacheKey == "" || requests[4].PromptCacheKey == rootCacheKey {

@@ -287,12 +287,13 @@ func TestResponsePreservesContinuationAndHostedMetadata(t *testing.T) {
 
 	var completed responses.Response
 	err := json.Unmarshal([]byte(`{
-		"id":"resp_1","status":"completed",
+		"id":"resp_1","status":"completed","future_top":true,
 		"output":[
 			{"id":"rs_1","type":"reasoning","summary":[],"encrypted_content":"cipher","status":"completed"},
 			{"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","queries":["Go 1.26 API"],"sources":[{"type":"url","url":"https://go.dev/doc/"}]}},
 			{"id":"fc_1","type":"function_call","call_id":"call_1","name":"repo_summary","arguments":"{}","status":"completed"}
-		]
+		],
+		"usage":{"input_tokens":42,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":12,"future_nested":"ok"},"output_tokens":9,"output_tokens_details":{"reasoning_tokens":7},"total_tokens":51,"future_usage":true}
 	}`), &completed)
 	if err != nil {
 		t.Fatal(err)
@@ -309,6 +310,9 @@ func TestResponsePreservesContinuationAndHostedMetadata(t *testing.T) {
 	}
 	if len(result.HostedToolCalls) != 1 || !slices.Equal(result.HostedToolCalls[0].Queries, []string{"Go 1.26 API"}) || !slices.Equal(result.HostedToolCalls[0].Sources, []string{"https://go.dev/doc/"}) {
 		t.Fatalf("hosted calls = %#v", result.HostedToolCalls)
+	}
+	if result.Usage != (Usage{InputTokens: 42, CachedInputTokens: 30, CacheWriteInputTokens: 12, OutputTokens: 9, ReasoningTokens: 7, TotalTokens: 51}) {
+		t.Fatalf("usage = %#v", result.Usage)
 	}
 }
 

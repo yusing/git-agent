@@ -14,6 +14,9 @@ var noToolsPrompt string
 //go:embed prompts/request.md.tmpl
 var requestPromptSource string
 
+//go:embed prompts/budget-status.md.tmpl
+var budgetStatusPromptSource string
+
 //go:embed prompts/budget-exhausted.md.tmpl
 var budgetExhaustedPromptSource string
 
@@ -28,6 +31,7 @@ var repairPromptSource string
 
 var (
 	requestPromptTemplate         = template.Must(template.New("agent-request").Parse(requestPromptSource))
+	budgetStatusPromptTemplate    = template.Must(template.New("agent-budget-status").Parse(budgetStatusPromptSource))
 	budgetExhaustedPromptTemplate = template.Must(template.New("budget-exhausted").Parse(budgetExhaustedPromptSource))
 	repairPromptTemplate          = template.Must(template.New("repair").Parse(repairPromptSource))
 )
@@ -40,11 +44,14 @@ type requestPromptTool struct {
 
 type requestPromptData struct {
 	Tools             []requestPromptTool
-	Step              int
-	MaxSteps          int
-	RemainingTools    int
-	MaxTools          int
 	ReadFileAvailable bool
+}
+
+type budgetStatusPromptData struct {
+	Step           int
+	MaxSteps       int
+	RemainingTools int
+	MaxTools       int
 }
 
 type budgetExhaustedPromptData struct {
@@ -55,6 +62,10 @@ type budgetExhaustedPromptData struct {
 
 func renderRequestPrompt(data requestPromptData) string {
 	return strings.TrimSpace(textutil.ExecuteTemplate(requestPromptTemplate, data))
+}
+
+func renderBudgetStatusPrompt(data budgetStatusPromptData) string {
+	return strings.TrimSpace(textutil.ExecuteTemplate(budgetStatusPromptTemplate, data))
 }
 
 func renderBudgetExhaustedPrompt(data budgetExhaustedPromptData) string {

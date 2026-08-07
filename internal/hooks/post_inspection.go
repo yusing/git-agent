@@ -62,12 +62,13 @@ type InspectionSession struct {
 }
 
 type Usage struct {
-	InputTokens         int64 `json:"input_tokens"`
-	CachedInputTokens   int64 `json:"cached_input_tokens"`
-	UncachedInputTokens int64 `json:"uncached_input_tokens"`
-	OutputTokens        int64 `json:"output_tokens"`
-	ReasoningTokens     int64 `json:"reasoning_tokens"`
-	TotalTokens         int64 `json:"total_tokens"`
+	InputTokens           int64 `json:"input_tokens"`
+	CachedInputTokens     int64 `json:"cached_input_tokens"`
+	CacheWriteInputTokens int64 `json:"cache_write_input_tokens"`
+	UncachedInputTokens   int64 `json:"uncached_input_tokens"`
+	OutputTokens          int64 `json:"output_tokens"`
+	ReasoningTokens       int64 `json:"reasoning_tokens"`
+	TotalTokens           int64 `json:"total_tokens"`
 }
 
 func RunPostInspection(ctx context.Context, configured []string, payload PostInspection) error {

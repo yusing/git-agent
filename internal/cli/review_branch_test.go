@@ -293,8 +293,12 @@ func TestRunReviewTreePreservesPromptCacheControlsAcrossForks(t *testing.T) {
 		if request.PromptCacheKey != "review:task-id" {
 			t.Fatalf("request %d prompt cache key = %q", index, request.PromptCacheKey)
 		}
-		if countPromptCacheBreakpoints(request.Input) != 1 {
-			t.Fatalf("request %d prompt cache breakpoints = %d, want 1", index, countPromptCacheBreakpoints(request.Input))
+		wantBreakpoints := 1
+		if index > 0 {
+			wantBreakpoints = 2
+		}
+		if got := countPromptCacheBreakpoints(request.Input); got != wantBreakpoints {
+			t.Fatalf("request %d prompt cache breakpoints = %d, want %d", index, got, wantBreakpoints)
 		}
 	}
 }

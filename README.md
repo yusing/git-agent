@@ -342,16 +342,18 @@ Concurrent initial calls batch automatically. Concurrent follow-ups naming the
 same parent ID become independent sibling branches. Three follow-ups preserve
 context; the next invocation succeeds as a fresh search with a reset allowance.
 An initial batch and its context-preserving follow-ups are assigned one
-prompt-cache key. On GPT-5.6 models, Git-agent sends that key, marks the initial
-stable input as an explicit cache breakpoint, and keeps changing follow-up
-questions after it; a fresh reset allocates a new key. Provider cache retention
-and minimum-prefix rules still apply. Other OpenAI models and the authenticated
-ChatGPT Codex endpoint send the stable key without GPT-5.6 breakpoint options;
-custom endpoints receive no undeclared cache controls.
+prompt-cache key. Git-agent keeps agent instructions unchanged across model
+steps and appends each changing budget as replayable developer input, making
+each completed request input an exact prefix of the next request input. On
+GPT-5.6 models, each appended budget is an explicit cache breakpoint. Provider
+cache retention and minimum-prefix rules still apply. Other OpenAI models and
+the authenticated ChatGPT Codex endpoint send the stable key without GPT-5.6
+breakpoint options; custom endpoints receive no undeclared cache controls.
 Follow-up IDs are bound to the workspace that created them and are rejected from
 another `--cwd`, even when both directories share an ancestor Git repository.
 Explore adds no internal timeout: it runs until completion or caller
 cancellation. Progress stays on stderr and the result envelope stays on stdout.
+Every completed Responses request also writes an `llm.usage` line to stderr with input, cached-input, cache-write-input, and output token counts.
 With `--debug`, Explore additionally streams its console trace and
 `explore.phase` timing events to stderr. Every timing event includes the phase
 duration and elapsed command time in milliseconds; provider and tool events

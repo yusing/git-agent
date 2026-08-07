@@ -82,6 +82,7 @@ func formatMarkdown(payload PostInspection) string {
 func writeMarkdownUsage(text *strings.Builder, usage Usage) {
 	fmt.Fprintf(text, "- **Input tokens:** %d\n", usage.InputTokens)
 	fmt.Fprintf(text, "  - Cached: %d\n", usage.CachedInputTokens)
+	fmt.Fprintf(text, "  - Cache write: %d\n", usage.CacheWriteInputTokens)
 	fmt.Fprintf(text, "  - Uncached: %d\n", usage.UncachedInputTokens)
 	fmt.Fprintf(text, "- **Output tokens:** %d\n", usage.OutputTokens)
 	fmt.Fprintf(text, "  - Reasoning: %d\n", usage.ReasoningTokens)

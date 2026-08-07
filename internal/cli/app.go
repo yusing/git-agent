@@ -496,8 +496,9 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		Validator: func(text string) []string {
 			return reviewtask.ValidateRepository(kind, text, repo, mode, prepared.Paths, prepared.Fingerprint)
 		},
-		Normalize: func(text string) string { return reviewtask.Shape(kind, text) },
-		Trace:     recorder,
+		Normalize:   func(text string) string { return reviewtask.Shape(kind, text) },
+		Trace:       recorder,
+		UsageOutput: a.stderr,
 	}
 	var providerUsage usageAccumulator
 	runner.ObserveUsage = providerUsage.add
@@ -632,8 +633,9 @@ func (a *usageAccumulator) snapshot() openai.Usage {
 func hookUsage(usage openai.Usage) hooks.Usage {
 	return hooks.Usage{
 		InputTokens: usage.InputTokens, CachedInputTokens: usage.CachedInputTokens,
-		UncachedInputTokens: max(0, usage.InputTokens-usage.CachedInputTokens),
-		OutputTokens:        usage.OutputTokens, ReasoningTokens: usage.ReasoningTokens,
+		CacheWriteInputTokens: usage.CacheWriteInputTokens,
+		UncachedInputTokens:   max(0, usage.InputTokens-usage.CachedInputTokens),
+		OutputTokens:          usage.OutputTokens, ReasoningTokens: usage.ReasoningTokens,
 		TotalTokens: usage.TotalTokens,
 	}
 }
@@ -1653,14 +1655,15 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 	toolSpecs := registry.Definitions(toolCandidates)
 	allowedTools := toolDefinitionNames(toolSpecs)
 	runner := agent.OpenAIRunner{
-		Config:    cfg,
-		Client:    openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
-		Tools:     registry,
-		ToolSpecs: toolSpecs,
-		Validator: validator,
-		Normalize: commitmsg.Shape,
-		Trace:     recorder,
-		Budget:    a.budgetHandler(),
+		Config:      cfg,
+		Client:      openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
+		Tools:       registry,
+		ToolSpecs:   toolSpecs,
+		Validator:   validator,
+		Normalize:   commitmsg.Shape,
+		Trace:       recorder,
+		Budget:      a.budgetHandler(),
+		UsageOutput: a.stderr,
 	}
 	environment := environmentContext(repo, command, string(mode), cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
 	result, err := runner.Run(ctx, agent.Request{
@@ -1796,12 +1799,13 @@ func (a *App) runPRMessage(ctx context.Context, args []string) error {
 		return err
 	}
 	runner := agent.OpenAIRunner{
-		Config:    cfg,
-		Client:    openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
-		Validator: func(text string) []string { return commitmsg.Validate(commitmsg.ModePR, text) },
-		Normalize: commitmsg.Shape,
-		Trace:     nil,
-		Budget:    a.budgetHandler(),
+		Config:      cfg,
+		Client:      openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
+		Validator:   func(text string) []string { return commitmsg.Validate(commitmsg.ModePR, text) },
+		Normalize:   commitmsg.Shape,
+		Trace:       nil,
+		Budget:      a.budgetHandler(),
+		UsageOutput: a.stderr,
 	}
 	registry := tools.NewRegistry(repo, skillManager)
 	toolSpecs := registry.Definitions(tools.SkillToolNames())
@@ -1928,13 +1932,14 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 	toolSpecs := registry.Definitions(toolCandidates)
 	allowedTools := toolDefinitionNames(toolSpecs)
 	runner := agent.OpenAIRunner{
-		Config:    cfg,
-		Client:    openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
-		Tools:     registry,
-		ToolSpecs: toolSpecs,
-		Validator: releasenote.Validate,
-		Trace:     recorder,
-		Budget:    a.budgetHandler(),
+		Config:      cfg,
+		Client:      openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
+		Tools:       registry,
+		ToolSpecs:   toolSpecs,
+		Validator:   releasenote.Validate,
+		Trace:       recorder,
+		Budget:      a.budgetHandler(),
+		UsageOutput: a.stderr,
 	}
 	environment := environmentContext(repo, "release-note", rangeArgs.BaseRef+".."+rangeArgs.ReleaseRef, cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
 	result, err := runner.Run(taskCtx, agent.Request{

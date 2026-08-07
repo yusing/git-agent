@@ -17,7 +17,7 @@ func TestRunPostInspectionRendersTemplateAndWritesPayloadToStdin(t *testing.T) {
 		SchemaVersion: SchemaVersion,
 		Session:       InspectionSession{ID: "turn-1", Title: "review O'Brien"},
 		Metrics: InspectionMetrics{
-			Usage:      Usage{InputTokens: 12, CachedInputTokens: 5, UncachedInputTokens: 7},
+			Usage:      Usage{InputTokens: 12, CachedInputTokens: 5, CacheWriteInputTokens: 3, UncachedInputTokens: 7},
 			UsedSkills: []string{"go"}, ToolCalls: []ToolCallMetric{{Name: "jq", Count: 3}},
 			Branches: []BranchMetric{},
 		},
@@ -31,7 +31,7 @@ func TestRunPostInspectionRendersTemplateAndWritesPayloadToStdin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsAll(string(data), `"schema_version":2`, `"id":"turn-1"`, `"used_skills":["go"]`, `"tool_calls":[{"name":"jq","count":3}]`, `"uncached_input_tokens":7`, `"findings":[]`) {
+	if !containsAll(string(data), `"schema_version":2`, `"id":"turn-1"`, `"used_skills":["go"]`, `"tool_calls":[{"name":"jq","count":3}]`, `"cache_write_input_tokens":3`, `"uncached_input_tokens":7`, `"findings":[]`) {
 		t.Fatalf("payload = %s", data)
 	}
 }

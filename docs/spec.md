@@ -619,9 +619,10 @@ simplification `opportunities`, including their evidence.
 
 `metrics.usage` sums provider-reported usage across every completed response in the
 root conversation, branch conversations, schema repair, and forced
-finalization. It contains `input_tokens`, `cached_input_tokens`, derived
-nonnegative `uncached_input_tokens`, `output_tokens`, `reasoning_tokens`, and
-`total_tokens`. Providers that omit a counter contribute zero for that counter.
+finalization. It contains `input_tokens`, `cached_input_tokens`,
+`cache_write_input_tokens`, derived nonnegative `uncached_input_tokens`,
+`output_tokens`, `reasoning_tokens`, and `total_tokens`. Providers that omit a
+counter contribute zero for that counter.
 `metrics.used_skills` lists each distinct skill successfully read through
 `skills_read`, in deterministic conversation traversal order. Reading a
 skill-relative reference records the leading skill name. `metrics.tool_calls` lists local model
@@ -720,10 +721,12 @@ The agent must inspect primary implementation owners and contract-defining
 tests, return direct answers with exploration-root-relative path-and-line
 evidence, and avoid delegating ownership or blast-radius rediscovery to the
 caller. Indexing, batch-wait, tool, and provider progress is written only to
-stderr. With `--fast`, the Responses API request sends
-`service_tier=priority`; without it, `service_tier` is omitted.
+stderr. With `--fast`, the Responses API request sends only
+`service_tier=priority`; it does not select a different prompt, model, reasoning
+effort, budget, cache policy, or search path. Without it, `service_tier` is
+omitted.
 
-Without `--debug`, progress is the only stderr output. With `--debug`, every
+Without `--debug`, stderr contains progress and per-request `llm.usage` metrics.
 invocation starts one stderr console trace and writes `explore.phase` events
 throughout its owned foreground path. Each event contains `phase`, nonnegative
 integer `duration_ms`, and cumulative integer `elapsed_ms` measured from command
@@ -764,15 +767,19 @@ Successful sessions persist in the current project's owner-only metadata
 directory. A session records its selected answer, parent ID, follow-up depth,
 one prompt-cache key, and replayable Responses API item history. An initial
 batch derives one key from its first sorted item ID and persists that key for
-every sibling. For GPT-5.6-family models, Git-agent sends that key, the initial
-conversation's last reusable input-text block has one explicit breakpoint, and
-requests use explicit-only cache mode. Follow-ups inherit both the key and
-original marker; a depth reset creates a new key. Official OpenAI models outside
-the GPT-5.6 family send the key while retaining provider-default caching. The
-authenticated ChatGPT Codex endpoint also sends only the stable key. Custom
-endpoints receive no prompt-cache fields. Provider prefix-length, retention,
-routing, and eviction rules remain authoritative, so a nonzero cached-token
-count is not guaranteed. `--follow-up <search-id>` appends the
+every sibling. Every request in one agent branch keeps `instructions` byte-stable.
+Changing model-step and remaining-tool budgets are appended as developer input
+and persisted in replay history, so each completed request input is an exact
+prefix of the next request input. Hosted-capability failure notices are also
+appended instead of rewriting instructions. For GPT-5.6-family models, each
+appended budget message is an explicit cache breakpoint and requests use
+explicit-only cache mode. Follow-ups inherit the key and replayable input; a
+depth reset creates a new key. Official OpenAI models outside the GPT-5.6 family
+send the key while retaining provider-default caching. The authenticated
+ChatGPT Codex endpoint also sends only the stable key. Custom endpoints receive
+no prompt-cache fields. Provider prefix-length, retention, routing, and eviction
+rules remain authoritative, so a nonzero cached-token count is not guaranteed.
+`--follow-up <search-id>` appends the
 new natural-language question to that stored context only when invoked from
 the same cleaned absolute workspace that created the session. A session ID from
 another workspace under the same project identity fails before semantic or
@@ -1494,14 +1501,18 @@ unchanged. API-key providers retain the requested model identifier.
 - stdout for `commit` / `commit --amend`: streaming human console trace lines
   while generating the message, followed by Git's raw commit summary after
   success
-- stderr: diagnostics, console-formatted debug output, search and index-sync
-  progress, `--agent` progress probe endpoints, validation failures, provider/tool
-  loop summaries when `--debug` is enabled, and stderr
-  emitted by a successful delegated `git commit`
+- stderr: per-request `llm.usage` metrics for every Responses-backed command,
+  diagnostics, console-formatted debug output, search and index-sync progress,
+  `--agent` progress probe endpoints, validation failures, provider/tool loop
+  summaries when `--debug` is enabled, and stderr emitted by a successful
+  delegated `git commit`
+- each `llm.usage` line reports the one-based model `step`, `input_tokens`,
+  `cached_input_tokens`, `cache_write_input_tokens`, and `output_tokens`; fields
+  unavailable from a provider are zero
 - `search` writes errors and optional `--debug` diagnostics to stderr only
-- `explore` always writes progress to stderr; `--debug` additionally writes its
-  human console trace and phase timings while preserving one strict result
-  object on stdout
+- `explore` always writes progress and provider usage to stderr; `--debug`
+  additionally writes its human console trace and phase timings while preserving
+  one strict result object on stdout
 - `review` and `simplify` keep trace events in memory for SSE replay; detached
   runs persist only their durable task record
 - `release-note --out <file>` and `commit` / `commit --amend` stream human

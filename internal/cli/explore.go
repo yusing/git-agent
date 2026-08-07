@@ -266,6 +266,7 @@ func (a *App) runExploreBatch(
 		Config: cfg, Client: client, Tools: registry, ToolSpecs: toolSpecs,
 		Validator: explore.ValidateAnswers(itemIDs), Trace: recorder, Budget: a.budgetHandler(),
 		PromptCacheKey: explore.PromptCacheKey(parent, items),
+		UsageOutput:    a.stderr,
 	}
 	if debug {
 		runner.Timing = func(event agent.Timing) {

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1099,7 +1100,7 @@ func TestCompletePendingFunctionCallsValidatesConversationHistory(t *testing.T) 
 func TestRequestInstructionsRequireReadFilePathProvenance(t *testing.T) {
 	t.Parallel()
 
-	instructions := requestInstructions("", []openai.ToolSpec{{Name: "read_file"}}, nil, 1, 3, 0, 2)
+	instructions := requestInstructions("", []openai.ToolSpec{{Name: "read_file"}}, nil)
 	if !containsAll(instructions,
 		"path copied verbatim from prepared context or prior repository-tool output",
 		"Discover paths with available inventory or search tools first",
@@ -1108,38 +1109,14 @@ func TestRequestInstructionsRequireReadFilePathProvenance(t *testing.T) {
 		t.Fatalf("read_file instructions missing path provenance contract: %s", instructions)
 	}
 
-	withoutReadFile := requestInstructions("", []openai.ToolSpec{{Name: "repo_summary"}}, nil, 1, 3, 0, 2)
+	withoutReadFile := requestInstructions("", []openai.ToolSpec{{Name: "repo_summary"}}, nil)
 	if strings.Contains(withoutReadFile, "do not imply filenames") {
 		t.Fatalf("instructions mention read_file contract without read_file: %s", withoutReadFile)
 	}
 
-	withHostedSearch := requestInstructions("", nil, []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch}}, 1, 3, 0, 2)
+	withHostedSearch := requestInstructions("", nil, []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch}})
 	if !strings.Contains(withHostedSearch, "web_search (provider-hosted)") || strings.Contains(withHostedSearch, "No tools are available") {
 		t.Fatalf("instructions do not advertise hosted web search: %s", withHostedSearch)
-	}
-}
-
-func TestProviderUsageJSONBoundaryRemainsForwardCompatible(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		raw  string
-		want int
-	}{
-		{name: "positive usage", raw: `{"usage":{"input_tokens":42}}`, want: 42},
-		{name: "unknown future fields", raw: `{"future_top":true,"usage":{"input_tokens":42,"future_nested":"ok"}}`, want: 42},
-		{name: "unrelated key collision", raw: `{"usage":{"input_tokens_backup":99}}`},
-		{name: "negative wrong type", raw: `{"usage":{"input_tokens":"42"}}`},
-		{name: "malformed", raw: `{"usage":`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := int((openai.Response{RawJSON: tt.raw}).ProviderUsage().InputTokens); got != tt.want {
-				t.Fatalf("input tokens = %d, want %d", got, tt.want)
-			}
-		})
 	}
 }
 
@@ -1151,23 +1128,31 @@ func TestRunnerObservesProviderUsageAcrossSteps(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &fakeClient{responses: []openai.Response{
-		{RawJSON: `{"usage":{"input_tokens":20,"input_tokens_details":{"cached_tokens":8},"output_tokens":4,"output_tokens_details":{"reasoning_tokens":3},"total_tokens":24}}`, ToolCalls: []openai.ToolCall{{ID: "call-1", Name: "repo_summary", Arguments: `{}`}}},
-		{RawJSON: `{"usage":{"input_tokens":30,"output_tokens":6,"total_tokens":36}}`, Text: "done"},
+		{Usage: openai.Usage{InputTokens: 20, CachedInputTokens: 8, CacheWriteInputTokens: 12, OutputTokens: 4, ReasoningTokens: 3, TotalTokens: 24}, ToolCalls: []openai.ToolCall{{ID: "call-1", Name: "repo_summary", Arguments: `{}`}}},
+		{Usage: openai.Usage{InputTokens: 30, OutputTokens: 6, TotalTokens: 36}, Text: "done"},
 	}}
 	registry := tools.NewRegistry(repo, nil)
 	var usage openai.Usage
+	var metrics bytes.Buffer
 	runner := OpenAIRunner{
 		Config: config.Config{MaxSteps: 2, MaxToolCalls: 2}, Client: client, Tools: registry,
 		ToolSpecs: registry.Definitions([]string{"repo_summary"}),
 		ObserveUsage: func(value openai.Usage) {
 			usage.Add(value)
 		},
+		UsageOutput: &metrics,
 	}
 	if _, err := runner.Run(t.Context(), Request{UserPrompt: "review", MaxSteps: 2}); err != nil {
 		t.Fatal(err)
 	}
-	if usage.InputTokens != 50 || usage.CachedInputTokens != 8 || usage.OutputTokens != 10 || usage.ReasoningTokens != 3 || usage.TotalTokens != 60 {
+	if usage.InputTokens != 50 || usage.CachedInputTokens != 8 || usage.CacheWriteInputTokens != 12 || usage.OutputTokens != 10 || usage.ReasoningTokens != 3 || usage.TotalTokens != 60 {
 		t.Fatalf("usage = %#v", usage)
+	}
+	if output := metrics.String(); !containsAll(output,
+		"llm.usage", "step=1", "input_tokens=20", "cached_input_tokens=8",
+		"cache_write_input_tokens=12", "output_tokens=4", "step=2", "input_tokens=30",
+	) {
+		t.Fatalf("usage metrics = %q", output)
 	}
 }
 
@@ -1267,11 +1252,13 @@ func TestRunnerDisablesRejectedHostedCapabilityAndRetriesStepOnce(t *testing.T) 
 		if len(client.requests[index].Tools) != 1 || client.requests[index].Tools[0].Name != "repo_summary" {
 			t.Fatalf("request %d lost local tools: %#v", index, client.requests[index].Tools)
 		}
-		if !strings.Contains(client.requests[index].Instructions, "hosted web lookup was unavailable") {
-			t.Fatalf("request %d missing disclosure instruction: %s", index, client.requests[index].Instructions)
+		if client.requests[index].Instructions != client.requests[0].Instructions {
+			t.Fatalf("request %d instructions changed across cacheable steps", index)
 		}
-		if strings.Contains(client.requests[index].Instructions, "web_search (provider-hosted)") {
-			t.Fatalf("request %d still advertises disabled hosted search: %s", index, client.requests[index].Instructions)
+		if !slices.ContainsFunc(client.requests[index].Input, func(item openai.Item) bool {
+			return strings.Contains(item.Content, "hosted web lookup was unavailable")
+		}) {
+			t.Fatalf("request %d missing appended capability disclosure: %#v", index, client.requests[index].Input)
 		}
 	}
 	lastInput := client.requests[2].Input
@@ -1515,10 +1502,11 @@ func TestRunnerExecutesToolCallRoundTrip(t *testing.T) {
 	}}
 	registry := tools.NewRegistry(repo, nil)
 	runner := OpenAIRunner{
-		Config:    config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 3, MaxToolCalls: 2},
-		Client:    client,
-		Tools:     registry,
-		ToolSpecs: registry.Definitions([]string{"repo_summary"}),
+		Config:         config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 3, MaxToolCalls: 2},
+		Client:         client,
+		Tools:          registry,
+		ToolSpecs:      registry.Definitions([]string{"repo_summary"}),
+		PromptCacheKey: "test:stable-instructions",
 	}
 
 	result, err := runner.Run(context.Background(), Request{
@@ -1532,11 +1520,31 @@ func TestRunnerExecutesToolCallRoundTrip(t *testing.T) {
 	if result.ToolCalls != 1 || result.Text != "Add parser" {
 		t.Fatalf("result = %#v", result)
 	}
-	if got := client.requests[1].Input[len(client.requests[1].Input)-1]; got.Type != "function_call_output" || got.CallID != "call_1" {
-		t.Fatalf("missing tool output input: %#v", got)
+	if !slices.ContainsFunc(client.requests[1].Input, func(item openai.Item) bool {
+		return item.Type == "function_call_output" && item.CallID == "call_1"
+	}) {
+		t.Fatalf("missing tool output input: %#v", client.requests[1].Input)
 	}
-	if instructions := client.requests[0].Instructions; !containsAll(instructions, "bounded agent loop", "model step 1 of 3", "2 of 2 local function tool calls remaining", "reduce material uncertainty", "do not call tools just to repeat provided context", "Conclude before the remaining budget reaches zero", "Do not ask the user for more evidence") {
-		t.Fatalf("request instructions missing tool economy guidance: %s", instructions)
+	if client.requests[0].Instructions != client.requests[1].Instructions {
+		t.Fatalf("instructions changed between cacheable requests")
+	}
+	if instructions := client.requests[0].Instructions; !containsAll(instructions, "bounded agent loop", "reduce material uncertainty", "do not call tools just to repeat provided context", "Do not ask the user for more evidence") {
+		t.Fatalf("request instructions missing stable tool guidance: %s", instructions)
+	}
+	if strings.Contains(client.requests[0].Instructions, "model step") {
+		t.Fatalf("request instructions contain dynamic budget state: %s", client.requests[0].Instructions)
+	}
+	for index, request := range client.requests {
+		if len(request.Input) == 0 {
+			t.Fatalf("request %d has no input", index)
+		}
+		budget := request.Input[len(request.Input)-1]
+		if !budget.PromptCacheBreakpoint || !strings.Contains(budget.Content, "model_step:") {
+			t.Fatalf("request %d missing appended cacheable budget: %#v", index, budget)
+		}
+	}
+	if !slices.Equal(client.requests[0].Input, client.requests[1].Input[:len(client.requests[0].Input)]) {
+		t.Fatalf("second request does not preserve the first request input as an exact prefix")
 	}
 }
 
@@ -1660,10 +1668,13 @@ func TestRunnerReturnsToolErrorsToModelForRecovery(t *testing.T) {
 	if result.Text != "recovered" || result.ToolCalls != 2 || len(client.requests) != 3 {
 		t.Fatalf("result = %#v, requests = %d", result, len(client.requests))
 	}
-	output := client.requests[1].Input[len(client.requests[1].Input)-1]
-	if output.Type != "function_call_output" || output.CallID != "call_1" {
-		t.Fatalf("tool error output item = %#v", output)
+	outputIndex := slices.IndexFunc(client.requests[1].Input, func(item openai.Item) bool {
+		return item.Type == "function_call_output" && item.CallID == "call_1"
+	})
+	if outputIndex < 0 {
+		t.Fatalf("tool error output missing from %#v", client.requests[1].Input)
 	}
+	output := client.requests[1].Input[outputIndex]
 	var envelope struct {
 		OK    bool   `json:"ok"`
 		Tool  string `json:"tool"`
@@ -1675,9 +1686,11 @@ func TestRunnerReturnsToolErrorsToModelForRecovery(t *testing.T) {
 	if envelope.OK || envelope.Tool != "read_file" || !strings.Contains(envelope.Error, "missing.go") {
 		t.Fatalf("tool error envelope = %#v", envelope)
 	}
-	corrected := client.requests[2].Input[len(client.requests[2].Input)-1]
-	if corrected.Type != "function_call_output" || corrected.CallID != "call_2" || !strings.Contains(corrected.Output, "package actual") {
-		t.Fatalf("corrected tool output item = %#v", corrected)
+	correctedIndex := slices.IndexFunc(client.requests[2].Input, func(item openai.Item) bool {
+		return item.Type == "function_call_output" && item.CallID == "call_2"
+	})
+	if correctedIndex < 0 || !strings.Contains(client.requests[2].Input[correctedIndex].Output, "package actual") {
+		t.Fatalf("corrected tool output missing from %#v", client.requests[2].Input)
 	}
 	var traced bool
 	for _, event := range events {
@@ -1860,7 +1873,7 @@ func TestRunnerFinalizesImmediatelyAtReportedContextThreshold(t *testing.T) {
 	client := &fakeClient{responses: []openai.Response{
 		{
 			ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: `{}`}},
-			RawJSON:   `{"usage":{"input_tokens":217600}}`,
+			Usage:     openai.Usage{InputTokens: 217600},
 		},
 		{Text: "all findings"},
 	}}
