@@ -187,7 +187,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		if flag.Name == "follow-up" {
 			followUpRequested = true
 		}
-		if flag.Name != "follow-up" {
+		if flag.Name != "follow-up" && flag.Name != "fast" {
 			followUpConflict = true
 		}
 		if flag.Name == "max-web-searches" {
@@ -205,7 +205,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	})
 	if followUpRequested {
 		if followUpConflict {
-			return errors.New("--follow-up cannot be combined with modes or other flags")
+			return errors.New("--follow-up cannot be combined with modes or flags other than --fast")
 		}
 		if strings.TrimSpace(followUpID) == "" {
 			return errors.New("--follow-up requires a parent turn ID")
@@ -2329,21 +2329,21 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent index sync\n")
 	b.WriteString("  git-agent index migrate --to v2 [--dry-run]\n")
 	b.WriteString("  git-agent commit-msg [--amend] [flags]\n")
-	b.WriteString("  git-agent explore [--follow-up <search-id>] <question...>\n")
+	b.WriteString("  git-agent explore [--debug] [--fast] [--follow-up <search-id>] <question...>\n")
 	b.WriteString("  git-agent pr-message [flags]\n")
 	b.WriteString("  git-agent project_id\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] patch|minor|major\n")
 	b.WriteString("  git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]\n")
 	b.WriteString("  git-agent review --wait <id>\n")
-	b.WriteString("  git-agent review --follow-up <turn-id> <prompt...>\n")
+	b.WriteString("  git-agent review [--fast] --follow-up <turn-id> <prompt...>\n")
 	b.WriteString("  git-agent search [flags] <query...>\n")
 	b.WriteString("  git-agent search --ls [--remote <url>] [--format text|json]\n")
 	b.WriteString("  git-agent search --ls-remotes [--format text|json|completion]\n")
 	b.WriteString("  git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]\n")
 	b.WriteString("  git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]\n")
 	b.WriteString("  git-agent simplify --wait <id>\n")
-	b.WriteString("  git-agent simplify --follow-up <turn-id> <prompt...>\n")
+	b.WriteString("  git-agent simplify [--fast] --follow-up <turn-id> <prompt...>\n")
 	b.WriteString("\nRun `git-agent explore --help` for exploration usage.\n")
 	b.WriteString("Run `git-agent search --help` for search flags.\n")
 	b.WriteString("Run `git-agent review --help` or `git-agent simplify --help` for inspection flags.\n")
@@ -2354,7 +2354,7 @@ func codeReviewUsageError(command string, fs *flag.FlagSet) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Usage: git-agent %s [--codebase|--uncommitted|--staged] [flags] [prompt...]\n\n", command)
 	fmt.Fprintf(&b, "       git-agent %s --wait <id>\n\n", command)
-	fmt.Fprintf(&b, "       git-agent %s --follow-up <turn-id> <prompt...>\n\n", command)
+	fmt.Fprintf(&b, "       git-agent %s [--fast] --follow-up <turn-id> <prompt...>\n\n", command)
 	b.WriteString("Modes:\n")
 	b.WriteString("  --uncommitted  inspect all dirty changes (default)\n")
 	b.WriteString("  --staged       inspect staged changes only\n")
@@ -2392,7 +2392,7 @@ func codeReviewUsageError(command string, fs *flag.FlagSet) error {
 func codeReviewAgentUsageError(command string, fs *flag.FlagSet) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Usage: git-agent %s [--codebase|--uncommitted|--staged] [--depth fast|balanced|thorough] [prompt...]\n\n", command)
-	fmt.Fprintf(&b, "       git-agent %s --follow-up <turn-id> <prompt...>\n\n", command)
+	fmt.Fprintf(&b, "       git-agent %s [--fast] --follow-up <turn-id> <prompt...>\n\n", command)
 	b.WriteString("Modes:\n")
 	b.WriteString("  --uncommitted  inspect all dirty changes (default)\n")
 	b.WriteString("  --staged       inspect staged changes only\n")
@@ -2404,7 +2404,7 @@ func codeReviewAgentUsageError(command string, fs *flag.FlagSet) error {
 	b.WriteString("      use thorough only for security-related issues or very complex logic; otherwise use fast or balanced\n")
 	b.WriteString("  --low | --medium | --high | --xhigh\n")
 	b.WriteString("      set reasoning effort (mutually exclusive)\n")
-	b.WriteString("  --follow-up <turn-id> <prompt...>\n")
+	b.WriteString("  [--fast] --follow-up <turn-id> <prompt...>\n")
 	b.WriteString("      re-evaluate a successful provider turn against current repository state\n")
 	return errors.New(b.String())
 }

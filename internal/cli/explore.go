@@ -11,6 +11,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/bytedance/sonic"
 	"github.com/yusing/git-agent/internal/agent"
@@ -25,12 +26,15 @@ import (
 )
 
 func (a *App) runExplore(ctx context.Context, args []string) error {
+	started := time.Now()
 	fs := flag.NewFlagSet("explore", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var followUpID string
 	var fast bool
+	var debug bool
 	fs.StringVar(&followUpID, "follow-up", "", "fork a completed explore search")
 	fs.BoolVar(&fast, "fast", false, "use priority service tier")
+	fs.BoolVar(&debug, "debug", false, "enable debug output on stderr")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return exploreUsageError()
@@ -40,6 +44,16 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 	question := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if question == "" {
 		return errors.New("explore requires a question")
+	}
+	var recorder *trace.Recorder
+	var timing *explorePhaseTrace
+	if debug {
+		var err error
+		recorder, err = trace.NewStream("explore", a.stderr)
+		if err != nil {
+			return err
+		}
+		timing = newExplorePhaseTrace(started, recorder)
 	}
 
 	workspace, err := os.Getwd()
@@ -78,6 +92,9 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 	}
 
 	coordinator := explore.NewCoordinator(store, workspace, fast)
+	if debug {
+		coordinator.Timing = timing.recordSimple
+	}
 	if dispositionLog, logErr := explore.NewDispositionLog(projectID); logErr == nil {
 		coordinator.DispositionLog = dispositionLog
 	}
@@ -92,21 +109,25 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 	var prepare explore.PrepareFunc
 	if parent == nil {
 		prepare = func(searchCtx context.Context) (explore.Prepared, error) {
-			return a.prepareExploreSearch(searchCtx, question)
+			return a.prepareExploreSearch(searchCtx, question, timing)
 		}
 	}
+	timing.recordSimple("setup", time.Since(started))
 	output, err := coordinator.Run(ctx, parent, question, prepare, func(
 		batchCtx context.Context, batchParent *explore.Session, items []explore.BatchItem,
 	) (map[string]explore.BatchResult, error) {
-		return a.runExploreBatch(batchCtx, workspace, repo, batchParent, items, fast)
+		return a.runExploreBatch(batchCtx, workspace, repo, batchParent, items, fast, debug, recorder, timing)
 	})
 	if err != nil {
-		return err
+		return errors.Join(err, timing.err())
 	}
-	return writeJSONOutput(a.stdout, output)
+	outputStarted := time.Now()
+	err = writeJSONOutput(a.stdout, output)
+	timing.recordSimple("output", time.Since(outputStarted))
+	return errors.Join(err, timing.err())
 }
 
-func (a *App) prepareExploreSearch(ctx context.Context, question string) (explore.Prepared, error) {
+func (a *App) prepareExploreSearch(ctx context.Context, question string, timing *explorePhaseTrace) (explore.Prepared, error) {
 	root, err := os.Getwd()
 	if err != nil {
 		return explore.Prepared{}, err
@@ -161,6 +182,9 @@ func (a *App) prepareExploreSearch(ctx context.Context, question string) (explor
 			return writeErr
 		},
 	}, question)
+	for _, phase := range output.Diagnostics.Timings {
+		timing.recordSimple("semantic_search."+phase.Step, phase.Duration)
+	}
 	if err != nil {
 		return explore.Prepared{}, err
 	}
@@ -177,8 +201,19 @@ func (a *App) prepareExploreSearch(ctx context.Context, question string) (explor
 	return explore.Prepared{SemanticResults: string(semantic), GuidancePaths: paths}, nil
 }
 
-func (a *App) runExploreBatch(ctx context.Context, root string, repo *gitctx.Repository, parent *explore.Session, items []explore.BatchItem, fast bool) (map[string]explore.BatchResult, error) {
-	cfg, err := config.Resolve(config.Options{Fast: fast})
+func (a *App) runExploreBatch(
+	ctx context.Context,
+	root string,
+	repo *gitctx.Repository,
+	parent *explore.Session,
+	items []explore.BatchItem,
+	fast bool,
+	debug bool,
+	recorder *trace.Recorder,
+	timing *explorePhaseTrace,
+) (map[string]explore.BatchResult, error) {
+	promptSetupStarted := time.Now()
+	cfg, err := config.Resolve(config.Options{Fast: fast, Debug: debug})
 	if err != nil {
 		return nil, err
 	}
@@ -210,10 +245,6 @@ func (a *App) runExploreBatch(ctx context.Context, root string, repo *gitctx.Rep
 	registry := tools.NewExploreRegistry(root, repo)
 	toolSpecs := registry.Definitions(tools.ExploreToolNames())
 	allowedTools := toolDefinitionNames(toolSpecs)
-	recorder, err := trace.NewStream("explore", a.stderr)
-	if err != nil {
-		return nil, err
-	}
 	parentSearchID := ""
 	if parent != nil {
 		parentSearchID = parent.ID
@@ -236,6 +267,18 @@ func (a *App) runExploreBatch(ctx context.Context, root string, repo *gitctx.Rep
 		Validator: explore.ValidateAnswers(itemIDs), Trace: recorder, Budget: a.budgetHandler(),
 		PromptCacheKey: explore.PromptCacheKey(parent, items),
 	}
+	if debug {
+		runner.Timing = func(event agent.Timing) {
+			fields := map[string]any{}
+			if event.Step > 0 {
+				fields["step"] = event.Step
+			}
+			if event.Tool != "" {
+				fields["tool"] = event.Tool
+			}
+			timing.record(event.Phase, event.Duration, fields)
+		}
+	}
 	request := agent.Request{
 		SystemPrompt: explore.SystemPrompt, TextFormat: explore.TextFormat(), AllowedToolNames: allowedTools,
 		ParallelToolCalls: true, MaxSteps: cfg.MaxSteps, RepairOnValidator: true,
@@ -248,12 +291,19 @@ func (a *App) runExploreBatch(ctx context.Context, root string, repo *gitctx.Rep
 	} else {
 		request.Input = explore.FollowUpInput(*parent, userPrompt)
 	}
+	timing.recordSimple("prompt_setup", time.Since(promptSetupStarted))
+
+	agentStarted := time.Now()
 	result, err := runner.Run(ctx, request)
+	timing.recordSimple("agent", time.Since(agentStarted))
 	if err != nil {
 		return nil, err
 	}
+
+	answerProcessingStarted := time.Now()
 	answers, err := explore.ParseAnswers(result.Text)
 	if err != nil {
+		timing.recordSimple("answer_processing", time.Since(answerProcessingStarted))
 		return nil, err
 	}
 	history := result.History()
@@ -261,6 +311,7 @@ func (a *App) runExploreBatch(ctx context.Context, root string, repo *gitctx.Rep
 	for id, answer := range answers {
 		results[id] = explore.BatchResult{Answer: answer, History: history}
 	}
+	timing.recordSimple("answer_processing", time.Since(answerProcessingStarted))
 	if cfg.Debug {
 		a.writeDebugEvent("explore_summary", slog.Int("batch_size", len(items)), slog.Int("tool_calls", result.ToolCalls))
 	}
@@ -269,7 +320,7 @@ func (a *App) runExploreBatch(ctx context.Context, root string, repo *gitctx.Rep
 
 func exploreUsageError() error {
 	var usage strings.Builder
-	usage.WriteString("Usage: git-agent explore [--fast] [--follow-up <search-id>] <question...>\n\n")
-	usage.WriteString("Flags:\n  --fast\n      use priority service tier\n  --follow-up <search-id>\n      fork a completed explore search")
+	usage.WriteString("Usage: git-agent explore [--debug] [--fast] [--follow-up <search-id>] <question...>\n\n")
+	usage.WriteString("Flags:\n  --debug\n      enable debug output on stderr\n  --fast\n      use priority service tier\n  --follow-up <search-id>\n      fork a completed explore search")
 	return errors.New(usage.String())
 }

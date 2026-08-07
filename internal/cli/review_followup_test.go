@@ -59,7 +59,8 @@ func TestFollowUpRequiresAnIsolatedPrompt(t *testing.T) {
 		args []string
 		want string
 	}{
-		{name: "missing prompt", args: []string{"review", "--follow-up", followUpParentTaskID}, want: "nonempty re-review prompt"},
+		{name: "missing review prompt with fast", args: []string{"review", "--fast", "--follow-up", followUpParentTaskID}, want: "nonempty re-review prompt"},
+		{name: "missing simplify prompt with fast", args: []string{"simplify", "--fast", "--follow-up", followUpParentTaskID}, want: "nonempty re-review prompt"},
 		{name: "scope conflict", args: []string{"review", "--follow-up", followUpParentTaskID, "--staged", "re-check"}, want: "cannot be combined"},
 		{name: "provider conflict", args: []string{"review", "--follow-up", followUpParentTaskID, "--model", "test", "re-check"}, want: "cannot be combined"},
 	}
@@ -111,7 +112,7 @@ func TestFollowUpReusesDetachedReviewPipeline(t *testing.T) {
 
 	server := newScriptedResponsesServer(t, []func(string) string{
 		func(body string) string {
-			for _, want := range []string{"previous_findings", "re-check the fix", "missing case"} {
+			for _, want := range []string{"previous_findings", "re-check the fix", "missing case", `"service_tier":"priority"`} {
 				if !strings.Contains(body, want) {
 					t.Fatalf("follow-up request missing %q:\n%s", want, body)
 				}
@@ -134,7 +135,7 @@ func TestFollowUpReusesDetachedReviewPipeline(t *testing.T) {
 
 	var stderr bytes.Buffer
 	app := &App{stdout: &bytes.Buffer{}, stderr: &stderr}
-	if err := app.Run(t.Context(), []string{"review", "--follow-up", followUpParentTaskID, "re-check", "the", "fix"}); err != nil {
+	if err := app.Run(t.Context(), []string{"review", "--fast", "--follow-up", followUpParentTaskID, "re-check", "the", "fix"}); err != nil {
 		t.Fatal(err)
 	}
 	child, err := store.Read(cliWaitTaskID)

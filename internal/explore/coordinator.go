@@ -70,6 +70,7 @@ type Coordinator struct {
 	heartbeatStale    time.Duration
 	Progress          func(string)
 	DispositionLog    *DispositionLog
+	Timing            func(string, time.Duration)
 }
 
 func NewCoordinator(store *Store, workspace string, fast bool) *Coordinator {
@@ -89,6 +90,12 @@ func NewCoordinator(store *Store, workspace string, fast bool) *Coordinator {
 		pollInterval:      defaultPollInterval,
 		heartbeatInterval: defaultHeartbeatInterval,
 		heartbeatStale:    defaultHeartbeatStale,
+	}
+}
+
+func (c *Coordinator) timing(phase string, started time.Time) {
+	if c.Timing != nil {
+		c.Timing(phase, time.Since(started))
 	}
 }
 
@@ -118,6 +125,7 @@ func (c *Coordinator) Run(ctx context.Context, parent *Session, question string,
 		return Output{}, errors.New("fresh explore search requires semantic preparation")
 	}
 
+	reservationStarted := time.Now()
 	itemID, err := newID()
 	if err != nil {
 		return Output{}, err
@@ -147,30 +155,42 @@ func (c *Coordinator) Run(ctx context.Context, parent *Session, question string,
 		_ = os.RemoveAll(intentDir)
 		return Output{}, fmt.Errorf("write explore batch reservation: %w", err)
 	}
+	c.timing("reservation", reservationStarted)
+	semanticStarted := time.Now()
 	if prepare != nil {
 		c.progress("searching")
 		prepared, err := prepare(ctx)
 		if err != nil {
 			_ = os.RemoveAll(intentDir)
+			c.timing("semantic_search", semanticStarted)
 			return Output{}, err
 		}
 		record.SemanticResults = prepared.SemanticResults
 		record.GuidancePaths = prepared.GuidancePaths
 		if err := writeJSONAtomic(intentDir, requestPath, record); err != nil {
 			_ = os.RemoveAll(intentDir)
+			c.timing("semantic_search", semanticStarted)
 			return Output{}, fmt.Errorf("publish explore semantic results: %w", err)
 		}
+	}
+	if prepare != nil {
+		c.timing("semantic_search", semanticStarted)
 	}
 	if err := os.WriteFile(filepath.Join(intentDir, "ready"), nil, 0o600); err != nil {
 		_ = os.RemoveAll(intentDir)
 		return Output{}, fmt.Errorf("mark explore batch item ready: %w", err)
 	}
+	joinGraceStarted := time.Now()
 	if err := sleepContext(ctx, c.joinGrace); err != nil {
 		_ = os.RemoveAll(intentDir)
+		c.timing("join_grace", joinGraceStarted)
 		return Output{}, err
 	}
+	c.timing("join_grace", joinGraceStarted)
 
+	batchJoinStarted := time.Now()
 	batchDir, leader, err := c.joinBatch(ctx, keyDir, intentDir, itemID)
+	c.timing("batch_join", batchJoinStarted)
 	if err != nil {
 		_ = os.RemoveAll(intentDir)
 		return Output{}, err
@@ -183,7 +203,10 @@ func (c *Coordinator) Run(ctx context.Context, parent *Session, question string,
 	} else {
 		c.progress("waiting_for_batch")
 	}
-	return c.waitForAnswer(ctx, keyDir, batchDir, itemID)
+	resultWaitStarted := time.Now()
+	output, err := c.waitForAnswer(ctx, keyDir, batchDir, itemID)
+	c.timing("result_wait", resultWaitStarted)
+	return output, err
 }
 
 func (c *Coordinator) prepareKeyDir(parent *Session) (string, error) {
@@ -254,63 +277,71 @@ func (c *Coordinator) joinBatch(ctx context.Context, keyDir, intentDir, itemID s
 }
 
 func (c *Coordinator) runLeader(ctx context.Context, keyDir, batchDir string, parent *Session, runner BatchRunner) error {
+	batchCollectionStarted := time.Now()
 	stopHeartbeat, err := c.startHeartbeat(ctx, filepath.Join(batchDir, "heartbeat"))
 	if err != nil {
+		c.timing("batch_collection", batchCollectionStarted)
 		_ = c.failBatch(ctx, keyDir, batchDir, err)
 		return err
 	}
 	defer stopHeartbeat()
 	if err := c.collectBatch(ctx, keyDir, batchDir); err != nil {
+		c.timing("batch_collection", batchCollectionStarted)
 		_ = c.failBatch(ctx, keyDir, batchDir, err)
 		return err
 	}
 	items, err := readBatchItems(batchDir)
 	if err != nil {
+		c.timing("batch_collection", batchCollectionStarted)
 		_ = c.failBatch(ctx, keyDir, batchDir, err)
 		return err
 	}
 	if c.DispositionLog != nil {
 		_ = c.DispositionLog.AppendBatch(ctx, filepath.Base(batchDir), c.workspace, parent, items)
 	}
+	c.timing("batch_collection", batchCollectionStarted)
+
 	c.progress("exploring")
 	results, err := runner(ctx, parent, items)
 	if err != nil {
 		_ = c.failBatch(ctx, keyDir, batchDir, err)
 		return err
 	}
-	promptCacheKey := PromptCacheKey(parent, items)
-	for _, item := range items {
-		result, ok := results[item.ID]
-		if !ok {
-			err := fmt.Errorf("explore batch completed without result for %s", item.ID)
-			_ = c.failBatch(ctx, keyDir, batchDir, err)
-			return err
+
+	persistenceStarted := time.Now()
+	err = func() error {
+		promptCacheKey := PromptCacheKey(parent, items)
+		for _, item := range items {
+			result, ok := results[item.ID]
+			if !ok {
+				return fmt.Errorf("explore batch completed without result for %s", item.ID)
+			}
+			depth := 0
+			parentID := ""
+			if parent != nil {
+				depth = parent.Depth + 1
+				parentID = parent.ID
+			}
+			session := Session{
+				Version: sessionVersion, ID: item.ID, ParentID: parentID, Depth: depth,
+				Workspace: c.workspace, PromptCacheKey: promptCacheKey, Answer: result.Answer,
+				History: append(slices.Clone(result.History), openai.NewMessage(
+					"developer",
+					"Continue only explore branch item_id "+item.ID+" in future turns; treat sibling items as unrelated context.",
+				)),
+			}
+			if err := c.store.create(session); err != nil {
+				return err
+			}
+			answerPath := filepath.Join(batchDir, "items", item.ID, "answer.json")
+			if err := writeJSONAtomic(filepath.Dir(answerPath), answerPath, Output{ID: item.ID, Answer: result.Answer}); err != nil {
+				return err
+			}
 		}
-		depth := 0
-		parentID := ""
-		if parent != nil {
-			depth = parent.Depth + 1
-			parentID = parent.ID
-		}
-		session := Session{
-			Version: sessionVersion, ID: item.ID, ParentID: parentID, Depth: depth,
-			Workspace: c.workspace, PromptCacheKey: promptCacheKey, Answer: result.Answer,
-			History: append(slices.Clone(result.History), openai.NewMessage(
-				"developer",
-				"Continue only explore branch item_id "+item.ID+" in future turns; treat sibling items as unrelated context.",
-			)),
-		}
-		if err := c.store.create(session); err != nil {
-			_ = c.failBatch(ctx, keyDir, batchDir, err)
-			return err
-		}
-		answerPath := filepath.Join(batchDir, "items", item.ID, "answer.json")
-		if err := writeJSONAtomic(filepath.Dir(answerPath), answerPath, Output{ID: item.ID, Answer: result.Answer}); err != nil {
-			_ = c.failBatch(ctx, keyDir, batchDir, err)
-			return err
-		}
-	}
-	if err := writeJSONAtomic(batchDir, filepath.Join(batchDir, "state.json"), batchState{Status: "ok"}); err != nil {
+		return writeJSONAtomic(batchDir, filepath.Join(batchDir, "state.json"), batchState{Status: "ok"})
+	}()
+	c.timing("persistence", persistenceStarted)
+	if err != nil {
 		_ = c.failBatch(ctx, keyDir, batchDir, err)
 		return err
 	}

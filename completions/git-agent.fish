@@ -100,7 +100,7 @@ function __git_agent_command_has_option
         case pr-message
             contains -- "$option" $shared
         case explore
-            contains -- "$option" fast follow-up
+            contains -- "$option" debug fast follow-up
         case release-note
             contains -- "$option" out $shared
         case review simplify
@@ -206,7 +206,9 @@ function __git_agent_option_state_is_valid
                 test (count $seen_options) -eq 1; or return 1
             end
             if contains -- follow-up $seen_options
-                test (count $seen_options) -eq 1; or return 1
+                for option in $seen_options
+                    contains -- "$option" follow-up fast; or return 1
+                end
             end
             if contains -- depth $seen_options; and contains -- max-steps $seen_options
                 return 1
@@ -258,10 +260,15 @@ function __git_agent_option_is_compatible
                 test (count $seen_options) -eq 0
                 return
             end
-            contains -- follow-up $seen_options; and return 1
-            if test "$candidate" = follow-up
-                test (count $seen_options) -eq 0
+            if contains -- follow-up $seen_options
+                test "$candidate" = fast
                 return
+            end
+            if test "$candidate" = follow-up
+                for option in $seen_options
+                    contains -- "$option" fast; or return 1
+                end
+                return 0
             end
             if contains -- "$candidate" codebase uncommitted staged
                 for mode in codebase uncommitted staged
@@ -526,7 +533,7 @@ complete -c git-agent -n '__git_agent_option_available timeout commit commit-msg
 complete -c git-agent -n '__git_agent_option_available max-steps commit commit-msg pr-message release-note review simplify' -l max-steps -r -f -d 'Set maximum agent steps'
 complete -c git-agent -n '__git_agent_option_available guidance-family commit commit-msg pr-message release-note review simplify' -l guidance-family -r -f -a 'auto agents claude codex none' -d 'Force guidance family'
 complete -c git-agent -n '__git_agent_option_available append-prompt commit commit-msg pr-message release-note review simplify' -l append-prompt -r -f -d 'Append a user prompt hint to the model request'
-complete -c git-agent -n '__git_agent_option_available debug commit commit-msg pr-message release-note review simplify' -l debug -d 'Enable debug output on stderr'
+complete -c git-agent -n '__git_agent_option_available debug commit commit-msg explore pr-message release-note review simplify' -l debug -d 'Enable debug output on stderr'
 complete -c git-agent -n '__git_agent_option_available pprof commit commit-msg pr-message release-note review simplify' -l pprof -r -f -d 'Serve pprof on address'
 
 complete -c git-agent -n '__git_agent_option_available out release-note' -l out -r -d 'Write release note markdown to file'

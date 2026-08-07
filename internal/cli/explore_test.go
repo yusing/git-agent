@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,6 +17,15 @@ import (
 	"github.com/yusing/git-agent/internal/openai"
 	"github.com/yusing/git-agent/internal/projectidentity"
 )
+
+type exploreTimingFailWriter struct{ buffer bytes.Buffer }
+
+func (w *exploreTimingFailWriter) Write(data []byte) (int, error) {
+	if bytes.Contains(data, []byte("explore.phase")) {
+		return 0, errors.New("write explore timing")
+	}
+	return w.buffer.Write(data)
+}
 
 type exploreFakeResponseClient struct {
 	mu       sync.Mutex
@@ -67,6 +77,100 @@ func TestExploreDoesNotApplyRequestTimeoutToWholeBatch(t *testing.T) {
 	}
 	if responses.deadline.Load() {
 		t.Fatal("explore applied the per-request timeout to the whole batch context")
+	}
+}
+
+func TestExploreWithoutDebugReportsOnlyProgress(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_EMBEDDING_DIMENSIONS", "3")
+	t.Chdir(root)
+	runGit(t, root, "init")
+	writeFixtureFile(t, root+"/main.go", "package demo\n")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{
+		stdin: strings.NewReader(""), stdout: &stdout, stderr: &stderr,
+		responseClient: &exploreFakeResponseClient{}, embeddingClient: &exploreFakeEmbedder{},
+	}
+	runExploreForTest(t, app, &stdout, "inspect", "the", "repository")
+
+	progress := stderr.String()
+	if !strings.Contains(progress, "explore: searching") || !strings.Contains(progress, "explore: complete") {
+		t.Fatalf("stderr missing progress:\n%s", progress)
+	}
+	if strings.Contains(progress, " INF ") || strings.Contains(progress, "explore.phase") {
+		t.Fatalf("stderr contains debug trace without --debug:\n%s", progress)
+	}
+}
+
+func TestExploreDebugReturnsTimingWriteError(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_EMBEDDING_DIMENSIONS", "3")
+	t.Chdir(root)
+	runGit(t, root, "init")
+	writeFixtureFile(t, root+"/main.go", "package demo\n")
+
+	var stdout bytes.Buffer
+	stderr := &exploreTimingFailWriter{}
+	app := &App{
+		stdin: strings.NewReader(""), stdout: &stdout, stderr: stderr,
+		responseClient: &exploreFakeResponseClient{}, embeddingClient: &exploreFakeEmbedder{},
+	}
+	err := app.Run(t.Context(), []string{"explore", "--debug", "inspect", "the", "repository"})
+	if err == nil || !strings.Contains(err.Error(), "write explore timing") {
+		t.Fatalf("error = %v, want timing write failure", err)
+	}
+}
+
+func TestExploreReportsPhaseTimingsOnStderr(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_EMBEDDING_DIMENSIONS", "3")
+	t.Chdir(root)
+	runGit(t, root, "init")
+	writeFixtureFile(t, root+"/main.go", "package demo\n")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{
+		stdin: strings.NewReader(""), stdout: &stdout, stderr: &stderr,
+		responseClient: &exploreFakeResponseClient{}, embeddingClient: &exploreFakeEmbedder{},
+	}
+	runExploreForTest(t, app, &stdout, "--debug", "inspect", "the", "repository")
+
+	traceText := stderr.String()
+	for _, phase := range []string{
+		"setup",
+		"reservation",
+		"semantic_search.discover",
+		"semantic_search",
+		"join_grace",
+		"batch_join",
+		"batch_collection",
+		"prompt_setup",
+		"provider_request",
+		"validation",
+		"agent",
+		"answer_processing",
+		"persistence",
+		"result_wait",
+		"output",
+	} {
+		if !strings.Contains(traceText, "phase="+phase) {
+			t.Errorf("stderr missing %s timing:\n%s", phase, traceText)
+		}
+	}
+	for line := range strings.SplitSeq(traceText, "\n") {
+		if strings.Contains(line, " INF explore.phase ") &&
+			(!strings.Contains(line, "duration_ms=") || !strings.Contains(line, "elapsed_ms=")) {
+			t.Errorf("incomplete explore timing line: %s", line)
+		}
 	}
 }
 
@@ -252,7 +356,7 @@ func countPromptCacheBreakpoints(items []openai.Item) int {
 func TestExploreHelpDoesNotResolveProviderConfiguration(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 	err := New().Run(t.Context(), []string{"explore", "--help"})
-	if err == nil || !strings.Contains(err.Error(), "Usage: git-agent explore [--fast] [--follow-up <search-id>] <question...>") {
+	if err == nil || !strings.Contains(err.Error(), "Usage: git-agent explore [--debug] [--fast] [--follow-up <search-id>] <question...>") {
 		t.Fatalf("help error = %v", err)
 	}
 }

@@ -105,6 +105,13 @@ type BudgetDecision struct {
 	ExtendToolCalls int
 }
 
+type Timing struct {
+	Phase    string
+	Duration time.Duration
+	Step     int
+	Tool     string
+}
+
 type BudgetHandler func(context.Context, BudgetStatus) (BudgetDecision, error)
 
 type OpenAIRunner struct {
@@ -120,6 +127,7 @@ type OpenAIRunner struct {
 	ReasoningSummary   string
 	PromptCacheKey     string
 	ObserveUsage       func(openai.Usage)
+	Timing             func(Timing)
 }
 
 type runState struct {
@@ -199,7 +207,15 @@ func (r *OpenAIRunner) RunNode(ctx context.Context, request Request) (NodeResult
 	r.normalizeResult(&result)
 
 	if r.Validator != nil {
-		if errs := r.Validator(result.Text); len(errs) > 0 {
+		var validationStarted time.Time
+		if r.Timing != nil {
+			validationStarted = time.Now()
+		}
+		errs := r.Validator(result.Text)
+		if r.Timing != nil {
+			r.Timing(Timing{Phase: "validation", Duration: time.Since(validationStarted)})
+		}
+		if len(errs) > 0 {
 			if !request.RepairOnValidator {
 				return NodeResult{}, fmt.Errorf("validation failed: %v", errs)
 			}
@@ -208,7 +224,14 @@ func (r *OpenAIRunner) RunNode(ctx context.Context, request Request) (NodeResult
 				repairMessages = append(slices.Clone(messages), openai.NewMessage("assistant", result.Text))
 			}
 			repairMessages = append(repairMessages, openai.NewMessage("user", renderRepairPrompt(errs)))
+			var repairStarted time.Time
+			if r.Timing != nil {
+				repairStarted = time.Now()
+			}
 			repairedOutcome, err := r.runUntilOutcome(ctx, request.SystemPrompt, repairMessages, nil, request.TextFormat, 1, state, "", false)
+			if r.Timing != nil {
+				r.Timing(Timing{Phase: "repair", Duration: time.Since(repairStarted)})
+			}
 			if err != nil {
 				return NodeResult{}, err
 			}
@@ -223,7 +246,14 @@ func (r *OpenAIRunner) RunNode(ctx context.Context, request Request) (NodeResult
 			result.Text = repaired.Text
 			result.messages = slices.Clone(repaired.messages)
 			r.normalizeResult(&result)
-			if errs := r.Validator(result.Text); len(errs) > 0 {
+			if r.Timing != nil {
+				validationStarted = time.Now()
+			}
+			errs = r.Validator(result.Text)
+			if r.Timing != nil {
+				r.Timing(Timing{Phase: "validation", Duration: time.Since(validationStarted)})
+			}
+			if len(errs) > 0 {
 				return NodeResult{}, fmt.Errorf("validation failed after repair: %v", errs)
 			}
 		}
@@ -286,7 +316,15 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, instructions string,
 		if err := writeTraceRequest(r.Trace, req); err != nil {
 			return NodeResult{}, err
 		}
+		timing := r.Timing
+		var providerStarted time.Time
+		if timing != nil {
+			providerStarted = time.Now()
+		}
 		response, err := r.Client.CreateResponse(ctx, req)
+		if timing != nil {
+			timing(Timing{Phase: "provider_request", Duration: time.Since(providerStarted), Step: step + 1})
+		}
 		if err != nil {
 			failure, ok := unsupportedEnabledCapability(err, state.hostedCapabilities)
 			if ok {
@@ -389,7 +427,18 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, instructions string,
 				return NodeResult{}, err
 			}
 		}
-		executions := r.executeToolCalls(ctx, localCalls)
+		timing = r.Timing
+		var toolBatchStarted time.Time
+		if timing != nil && len(localCalls) > 0 {
+			toolBatchStarted = time.Now()
+		}
+		executions := r.executeToolCalls(ctx, localCalls, timing != nil)
+		if timing != nil && len(localCalls) > 0 {
+			for index, call := range localCalls {
+				timing(Timing{Phase: "tool", Duration: executions[index].duration, Step: step + 1, Tool: call.Name})
+			}
+			timing(Timing{Phase: "tool_batch", Duration: time.Since(toolBatchStarted), Step: step + 1})
+		}
 		if len(localCalls) > 0 {
 			if err := r.Tools.CheckReviewSnapshot(); err != nil {
 				return NodeResult{}, err
@@ -552,18 +601,26 @@ type toolCallBatch struct {
 }
 
 type toolExecution struct {
-	result tools.Result
-	err    error
+	result   tools.Result
+	err      error
+	duration time.Duration
 }
 
-func (r *OpenAIRunner) executeToolCalls(ctx context.Context, calls []openai.ToolCall) []toolExecution {
+func (r *OpenAIRunner) executeToolCalls(ctx context.Context, calls []openai.ToolCall, measureDuration bool) []toolExecution {
 	executions := make([]toolExecution, len(calls))
 	var wait sync.WaitGroup
 	for index, call := range calls {
 		wait.Go(func() {
+			var started time.Time
+			if measureDuration {
+				started = time.Now()
+			}
 			executions[index].result, executions[index].err = r.Tools.Execute(ctx, tools.Invocation{
 				Name: call.Name, Arguments: call.Arguments,
 			})
+			if measureDuration {
+				executions[index].duration = time.Since(started)
+			}
 		})
 	}
 	wait.Wait()
@@ -815,7 +872,15 @@ func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions st
 	if err := writeTraceRequest(r.Trace, req); err != nil {
 		return Result{}, err
 	}
+	timing := r.Timing
+	var providerStarted time.Time
+	if timing != nil {
+		providerStarted = time.Now()
+	}
 	response, err := r.Client.CreateResponse(ctx, req)
+	if timing != nil {
+		timing(Timing{Phase: "provider_request", Duration: time.Since(providerStarted), Step: status.Step})
+	}
 	if err != nil {
 		return Result{}, err
 	}

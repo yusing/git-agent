@@ -299,12 +299,12 @@ func currentExploreRequest(body []byte) ([]string, string, error) {
 		if message.Role != "user" {
 			continue
 		}
-		messageText := ""
+		var messageText strings.Builder
 		for _, content := range message.Content {
-			messageText += content.Text
+			messageText.WriteString(content.Text)
 		}
 		const promptPrefix = "Exploration input JSON:\n"
-		if !strings.HasPrefix(messageText, promptPrefix) {
+		if !strings.HasPrefix(messageText.String(), promptPrefix) {
 			continue
 		}
 		var envelope struct {
@@ -313,7 +313,7 @@ func currentExploreRequest(body []byte) ([]string, string, error) {
 				Question string `json:"question"`
 			} `json:"items"`
 		}
-		if err := json.Unmarshal([]byte(strings.TrimPrefix(messageText, promptPrefix)), &envelope); err != nil {
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(messageText.String(), promptPrefix)), &envelope); err != nil {
 			return nil, "", err
 		}
 		ids := make([]string, 0, len(envelope.Items))
@@ -373,12 +373,10 @@ func runConcurrentExploreProcesses(t *testing.T, executable, repoDir string, arg
 	results := make([]exploreProcessResult, len(args))
 	var wait sync.WaitGroup
 	for index := range args {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
+		wait.Go(func() {
 			<-start
 			results[index] = runExploreProcess(ctx, executable, repoDir, args[index]...)
-		}()
+		})
 	}
 	close(start)
 	wait.Wait()

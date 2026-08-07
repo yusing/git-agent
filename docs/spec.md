@@ -27,12 +27,12 @@ Supported workflows:
 - `git-agent release-note [--out <file>] patch|minor|major`
 - `git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 - `git-agent review --wait <id>`
-- `git-agent review --follow-up <turn-id> <prompt...>`
-- `git-agent explore [--fast] [--follow-up <search-id>] <question...>`
+- `git-agent review [--fast] --follow-up <turn-id> <prompt...>`
+- `git-agent explore [--debug] [--fast] [--follow-up <search-id>] <question...>`
 - `git-agent project_id`
 - `git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 - `git-agent simplify --wait <id>`
-- `git-agent simplify --follow-up <turn-id> <prompt...>`
+- `git-agent simplify [--fast] --follow-up <turn-id> <prompt...>`
 - `git-agent search [flags] <query...>`
 - `git-agent search --ls [--remote <url>] [--format text|json]`
 - `git-agent search --ls-remotes [--format text|json|completion]`
@@ -538,14 +538,15 @@ completion. A stored `error`, unknown or malformed ID, corrupt record, dead
 producer, or task created by the other command returns nonzero with empty
 stdout.
 
-`review --follow-up <turn-id> <prompt...>` and
-`simplify --follow-up <turn-id> <prompt...>` start a new detached turn that
-targets a successful real-provider report from the same command and current
-project. The prompt is required; after flag parsing, its argv elements are
-joined with one ASCII space. `--` permits a prompt whose first element starts
-with `-`. `--follow-up` is isolated from `--wait`, scope modes, ordinary
-trailing focus, `--append-prompt`, orchestration artifacts, and provider or
-execution overrides.
+`review [--fast] --follow-up <turn-id> <prompt...>` and
+`simplify [--fast] --follow-up <turn-id> <prompt...>` start a new detached turn
+that targets a successful real-provider report from the same command and
+current project. The prompt is required; after flag parsing, its argv elements
+are joined with one ASCII space. `--` permits a prompt whose first element
+starts with `-`. `--fast` sends `service_tier=priority` for the new provider
+conversation. `--follow-up` is isolated from `--wait`, scope modes, ordinary
+trailing focus, `--append-prompt`, orchestration artifacts, and every other
+provider or execution override.
 
 The new turn inherits only the parent's uncommitted, staged, or codebase mode
 and otherwise uses current configuration, guidance, skills, read-only tools,
@@ -685,7 +686,7 @@ share an identifier, while repositories without an origin and non-Git
 directories remain path-specific. The command does not create an index or call
 a provider.
 
-#### `git-agent explore [--fast] [--follow-up <search-id>] <question...>`
+#### `git-agent explore [--debug] [--fast] [--follow-up <search-id>] <question...>`
 
 Run a synchronous, read-only codebase exploration and write exactly one
 newline-terminated JSON object to stdout:
@@ -721,6 +722,28 @@ evidence, and avoid delegating ownership or blast-radius rediscovery to the
 caller. Indexing, batch-wait, tool, and provider progress is written only to
 stderr. With `--fast`, the Responses API request sends
 `service_tier=priority`; without it, `service_tier` is omitted.
+
+Without `--debug`, progress is the only stderr output. With `--debug`, every
+invocation starts one stderr console trace and writes `explore.phase` events
+throughout its owned foreground path. Each event contains `phase`, nonnegative
+integer `duration_ms`, and cumulative integer `elapsed_ms` measured from command
+entry. Provider-request, tool-batch, and individual-tool timings additionally
+contain the one-based model `step`; individual-tool timings also contain `tool`.
+The command reports `setup`, `reservation`, `semantic_search`, `join_grace`,
+`batch_join`, `batch_collection`, `prompt_setup`, `provider_request`, `tool`,
+`tool_batch`, `validation`, `repair` when used, `agent`, `answer_processing`,
+`persistence`, `result_wait`, and `output` when those phases execute.
+Fresh-search diagnostics also report `semantic_search.<step>` for the
+search-owned `discover`, `chunk`, `cache`, `embed_index`, `persist`,
+`embed_query`, `score`, and `replay` phases that complete. Timings are emitted
+after their measured action and may therefore overlap their enclosing
+`semantic_search`, `repair`, or `agent` timing.
+
+Each process reports only work it owns. A debug batch leader reports collection,
+provider, tool, answer-processing, and persistence timings; a debug follower
+instead spends that interval in `result_wait` and does not duplicate the
+leader's events. Debug timing and trace output never changes the strict JSON
+stdout result.
 
 Explore is a foreground workflow. It does not detach, create a wait endpoint,
 or support `--wait`. It imposes no internal wall-clock or HTTP timeout on
@@ -1319,12 +1342,13 @@ Message-generation subcommands reserve this shared flag surface:
 - `--debug`
 - `--pprof <addr>`
 
-`explore` supports `--fast` with the shared service-tier behavior and its
-command-specific `--follow-up <search-id>` form.
+`explore` supports `--debug` for console trace and phase timing events, `--fast`
+with the shared service-tier behavior, and its command-specific
+`--follow-up <search-id>` form.
 
 `review` and `simplify` additionally support
 `--depth fast|balanced|thorough`, `--max-web-searches <positive-n>`, and the
-isolated `--follow-up <turn-id> <prompt...>` form. They also support
+isolated `[--fast] --follow-up <turn-id> <prompt...>` form. They also support
 `--help-agent`, which prints only the launch syntax, scope modes, `--depth`,
 reasoning-effort flags, and follow-up syntax intended for automated coding
 agents. The agent help reserves `thorough` for security-related issues or very
@@ -1475,6 +1499,9 @@ unchanged. API-key providers retain the requested model identifier.
   loop summaries when `--debug` is enabled, and stderr
   emitted by a successful delegated `git commit`
 - `search` writes errors and optional `--debug` diagnostics to stderr only
+- `explore` always writes progress to stderr; `--debug` additionally writes its
+  human console trace and phase timings while preserving one strict result
+  object on stdout
 - `review` and `simplify` keep trace events in memory for SSE replay; detached
   runs persist only their durable task record
 - `release-note --out <file>` and `commit` / `commit --amend` stream human

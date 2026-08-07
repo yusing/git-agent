@@ -56,7 +56,7 @@ directory is on `PATH`.
 | Version bump release body | `git-agent release-note patch` | Release Markdown for latest tag to `HEAD` |
 | Uncommitted review | `git-agent review` | Detached task launch JSON |
 | Staged review | `git-agent review --staged` | Detached staged-review launch JSON |
-| Re-review a completed turn | `git-agent review --follow-up <turn-id> <prompt...>` | New detached task launch JSON |
+| Re-review a completed turn | `git-agent review [--fast] --follow-up <turn-id> <prompt...>` | New detached task launch JSON |
 | Codebase simplification audit | `git-agent simplify --codebase` | Detached codebase-audit launch JSON |
 | Agent-ready codebase exploration | `git-agent explore <question...>` | Search ID and grounded answer JSON |
 | Continue an exploration | `git-agent explore --follow-up <search-id> <question...>` | New branch ID and answer JSON |
@@ -165,8 +165,9 @@ An eligible completed provider turn can be followed with
 `--follow-up <turn-id> <prompt...>`. The new detached turn inherits the original
 uncommitted, staged, or codebase mode, inspects current repository state, and
 starts a fresh provider conversation containing only the prior findings or
-opportunities and the new prompt. Follow-up is mutually exclusive with all
-other flags and uses the same SSE and repeatable `--wait` workflow.
+opportunities and the new prompt. Follow-up accepts `--fast` to request priority
+Responses API processing, rejects every other additional flag, and uses the
+same SSE and repeatable `--wait` workflow.
 
 Without a trailing focus, review reports all actionable findings and simplify
 inspects the full authoritative scope. A trailing focus limits the report to
@@ -330,6 +331,9 @@ git-agent explore "where is release note evidence prepared?"
 # Request priority Responses API processing
 git-agent explore --fast "where is release note evidence prepared?"
 
+# Include console trace and phase timing events on stderr
+git-agent explore --debug "where is release note evidence prepared?"
+
 # Continue that exact context; the result receives another independently usable ID
 git-agent explore --follow-up <search-id> "which tests define its failure contract?"
 ```
@@ -348,6 +352,14 @@ Follow-up IDs are bound to the workspace that created them and are rejected from
 another `--cwd`, even when both directories share an ancestor Git repository.
 Explore adds no internal timeout: it runs until completion or caller
 cancellation. Progress stays on stderr and the result envelope stays on stdout.
+With `--debug`, Explore additionally streams its console trace and
+`explore.phase` timing events to stderr. Every timing event includes the phase
+duration and elapsed command time in milliseconds; provider and tool events
+additionally identify their model step, and individual tool events name the
+tool. Fresh searches report semantic discovery, chunking, cache, embedding,
+persistence, query embedding, scoring, and replay subphases. Batch leaders
+report collection, prompt setup, agent execution, answer processing, and
+persistence; followers report their own coordination and result-wait time.
 See [the specification](docs/spec.md) for the exact batching, persistence,
 read-tool, reset, and failure contracts.
 
@@ -543,14 +555,14 @@ git-agent release-note [--out <file>] [flags] <base> <release>
 git-agent release-note [--out <file>] [flags] patch|minor|major
 git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]
 git-agent review --wait <id>
-git-agent review --follow-up <turn-id> <prompt...>
+git-agent review [--fast] --follow-up <turn-id> <prompt...>
 git-agent search [flags] <query...>
 git-agent search --ls [--remote <url>] [--format text|json]
 git-agent search --ls-remotes [--format text|json|completion]
 git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]
 git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]
 git-agent simplify --wait <id>
-git-agent simplify --follow-up <turn-id> <prompt...>
+git-agent simplify [--fast] --follow-up <turn-id> <prompt...>
 git-agent config index.remote [<git-url>]
 git-agent config --unset index.remote
 git-agent index sync

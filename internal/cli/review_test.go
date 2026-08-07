@@ -1015,7 +1015,7 @@ func TestReviewHelpDocumentsDefaultMode(t *testing.T) {
 	for _, want := range []string{
 		"Usage: git-agent review",
 		"git-agent review --wait <id>",
-		"git-agent review --follow-up <turn-id> <prompt...>",
+		"git-agent review [--fast] --follow-up <turn-id> <prompt...>",
 		"wait for a detached task and print its report",
 		"re-review a successful provider turn with a required prompt",
 		"--uncommitted  inspect all dirty changes (default)",
@@ -1059,7 +1059,7 @@ func TestCodeReviewAgentHelpOnlyDocumentsAgentFacingFlags(t *testing.T) {
 				"use thorough only for security-related issues or very complex logic; otherwise use fast or balanced",
 				"--low | --medium | --high | --xhigh",
 				"set reasoning effort (mutually exclusive)",
-				"--follow-up <turn-id> <prompt...>",
+				"[--fast] --follow-up <turn-id> <prompt...>",
 				"re-evaluate a successful provider turn against current repository state",
 			} {
 				if !strings.Contains(help, want) {
@@ -1067,7 +1067,7 @@ func TestCodeReviewAgentHelpOnlyDocumentsAgentFacingFlags(t *testing.T) {
 				}
 			}
 			for _, unwanted := range []string{
-				"--wait", "--model", "--fast", "--max-steps", "--max-web-searches", "--append-prompt",
+				"--wait", "--model", "--max-steps", "--max-web-searches", "--append-prompt",
 				"--dry-run", "--orchestration-artifact", "--debug", "--pprof", "--help-agent",
 			} {
 				if strings.Contains(help, unwanted) {

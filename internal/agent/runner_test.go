@@ -362,6 +362,68 @@ func TestRunnerRejectsConcurrentBatchWhenReviewSnapshotChanges(t *testing.T) {
 	}
 }
 
+func TestRunnerReportsProviderToolAndValidationTimings(t *testing.T) {
+	t.Parallel()
+	const toolDelay = 2 * time.Millisecond
+	names := []string{"list_files", "grep", "read_file"}
+	registry := tools.NewRegistry(nil, nil)
+	for _, name := range names {
+		registry.Register(delayedTool{name: name, delay: toolDelay, content: name + " output"})
+	}
+	client := &fakeClient{responses: []openai.Response{
+		{ToolCalls: []openai.ToolCall{
+			{ID: "fc_1", CallID: "call_1", Name: names[0], Arguments: `{}`},
+			{ID: "fc_2", CallID: "call_2", Name: names[1], Arguments: `{}`},
+			{ID: "fc_3", CallID: "call_3", Name: names[2], Arguments: `{}`},
+		}},
+		{Text: "done"},
+	}}
+	var timings []Timing
+	runner := OpenAIRunner{
+		Config:    config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 3},
+		Client:    client,
+		Tools:     registry,
+		ToolSpecs: registry.Definitions(names),
+		Validator: func(string) []string { return nil },
+		Timing:    func(timing Timing) { timings = append(timings, timing) },
+	}
+	if _, err := runner.Run(t.Context(), Request{
+		UserPrompt: "explore", MaxSteps: 3, ParallelToolCalls: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	phaseCounts := map[string]int{}
+	toolNames := map[string]bool{}
+	for _, timing := range timings {
+		phaseCounts[timing.Phase]++
+		if timing.Duration < 0 {
+			t.Fatalf("negative timing: %#v", timing)
+		}
+		if timing.Phase == "tool" {
+			toolNames[timing.Tool] = true
+			if timing.Step != 1 || timing.Duration < toolDelay {
+				t.Errorf("tool timing = %#v, want step 1 and duration >= %s", timing, toolDelay)
+			}
+		}
+	}
+	for phase, want := range map[string]int{
+		"provider_request": 2,
+		"tool":             len(names),
+		"tool_batch":       1,
+		"validation":       1,
+	} {
+		if got := phaseCounts[phase]; got != want {
+			t.Errorf("%s timing count = %d, want %d: %#v", phase, got, want, timings)
+		}
+	}
+	for _, name := range names {
+		if !toolNames[name] {
+			t.Errorf("missing timing for tool %s: %#v", name, timings)
+		}
+	}
+}
+
 func BenchmarkRunnerExploreToolBatch(b *testing.B) {
 	const toolDelay = 2 * time.Millisecond
 	names := []string{"list_files", "grep", "read_file"}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -586,6 +587,32 @@ func TestCoordinatorMarksAbandonedLeaderFailed(t *testing.T) {
 	}
 	if state.Status != "failed" || !strings.Contains(state.Error, "leader exited") {
 		t.Fatalf("state = %#v", state)
+	}
+}
+
+func TestCoordinatorReportsPhaseTimings(t *testing.T) {
+	t.Parallel()
+	coordinator := testCoordinator(testStore(t))
+	var phases []string
+	coordinator.Timing = func(phase string, duration time.Duration) {
+		if duration < 0 {
+			t.Errorf("negative duration for %s: %s", phase, duration)
+		}
+		phases = append(phases, phase)
+	}
+	runFresh(t, coordinator, "timed question")
+
+	want := []string{
+		"reservation",
+		"semantic_search",
+		"join_grace",
+		"batch_join",
+		"batch_collection",
+		"persistence",
+		"result_wait",
+	}
+	if !slices.Equal(phases, want) {
+		t.Fatalf("timing phases = %v, want %v", phases, want)
 	}
 }
 

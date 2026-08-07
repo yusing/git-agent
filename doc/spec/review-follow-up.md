@@ -9,8 +9,8 @@ This document specifies fresh follow-up turns for the existing detached
 Git-agent must accept:
 
 ```text
-git-agent review --follow-up <turn-id> <prompt...>
-git-agent simplify --follow-up <turn-id> <prompt...>
+git-agent review [--fast] --follow-up <turn-id> <prompt...>
+git-agent simplify [--fast] --follow-up <turn-id> <prompt...>
 ```
 
 The parent must be a successful real-provider turn from the same command and
@@ -20,10 +20,12 @@ starts with `-`.
 
 ## REQ-FOLLOWUP-002 — Isolate follow-up from ordinary launch options
 
-`--follow-up` must be mutually exclusive with `--wait`, scope modes, ordinary
-trailing focus, `--append-prompt`, orchestration artifacts, and explicit
-provider or execution overrides. The child inherits only the parent's
-`uncommitted`, `staged`, or `codebase` mode.
+`--follow-up` may be combined with `--fast`, which sends
+`service_tier=priority` for the new provider conversation. It must be mutually
+exclusive with `--wait`, scope modes, ordinary trailing focus, `--append-prompt`,
+orchestration artifacts, and every other explicit provider or execution
+override. The child inherits only the parent's `uncommitted`, `staged`, or
+`codebase` mode.
 
 ## REQ-FOLLOWUP-003 — Start one fresh targeted conversation
 

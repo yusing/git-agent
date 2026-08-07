@@ -377,7 +377,7 @@ func fishCompletionCommands(refs, remotes, paths []string) []fishCompletionComma
 	return []fishCompletionCommand{
 		{name: "commit", options: withShared(fishCompletionOption{name: "amend"})},
 		{name: "commit-msg", options: withShared(fishCompletionOption{name: "amend"})},
-		{name: "explore", options: []fishCompletionOption{{name: "fast"}, {name: "follow-up", takesValue: true, value: "AAAAAAAAAAAAAAAAAAAAAAAAAA"}}},
+		{name: "explore", options: []fishCompletionOption{{name: "debug"}, {name: "fast"}, {name: "follow-up", takesValue: true, value: "AAAAAAAAAAAAAAAAAAAAAAAAAA"}}},
 		{name: "pr-message", options: slices.Clone(shared)},
 		{name: "release-note", options: withShared(fishCompletionOption{name: "out", takesValue: true, value: "notes.md", valueCandidates: slices.Clone(paths)})},
 		{name: "review", options: slices.Clone(review)},
@@ -408,8 +408,12 @@ func expectedOptionCandidates(command fishCompletionCommand, used []fishCompleti
 		if _, wait := seen["wait"]; wait && len(seen) != 1 {
 			return nil
 		}
-		if _, followUp := seen["follow-up"]; followUp && len(seen) != 1 {
-			return nil
+		if _, followUp := seen["follow-up"]; followUp {
+			for option := range seen {
+				if option != "follow-up" && option != "fast" {
+					return nil
+				}
+			}
 		}
 		if _, depth := seen["depth"]; depth {
 			if _, maxSteps := seen["max-steps"]; maxSteps {
@@ -452,10 +456,15 @@ func completionOptionCompatible(command, candidate string, seen map[string]fishC
 			return len(seen) == 0
 		}
 		if _, followUp := seen["follow-up"]; followUp {
-			return false
+			return candidate == "fast"
 		}
 		if candidate == "follow-up" {
-			return len(seen) == 0
+			for option := range seen {
+				if option != "fast" {
+					return false
+				}
+			}
+			return true
 		}
 		if slices.Contains([]string{"codebase", "uncommitted", "staged"}, candidate) {
 			return countEnabledOptions(seen, "codebase", "uncommitted", "staged") == 0
