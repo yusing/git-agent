@@ -35,6 +35,7 @@ type vectorStore struct {
 type vectorStoreCatalog struct {
 	Version    int                         `json:"version"`
 	Generation uint64                      `json:"generation"`
+	Payload    string                      `json:"payload,omitempty"`
 	Entries    map[string]vectorStoreEntry `json:"entries"`
 }
 
@@ -58,8 +59,6 @@ func vectorStoreKey(inputHash, model string, dimensions int) string {
 }
 
 func (store vectorStore) put(ctx context.Context, records []vectorRecord, forceKeys map[string]bool) (keys map[string]vectorStoreEntry, err error) {
-	keys = make(map[string]vectorStoreEntry, len(records))
-	keyData := make(map[string][]byte, len(records))
 	if err := os.MkdirAll(store.dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -68,12 +67,21 @@ func (store vectorStore) put(ctx context.Context, records []vectorRecord, forceK
 		return nil, err
 	}
 	defer func() { err = errors.Join(err, lock.Unlock()) }()
+	return store.putLocked(records, forceKeys)
+}
 
+func (store vectorStore) putLocked(records []vectorRecord, forceKeys map[string]bool) (keys map[string]vectorStoreEntry, err error) {
+	keys = make(map[string]vectorStoreEntry, len(records))
+	keyData := make(map[string][]byte, len(records))
 	catalog, nextGeneration, err := store.loadCatalog()
 	if err != nil {
 		return nil, err
 	}
-	payloadPath := filepath.Join(store.dir, vectorStorePayloadName)
+	payloadName, err := vectorStoreCatalogPayload(catalog)
+	if err != nil {
+		return nil, err
+	}
+	payloadPath := filepath.Join(store.dir, payloadName)
 	payload, err := os.OpenFile(payloadPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
@@ -133,11 +141,18 @@ func (store vectorStore) put(ctx context.Context, records []vectorRecord, forceK
 	}
 	previousGeneration := catalog.Generation
 	catalog.Generation = nextGeneration
+	catalog.Payload = payloadName
 	if err := store.publishCatalog(catalog); err != nil {
 		return nil, err
 	}
-	if store.removeOldCatalogs(previousGeneration, catalog.Generation) {
-		_ = syncDirectory(store.dir)
+	removed, err := store.removeOldGenerations(previousGeneration, catalog.Generation)
+	if err != nil {
+		return nil, err
+	}
+	if removed {
+		if err := syncDirectory(store.dir); err != nil {
+			return nil, err
+		}
 	}
 	return keys, nil
 }
@@ -165,16 +180,37 @@ func (store vectorStore) loadCatalog() (vectorStoreCatalog, uint64, error) {
 		return cmp.Compare(b.generation, a.generation)
 	})
 	for _, candidate := range candidates {
-		data, err := os.ReadFile(filepath.Join(store.dir, candidate.name))
+		path := filepath.Join(store.dir, candidate.name)
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
 		var catalog vectorStoreCatalog
-		if sonic.Unmarshal(data, &catalog) != nil || catalog.Version != vectorStoreCatalogVersion ||
-			catalog.Generation != candidate.generation || catalog.Entries == nil {
+		if decodeStrictJSON(data, &catalog) != nil ||
+			catalog.Version != vectorStoreCatalogVersion ||
+			catalog.Generation != candidate.generation ||
+			catalog.Entries == nil {
 			continue
 		}
+		payloadName, err := vectorStoreCatalogPayload(catalog)
+		if err != nil {
+			continue
+		}
+		payloadInfo, err := os.Lstat(filepath.Join(store.dir, payloadName))
+		if err != nil || !payloadInfo.Mode().IsRegular() {
+			continue
+		}
+		if maxGeneration == ^uint64(0) {
+			return vectorStoreCatalog{}, 0, errors.New("shared vector catalog generation overflows")
+		}
 		return catalog, maxGeneration + 1, nil
+	}
+	if maxGeneration == ^uint64(0) {
+		return vectorStoreCatalog{}, 0, errors.New("shared vector catalog generation overflows")
 	}
 	return vectorStoreCatalog{
 		Version: vectorStoreCatalogVersion,
@@ -182,12 +218,19 @@ func (store vectorStore) loadCatalog() (vectorStoreCatalog, uint64, error) {
 	}, maxGeneration + 1, nil
 }
 
-func (store vectorStore) publishCatalog(catalog vectorStoreCatalog) error {
+func marshalVectorStoreCatalog(catalog vectorStoreCatalog) ([]byte, error) {
 	data, err := sonic.Marshal(catalog)
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+func (store vectorStore) publishCatalog(catalog vectorStoreCatalog) error {
+	data, err := marshalVectorStoreCatalog(catalog)
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
 	temporary, err := os.CreateTemp(store.dir, ".catalog-*.tmp")
 	if err != nil {
 		return err
@@ -212,22 +255,47 @@ func (store vectorStore) publishCatalog(catalog vectorStoreCatalog) error {
 	return syncDirectory(store.dir)
 }
 
-func (store vectorStore) removeOldCatalogs(previousGeneration, currentGeneration uint64) bool {
+func (store vectorStore) removeOldGenerations(previousGeneration, currentGeneration uint64) (bool, error) {
 	entries, err := os.ReadDir(store.dir)
 	if err != nil {
-		return false
+		return false, err
 	}
-	removed := false
-	for _, entry := range entries {
-		generation, ok := vectorStoreCatalogGeneration(entry.Name())
-		if !ok || generation == previousGeneration || generation == currentGeneration {
+	retainedPayloads := map[string]bool{}
+	for _, generation := range []uint64{previousGeneration, currentGeneration} {
+		if generation == 0 {
 			continue
 		}
-		if os.Remove(filepath.Join(store.dir, entry.Name())) == nil {
-			removed = true
+		data, err := os.ReadFile(filepath.Join(store.dir, vectorStoreCatalogName(generation)))
+		if err != nil {
+			return false, err
 		}
+		var catalog vectorStoreCatalog
+		if err := decodeStrictJSON(data, &catalog); err != nil {
+			return false, err
+		}
+		payloadName, err := vectorStoreCatalogPayload(catalog)
+		if err != nil {
+			return false, err
+		}
+		retainedPayloads[payloadName] = true
 	}
-	return removed
+
+	removed := false
+	for _, entry := range entries {
+		name := entry.Name()
+		if generation, ok := vectorStoreCatalogGeneration(name); ok {
+			if generation == previousGeneration || generation == currentGeneration {
+				continue
+			}
+		} else if !recognizedVectorStorePayloadName(name) || retainedPayloads[name] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(store.dir, name)); err != nil {
+			return removed, err
+		}
+		removed = true
+	}
+	return removed, nil
 }
 
 func vectorStoreCatalogName(generation uint64) string {
@@ -240,11 +308,51 @@ func vectorStoreCatalogGeneration(name string) (uint64, bool) {
 		return 0, false
 	}
 	value, ok = strings.CutSuffix(value, ".json")
-	if !ok {
+	if !ok || len(value) != 20 {
 		return 0, false
 	}
 	generation, err := strconv.ParseUint(value, 10, 64)
-	return generation, err == nil
+	return generation, err == nil && vectorStoreCatalogName(generation) == name
+}
+
+func vectorStoreGenerationPayloadName(generation uint64) string {
+	return fmt.Sprintf("vectors-%020d.f32", generation)
+}
+
+func vectorStorePayloadGeneration(name string) (uint64, bool) {
+	value, ok := strings.CutPrefix(name, "vectors-")
+	if !ok {
+		return 0, false
+	}
+	value, ok = strings.CutSuffix(value, ".f32")
+	if !ok || len(value) != 20 {
+		return 0, false
+	}
+	generation, err := strconv.ParseUint(value, 10, 64)
+	return generation, err == nil && vectorStoreGenerationPayloadName(generation) == name
+}
+
+func recognizedVectorStorePayloadName(name string) bool {
+	if name == vectorStorePayloadName {
+		return true
+	}
+	_, ok := vectorStorePayloadGeneration(name)
+	return ok
+}
+
+func vectorStoreCatalogPayload(catalog vectorStoreCatalog) (string, error) {
+	if catalog.Payload == "" {
+		return vectorStorePayloadName, nil
+	}
+	if filepath.Base(catalog.Payload) != catalog.Payload || filepath.IsAbs(catalog.Payload) {
+		return "", errors.New("shared vector catalog payload has an invalid path")
+	}
+	if catalog.Payload != vectorStorePayloadName {
+		if _, ok := vectorStorePayloadGeneration(catalog.Payload); !ok {
+			return "", errors.New("shared vector catalog payload has an invalid name")
+		}
+	}
+	return catalog.Payload, nil
 }
 
 func readStoredVector(payload io.ReaderAt, entry vectorStoreEntry) ([]float64, error) {
@@ -275,8 +383,8 @@ func readStoredVectorData(payload io.ReaderAt, entry vectorStoreEntry) ([]byte, 
 	return data, nil
 }
 
-func writeSharedVectorIndex(ctx context.Context, metadataDir, indexDir string, records []vectorRecord, forceKeys map[string]bool) error {
-	storeEntries, err := newVectorStore(metadataDir).put(ctx, records, forceKeys)
+func writeSharedVectorIndexLocked(store vectorStore, indexDir string, records []vectorRecord, forceKeys map[string]bool) error {
+	storeEntries, err := store.putLocked(records, forceKeys)
 	if err != nil {
 		return err
 	}
@@ -324,8 +432,27 @@ func writeSharedVectorIndex(ctx context.Context, metadataDir, indexDir string, r
 	return writeJSONSync(filepath.Join(indexDir, "vectors.index.json"), index)
 }
 
-func loadSharedVectors(metadataDir, indexDir string) ([]vectorRecord, error) {
+func loadSharedVectors(ctx context.Context, metadataDir, indexDir string) ([]vectorRecord, error) {
+	return loadSharedVectorsWithHook(ctx, metadataDir, indexDir, nil)
+}
+
+func loadSharedVectorsWithHook(ctx context.Context, metadataDir, indexDir string, afterSharedOpen func()) (records []vectorRecord, err error) {
+	store := newVectorStore(metadataDir)
+	lock, err := lockIndex(ctx, store.dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = errors.Join(err, lock.Unlock()) }()
+
 	index, err := loadVectorIndexRecords(indexDir)
+	if err != nil {
+		return nil, err
+	}
+	catalog, _, err := store.loadCatalog()
+	if err != nil {
+		return nil, err
+	}
+	payloadName, err := vectorStoreCatalogPayload(catalog)
 	if err != nil {
 		return nil, err
 	}
@@ -333,15 +460,20 @@ func loadSharedVectors(metadataDir, indexDir string) ([]vectorRecord, error) {
 	var local *os.File
 	defer func() {
 		if shared != nil {
-			_ = shared.Close()
+			err = errors.Join(err, shared.Close())
 		}
 		if local != nil {
-			_ = local.Close()
+			err = errors.Join(err, local.Close())
 		}
 	}()
-	records := make([]vectorRecord, len(index))
+	records = make([]vectorRecord, len(index))
 	for i, entry := range index {
-		payload := local
+		var payload io.ReaderAt
+		readEntry := vectorStoreEntry{
+			Offset:     entry.Offset,
+			Dimensions: entry.Dimensions,
+			Checksum:   entry.VectorChecksum,
+		}
 		if entry.VectorKey != "" {
 			if entry.EmbeddingInputHash != "" {
 				expectedKey := vectorStoreKey(entry.EmbeddingInputHash, entry.EmbeddingModel, entry.Dimensions)
@@ -349,25 +481,34 @@ func loadSharedVectors(metadataDir, indexDir string) ([]vectorRecord, error) {
 					return nil, fmt.Errorf("vectors.index.json entry %d has invalid shared vector key", i)
 				}
 			}
+			authoritative, ok := catalog.Entries[entry.VectorKey]
+			if !ok ||
+				authoritative.Dimensions != entry.Dimensions ||
+				authoritative.Checksum != entry.VectorChecksum {
+				return nil, fmt.Errorf("vectors.index.json entry %d does not match the shared vector catalog", i)
+			}
+			readEntry = authoritative
 			if shared == nil {
-				shared, err = os.Open(sharedVectorPayloadPath(metadataDir))
+				shared, err = os.Open(filepath.Join(store.dir, payloadName))
+				if err != nil {
+					return nil, err
+				}
+				if afterSharedOpen != nil {
+					afterSharedOpen()
+					afterSharedOpen = nil
+				}
+			}
+			payload = shared
+		} else {
+			if local == nil {
+				local, err = os.Open(filepath.Join(indexDir, "vectors.f32"))
 				if err != nil {
 					return nil, err
 				}
 			}
-			payload = shared
-		} else if local == nil {
-			local, err = os.Open(filepath.Join(indexDir, "vectors.f32"))
-			if err != nil {
-				return nil, err
-			}
 			payload = local
 		}
-		vector, err := readStoredVector(payload, vectorStoreEntry{
-			Offset:     entry.Offset,
-			Dimensions: entry.Dimensions,
-			Checksum:   entry.VectorChecksum,
-		})
+		vector, err := readStoredVector(payload, readEntry)
 		if err != nil {
 			return nil, fmt.Errorf("vectors.index.json entry %d: %w", i, err)
 		}

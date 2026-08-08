@@ -129,7 +129,7 @@ func syncLocalTarget(ctx context.Context, sync *indexSync, target indexSyncTarge
 	var localRecords []vectorRecord
 	err = withIndexLock(ctx, target.indexDir, func() error {
 		var loadErr error
-		localRecords, loadErr = loadVectors(target.indexDir)
+		localRecords, loadErr = loadVectorsContext(ctx, target.indexDir)
 		return loadErr
 	})
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

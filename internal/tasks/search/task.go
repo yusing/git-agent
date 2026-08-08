@@ -574,7 +574,7 @@ func run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 	}()
 	var oldVectors []vectorRecord
 	var exactVectors []vectorRecord
-	oldVectors, _ = loadVectors(indexDir)
+	oldVectors, _ = loadVectorsContext(ctx, indexDir)
 	if !opts.Reindex && selection.remoteFiles == nil {
 		missingHashes := missingReusableInputHashes(chunks, oldVectors, opts)
 		if len(missingHashes) > 0 {
@@ -590,7 +590,7 @@ func run(ctx context.Context, client openai.EmbeddingClient, opts Options, query
 				return fail(err)
 			}
 			indexLocked = true
-			oldVectors, _ = loadVectors(indexDir)
+			oldVectors, _ = loadVectorsContext(ctx, indexDir)
 		}
 	}
 	if selection.remoteFiles == nil {
@@ -1439,6 +1439,10 @@ func clampEmbeddingLine(line string) string {
 }
 
 func loadVectors(dir string) ([]vectorRecord, error) {
+	return loadVectorsContext(context.Background(), dir)
+}
+
+func loadVectorsContext(ctx context.Context, dir string) ([]vectorRecord, error) {
 	found, err := loadManifest(dir)
 	if err != nil {
 		return nil, err
@@ -1447,7 +1451,7 @@ func loadVectors(dir string) ([]vectorRecord, error) {
 		if found.VectorStore != sharedVectorStoreVersion {
 			return nil, fmt.Errorf("unsupported vector store %q", found.VectorStore)
 		}
-		return loadSharedVectors(metadataDirForIndex(dir), dir)
+		return loadSharedVectors(ctx, metadataDirForIndex(dir), dir)
 	}
 	if records, err := loadBinaryVectors(dir); err == nil {
 		return records, nil
@@ -1484,7 +1488,7 @@ func migrateSearchMetadata(ctx context.Context, legacyMetadataDir, targetMetadat
 			if err != nil {
 				return err
 			}
-			sourceRecords, err = loadVectors(sourceDir)
+			sourceRecords, err = loadVectorsContext(ctx, sourceDir)
 			return err
 		}); err != nil {
 			return fmt.Errorf("load legacy search index %s: %w", sourceDir, err)
@@ -1498,7 +1502,7 @@ func migrateSearchMetadata(ctx context.Context, legacyMetadataDir, targetMetadat
 			targetDir = filepath.Join(targetMetadataDir, "search", "migrated-"+pathHash(legacyMetadataDir), strings.TrimPrefix(rel, "search"+string(filepath.Separator)))
 		}
 		if err := withIndexLock(ctx, targetDir, func() error {
-			targetRecords, _ := loadVectors(targetDir)
+			targetRecords, _ := loadVectorsContext(ctx, targetDir)
 			records := mergeCompatibleRecords(targetRecords, sourceRecords, found.EmbeddingModel, found.Dimensions)
 			source := Source{Mode: found.Mode, Root: found.Root, Remote: found.Remote, ResolvedRev: found.ResolvedRev, OriginIdentity: found.OriginIdentity}
 			return saveIndex(ctx, targetMetadataDir, targetDir, source, found.Root, found.ResolvedRev, found.EmbeddingModel, found.Dimensions, records, nil)
@@ -1540,7 +1544,7 @@ func loadManifest(dir string) (manifest, error) {
 	if err != nil {
 		return manifest{}, err
 	}
-	if err := sonic.Unmarshal(data, &found); err != nil {
+	if err := decodeStrictJSON(data, &found); err != nil {
 		return manifest{}, err
 	}
 	switch found.Version {
@@ -1636,59 +1640,7 @@ func loadExactReuseVectorsForHashes(ctx context.Context, metadataDir, targetDir 
 		return nil, nil
 	}
 	byHash := make(map[string]vectorRecord, len(targetHashes))
-	sharedFailed := make(map[string]bool)
-	store := newVectorStore(metadataDir)
-	var catalog vectorStoreCatalog
-	var payload *os.File
-	var catalogLoaded bool
-	var sharedUnavailable bool
-	defer func() {
-		if payload != nil {
-			_ = payload.Close()
-		}
-	}()
-	loadShared := func(inputHash string) (vectorRecord, bool, error) {
-		if sharedUnavailable {
-			return vectorRecord{}, false, nil
-		}
-		if !catalogLoaded {
-			var err error
-			catalog, _, err = store.loadCatalog()
-			if errors.Is(err, fs.ErrNotExist) {
-				sharedUnavailable = true
-				return vectorRecord{}, false, nil
-			}
-			if err != nil {
-				return vectorRecord{}, false, err
-			}
-			catalogLoaded = true
-		}
-		entry, ok := catalog.Entries[vectorStoreKey(inputHash, opts.EmbeddingModel, opts.EmbeddingDimensions)]
-		if !ok || entry.Dimensions != opts.EmbeddingDimensions {
-			return vectorRecord{}, false, nil
-		}
-		if payload == nil {
-			var err error
-			payload, err = os.Open(filepath.Join(store.dir, vectorStorePayloadName))
-			if errors.Is(err, fs.ErrNotExist) {
-				sharedUnavailable = true
-				return vectorRecord{}, false, nil
-			}
-			if err != nil {
-				return vectorRecord{}, false, err
-			}
-		}
-		vector, err := readStoredVector(payload, entry)
-		if err != nil {
-			return vectorRecord{}, false, nil
-		}
-		return vectorRecord{
-			EmbeddingInputHash: inputHash,
-			EmbeddingModel:     opts.EmbeddingModel,
-			Dimensions:         opts.EmbeddingDimensions,
-			Vector:             vector,
-		}, true, nil
-	}
+	sharedCandidates := make(map[string]bool, len(targetHashes))
 	errReuseComplete := errors.New("exact vector reuse complete")
 	complete := func() bool { return len(byHash) == len(targetHashes) }
 	searchRoot := filepath.Join(metadataDir, "search")
@@ -1723,26 +1675,14 @@ func loadExactReuseVectorsForHashes(ctx context.Context, metadataDir, targetDir 
 					return nil
 				}
 				for _, record := range records {
-					if targetHashes[record.EmbeddingInputHash] && byHash[record.EmbeddingInputHash].EmbeddingInputHash == "" &&
-						!sharedFailed[record.EmbeddingInputHash] &&
+					if targetHashes[record.EmbeddingInputHash] &&
 						record.VectorKey == vectorStoreKey(record.EmbeddingInputHash, opts.EmbeddingModel, opts.EmbeddingDimensions) {
-						loaded, ok, err := loadShared(record.EmbeddingInputHash)
-						if err != nil {
-							return err
-						}
-						if ok {
-							byHash[record.EmbeddingInputHash] = loaded
-						} else {
-							sharedFailed[record.EmbeddingInputHash] = true
-						}
+						sharedCandidates[record.EmbeddingInputHash] = true
 					}
-				}
-				if complete() {
-					return errReuseComplete
 				}
 				return nil
 			}
-			records, err := loadVectors(dir)
+			records, err := loadVectorsContext(ctx, dir)
 			if err != nil {
 				return nil
 			}
@@ -1760,11 +1700,72 @@ func loadExactReuseVectorsForHashes(ctx context.Context, metadataDir, targetDir 
 	if err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, errReuseComplete) {
 		return nil, err
 	}
+	if !complete() && len(sharedCandidates) > 0 {
+		if err := loadExactSharedReuseVectors(ctx, newVectorStore(metadataDir), sharedCandidates, opts, byHash); err != nil {
+			return nil, err
+		}
+	}
 	result := make([]vectorRecord, 0, len(byHash))
 	for _, record := range byHash {
 		result = append(result, record)
 	}
 	return result, nil
+}
+
+func loadExactSharedReuseVectors(
+	ctx context.Context,
+	store vectorStore,
+	inputHashes map[string]bool,
+	opts Options,
+	byHash map[string]vectorRecord,
+) (err error) {
+	lock, err := lockIndex(ctx, store.dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer func() { err = errors.Join(err, lock.Unlock()) }()
+	catalog, _, err := store.loadCatalog()
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	payloadName, err := vectorStoreCatalogPayload(catalog)
+	if err != nil {
+		return err
+	}
+	payload, err := os.Open(filepath.Join(store.dir, payloadName))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, payload.Close()) }()
+	for inputHash := range inputHashes {
+		if byHash[inputHash].EmbeddingInputHash != "" {
+			continue
+		}
+		entry, ok := catalog.Entries[vectorStoreKey(inputHash, opts.EmbeddingModel, opts.EmbeddingDimensions)]
+		if !ok || entry.Dimensions != opts.EmbeddingDimensions {
+			continue
+		}
+		vector, err := readStoredVector(payload, entry)
+		if err != nil {
+			continue
+		}
+		byHash[inputHash] = vectorRecord{
+			EmbeddingInputHash: inputHash,
+			EmbeddingModel:     opts.EmbeddingModel,
+			Dimensions:         opts.EmbeddingDimensions,
+			Vector:             vector,
+		}
+	}
+	return nil
 }
 
 func missingReusableInputHashes(chunks []Chunk, records []vectorRecord, opts Options) map[string]bool {
@@ -2002,7 +2003,7 @@ func indexRemoteFileStream(ctx context.Context, client openai.EmbeddingClient, f
 	var current []vectorRecord
 	if !opts.Reindex {
 		if err := withIndexLock(ctx, indexDir, func() error {
-			current, _ = loadVectors(indexDir)
+			current, _ = loadVectorsContext(ctx, indexDir)
 			return nil
 		}); err != nil {
 			return result, err
@@ -2337,10 +2338,19 @@ func embeddingBatchEnd(texts []string, start, maxInputs, maxChars int) int {
 	return end
 }
 
-func saveIndex(ctx context.Context, metadataDir, dir string, source Source, root, resolvedRev, model string, dimensions int, records []vectorRecord, forceVectorKeys map[string]bool) error {
+func saveIndex(ctx context.Context, metadataDir, dir string, source Source, root, resolvedRev, model string, dimensions int, records []vectorRecord, forceVectorKeys map[string]bool) (err error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	store := newVectorStore(metadataDir)
+	if err := os.MkdirAll(store.dir, 0o700); err != nil {
+		return err
+	}
+	lifecycleLock, err := lockIndex(ctx, store.dir)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, lifecycleLock.Unlock()) }()
 	manifestPath := filepath.Join(dir, "manifest.json")
 	if err := os.Remove(manifestPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("invalidate search index manifest: %w", err)
@@ -2349,7 +2359,7 @@ func saveIndex(ctx context.Context, metadataDir, dir string, source Source, root
 			return fmt.Errorf("sync invalidated search index: %w", err)
 		}
 	}
-	if err := writeSharedVectorIndex(ctx, metadataDir, dir, records, forceVectorKeys); err != nil {
+	if err := writeSharedVectorIndexLocked(store, dir, records, forceVectorKeys); err != nil {
 		return err
 	}
 	if err := syncDirectory(dir); err != nil {

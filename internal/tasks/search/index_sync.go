@@ -452,7 +452,7 @@ func (sync *indexSync) importIndex(ctx context.Context, target indexSyncTarget) 
 		remoteRecords = snapshot.Records
 	}
 	return withIndexLock(ctx, target.indexDir, func() error {
-		local, _ := loadVectors(target.indexDir)
+		local, _ := loadVectorsContext(ctx, target.indexDir)
 		records, changed, err := mergeImportedRecords(local, remoteRecords, target.model, target.dimensions)
 		if err != nil {
 			return err
@@ -487,14 +487,14 @@ func (sync *indexSync) exportAndPush(ctx context.Context, target indexSyncTarget
 func (sync *indexSync) exportIndex(ctx context.Context, target indexSyncTarget) (records int, err error) {
 	err = withIndexLock(ctx, target.indexDir, func() error {
 		var exportErr error
-		records, exportErr = sync.exportIndexLocked(target)
+		records, exportErr = sync.exportIndexLocked(ctx, target)
 		return exportErr
 	})
 	return records, err
 }
 
-func (sync *indexSync) exportIndexLocked(target indexSyncTarget) (int, error) {
-	records, err := loadVectors(target.indexDir)
+func (sync *indexSync) exportIndexLocked(ctx context.Context, target indexSyncTarget) (int, error) {
+	records, err := loadVectorsContext(ctx, target.indexDir)
 	if err != nil {
 		return 0, fmt.Errorf("load revision index for sync: %w", err)
 	}

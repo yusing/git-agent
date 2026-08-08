@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bytedance/sonic"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/giturl"
 	"github.com/yusing/git-agent/internal/metadata"
@@ -550,7 +549,7 @@ func loadVectorIndexRecords(dir string) ([]vectorIndexRecord, error) {
 		return nil, err
 	}
 	var records []vectorIndexRecord
-	if err := sonic.Unmarshal(data, &records); err != nil {
+	if err := decodeStrictJSON(data, &records); err != nil {
 		return nil, err
 	}
 	return records, nil
