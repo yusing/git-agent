@@ -46,6 +46,24 @@ function __git_agent_needs_index_subcommand
     test (count $words) -eq 2; and test "$words[2]" = index
 end
 
+function __git_agent_index_gc_can_complete
+    set -l candidate $argv[1]
+    set -l words (__git_agent_words)
+    test (count $words) -gt 2; and test "$words[2]" = index; and test "$words[3]" = gc; or return 1
+
+    set -l seen_dry_run 0
+    for word in $words[4..-1]
+        switch $word
+            case --dry-run
+                test $seen_dry_run -eq 0; or return 1
+                set seen_dry_run 1
+            case '*'
+                return 1
+        end
+    end
+    test "$candidate" = dry-run; and test $seen_dry_run -eq 0
+end
+
 function __git_agent_index_migrate_can_complete
     set -l candidate $argv[1]
     set -l words (__git_agent_words)
@@ -503,10 +521,13 @@ complete -c git-agent -n '__git_agent_config_needs_key' -a index.remote -d 'Dedi
 complete -c git-agent -n '__git_agent_config_can_unset' -l unset -d 'Remove a configuration value'
 complete -c git-agent -n '__git_agent_needs_index_subcommand' -a sync -d 'Push all completed local revision indexes'
 complete -c git-agent -n '__git_agent_needs_index_subcommand' -a migrate -d 'Migrate synchronized indexes to a newer schema'
+complete -c git-agent -n '__git_agent_needs_index_subcommand' -a gc -d 'Reclaim unreachable local and shared index storage'
 complete -c git-agent -n '__git_agent_index_migrate_can_complete to' -l to -r -f -a v2 -d 'Target index schema version'
 complete -c git-agent -n '__git_agent_index_migrate_can_complete dry-run' -l dry-run -d 'Report migration size without changing the remote'
 complete -c git-agent -n '__git_agent_index_migrate_can_complete option-to' -a '--to' -d 'Target index schema version'
 complete -c git-agent -n '__git_agent_index_migrate_can_complete option-dry-run' -a '--dry-run' -d 'Report migration size without changing the remote'
+complete -c git-agent -n '__git_agent_index_gc_can_complete dry-run' -l dry-run -d 'Report garbage collection without publishing or deleting'
+complete -c git-agent -n '__git_agent_index_gc_can_complete dry-run' -a '--dry-run' -d 'Report garbage collection without publishing or deleting'
 
 complete -c git-agent -n '__git_agent_option_available amend commit' -l amend -d 'Generate an amended commit message and amend HEAD'
 complete -c git-agent -n '__git_agent_option_available amend commit-msg' -l amend -d 'Generate an amended commit message'

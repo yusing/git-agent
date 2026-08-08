@@ -90,3 +90,57 @@ shortcut.
   prompt covers mixed or unclear questions.
 - Provider batching requires the same service tier, parent identity, and selected
   query target.
+
+## Index storage garbage collection
+
+### Outcome
+
+An operator can reclaim derived local search storage and, when configured,
+unreferenced current-tree packs in the shared index repository through one
+explicit, observable operation without deleting valid index snapshots.
+
+### First-draft scope
+
+- `git-agent index gc [--dry-run]` always inventories every eligible local
+  project and cached-remote search store under the standard metadata root.
+- Local garbage collection compacts shared vector payloads from exact references
+  in every valid completed local index and removes only recognized incomplete or
+  superseded legacy payloads.
+- When `index.remote` is configured, the same command also removes vector packs
+  referenced by no valid manifest in the authoritative current shared tree.
+- An unset `index.remote` skips the shared phase without preventing local
+  cleanup.
+- `--dry-run` validates and reports the same candidates without publishing,
+  deleting, committing, or pushing.
+- The remaining current-HEAD index-sync pack catalog uses a compact, versioned
+  binary representation while retaining safe reconstruction from immutable
+  packs.
+
+### Non-goals
+
+- Automatic, scheduled, age-based, recency-based, count-based, or size-based
+  index retention.
+- Deleting any valid local or shared revision manifest.
+- Rewriting shared Git history, pruning historical Git objects, or running
+  general Git garbage collection.
+- A `--remote` selector, retention configuration, daemon, or alternate cleanup
+  command.
+- Embedding-provider calls or mutation of source repositories, cached bare
+  repository contents, settings, authentication, or background-task state.
+
+### Garbage-collection constraints
+
+- Local cleanup always runs across the standard metadata root; `index.remote`
+  is optional and controls only the shared phase.
+- Every deletion derives from exact current references after strict validation
+  under the owning locks.
+- Each local vector store publishes a generation-bound payload before its
+  catalog so interruption leaves a readable generation.
+- Local stores publish before the optional shared cleanup. If a later phase
+  fails, completed local compactions remain valid and a repeated command resumes
+  from actual state.
+- Shared cleanup preserves all valid manifests, validates the prospective tree,
+  creates at most one unsigned commit, and pushes last.
+- Long-running discovery, compaction, validation, fetch, and push report
+  progress without changing the single-line stdout summary.
+- Production Git access remains in-process and does not use `exec.Command*`.

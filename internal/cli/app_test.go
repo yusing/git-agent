@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -58,6 +60,9 @@ func TestRunWithoutArgsReturnsUsage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "git-agent index migrate --to v2") {
 		t.Fatalf("usage missing index migration synopsis:\n%s", err)
+	}
+	if !strings.Contains(err.Error(), "git-agent index gc [--dry-run]") {
+		t.Fatalf("usage missing index gc synopsis:\n%s", err)
 	}
 	if !strings.Contains(err.Error(), "git-agent [--cwd <directory>] <command> [args...]") {
 		t.Fatalf("usage missing global cwd synopsis:\n%s", err)
@@ -488,6 +493,80 @@ func TestParseIndexMigrationArgs(t *testing.T) {
 				t.Fatalf("parseIndexMigrationArgs(%q) = %v, %v", test.args, dryRun, err)
 			}
 		})
+	}
+}
+
+func TestParseIndexGCArgs(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		args    []string
+		wantDry bool
+		wantErr bool
+	}{
+		{name: "normal"},
+		{name: "dry run", args: []string{"--dry-run"}, wantDry: true},
+		{name: "duplicate", args: []string{"--dry-run", "--dry-run"}, wantErr: true},
+		{name: "unknown", args: []string{"--force"}, wantErr: true},
+		{name: "positional", args: []string{"extra"}, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dryRun, err := parseIndexGCArgs(test.args)
+			if (err != nil) != test.wantErr || dryRun != test.wantDry {
+				t.Fatalf("parseIndexGCArgs(%q) = %v, %v", test.args, dryRun, err)
+			}
+			if err != nil && err.Error() != "usage: git-agent index gc [--dry-run]" {
+				t.Fatalf("parseIndexGCArgs(%q) error = %q", test.args, err)
+			}
+		})
+	}
+}
+
+func TestIndexGCDryRunWithoutRemote(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"index", "gc", "--dry-run"}); err != nil {
+		t.Fatal(err)
+	}
+	wantOut := "gc local_stores=0 local_compacted=0 local_vectors=0 local_removed_vectors=0 local_current_bytes=0 local_projected_bytes=0 local_saved_bytes=0 remote_configured=false remote_removed_packs=0 remote_current_bytes=0 remote_projected_bytes=0 remote_saved_bytes=0 dry_run=true\n"
+	if stdout.String() != wantOut {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), wantOut)
+	}
+	wantErr := "index gc: scanning local indexes\nindex gc: compacting local stores 0/0\n"
+	if stderr.String() != wantErr {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), wantErr)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".git-agent")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("dry-run created metadata root: %v", err)
+	}
+}
+
+func TestIndexGCProgressRendering(t *testing.T) {
+	var stderr bytes.Buffer
+	app := &App{stderr: &stderr}
+	for _, progress := range []searchtask.Progress{
+		{Status: searchtask.ProgressStatusGCScanningLocal},
+		{Status: searchtask.ProgressStatusGCCompactingLocal, Done: 1, Total: 2},
+		{Status: searchtask.ProgressStatusFetching, Detail: "Receiving objects: 42%"},
+		{Status: searchtask.ProgressStatusGCScanningRemote},
+		{Status: searchtask.ProgressStatusGCPruningRemote},
+		{Status: searchtask.ProgressStatusPushing, Detail: "Writing objects: 75%"},
+	} {
+		if err := app.writeIndexGCProgress(progress, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := "index gc: scanning local indexes\n" +
+		"index gc: compacting local stores 1/2\n" +
+		"index gc: fetching remote [Receiving objects: 42%]\n" +
+		"index gc: scanning shared indexes\n" +
+		"index gc: pruning shared packs\n" +
+		"index gc: pushing remote [Writing objects: 75%]\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 	}
 }
 

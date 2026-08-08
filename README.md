@@ -65,6 +65,7 @@ directory is on `PATH`.
 | Configure index sync | `git-agent config index.remote <git-url>` | Save a dedicated Git remote for shared revision indexes |
 | Push local indexes | `git-agent index sync` | Additively publish all completed local revision indexes |
 | Migrate index storage | `git-agent index migrate --to v2` | Deduplicate vectors into immutable content-addressed packs |
+| Reclaim index storage | `git-agent index gc --dry-run` | Project local and optional shared-pack garbage-collection projection |
 | List search indexes | `git-agent search --ls` | Local index summaries for the current project |
 | List indexed files | `git-agent search --ls-files` | Tree of files stored in the selected index |
 
@@ -445,6 +446,8 @@ git-agent config index.remote
 git-agent index sync
 git-agent index migrate --to v2 --dry-run
 git-agent index migrate --to v2
+git-agent index gc --dry-run
+git-agent index gc
 git-agent config --unset index.remote
 ```
 
@@ -486,6 +489,13 @@ build phases because it never installs or pushes. Re-running migration also
 repairs interrupted or mixed v2 trees automatically: validated legacy v1
 manifests are merged into v2, removed from the current tree, and the removals
 are pushed with the repaired v2 data.
+
+`git-agent index gc` compacts shared local vector payloads from the exact references
+in completed indexes and removes recognized incomplete or superseded local payloads.
+When `index.remote` is configured, it also removes current-tree packs that no valid
+shared snapshot references. Run `--dry-run` to inspect the same candidates without
+publishing or deleting. Garbage collection preserves valid manifests and does not
+rewrite shared Git history.
 
 SSH remotes try available agent identities first, then unencrypted default
 keys in `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`, and `id_dsa`. Encrypted keys
@@ -603,6 +613,7 @@ git-agent config index.remote [<git-url>]
 git-agent config --unset index.remote
 git-agent index sync
 git-agent index migrate --to v2 [--dry-run]
+git-agent index gc [--dry-run]
 ```
 
 Common generation and inspection flags:

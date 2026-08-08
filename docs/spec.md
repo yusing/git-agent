@@ -40,6 +40,7 @@ Supported workflows:
 - `git-agent config index.remote [<git-url>]`
 - `git-agent config --unset index.remote`
 - `git-agent index sync`
+- `git-agent index gc [--dry-run]`
 
 ### Non-goals
 
@@ -1359,6 +1360,231 @@ rewrites and clears one transient line; non-interactive stderr emits each
 update as a newline. Progress callback failures abort the operation. Progress
 does not change either command's exact stdout summary.
 
+#### `git-agent index gc [--dry-run]`
+
+##### GC-001 — Command and scope
+
+`git-agent index gc` is the single explicit garbage-collection entry point.
+It accepts only one optional `--dry-run`; duplicate `--dry-run`, `--remote`,
+positional arguments, and unknown options fail with
+`usage: git-agent index gc [--dry-run]`. Eligible local metadata roots are
+exactly direct directories named by 64 lowercase hexadecimal characters at
+`~/.git-agent/<id>` and `~/.git-agent/remotes/<id>`. Within each root, GC owns
+only the `search` subtree and recognizes index candidates through the exact
+manifest and payload filenames defined below. It does not enter
+`~/.git-agent/index-sync`, cached bare `repo.git` trees, query-lock directories,
+or vector-store internals as index candidates. Every traversed owned directory
+and file must be a non-symlink beneath its lexical metadata root; a symlink,
+non-regular owned file, containment escape, or malformed recognized generation
+filename fails preflight.
+
+An unset `index.remote` does not fail garbage collection: the command completes
+the local phase and skips shared-repository cleanup. When `index.remote` is
+configured, shared cleanup runs after every selected local store has published.
+Normal `git-agent index sync` remains additive and never performs garbage
+collection implicitly.
+
+After every selected phase succeeds, stdout is exactly one newline-terminated
+summary:
+
+`gc local_stores=<n> local_compacted=<n> local_vectors=<n>
+local_removed_vectors=<n> local_current_bytes=<n> local_projected_bytes=<n>
+local_saved_bytes=<n> remote_configured=<true|false>
+remote_removed_packs=<n> remote_current_bytes=<n>
+remote_projected_bytes=<n> remote_saved_bytes=<n>
+dry_run=<true|false>`
+
+`local_stores` is the number of regular `search/vector-store` directories that
+complete preflight, including empty stores. `local_compacted` counts stores
+whose projected recognized file set or bytes differ and therefore would change
+in normal mode. `local_vectors` sums distinct live vector keys per store; the
+same key in different stores counts once in each. `local_removed_vectors` sums
+current-catalog keys absent from that store's complete live-root set.
+
+Local `current_bytes` is the sum of logical `FileInfo.Size` values for recognized
+vector-store catalogs and payload generations plus recognized incomplete or
+superseded legacy payload candidates before GC. `projected_bytes` is the same
+sum for the exact retained or published file set after GC, including both
+retained recovery catalogs and every distinct payload they reference.
+`local_saved_bytes` is signed `current_bytes - projected_bytes`. Unknown files
+are preserved and excluded from both byte totals. Remote byte counts use
+logical sizes for the tracked current schema-v2 tree before and after the final
+successful cleanup; they exclude `.git` data and historical objects.
+`remote_removed_packs` is derived from the authoritative base of the tree that
+was actually pushed, not an earlier conflicted attempt.
+
+A skipped remote phase reports `remote_configured=false` and zero for every
+remote count. Dry-run and normal mode calculate identical candidates and
+summary values from identical starting state. A store is an idempotent no-op and
+does not publish another generation when its live key mapping, retained
+generation pair, recognized payload bytes, and cleanup candidates already equal
+the deterministic projected state. A failure writes no success summary. Local
+stores published before a later failure remain valid; repeating the command
+recalculates all counts from current state.
+
+##### GC-002 — Dry run and progress
+
+`--dry-run` performs the same discovery, locking, strict validation,
+reachability calculation, and byte accounting but does not publish a local
+catalog or payload, delete a file, mutate the persistent local index-sync
+repository, create a commit, or push. A configured shared remote is inspected
+through disposable state.
+
+Garbage-collection progress is stderr-only. Local phases report
+`index gc: scanning local indexes` and
+`index gc: compacting local stores <done>/<total>`. A configured shared phase
+additionally reports `index gc: fetching remote`,
+`index gc: scanning shared indexes`, `index gc: pruning shared packs`, and, for
+a changed non-dry-run tree, `index gc: pushing remote`. Fetch and push transport
+details use the existing sanitized bracketed suffix. Interactive stderr rewrites
+and clears one transient line; redirected stderr emits newline-delimited
+updates. Progress callback failure aborts the operation without a success
+summary.
+
+##### GC-003 — Local roots and exact reachability
+
+Every strictly valid completed local manifest is a live root regardless of age,
+revision, branch, tag, or observed use. Version-1 manifests retain their local
+payloads. For each version-2 `shared-v1` manifest, garbage collection strictly
+validates `vectors.index.json`; every shared vector key must match its embedding
+input, model, and dimensions and must resolve through the current vector-store
+catalog to payload bytes with matching dimensions and checksum. Index-local
+records without a shared vector key remain owned by that index and their local
+`vectors.f32` data is not compacted.
+
+For each metadata root, the existing vector-store lock becomes the lifecycle
+lock for shared-vector publication. Writers acquire their index lock first,
+then acquire this lifecycle lock before invalidating the old manifest, and hold
+it through vector-store updates, index payload publication, and the final
+atomic manifest publication. GC acquires only the lifecycle lock while it
+discovers and validates the complete stable set of valid shared-vector roots,
+builds a candidate, and publishes that store; it never waits for an index lock
+while holding the lifecycle lock. This preserves the existing writer lock order
+and prevents a new manifest from appearing with a vector key omitted by GC.
+
+Every code path that selects a shared-vector catalog or opens a shared payload
+also participates in the lifecycle lock. When it already owns an index lock, it
+acquires the lifecycle lock second and holds it through catalog selection,
+payload open, every referenced read, and payload close. A reader without an
+index lock acquires only the lifecycle lock and must not acquire an index lock
+before releasing it. GC's exclusive lifecycle ownership therefore waits for
+pre-existing readers before publishing and removing generations, while new
+readers cannot select an old catalog during replacement. The universal order is
+`index lock → lifecycle lock`; no path may acquire these locks in reverse.
+
+After releasing the lifecycle lock, GC processes recognized incomplete or
+superseded per-index payloads one index directory at a time in sorted path
+order. It acquires that index's existing lock, rescans the directory, and
+deletes only candidates that remain incomplete or superseded. A concurrent
+writer therefore completes before classification, and a newly valid manifest
+is preserved. No vector-store lock is held during this per-index cleanup.
+
+Recognized index payload filenames are exactly `manifest.json`,
+`vectors.index.json`, `vectors.f32`, and `embeddings.json`. A directory that
+still lacks a valid completed manifest after its index lock is acquired is
+incomplete. GC may remove only its recognized payload files and empty owned
+directories; any unknown entry preserves the directory. A valid version-2
+manifest may own superseded `embeddings.json` or obsolete index-local payload
+bytes only when every record is a validated shared reference; GC removes only
+those recognized superseded files. Version-1 manifests and version-2 indexes
+with local-only vector records retain their index-local payloads. Malformed
+completed metadata, unknown versions, invalid shared references, checksum
+failures, symlinks, containment failures, and unreadable owned data fail
+preflight before any store publishes.
+
+##### GC-004 — Generation-safe local compaction
+
+Shared-vector reads resolve a record's authoritative offset, dimensions, and
+checksum from the current vector-store catalog by vector key. The offset copied
+in an existing `vectors.index.json` is not authoritative after compaction.
+Catalog lookup must still validate the record's expected key, dimensions, and
+checksum, so unchanged completed indexes remain readable when live vectors move.
+
+A compacted store writes one payload containing exactly the distinct live
+vectors in deterministic vector-key order. Recognized generation filenames are
+only `catalog-<20-decimal-digits>.json`, `vectors-<20-decimal-digits>.f32`, and
+the legacy payload `vectors.f32`. A catalog payload field must be a basename
+matching one recognized payload filename; separators, traversal, absolute
+paths, symlinks, and other names fail validation. Existing catalogs without a
+payload filename refer only to legacy `vectors.f32`.
+
+Compaction reserves two consecutive catalog generations. It fully writes and
+syncs `vectors-<first-generation>.f32`, publishes and syncs a recovery catalog
+for the first generation, then publishes and syncs an identical current mapping
+at the second generation. Both catalogs reference the new compact payload.
+Only after the second catalog and directory are durable may GC remove older
+recognized catalogs and payloads. It retains exactly the two new catalogs and
+every distinct payload they reference. At every interruption boundary either
+the old retained generation or one of the new catalogs identifies a complete
+payload. Normal append writes continue retaining a current and immediately
+previous valid catalog and every payload they reference.
+
+Local stores publish independently. The command preflights all selected stores
+before publishing the first, but no cross-directory transaction is promised.
+If publication of a later store or the optional shared phase fails, earlier
+valid compactions remain and the command returns an error.
+
+##### GC-005 — Optional shared-repository cleanup
+
+When `index.remote` is configured, GC inspects authoritative schema-v2 state
+under the existing index-sync ownership and repository lock. It strictly
+validates every current manifest and vector pack, marks every pack referenced by
+every valid manifest, and selects only current-tree pack files with zero
+references. It preserves every valid manifest, referenced pack, `schema.json`,
+and the existing unsafe-tree rejection rules. A schema-v1, mixed, malformed,
+unknown, or unsafe tree fails without cleanup.
+
+Dry-run constructs and validates the prospective tree in disposable storage.
+Normal execution removes the selected files, validates the complete resulting
+tree again, creates an unsigned cleanup commit, and attempts the push. On every
+non-fast-forward response, GC fetches the newly authoritative tree, discards the
+stale removal plan, reruns strict validation and reachability, reapplies only
+the newly unreferenced removals, validates again, and replaces the attempted
+cleanup commit before retrying. A pack newly referenced by the authoritative
+tree is never removed. The success summary is computed from the authoritative
+base and exact tree accepted by the final push. The successfully pushed result
+contains at most one cleanup commit above that base. A no-op creates no commit
+or push. Cleanup changes only the current tree: it does not rewrite Git history,
+remove historical Git objects, or run general Git garbage collection.
+
+##### GC-006 — Compact derived pack catalog
+
+The uncommitted current-HEAD vector-pack catalog uses this exact binary layout:
+
+| Offset | Width | Field |
+| ---: | ---: | --- |
+| 0 | 8 | magic `GITAGCT\0` |
+| 8 | 4 | little-endian uint32 version `2` |
+| 12 | 20 | raw Git HEAD SHA-1 |
+| 32 | 4 | little-endian uint32 pack count |
+| 36 | 8 | little-endian uint64 entry count |
+| 44 | `pack_count * 36` | pack rows |
+| next | `entry_count * 72` | slot rows |
+| final | 32 | SHA-256 of every preceding byte |
+
+Each pack row is a raw 32-byte pack digest followed by its little-endian uint32
+slot count. Pack rows are strictly sorted by digest and include every regular
+`.pack` in the current validated pack tree, including packs whose identities
+duplicate slots in another pack. Each slot row is a raw 32-byte embedding key,
+raw 32-byte vector digest, little-endian uint32 pack-table index, and
+little-endian uint32 slot. Slot rows are strictly ordered by pack-table index
+then slot, cover every slot from zero through each pack's declared count exactly
+once, and match that pack's validated entry table. Loading those rows through
+the existing canonical selection rule reconstructs the complete catalog,
+including deterministic selection when duplicate identities occur across
+packs.
+
+Decoding rejects a wrong magic or HEAD, unknown version, count or size overflow,
+truncation, trailing bytes, checksum mismatch, duplicate or unsorted packs or
+slots, missing or extra current-tree packs, an out-of-range pack-table index or
+slot, incomplete slot coverage, and any embedding/vector mismatch with the
+validated pack entry. Rejected or absent data is reconstructed from immutable
+packs. A legacy Gob cache is recognized only as an upgrade candidate: after its
+existing validation succeeds, GC performs a complete authoritative pack scan
+and writes the resulting binary cache rather than deriving completeness from
+the legacy entries. New writes use only version 2. Atomic publication and
+current-HEAD historical-cache pruning remain unchanged.
+
 With `--debug`, search writes live human console diagnostic events to stderr
 using the same renderer as streamed traces. It writes one `search_skip` event per
 file or directory skipped by git-agent's own safety rules, including dot paths,
@@ -2620,3 +2846,24 @@ The in-repository implementation is complete when:
   object on stdout with empty success stderr, including follow-up launchers;
   `--wait <id>` emits only a repeatable strict final report or fails with empty
   stdout
+- GC-001 and GC-002: `git-agent index gc --dry-run` with an isolated metadata
+  root and no `index.remote` succeeds, reports `remote_configured=false`, and
+  leaves every byte and modification time unchanged; duplicate or unknown
+  arguments fail with exact usage
+- GC-003 and GC-004: malformed completed local metadata fails before any store
+  publishes; successful compaction preserves exact search vectors through
+  catalog-resolved offsets, removes only unreachable recognized bytes, is an
+  idempotent no-op on repetition, and remains readable after interruption at
+  every payload/catalog publication boundary; a reader paused after catalog
+  selection or payload open completes before the old generation is removed
+- GC-005: a configured fixture remote removes only packs unreferenced by every
+  valid current manifest, preserves all manifests and referenced vectors, and
+  recomputes reachability after a concurrent non-fast-forward update before
+  reporting the final pushed result
+- GC-005: dry-run does not mutate the persistent sync checkout, create a commit,
+  or push; normal cleanup changes only the current tree and does not rewrite
+  history or prune historical objects
+- GC-006: binary catalog round trips and is materially smaller than the legacy
+  Gob fixture; wrong-HEAD, future-version, malformed, incomplete, reordered,
+  truncated, trailing, or checksum-invalid data is rejected and reconstructed
+  from validated packs

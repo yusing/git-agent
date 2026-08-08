@@ -730,29 +730,42 @@ func applyCodeReviewDefaults(kind reviewtask.Kind, depth reviewtask.Depth, opts 
 	}
 }
 
+const indexUsage = "usage: git-agent index sync\n       git-agent index migrate --to v2 [--dry-run]\n       git-agent index gc [--dry-run]"
+
 func (a *App) runIndex(ctx context.Context, args []string) error {
-	migrate := false
+	mode := ""
 	dryRun := false
-	if len(args) == 1 && args[0] == "sync" {
-		// Valid sync command.
-	} else if len(args) > 0 && args[0] == "migrate" {
+	switch {
+	case len(args) == 1 && args[0] == "sync":
+		mode = "sync"
+	case len(args) > 0 && args[0] == "migrate":
 		var err error
 		dryRun, err = parseIndexMigrationArgs(args[1:])
 		if err != nil {
 			return err
 		}
-		migrate = true
-	} else {
-		return errors.New("usage: git-agent index sync\n       git-agent index migrate --to v2 [--dry-run]")
+		mode = "migrate"
+	case len(args) > 0 && args[0] == "gc":
+		var err error
+		dryRun, err = parseIndexGCArgs(args[1:])
+		if err != nil {
+			return err
+		}
+		mode = "gc"
+	default:
+		return errors.New(indexUsage)
 	}
 	cfg, err := config.LoadFile()
 	if err != nil {
 		return err
 	}
+	if mode == "gc" {
+		return a.runIndexGC(ctx, cfg.Index.Remote, dryRun)
+	}
 	if cfg.Index.Remote == "" {
 		return errors.New("index.remote is not configured; configure it with git-agent config index.remote <git-url>")
 	}
-	if migrate {
+	if mode == "migrate" {
 		return a.runIndexMigrate(ctx, cfg.Index.Remote, dryRun)
 	}
 	interactive := isInteractiveFile(a.stderr)
@@ -799,6 +812,16 @@ func parseIndexMigrationArgs(args []string) (bool, error) {
 	return dryRun, nil
 }
 
+func parseIndexGCArgs(args []string) (bool, error) {
+	if len(args) == 0 {
+		return false, nil
+	}
+	if len(args) == 1 && args[0] == "--dry-run" {
+		return true, nil
+	}
+	return false, errors.New("usage: git-agent index gc [--dry-run]")
+}
+
 func (a *App) runIndexMigrate(ctx context.Context, remoteURL string, dryRun bool) error {
 	interactive := isInteractiveFile(a.stderr)
 	progressStarted := false
@@ -826,6 +849,45 @@ func (a *App) runIndexMigrate(ctx context.Context, remoteURL string, dryRun bool
 	_, err = fmt.Fprintf(a.stdout,
 		"migrated from=%d to=%d indexes=%d records=%d unique_vectors=%d packs=%d bytes=%d\n",
 		summary.From, summary.To, summary.Indexes, summary.Records, summary.UniqueVectors, summary.Packs, summary.ProjectedBytes)
+	return err
+}
+
+func (a *App) runIndexGC(ctx context.Context, remoteURL string, dryRun bool) error {
+	interactive := isInteractiveFile(a.stderr)
+	progressStarted := false
+	summary, err := searchtask.GCAll(ctx, searchtask.GCOptions{
+		DryRun:    dryRun,
+		RemoteURL: remoteURL,
+		ProgressLog: func(progress searchtask.Progress) error {
+			progressStarted = true
+			return a.writeIndexGCProgress(progress, interactive)
+		},
+	})
+	if interactive && progressStarted {
+		a.clearProgressLine()
+	}
+	if err != nil {
+		return err
+	}
+	localSaved := summary.Local.CurrentBytes - summary.Local.ProjectedBytes
+	remoteSaved := summary.RemoteCurrentBytes - summary.RemoteProjectedBytes
+	_, err = fmt.Fprintf(
+		a.stdout,
+		"gc local_stores=%d local_compacted=%d local_vectors=%d local_removed_vectors=%d local_current_bytes=%d local_projected_bytes=%d local_saved_bytes=%d remote_configured=%t remote_removed_packs=%d remote_current_bytes=%d remote_projected_bytes=%d remote_saved_bytes=%d dry_run=%t\n",
+		summary.Local.Stores,
+		summary.Local.Compacted,
+		summary.Local.Vectors,
+		summary.Local.RemovedVectors,
+		summary.Local.CurrentBytes,
+		summary.Local.ProjectedBytes,
+		localSaved,
+		summary.RemoteConfigured,
+		summary.RemoteRemovedPacks,
+		summary.RemoteCurrentBytes,
+		summary.RemoteProjectedBytes,
+		remoteSaved,
+		dryRun,
+	)
 	return err
 }
 
@@ -1369,12 +1431,7 @@ func (a *App) writeIndexSyncProgress(progress searchtask.Progress, interactive b
 	default:
 		return nil
 	}
-	if interactive {
-		_, err := fmt.Fprintf(a.stderr, "\r\x1b[2K%s", message)
-		return err
-	}
-	_, err := fmt.Fprintln(a.stderr, message)
-	return err
+	return a.writeIndexProgressMessage(message, interactive)
 }
 
 func (a *App) writeIndexMigrationProgress(progress searchtask.Progress, interactive bool) error {
@@ -1403,6 +1460,37 @@ func (a *App) writeIndexMigrationProgress(progress searchtask.Progress, interact
 	default:
 		return nil
 	}
+	return a.writeIndexProgressMessage(message, interactive)
+}
+
+func (a *App) writeIndexGCProgress(progress searchtask.Progress, interactive bool) error {
+	var message string
+	switch progress.Status {
+	case searchtask.ProgressStatusGCScanningLocal:
+		message = "index gc: scanning local indexes"
+	case searchtask.ProgressStatusGCCompactingLocal:
+		message = fmt.Sprintf("index gc: compacting local stores %d/%d", progress.Done, progress.Total)
+	case searchtask.ProgressStatusFetching:
+		message = "index gc: fetching remote"
+		if progress.Detail != "" {
+			message += " [" + progress.Detail + "]"
+		}
+	case searchtask.ProgressStatusGCScanningRemote:
+		message = "index gc: scanning shared indexes"
+	case searchtask.ProgressStatusGCPruningRemote:
+		message = "index gc: pruning shared packs"
+	case searchtask.ProgressStatusPushing:
+		message = "index gc: pushing remote"
+		if progress.Detail != "" {
+			message += " [" + progress.Detail + "]"
+		}
+	default:
+		return nil
+	}
+	return a.writeIndexProgressMessage(message, interactive)
+}
+
+func (a *App) writeIndexProgressMessage(message string, interactive bool) error {
 	if interactive {
 		_, err := fmt.Fprintf(a.stderr, "\r\x1b[2K%s", message)
 		return err
@@ -2333,6 +2421,7 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent config [--unset] index.remote [<git-url>]\n")
 	b.WriteString("  git-agent index sync\n")
 	b.WriteString("  git-agent index migrate --to v2 [--dry-run]\n")
+	b.WriteString("  git-agent index gc [--dry-run]\n")
 	b.WriteString("  git-agent commit-msg [--amend] [flags]\n")
 	b.WriteString("  git-agent explore [--debug] [--fast] [--for <diagnose|change|behavior|owner>] [--follow-up <search-id>] <question...>\n")
 	b.WriteString("  git-agent pr-message [flags]\n")
