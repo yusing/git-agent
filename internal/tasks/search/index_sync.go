@@ -133,12 +133,18 @@ func openIndexSyncWithMigration(ctx context.Context, remoteURL string, progressL
 				if err := sync.ensureSchema(); err != nil {
 					return nil, err
 				}
+				if err := sync.pruneVectorPackCatalogCaches(); err != nil {
+					return nil, err
+				}
 				sync.confirmedAt = confirmedAt
 				return sync, nil
 			}
 		}
 	}
 	if err := sync.reconcile(ctx); err != nil {
+		return nil, err
+	}
+	if err := sync.pruneVectorPackCatalogCaches(); err != nil {
 		return nil, err
 	}
 	if !confirmedAfter.IsZero() {

@@ -1308,7 +1308,11 @@ pack/slot references. Import validates the pack path, complete pack digest,
 header version, model, dimensions, slot, embedding identity, payload digest,
 and checksum before publishing a local index. A derived pack catalog may be
 cached only below the sync repository's `.git` directory and is never
-committed.
+committed. The cache directory retains at most the current local `HEAD`
+catalog. Opening a schema-v2 sync repository or publishing a new catalog
+removes owned historical catalogs and abandoned catalog temporary files.
+Missing, malformed, stale, or invalid catalog data is rebuilt from the
+immutable vector packs.
 
 Concurrent schema-v2 writers merge pack files by content-addressed path and
 merge manifests by cache-record identity. Identical payloads choose the

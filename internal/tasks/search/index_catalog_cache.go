@@ -3,9 +3,12 @@ package search
 import (
 	"cmp"
 	"encoding/gob"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/go-git/go-git/v6/plumbing"
 )
@@ -156,8 +159,60 @@ func (sync *indexSync) persistVectorPackCatalog(head plumbing.Hash) error {
 	if err := syncDirectory(dir); err != nil {
 		return err
 	}
+	if err := sync.pruneVectorPackCatalogCachesForHead(head); err != nil {
+		return err
+	}
 	sync.packCatalogDirty = false
 	return nil
+}
+
+func (sync *indexSync) pruneVectorPackCatalogCaches() error {
+	if sync.repo == nil || sync.schema != indexSyncSchemaV2 {
+		return nil
+	}
+	head, err := sync.repo.Head()
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return sync.pruneVectorPackCatalogCachesForHead(head.Hash())
+}
+
+func (sync *indexSync) pruneVectorPackCatalogCachesForHead(head plumbing.Hash) error {
+	cachePath := sync.vectorPackCatalogCachePath(head)
+	dir := filepath.Dir(cachePath)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	current := filepath.Base(cachePath)
+	removed := false
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Name() == current || !ownedVectorPackCatalogCacheName(entry.Name()) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+			return err
+		}
+		removed = true
+	}
+	if removed {
+		return syncDirectory(dir)
+	}
+	return nil
+}
+
+func ownedVectorPackCatalogCacheName(name string) bool {
+	if strings.HasPrefix(name, ".catalog-") && strings.HasSuffix(name, ".tmp") {
+		return true
+	}
+	hash, ok := strings.CutSuffix(name, ".bin")
+	return ok && canonicalLowerHex(hash, len(plumbing.ZeroHash.String()))
 }
 
 func (sync *indexSync) vectorPackCatalogCachePath(head plumbing.Hash) string {
