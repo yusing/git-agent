@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"github.com/yusing/git-agent/internal/followup"
 	"github.com/yusing/git-agent/internal/openai"
 )
 
@@ -328,22 +329,28 @@ func (c *Coordinator) runLeader(ctx context.Context, keyDir, batchDir string, pa
 
 	persistenceStarted := time.Now()
 	err = func() error {
-		promptCacheKey := PromptCacheKey(parent, items)
+		var parentLineage *followup.Lineage
+		if parent != nil {
+			lineage := followup.Lineage{
+				ID: parent.ID, ParentID: parent.ParentID, Depth: parent.Depth,
+				PromptCacheKey: parent.PromptCacheKey,
+			}
+			parentLineage = &lineage
+		}
+		initialCacheKey := ""
+		if len(items) > 0 {
+			initialCacheKey = "explore:" + items[0].ID
+		}
 		for _, item := range items {
 			result, ok := results[item.ID]
 			if !ok {
 				return fmt.Errorf("explore batch completed without result for %s", item.ID)
 			}
-			depth := 0
-			parentID := ""
+			lineage := followup.Next(parentLineage, item.ID, initialCacheKey)
 			instructionTarget := SystemPromptTarget(parent, item.QueryTarget)
-			if parent != nil {
-				depth = parent.Depth + 1
-				parentID = parent.ID
-			}
 			session := Session{
-				Version: sessionVersion, ID: item.ID, ParentID: parentID, Depth: depth,
-				Workspace: c.workspace, PromptCacheKey: promptCacheKey, Answer: result.Answer,
+				Version: sessionVersion, ID: item.ID, ParentID: lineage.ParentID, Depth: lineage.Depth,
+				Workspace: c.workspace, PromptCacheKey: lineage.PromptCacheKey, Answer: result.Answer,
 				InstructionTarget: instructionTarget, ActiveTarget: item.QueryTarget,
 				History: append(slices.Clone(result.History), openai.NewMessage(
 					"developer",

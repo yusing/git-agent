@@ -17,6 +17,7 @@ import (
 	"github.com/yusing/git-agent/internal/agent"
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/explore"
+	"github.com/yusing/git-agent/internal/followup"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/openai"
 	"github.com/yusing/git-agent/internal/projectidentity"
@@ -361,10 +362,19 @@ func (a *App) runExploreBatch(
 	if client == nil {
 		client = openai.NewHTTPClient(&http.Client{})
 	}
+	var parentLineage *followup.Lineage
+	if parent != nil {
+		lineage := followup.Lineage{
+			ID: parent.ID, ParentID: parent.ParentID, Depth: parent.Depth,
+			PromptCacheKey: parent.PromptCacheKey,
+		}
+		parentLineage = &lineage
+	}
+	lineage := followup.Next(parentLineage, items[0].ID, "explore:"+items[0].ID)
 	runner := agent.OpenAIRunner{
 		Config: cfg, Client: client, Tools: registry, ToolSpecs: toolSpecs,
 		Validator: explore.ValidateAnswers(itemIDs), Trace: recorder, Budget: a.budgetHandler(),
-		PromptCacheKey: explore.PromptCacheKey(parent, items),
+		PromptCacheKey: lineage.PromptCacheKey,
 		UsageOutput:    a.stderr,
 	}
 	if debug {

@@ -227,7 +227,7 @@ function __git_agent_option_state_is_valid
             end
             if contains -- follow-up $seen_options
                 for option in $seen_options
-                    contains -- "$option" follow-up fast; or return 1
+                    contains -- "$option" follow-up fast debug; or return 1
                 end
             end
             if contains -- depth $seen_options; and contains -- max-steps $seen_options
@@ -281,12 +281,12 @@ function __git_agent_option_is_compatible
                 return
             end
             if contains -- follow-up $seen_options
-                test "$candidate" = fast
+                contains -- "$candidate" fast debug
                 return
             end
             if test "$candidate" = follow-up
                 for option in $seen_options
-                    contains -- "$option" fast; or return 1
+                    contains -- "$option" fast debug; or return 1
                 end
                 return 0
             end

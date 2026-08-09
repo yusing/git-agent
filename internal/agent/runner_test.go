@@ -1134,6 +1134,16 @@ func TestRunnerObservesProviderUsageAcrossSteps(t *testing.T) {
 	registry := tools.NewRegistry(repo, nil)
 	var usage openai.Usage
 	var metrics bytes.Buffer
+	var responseEvents []trace.Event
+	recorder, err := trace.NewEventSink(func(event trace.Event) error {
+		if event.Kind == "response" {
+			responseEvents = append(responseEvents, event)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	runner := OpenAIRunner{
 		Config: config.Config{MaxSteps: 2, MaxToolCalls: 2}, Client: client, Tools: registry,
 		ToolSpecs: registry.Definitions([]string{"repo_summary"}),
@@ -1141,6 +1151,7 @@ func TestRunnerObservesProviderUsageAcrossSteps(t *testing.T) {
 			usage.Add(value)
 		},
 		UsageOutput: &metrics,
+		Trace:       recorder,
 	}
 	if _, err := runner.Run(t.Context(), Request{UserPrompt: "review", MaxSteps: 2}); err != nil {
 		t.Fatal(err)
@@ -1153,6 +1164,15 @@ func TestRunnerObservesProviderUsageAcrossSteps(t *testing.T) {
 		"cache_write_input_tokens=12", "output_tokens=4", "step=2", "input_tokens=30",
 	) {
 		t.Fatalf("usage metrics = %q", output)
+	}
+	if len(responseEvents) != 2 {
+		t.Fatalf("response events = %d, want 2", len(responseEvents))
+	}
+	if first := responseEvents[0].Value; first["input_tokens"] != json.Number("20") || first["cached_input_tokens"] != json.Number("8") {
+		t.Fatalf("first response usage = %#v", first)
+	}
+	if second := responseEvents[1].Value; second["input_tokens"] != json.Number("30") || second["cached_input_tokens"] != json.Number("0") {
+		t.Fatalf("second response usage = %#v", second)
 	}
 }
 

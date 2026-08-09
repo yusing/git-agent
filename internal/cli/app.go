@@ -26,6 +26,7 @@ import (
 	"github.com/yusing/git-agent/internal/checks"
 	checkbuiltin "github.com/yusing/git-agent/internal/checks/builtin"
 	"github.com/yusing/git-agent/internal/config"
+	"github.com/yusing/git-agent/internal/followup"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/giturl"
 	"github.com/yusing/git-agent/internal/guidance"
@@ -187,7 +188,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		if flag.Name == "follow-up" {
 			followUpRequested = true
 		}
-		if flag.Name != "follow-up" && flag.Name != "fast" {
+		if flag.Name != "follow-up" && flag.Name != "fast" && flag.Name != "debug" {
 			followUpConflict = true
 		}
 		if flag.Name == "max-web-searches" {
@@ -205,7 +206,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	})
 	if followUpRequested {
 		if followUpConflict {
-			return errors.New("--follow-up cannot be combined with modes or flags other than --fast")
+			return errors.New("--follow-up cannot be combined with modes or flags other than --fast and --debug")
 		}
 		if strings.TrimSpace(followUpID) == "" {
 			return errors.New("--follow-up requires a parent turn ID")
@@ -218,11 +219,11 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 			return fmt.Errorf("--follow-up prompt exceeds %d bytes", maxFollowUpPromptBytes)
 		}
 		if !isDetachedChild() {
-			_, parentReport, err := loadFollowUpParent(kind, followUpID)
+			parent, err := loadFollowUpParent(kind, followUpID)
 			if err != nil {
 				return err
 			}
-			if _, err := reviewtask.FollowUpPrompt(kind, parentReport, followUpPrompt); err != nil {
+			if _, err := reviewtask.FollowUpPrompt(kind, parent.Report, followUpPrompt); err != nil {
 				return err
 			}
 			return startDetachedTask(command, args, a.stdout)
@@ -302,12 +303,31 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	if err != nil {
 		return err
 	}
-	var parentReport any
+	var parent *reviewFollowUpParent
 	if followUpRequested {
-		mode, parentReport, err = readFollowUpParent(backgroundStore, kind, followUpID)
+		loadedParent, readErr := readFollowUpParent(backgroundStore, kind, followUpID, repo.WorkPath)
+		if readErr != nil {
+			return readErr
+		}
+		parent = &loadedParent
+		mode = parent.Mode
+		depth, err = reviewtask.ParseDepth(parent.Turn.ReviewDepth)
 		if err != nil {
 			return err
 		}
+	}
+	var parentLineage *followup.Lineage
+	if parent != nil {
+		lineage := followup.Lineage{
+			ID: followUpID, ParentID: parent.Turn.ParentID, Depth: parent.Turn.Depth,
+			PromptCacheKey: parent.Turn.PromptCacheKey,
+		}
+		parentLineage = &lineage
+	}
+	lineage := followup.Next(parentLineage, taskID, "review:"+taskID)
+	turnMetadata := backgroundtask.TurnMetadata{
+		ParentID: lineage.ParentID, Mode: string(mode), Workspace: repo.WorkPath,
+		ReviewDepth: string(depth), Depth: lineage.Depth, PromptCacheKey: lineage.PromptCacheKey,
 	}
 	inspectionStarted := time.Now().UTC()
 	if err := backgroundStore.Create(taskID, command, os.Getpid(), inspectionStarted); err != nil {
@@ -324,10 +344,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		returnErr = errors.Join(returnErr, backgroundStore.Complete(taskID, terminal, failureDiagnostic, now))
 	}()
 	if !dryRun {
-		if err := backgroundStore.AttachTurn(taskID, backgroundtask.TurnMetadata{
-			ParentID: followUpID,
-			Mode:     string(mode),
-		}); err != nil {
+		if err := backgroundStore.AttachTurn(taskID, turnMetadata); err != nil {
 			return err
 		}
 	}
@@ -428,8 +445,8 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	if orchestration != nil {
 		session["orchestration_manifest_sha256"] = orchestration.Digest
 	}
-	if followUpRequested {
-		session["parent"] = followUpID
+	if turnMetadata.ParentID != "" {
+		session["parent"] = turnMetadata.ParentID
 	}
 	if err := recorder.Write("session", session); err != nil {
 		return err
@@ -478,31 +495,40 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		orchestrationPrompt(reviewtask.UserPrompt(kind, prepared), orchestration),
 		opts.AppendPrompt,
 	)
-	if followUpRequested {
-		userPrompt, err = reviewtask.FollowUpPrompt(kind, parentReport, followUpPrompt)
+	followUpContext := ""
+	followUpMessage := ""
+	if parent != nil {
+		followUpContext, err = reviewtask.FollowUpContextPrompt(prepared)
+		if err != nil {
+			return err
+		}
+		followUpMessage, err = reviewtask.FollowUpPrompt(kind, parent.Report, followUpPrompt)
 		if err != nil {
 			return err
 		}
 	}
 
+	responseClient := a.responseClient
+	if responseClient == nil {
+		responseClient = openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout})
+	}
 	runner := agent.OpenAIRunner{
 		Config:             cfg,
-		Client:             openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
+		Client:             responseClient,
 		Tools:              registry,
 		ToolSpecs:          toolSpecs,
 		HostedCapabilities: []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch, MaxCalls: cfg.MaxWebSearches}},
 		ReasoningSummary:   openai.ReasoningSummaryAuto,
-		PromptCacheKey:     "review:" + taskID,
+		PromptCacheKey:     turnMetadata.PromptCacheKey,
 		Validator: func(text string) []string {
 			return reviewtask.ValidateRepository(kind, text, repo, mode, prepared.Paths, prepared.Fingerprint)
 		},
-		Normalize:   func(text string) string { return reviewtask.Shape(kind, text) },
-		Trace:       recorder,
-		UsageOutput: a.stderr,
+		Normalize: func(text string) string { return reviewtask.Shape(kind, text) },
+		Trace:     recorder,
 	}
 	var providerUsage usageAccumulator
 	runner.ObserveUsage = providerUsage.add
-	result, err := runReviewTree(taskCtx, kind, depth, runner, agent.Request{
+	baseRequest := agent.Request{
 		SystemPrompt:      reviewtask.SystemPrompt(kind),
 		ToolPolicy:        reviewToolPolicy(),
 		Environment:       environmentContext(repo, command, string(mode), cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls),
@@ -514,7 +540,33 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		ParallelToolCalls: true,
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
-	}, recorder)
+	}
+	var result reviewTreeResult
+	if parent == nil {
+		result, err = runReviewTree(taskCtx, kind, depth, runner, baseRequest, recorder)
+	} else {
+		parentLeaves := parent.Turn.Expanded()
+		roots := make([]reviewTreeRoot, len(parentLeaves))
+		for index, leaf := range parentLeaves {
+			input := slices.Clone(leaf.Input)
+			input = append(input,
+				openai.NewMessage("user", followUpContext),
+				openai.NewMessage("user", followUpMessage),
+			)
+			turnState := leaf.TurnState
+			if turnMetadata.ParentID == "" {
+				turnState = ""
+			}
+			roots[index] = reviewTreeRoot{
+				reviewContinuation: reviewContinuation{
+					Scope: leaf.Scope, Model: leaf.Model, ReasoningEffort: leaf.ReasoningEffort,
+					TurnState: turnState, Input: input,
+				},
+				Request: baseRequest,
+			}
+		}
+		result, err = runReviewForest(taskCtx, kind, depth, runner, roots, recorder)
+	}
 	if err != nil {
 		traceErr := recorder.WriteExact("error", map[string]any{"message": err.Error()})
 		eventServer.Finish()
@@ -600,6 +652,20 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 			_ = recorder.WriteExact("runtime.status", map[string]any{
 				"phase": "post_inspection_hook_failed", "message": err.Error(),
 			})
+		}
+	}
+	if !dryRun {
+		leaves := make([]followup.Leaf, len(result.Continuations))
+		for index, continuation := range result.Continuations {
+			leaves[index] = followup.Leaf{
+				Scope: continuation.Scope, Model: continuation.Model,
+				ReasoningEffort: continuation.ReasoningEffort, TurnState: continuation.TurnState,
+				Input: continuation.Input,
+			}
+		}
+		turnMetadata.Tree = followup.Compact(leaves)
+		if err := backgroundStore.UpdateTurn(taskID, turnMetadata); err != nil {
+			return err
 		}
 	}
 	if err := recorder.WriteExact("final", map[string]any{
@@ -2430,14 +2496,14 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent release-note [--out <file>] [flags] patch|minor|major\n")
 	b.WriteString("  git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]\n")
 	b.WriteString("  git-agent review --wait <id>\n")
-	b.WriteString("  git-agent review [--fast] --follow-up <turn-id> <prompt...>\n")
+	b.WriteString("  git-agent review [--debug] [--fast] --follow-up <turn-id> <prompt...>\n")
 	b.WriteString("  git-agent search [flags] <query...>\n")
 	b.WriteString("  git-agent search --ls [--remote <url>] [--format text|json]\n")
 	b.WriteString("  git-agent search --ls-remotes [--format text|json|completion]\n")
 	b.WriteString("  git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]\n")
 	b.WriteString("  git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]\n")
 	b.WriteString("  git-agent simplify --wait <id>\n")
-	b.WriteString("  git-agent simplify [--fast] --follow-up <turn-id> <prompt...>\n")
+	b.WriteString("  git-agent simplify [--debug] [--fast] --follow-up <turn-id> <prompt...>\n")
 	b.WriteString("\nRun `git-agent explore --help` for exploration usage.\n")
 	b.WriteString("Run `git-agent search --help` for search flags.\n")
 	b.WriteString("Run `git-agent review --help` or `git-agent simplify --help` for inspection flags.\n")
@@ -2448,7 +2514,7 @@ func codeReviewUsageError(command string, fs *flag.FlagSet) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Usage: git-agent %s [--codebase|--uncommitted|--staged] [flags] [prompt...]\n\n", command)
 	fmt.Fprintf(&b, "       git-agent %s --wait <id>\n\n", command)
-	fmt.Fprintf(&b, "       git-agent %s [--fast] --follow-up <turn-id> <prompt...>\n\n", command)
+	fmt.Fprintf(&b, "       git-agent %s [--debug] [--fast] --follow-up <turn-id> <prompt...>\n\n", command)
 	b.WriteString("Modes:\n")
 	b.WriteString("  --uncommitted  inspect all dirty changes (default)\n")
 	b.WriteString("  --staged       inspect staged changes only\n")
@@ -2486,7 +2552,7 @@ func codeReviewUsageError(command string, fs *flag.FlagSet) error {
 func codeReviewAgentUsageError(command string, fs *flag.FlagSet) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Usage: git-agent %s [--codebase|--uncommitted|--staged] [--depth fast|balanced|thorough] [prompt...]\n\n", command)
-	fmt.Fprintf(&b, "       git-agent %s [--fast] --follow-up <turn-id> <prompt...>\n\n", command)
+	fmt.Fprintf(&b, "       git-agent %s [--debug] [--fast] --follow-up <turn-id> <prompt...>\n\n", command)
 	b.WriteString("Modes:\n")
 	b.WriteString("  --uncommitted  inspect all dirty changes (default)\n")
 	b.WriteString("  --staged       inspect staged changes only\n")
@@ -2498,7 +2564,7 @@ func codeReviewAgentUsageError(command string, fs *flag.FlagSet) error {
 	b.WriteString("      use thorough only for security-related issues or very complex logic; otherwise use fast or balanced\n")
 	b.WriteString("  --low | --medium | --high | --xhigh\n")
 	b.WriteString("      set reasoning effort (mutually exclusive)\n")
-	b.WriteString("  [--fast] --follow-up <turn-id> <prompt...>\n")
+	b.WriteString("  [--debug] [--fast] --follow-up <turn-id> <prompt...>\n")
 	b.WriteString("      re-evaluate a successful provider turn against current repository state\n")
 	return errors.New(b.String())
 }

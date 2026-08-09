@@ -27,12 +27,12 @@ Supported workflows:
 - `git-agent release-note [--out <file>] patch|minor|major`
 - `git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 - `git-agent review --wait <id>`
-- `git-agent review [--fast] --follow-up <turn-id> <prompt...>`
+- `git-agent review [--debug] [--fast] --follow-up <turn-id> <prompt...>`
 - `git-agent explore [--debug] [--fast] [--for <diagnose|change|behavior|owner>] [--follow-up <search-id>] <question...>`
 - `git-agent project_id`
 - `git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 - `git-agent simplify --wait <id>`
-- `git-agent simplify [--fast] --follow-up <turn-id> <prompt...>`
+- `git-agent simplify [--debug] [--fast] --follow-up <turn-id> <prompt...>`
 - `git-agent search [flags] <query...>`
 - `git-agent search --ls [--remote <url>] [--format text|json]`
 - `git-agent search --ls-remotes [--format text|json|completion]`
@@ -352,21 +352,28 @@ but do not restrict repository inspection, evidence, or final validation. Child
 input is the forked provider-visible conversation, including every ordinary
 function-call output from the branch response, followed by the selected branch
 function result; Git-agent appends no child-specific developer message.
-The detached review tree assigns every request one cache key derived from its
-task ID. For GPT-5.6-family models, Git-agent sends that key, marks the initial
-conversation's last reusable input-text block with one explicit prompt-cache
-breakpoint, uses explicit-only cache mode, and retains the original marker in
-forked histories rather than moving it onto branch-specific output. These
-controls are best-effort: a changed model, tool catalog, structured-output
-schema, or dynamic instruction prefix can make a child ineligible for a hit.
-Git-agent does not alter branch availability or depth semantics to preserve
-cache identity. Models outside the GPT-5.6 family receive neither the explicit
-breakpoint nor its request options and continue using provider-default caching,
-but official OpenAI requests still carry the stable cache key. The authenticated
-ChatGPT Codex endpoint also receives only that key because it does not accept
-the explicit options or content-block breakpoint. Custom endpoints receive no
-prompt-cache fields because Git-agent has no provider capability declaration
-for them.
+A later `--follow-up` treats every persisted terminal child as a root of the
+new inspection, resets branch depth for that inspection, and permits each root
+to use the selected depth policy again.
+The detached review tree assigns every initial request one cache key derived
+from its task ID. Context-preserving follow-ups reuse that key; a depth reset
+creates a new key. For GPT-5.6-family models, Git-agent sends the key, marks the
+last reusable input-text block with an explicit prompt-cache breakpoint, uses
+explicit-only cache mode, and retains existing markers in forked and follow-up
+histories. These controls are best-effort: provider retention and minimum-prefix
+rules remain authoritative, and a changed model, tool catalog, structured-output
+schema, dynamic instruction prefix, or renewed branch availability can make a
+request ineligible for a hit. Git-agent does not alter branch availability or
+depth semantics to force cache eligibility. Models outside the GPT-5.6 family
+use provider-default caching, but official OpenAI requests still carry the stable
+cache key. The ChatGPT Codex endpoint receives that key without explicit
+breakpoint options and also receives it as the stable `session-id` and
+`thread-id` routing identity. Git-agent captures the opaque
+`x-codex-turn-state` response header when supplied and replays it on later
+requests in the same cache lineage, including immediate child branches and
+context-preserving detached follow-ups. A depth reset starts with new routing
+identities and no turn-state header. Custom endpoints receive no prompt-cache
+fields or Codex routing headers.
 Child model and reasoning effort inherit by default or select from the bounded
 model catalog returned by `branch_help` and enforced by the strict `branch`
 function. Every required leaf must pass the ordinary report and
@@ -390,7 +397,11 @@ before the first provider request. Requests without that per-run token are rejec
 honors `Last-Event-ID`. Stream includes `session.started`, `session`, `request`,
 `reasoning_summary.delta`, `reasoning_summary.done`, `response`, `tool-call`,
 `tool-output`, `hosted-tool-call`, `hosted-capability`, `runtime.status`,
-`budget`, and terminal `final` or `error` events as applicable. Hosted-search
+`budget`, and terminal `final` or `error` events as applicable. Every `response`
+event includes the provider-reported integer `input_tokens` and
+`cached_input_tokens`; debug clients calculate the per-request cache ratio as
+`cached_input_tokens / input_tokens` when `input_tokens` is positive.
+Hosted-search
 events contain only bounded query, status, action, and source metadata, never
 fetched page bodies. `runtime.status` reports phase, model step, tool-call
 usage, elapsed runtime, latest provider input-token usage, estimated request
@@ -539,35 +550,51 @@ completion. A stored `error`, unknown or malformed ID, corrupt record, dead
 producer, or task created by the other command returns nonzero with empty
 stdout.
 
-`review [--fast] --follow-up <turn-id> <prompt...>` and
-`simplify [--fast] --follow-up <turn-id> <prompt...>` start a new detached turn
-that targets a successful real-provider report from the same command and
-current project. The prompt is required; after flag parsing, its argv elements
-are joined with one ASCII space. `--` permits a prompt whose first element
-starts with `-`. `--fast` sends `service_tier=priority` for the new provider
-conversation. `--follow-up` is isolated from `--wait`, scope modes, ordinary
-trailing focus, `--append-prompt`, orchestration artifacts, and every other
-provider or execution override.
+`review [--debug] [--fast] --follow-up <turn-id> <prompt...>` and
+`simplify [--debug] [--fast] --follow-up <turn-id> <prompt...>` start a new
+detached turn from a successful replayable provider turn created by the same
+command and cleaned absolute workspace. The prompt is required; after flag
+parsing, its argv elements are joined with one ASCII space. `--` permits a prompt
+whose first element starts with `-`. `--fast` sends `service_tier=priority` for
+the new provider work. `--debug` retains the standard response diagnostics on
+the detached SSE stream. `--follow-up` is isolated from `--wait`, scope modes,
+ordinary trailing focus, `--append-prompt`, orchestration artifacts, and every
+other provider or execution override.
 
-The new turn inherits only the parent's uncommitted, staged, or codebase mode
-and otherwise uses current configuration, guidance, skills, read-only tools,
-validation, and repository state. It starts a fresh provider conversation whose
-first user message is one strict JSON object containing only
-`previous_findings` plus `prompt` for review, or `previous_opportunities` plus
-`prompt` for simplify. The prior summary, recommendation, checks, prepared
-context, reasoning, and tool transcript are not reconstructed.
+The new turn inherits the parent's uncommitted, staged, or codebase mode,
+inspection depth, prompt-cache identity, complete replayable provider input,
+and complete final report. It appends freshly prepared current-repository
+context and one user message containing `previous_report` plus `prompt`.
+Uncommitted and staged modes retain their current-turn fingerprint guard,
+staged mode still excludes unstaged bytes, codebase mode remains live, and an
+empty current diff is valid. Review reruns current host checks after the
+provider report.
 
-Every follow-up re-evaluates the named provider report's items against current
-authoritative repository state. Resolved or inapplicable items are omitted;
-review may add a regression directly caused by the attempted fix.
-Uncommitted and staged modes retain their current-turn fingerprint guard, staged
-mode still excludes unstaged bytes, codebase mode remains live, and an empty
-current diff is valid. Review reruns current host checks after the provider
-report.
+An unbranched parent has one replay leaf. For a branched parent, Git-agent
+persists the common input prefix once plus every terminal leaf's branch-specific
+suffix, model, reasoning effort, scope, and provider turn state. A follow-up
+continues every terminal leaf concurrently, appends only fresh repository diff
+context plus the complete aggregated parent report and new prompt, and
+aggregates their new validated reports.
+A changed-scope follow-up may have no remaining paths after the parent issue is
+fixed; it still verifies the empty snapshot and returns an empty static-check
+set.
+It never selects an arbitrary helper branch or concatenates divergent branch
+transcripts. Each continued leaf receives a fresh branch-depth allowance, so a
+leaf that ended at its parent's branch limit may branch again.
+
+The parent remains immutable and reusable, so simultaneous follow-ups create
+independent sibling task IDs. Three context-preserving follow-ups inherit the
+parent cache key and provider turn state. A follow-up against depth three still
+inherits all input and the complete report, but starts a new lineage at depth
+zero with no persisted parent ID, a new prompt-cache key, and no inherited turn
+state. Existing records without workspace, cache, depth, and replay tree
+metadata are not follow-up eligible.
 
 Each accepted follow-up allocates a new task ID, launch object, replayable
 authenticated SSE endpoint, durable report, and repeatable `--wait` result.
-The `session` event records the parent but never the prompt or prior report.
+The `session` event records a context-preserving parent ID but never the prompt
+or prior report; a depth reset has no session parent.
 
 `--dry-run` is valid only on initial review/simplify launch and is mutually
 exclusive with `--wait` and `--follow-up` through normal flag conflict
@@ -1639,8 +1666,9 @@ with the shared service-tier behavior, and its command-specific
 `--follow-up <search-id>` form.
 
 `review` and `simplify` additionally support
-`--depth fast|balanced|thorough`, `--max-web-searches <positive-n>`, and the
-isolated `[--fast] --follow-up <turn-id> <prompt...>` form. They also support
+`--depth fast|balanced|thorough`, `--max-web-searches <positive-n>`, `--debug`,
+and the isolated `[--debug] [--fast] --follow-up <turn-id> <prompt...>` form.
+They also support
 `--help-agent`, which prints only the launch syntax, scope modes, `--depth`,
 reasoning-effort flags, and follow-up syntax intended for automated coding
 agents. The agent help reserves `thorough` for security-related issues or very

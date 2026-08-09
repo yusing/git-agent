@@ -27,7 +27,10 @@ func TestStorePersistsFollowUpMetadata(t *testing.T) {
 	if err := store.Create(testTaskID, "review", 42, now); err != nil {
 		t.Fatal(err)
 	}
-	metadata := TurnMetadata{ParentID: secondTestTaskID, Mode: "staged"}
+	metadata := TurnMetadata{
+		ParentID: secondTestTaskID, Mode: "staged", Workspace: "/workspace",
+		ReviewDepth: "balanced", Depth: 1, PromptCacheKey: "review:test",
+	}
 	if err := store.AttachTurn(testTaskID, metadata); err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +38,10 @@ func TestStorePersistsFollowUpMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.Version != recordVersion || record.Turn == nil || *record.Turn != metadata {
+	if record.Version != recordVersion || record.Turn == nil ||
+		record.Turn.ParentID != metadata.ParentID || record.Turn.Mode != metadata.Mode ||
+		record.Turn.Workspace != metadata.Workspace || record.Turn.ReviewDepth != metadata.ReviewDepth ||
+		record.Turn.Depth != metadata.Depth || record.Turn.PromptCacheKey != metadata.PromptCacheKey {
 		t.Fatalf("record = %#v", record)
 	}
 }

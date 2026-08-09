@@ -56,7 +56,7 @@ directory is on `PATH`.
 | Version bump release body | `git-agent release-note patch` | Release Markdown for latest tag to `HEAD` |
 | Uncommitted review | `git-agent review` | Detached task launch JSON |
 | Staged review | `git-agent review --staged` | Detached staged-review launch JSON |
-| Re-review a completed turn | `git-agent review [--fast] --follow-up <turn-id> <prompt...>` | New detached task launch JSON |
+| Re-review a completed turn | `git-agent review [--debug] [--fast] --follow-up <turn-id> <prompt...>` | New detached task launch JSON |
 | Codebase simplification audit | `git-agent simplify --codebase` | Detached codebase-audit launch JSON |
 | Agent-ready codebase exploration | `git-agent explore [--for <target>] <question...>` | Search ID and grounded answer JSON |
 | Continue an exploration | `git-agent explore --follow-up <search-id> <question...>` | New branch ID and answer JSON |
@@ -163,12 +163,19 @@ inspection depth: review uses `low`, `medium`, and `high` for
 An explicit effort flag overrides these defaults.
 
 An eligible completed provider turn can be followed with
-`--follow-up <turn-id> <prompt...>`. The new detached turn inherits the original
-uncommitted, staged, or codebase mode, inspects current repository state, and
-starts a fresh provider conversation containing only the prior findings or
-opportunities and the new prompt. Follow-up accepts `--fast` to request priority
-Responses API processing, rejects every other additional flag, and uses the
-same SSE and repeatable `--wait` workflow.
+`--follow-up <turn-id> <prompt...>`. The detached follow-up inherits the
+complete provider input, complete report, scope mode, inspection depth, and
+cache identity; it also inspects current repository state. Branched parents
+continue every terminal branch and may branch again. Follow-up accepts `--debug`
+and `--fast`, rejects every other additional flag, and uses the same SSE and
+`--wait` workflow. Three turns preserve the cache lineage before the next turn
+starts a new cache lineage while retaining the inherited input and report.
+The stable cache key also supplies Codex's `session-id` and `thread-id` routing
+identity. An opaque Codex turn-state header, when returned, follows the same
+lineage: child branches and context-preserving detached follow-ups inherit it,
+while a cache-lineage reset starts with new routing state. Follow-ups append only
+fresh repository diff
+context rather than repeating the initial mission and scope prompt.
 
 Without a trailing focus, review reports all actionable findings and simplify
 inspects the full authoritative scope. A trailing focus limits the report to
@@ -287,6 +294,9 @@ retry. The event stream publishes `runtime.status` with
 retry; it marks the preceding attempt's live reasoning progress as superseded,
 and subsequent reasoning events carry the new provider-attempt number. Strict
 report stdout remains unchanged.
+Every `response` event includes `input_tokens` and `cached_input_tokens`, so
+debug consumers can calculate the provider-reported prompt-cache ratio for each
+initial or follow-up request.
 
 See [docs/spec.md](docs/spec.md) for exact mode, schema, tool, and SSE contracts.
 
@@ -601,14 +611,14 @@ git-agent release-note [--out <file>] [flags] <base> <release>
 git-agent release-note [--out <file>] [flags] patch|minor|major
 git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]
 git-agent review --wait <id>
-git-agent review [--fast] --follow-up <turn-id> <prompt...>
+git-agent review [--debug] [--fast] --follow-up <turn-id> <prompt...>
 git-agent search [flags] <query...>
 git-agent search --ls [--remote <url>] [--format text|json]
 git-agent search --ls-remotes [--format text|json|completion]
 git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]
 git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]
 git-agent simplify --wait <id>
-git-agent simplify [--fast] --follow-up <turn-id> <prompt...>
+git-agent simplify [--debug] [--fast] --follow-up <turn-id> <prompt...>
 git-agent config index.remote [<git-url>]
 git-agent config --unset index.remote
 git-agent index sync

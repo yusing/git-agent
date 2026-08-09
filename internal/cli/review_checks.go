@@ -28,6 +28,27 @@ func newReviewCheckSession(
 	prepared reviewtask.PreparedContext,
 ) (*reviewCheckSession, error) {
 	session := &reviewCheckSession{}
+	if len(prepared.Paths) == 0 && mode != reviewtask.ModeCodebase {
+		switch mode {
+		case reviewtask.ModeUncommitted:
+			if err := repo.CheckUncommittedFingerprint(prepared.Fingerprint); err != nil {
+				return nil, err
+			}
+			session.verify = func() error {
+				return repo.CheckUncommittedFingerprint(prepared.Fingerprint)
+			}
+		case reviewtask.ModeStaged:
+			if err := repo.CheckStagedReviewFingerprint(prepared.Fingerprint); err != nil {
+				return nil, err
+			}
+			session.verify = func() error {
+				return repo.CheckStagedReviewFingerprint(prepared.Fingerprint)
+			}
+		default:
+			return nil, fmt.Errorf("unknown review mode %q", mode)
+		}
+		return session, nil
+	}
 	var scope checks.Scope
 	var err error
 	switch mode {
@@ -92,27 +113,35 @@ func (s *reviewCheckSession) Run(
 	executable string,
 	progress checks.Progress,
 ) ([]checks.Result, error) {
-	results, runErr := s.prepared.Run(ctx, executable, progress)
+	results := []checks.Result{}
+	var runErr error
+	if s.prepared != nil {
+		results, runErr = s.prepared.Run(ctx, executable, progress)
+	}
 	verifyErr := s.verify()
 	closeErr := s.Close()
 	return results, errors.Join(runErr, verifyErr, closeErr)
 }
 
 func (s *reviewCheckSession) SyntheticResults() ([]checks.Result, error) {
-	results, resultErr := s.prepared.SyntheticResults(func(name string) []checks.Diagnostic {
-		path := "dry-run.go"
-		if s.scope.Kind() == checks.ScopeChanged {
-			for _, candidate := range s.scope.Paths() {
-				if filepath.Ext(candidate) == ".go" {
-					path = candidate
-					break
+	results := []checks.Result{}
+	var resultErr error
+	if s.prepared != nil {
+		results, resultErr = s.prepared.SyntheticResults(func(name string) []checks.Diagnostic {
+			path := "dry-run.go"
+			if s.scope.Kind() == checks.ScopeChanged {
+				for _, candidate := range s.scope.Paths() {
+					if filepath.Ext(candidate) == ".go" {
+						path = candidate
+						break
+					}
 				}
 			}
-		}
-		return []checks.Diagnostic{{
-			Path: path, Line: 1, Code: "dry-run", Message: name + " deterministic dry-run diagnostic",
-		}}
-	})
+			return []checks.Diagnostic{{
+				Path: path, Line: 1, Code: "dry-run", Message: name + " deterministic dry-run diagnostic",
+			}}
+		})
+	}
 	verifyErr := s.verify()
 	closeErr := s.Close()
 	return results, errors.Join(resultErr, verifyErr, closeErr)

@@ -13,13 +13,14 @@ import (
 	"strings"
 
 	"github.com/bytedance/sonic"
+	"github.com/yusing/git-agent/internal/followup"
 	"github.com/yusing/git-agent/internal/openai"
 )
 
 const (
 	sessionVersion  = 3
-	MaxFollowUps    = 3
-	maxSessionBytes = 64 << 20
+	MaxFollowUps    = followup.MaxDepth
+	maxSessionBytes = followup.MaxStateBytes
 )
 
 // Session is one independently addressable branch of an exploration chain.
@@ -102,7 +103,7 @@ func (s *Store) FollowUpParent(id, workspace string) (*Session, QueryTarget, err
 	if session.Workspace != workspace {
 		return nil, "", fmt.Errorf("explore search ID %s belongs to workspace %q, not %q", id, session.Workspace, workspace)
 	}
-	if session.Depth >= MaxFollowUps {
+	if !followup.CanReplay(session.Depth) {
 		return nil, session.ActiveTarget, nil
 	}
 	return &session, session.ActiveTarget, nil

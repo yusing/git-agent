@@ -54,3 +54,34 @@ func TestCodebaseReviewCheckSessionPrunesRepositoryIgnoredModules(t *testing.T) 
 		t.Fatal("codebase checker scope lost repository ignore rules")
 	}
 }
+
+func TestChangedReviewCheckSessionAcceptsEmptyFollowUpScope(t *testing.T) {
+	for _, mode := range []reviewtask.Mode{reviewtask.ModeUncommitted, reviewtask.ModeStaged} {
+		t.Run(string(mode), func(t *testing.T) {
+			root := initRepo(t)
+			runGit(t, root, "commit", "-m", "base")
+			repo, err := gitctx.Open(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared, err := reviewtask.PrepareFollowUp(repo, mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(prepared.Paths) != 0 {
+				t.Fatalf("follow-up paths = %v, want empty", prepared.Paths)
+			}
+			session, err := newReviewCheckSession(repo, mode, prepared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			results, err := session.Run(t.Context(), "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(results) != 0 {
+				t.Fatalf("check results = %#v, want empty", results)
+			}
+		})
+	}
+}

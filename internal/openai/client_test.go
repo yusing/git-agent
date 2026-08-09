@@ -210,6 +210,7 @@ func TestCreateResponseReplaysCodexTurnStateOnlyForChatGPT(t *testing.T) {
 	t.Parallel()
 
 	const turnState = "sticky-route"
+	const cacheKey = "review:task-id"
 	requestCount := 0
 	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		requestCount++
@@ -219,6 +220,15 @@ func TestCreateResponseReplaysCodexTurnStateOnlyForChatGPT(t *testing.T) {
 		}
 		if got := request.Header.Get(codexTurnStateHeader); got != wantTurnState {
 			t.Fatalf("request %d turn state = %q, want %q", requestCount, got, wantTurnState)
+		}
+		wantLineage := ""
+		if requestCount < 3 {
+			wantLineage = cacheKey
+		}
+		for _, name := range []string{"session-id", "thread-id"} {
+			if got := request.Header.Get(name); got != wantLineage {
+				t.Fatalf("request %d %s = %q, want %q", requestCount, name, got, wantLineage)
+			}
 		}
 		headers := make(http.Header)
 		headers.Set("Content-Type", "text/event-stream")
@@ -238,7 +248,8 @@ func TestCreateResponseReplaysCodexTurnStateOnlyForChatGPT(t *testing.T) {
 	client := NewHTTPClient(httpClient)
 	request := Request{
 		Model: "gpt-5.6-sol", BaseURL: "https://chatgpt.com/backend-api/codex",
-		APIKey: "test-key", AuthAccountID: "account-id", Input: []Item{NewMessage("user", "task")},
+		APIKey: "test-key", AuthAccountID: "account-id", PromptCacheKey: cacheKey,
+		Input: []Item{NewMessage("user", "task")},
 	}
 	first, err := client.CreateResponse(t.Context(), request)
 	if err != nil {

@@ -50,11 +50,17 @@ type Result struct {
 	ToolCallsByName map[string]int
 	UsedSkills      []string
 	messages        []openai.Item
+	turnState       string
 }
 
 // History returns a replayable snapshot of the completed conversation.
 func (r Result) History() []openai.Item {
 	return slices.Clone(r.messages)
+}
+
+// TurnState returns the provider's opaque sticky-routing state, when present.
+func (r Result) TurnState() string {
+	return r.turnState
 }
 
 type NodeResult struct {
@@ -265,6 +271,7 @@ func (r *OpenAIRunner) RunNode(ctx context.Context, request Request) (NodeResult
 			}
 		}
 	}
+	result.turnState = state.turnState
 	return NodeResult{Final: &result}, nil
 }
 
@@ -1078,12 +1085,14 @@ func writeTraceResponse(recorder *trace.Recorder, response openai.Response) erro
 		continuationTypes = append(continuationTypes, item.Type)
 	}
 	return recorder.Write("response", map[string]any{
-		"id":                 response.ID,
-		"text":               response.Text,
-		"tool_calls":         response.ToolCalls,
-		"hosted_tool_calls":  len(response.HostedToolCalls),
-		"continuation_types": continuationTypes,
-		"finish_kind":        response.FinishKind,
+		"id":                  response.ID,
+		"text":                response.Text,
+		"tool_calls":          response.ToolCalls,
+		"hosted_tool_calls":   len(response.HostedToolCalls),
+		"continuation_types":  continuationTypes,
+		"finish_kind":         response.FinishKind,
+		"input_tokens":        response.Usage.InputTokens,
+		"cached_input_tokens": response.Usage.CachedInputTokens,
 	})
 }
 

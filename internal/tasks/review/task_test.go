@@ -18,7 +18,7 @@ import (
 	"github.com/yusing/git-agent/internal/gitctx"
 )
 
-func TestFollowUpPromptContainsOnlyPriorItemsAndPrompt(t *testing.T) {
+func TestFollowUpPromptContainsCompleteParentReportAndPrompt(t *testing.T) {
 	t.Parallel()
 
 	check := checks.Result{
@@ -37,12 +37,13 @@ func TestFollowUpPromptContainsOnlyPriorItemsAndPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(reviewPrompt, `"previous_findings"`) || !strings.Contains(reviewPrompt, `"prompt":"I fixed it"`) {
+	if !strings.Contains(reviewPrompt, `"previous_report"`) ||
+		!strings.Contains(reviewPrompt, `"prompt":"I fixed it"`) {
 		t.Fatalf("review follow-up prompt = %s", reviewPrompt)
 	}
-	for _, excluded := range []string{"old summary", "recommendation", "checks", "no eligible Go targets"} {
-		if strings.Contains(reviewPrompt, excluded) {
-			t.Fatalf("review follow-up prompt contains %q: %s", excluded, reviewPrompt)
+	for _, want := range []string{"old summary", "recommendation", "checks", "no eligible Go targets", "missing case"} {
+		if !strings.Contains(reviewPrompt, want) {
+			t.Fatalf("review follow-up prompt missing %q: %s", want, reviewPrompt)
 		}
 	}
 
@@ -57,8 +58,30 @@ func TestFollowUpPromptContainsOnlyPriorItemsAndPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(simplifyPrompt, `"previous_opportunities"`) || strings.Contains(simplifyPrompt, "old summary") {
+	if !strings.Contains(simplifyPrompt, `"previous_report"`) || !strings.Contains(simplifyPrompt, "old summary") {
 		t.Fatalf("simplify follow-up prompt = %s", simplifyPrompt)
+	}
+}
+
+func TestFollowUpContextPromptContainsOnlyFreshRepositoryState(t *testing.T) {
+	t.Parallel()
+
+	prompt, err := FollowUpContextPrompt(PreparedContext{
+		Mode: ModeStaged, Diff: "diff --git a/a.go b/a.go", DiffTruncated: true,
+		ContextPack: contextpack.ContextPack{Groups: []contextpack.ChangeGroup{{}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"current_repository_context", "staged", "diff --git", "diff_truncated"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("follow-up context missing %q: %s", want, prompt)
+		}
+	}
+	for _, duplicate := range []string{"Review authoritative scope", "prepared_change_context", "context_pack"} {
+		if strings.Contains(prompt, duplicate) {
+			t.Fatalf("follow-up context repeated %q: %s", duplicate, prompt)
+		}
 	}
 }
 

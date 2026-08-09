@@ -201,16 +201,3 @@ func FollowUpInput(parent Session, prompt string, target QueryTarget) []openai.I
 	}
 	return append(items, openai.NewMessage("user", prompt))
 }
-
-// PromptCacheKey returns one stable provider cache identity for an exploration
-// tree. Initial batch siblings share the first sorted item ID; descendants
-// inherit that root identity from their persisted parent.
-func PromptCacheKey(parent *Session, items []BatchItem) string {
-	if parent != nil {
-		return parent.PromptCacheKey
-	}
-	if len(items) == 0 {
-		return ""
-	}
-	return "explore:" + items[0].ID
-}

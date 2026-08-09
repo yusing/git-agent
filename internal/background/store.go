@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"github.com/yusing/git-agent/internal/followup"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/textutil"
 	"github.com/yusing/git-agent/internal/trace"
@@ -24,11 +25,12 @@ import (
 const (
 	legacyRecordVersion = 1
 	diagnosticVersion   = 2
-	recordVersion       = 3
+	turnRecordVersion   = 3
+	recordVersion       = 4
 	defaultPollInterval = 100 * time.Millisecond
 	heartbeatInterval   = 5 * time.Second
 	heartbeatStaleAfter = 30 * time.Second
-	maxRecordBytes      = 4 << 20
+	maxRecordBytes      = followup.MaxStateBytes
 	maxDiagnosticEvents = 8
 	maxDiagnosticBytes  = 4 << 10
 	maxDiagnosticLines  = 40
@@ -500,7 +502,7 @@ func (s *Store) readPath(path, id string) (Record, error) {
 }
 
 func validateRecord(record Record, id string) error {
-	if record.Version != legacyRecordVersion && record.Version != diagnosticVersion && record.Version != recordVersion {
+	if record.Version != legacyRecordVersion && record.Version != diagnosticVersion && record.Version != turnRecordVersion && record.Version != recordVersion {
 		return fmt.Errorf("background task %s has unsupported record version %d", id, record.Version)
 	}
 	if record.ID != id {
@@ -518,10 +520,10 @@ func validateRecord(record Record, id string) error {
 	if record.Version == legacyRecordVersion && record.Failure != nil {
 		return fmt.Errorf("background task %s legacy record contains failure diagnostics", id)
 	}
-	if record.Version < recordVersion && record.Turn != nil {
+	if record.Version < turnRecordVersion && record.Turn != nil {
 		return fmt.Errorf("background task %s legacy record contains turn metadata", id)
 	}
-	if err := validateTurnMetadata(record.Turn); err != nil {
+	if err := validateTurnMetadata(record.Turn, record.Version >= recordVersion); err != nil {
 		return fmt.Errorf("background task %s: %w", id, err)
 	}
 	if record.Failure != nil && (record.Terminal == nil || record.Terminal.Kind != "error") {

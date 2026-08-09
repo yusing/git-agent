@@ -415,7 +415,7 @@ func expectedOptionCandidates(command fishCompletionCommand, used []fishCompleti
 		}
 		if _, followUp := seen["follow-up"]; followUp {
 			for option := range seen {
-				if option != "follow-up" && option != "fast" {
+				if option != "follow-up" && option != "fast" && option != "debug" {
 					return nil
 				}
 			}
@@ -461,11 +461,11 @@ func completionOptionCompatible(command, candidate string, seen map[string]fishC
 			return len(seen) == 0
 		}
 		if _, followUp := seen["follow-up"]; followUp {
-			return candidate == "fast"
+			return candidate == "fast" || candidate == "debug"
 		}
 		if candidate == "follow-up" {
 			for option := range seen {
-				if option != "fast" {
+				if option != "fast" && option != "debug" {
 					return false
 				}
 			}

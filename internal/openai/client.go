@@ -206,6 +206,12 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 			option.WithHeader("originator", codexClientIdentity),
 			option.WithHeader("User-Agent", codexClientIdentity),
 		)
+		if request.PromptCacheKey != "" && supportsCodexTurnState(request) {
+			opts = append(opts,
+				option.WithHeader("session-id", request.PromptCacheKey),
+				option.WithHeader("thread-id", request.PromptCacheKey),
+			)
+		}
 		if request.Model == "gpt-5.6" {
 			request.Model = "gpt-5.6-sol"
 		}
@@ -270,21 +276,27 @@ func (e *streamEventPublishError) Error() string {
 func (e *streamEventPublishError) Unwrap() error { return e.err }
 
 func createStreamingResponse(ctx context.Context, client openaisdk.Client, params responses.ResponseNewParams, providerAttempt int, codexTurnStateEnabled bool, turnState string, onStreamEvent func(StreamEvent) error) (Response, error) {
-	var rawResponse *http.Response
+	capturedTurnState := turnState
 	requestOptions := make([]option.RequestOption, 0, 2)
 	if codexTurnStateEnabled {
-		requestOptions = append(requestOptions, option.WithResponseInto(&rawResponse))
+		requestOptions = append(requestOptions, option.WithMiddleware(func(
+			request *http.Request,
+			next option.MiddlewareNext,
+		) (*http.Response, error) {
+			response, err := next(request)
+			if response != nil {
+				if value := strings.TrimSpace(response.Header.Get(codexTurnStateHeader)); value != "" {
+					capturedTurnState = value
+				}
+			}
+			return response, err
+		}))
 		if turnState != "" {
 			requestOptions = append(requestOptions, option.WithHeader(codexTurnStateHeader, turnState))
 		}
 	}
 	captureTurnState := func(result Response) Response {
-		result.TurnState = turnState
-		if rawResponse != nil {
-			if value := strings.TrimSpace(rawResponse.Header.Get(codexTurnStateHeader)); value != "" {
-				result.TurnState = value
-			}
-		}
+		result.TurnState = capturedTurnState
 		return result
 	}
 	stream := client.Responses.NewStreaming(ctx, params, requestOptions...)

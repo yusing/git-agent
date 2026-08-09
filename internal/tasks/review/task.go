@@ -291,8 +291,8 @@ func SystemPrompt(kind Kind) string {
 	}
 }
 
-// FollowUpPrompt constructs the only user message for a fresh follow-up
-// conversation from a validated public parent report.
+// FollowUpPrompt constructs the user message that adds the complete parent
+// report and the requested re-evaluation to inherited conversation input.
 func FollowUpPrompt(kind Kind, report any, prompt string) (string, error) {
 	data, err := sonic.Marshal(report)
 	if err != nil {
@@ -308,9 +308,9 @@ func FollowUpPrompt(kind Kind, report any, prompt string) (string, error) {
 			return "", err
 		}
 		return marshalFollowUp(struct {
-			PreviousFindings []Finding `json:"previous_findings"`
-			Prompt           string    `json:"prompt"`
-		}{PreviousFindings: parent.Findings, Prompt: prompt})
+			PreviousReport FinalReviewReport `json:"previous_report"`
+			Prompt         string            `json:"prompt"`
+		}{PreviousReport: parent, Prompt: prompt})
 	case KindSimplify:
 		var parent SimplifyReport
 		if err := sonic.Unmarshal(data, &parent); err != nil {
@@ -320,12 +320,30 @@ func FollowUpPrompt(kind Kind, report any, prompt string) (string, error) {
 			return "", fmt.Errorf("invalid parent simplify report: %s", strings.Join(errs, "; "))
 		}
 		return marshalFollowUp(struct {
-			PreviousOpportunities []Opportunity `json:"previous_opportunities"`
-			Prompt                string        `json:"prompt"`
-		}{PreviousOpportunities: parent.Opportunities, Prompt: prompt})
+			PreviousReport SimplifyReport `json:"previous_report"`
+			Prompt         string         `json:"prompt"`
+		}{PreviousReport: parent, Prompt: prompt})
 	default:
 		return "", fmt.Errorf("unknown report kind %q", kind)
 	}
+}
+
+type followUpRepositoryContext struct {
+	Mode          Mode   `json:"mode"`
+	Diff          string `json:"diff,omitempty"`
+	DiffTruncated bool   `json:"diff_truncated,omitempty"`
+}
+
+// FollowUpContextPrompt adds only fresh authoritative state. The inherited
+// conversation already contains the mission, scope rules, and prior context.
+func FollowUpContextPrompt(prepared PreparedContext) (string, error) {
+	return marshalFollowUp(struct {
+		CurrentRepositoryContext followUpRepositoryContext `json:"current_repository_context"`
+	}{
+		CurrentRepositoryContext: followUpRepositoryContext{
+			Mode: prepared.Mode, Diff: prepared.Diff, DiffTruncated: prepared.DiffTruncated,
+		},
+	})
 }
 
 func marshalFollowUp(value any) (string, error) {
