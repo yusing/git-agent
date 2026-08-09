@@ -5,7 +5,7 @@ go 1.26.5
 require (
 	github.com/bytedance/sonic v1.15.2
 	github.com/go-git/go-billy/v6 v6.0.0-alpha.2
-	github.com/go-git/go-git/v6 v6.0.0-alpha.4
+	github.com/go-git/go-git/v6 v6.0.0-alpha.5
 	github.com/golangci/golangci-lint/v2 v2.12.2
 	github.com/openai/openai-go/v3 v3.46.0
 	github.com/yusing/goutils v0.0.0-20260713173753-e8944db5b4e1
