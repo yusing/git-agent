@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +42,7 @@ type Request struct {
 	Input                 []openai.Item
 	ControlTool           *tools.Definition
 	TurnState             string
+	TurnID                string
 }
 
 type Result struct {
@@ -76,6 +78,7 @@ type BranchRequest struct {
 	ToolCallsByName map[string]int
 	UsedSkills      []string
 	TurnState       string
+	TurnID          string
 	messages        []openai.Item
 }
 
@@ -145,6 +148,7 @@ type OpenAIRunner struct {
 type runState struct {
 	hostedCapabilities []provider.HostedCapability
 	turnState          string
+	turnID             string
 }
 
 func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error) {
@@ -203,7 +207,14 @@ func (r *OpenAIRunner) RunNode(ctx context.Context, request Request) (NodeResult
 		toolSpecs = append(toolSpecs, openai.ToolSpec{Name: def.Name, Description: def.Description, Schema: def.Schema, Strict: def.Strict})
 	}
 
-	state := &runState{hostedCapabilities: slices.Clone(r.HostedCapabilities), turnState: request.TurnState}
+	state := &runState{
+		hostedCapabilities: slices.Clone(r.HostedCapabilities),
+		turnState:          request.TurnState,
+		turnID:             request.TurnID,
+	}
+	if state.turnID == "" {
+		state.turnID = rand.Text()
+	}
 	parallelToolCalls := request.ParallelToolCalls
 	stableInstructions := requestInstructions(request.SystemPrompt, toolSpecs, state.hostedCapabilities)
 	runResult, err := r.runUntilOutcome(ctx, stableInstructions, messages, toolSpecs, request.TextFormat, request.MaxSteps, state, controlToolName, parallelToolCalls)
@@ -314,6 +325,7 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, stableInstructions s
 			parallelToolCalls,
 		)
 		req.TurnState = state.turnState
+		req.TurnID = state.turnID
 		estimatedTokens := estimateRequestTokens(req)
 		r.attachRetryStatus(&req, step+1, maxSteps, result.ToolCalls, maxToolCalls, estimatedTokens, started)
 		if err := r.writeRuntimeStatus("requesting", step+1, maxSteps, result.ToolCalls, maxToolCalls, estimatedTokens, 0, started); err != nil {
@@ -505,6 +517,7 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, stableInstructions s
 				ToolCalls: result.ToolCalls, RepairCalls: result.RepairCalls,
 				ToolCallsByName: result.ToolCallsByName,
 				TurnState:       state.turnState,
+				TurnID:          state.turnID,
 				UsedSkills:      slices.Clone(result.UsedSkills), messages: messages,
 			}}, nil
 		}
@@ -907,6 +920,7 @@ func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions st
 	finalMessages := append(completedMessages, finalMessage)
 	req := r.providerRequest(instructions, finalMessages, nil, nil, textFormat, false)
 	req.TurnState = state.turnState
+	req.TurnID = state.turnID
 	r.attachRetryStatus(&req, status.Step, status.MaxSteps, toolCalls, status.MaxToolCalls, estimateRequestTokens(req), started)
 	if err := writeTraceRequest(r.Trace, req); err != nil {
 		return Result{}, err

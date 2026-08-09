@@ -1555,6 +1555,9 @@ func TestRunnerExecutesToolCallRoundTrip(t *testing.T) {
 	if client.requests[0].TurnState != "" || client.requests[1].TurnState != "sticky-route" {
 		t.Fatalf("request turn states = %q, %q", client.requests[0].TurnState, client.requests[1].TurnState)
 	}
+	if client.requests[0].TurnID == "" || client.requests[1].TurnID != client.requests[0].TurnID {
+		t.Fatalf("request turn IDs = %q, %q", client.requests[0].TurnID, client.requests[1].TurnID)
+	}
 	if client.requests[0].Instructions != client.requests[1].Instructions {
 		t.Fatalf("instructions changed between cacheable requests")
 	}

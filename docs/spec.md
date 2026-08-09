@@ -368,12 +368,14 @@ depth semantics to force cache eligibility. Models outside the GPT-5.6 family
 use provider-default caching, but official OpenAI requests still carry the stable
 cache key. The ChatGPT Codex endpoint receives that key without explicit
 breakpoint options and also receives it as the stable `session-id` and
-`thread-id` routing identity. Git-agent captures the opaque
-`x-codex-turn-state` response header when supplied and replays it on later
-requests in the same cache lineage, including immediate child branches and
-context-preserving detached follow-ups. A depth reset starts with new routing
-identities and no turn-state header. Custom endpoints receive no prompt-cache
-fields or Codex routing headers.
+`thread-id` routing identity. Each initial inspection or detached follow-up
+starts with a fresh `x-codex-turn-metadata` turn identity; later provider
+requests and immediate child branches within that inspection reuse it.
+Git-agent captures the opaque `x-codex-turn-state` response header when
+supplied and replays it on later requests in the same cache lineage, including
+immediate child branches and context-preserving detached follow-ups. A depth
+reset starts with new routing identities and no turn-state header. Custom
+endpoints receive no prompt-cache fields or Codex routing headers.
 Child model and reasoning effort inherit by default or select from the bounded
 model catalog returned by `branch_help` and enforced by the strict `branch`
 function. Every required leaf must pass the ordinary report and

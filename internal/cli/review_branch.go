@@ -292,6 +292,7 @@ func (t *reviewTree) runNode(
 				child.Model == runner.Config.Model,
 			)
 			childRequest.TurnState = outcome.Branch.TurnState
+			childRequest.TurnID = outcome.Branch.TurnID
 			childRequest.ControlTool = nil
 			results[index], errorsByChild[index] = t.runNode(ctx, childRunner, childRequest, child.branchNode, child.Scope, child.Model, child.ReasoningEffort)
 			if errorsByChild[index] != nil {

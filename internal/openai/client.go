@@ -41,6 +41,7 @@ type Request struct {
 	Instructions       string                      `json:"instructions,omitempty"`
 	PromptCacheKey     string                      `json:"prompt_cache_key,omitempty"`
 	TurnState          string                      `json:"-"`
+	TurnID             string                      `json:"-"`
 	ParallelToolCalls  bool                        `json:"parallel_tool_calls"`
 	Input              []Item                      `json:"input"`
 	Tools              []ToolSpec                  `json:"tools,omitempty"`
@@ -191,6 +192,14 @@ const DefaultDialTimeout = 5 * time.Second
 const codexClientIdentity = "codex_cli_rs"
 const codexTurnStateHeader = "x-codex-turn-state"
 
+const codexTurnMetadataHeader = "x-codex-turn-metadata"
+
+type codexTurnMetadata struct {
+	SessionID string `json:"session_id"`
+	ThreadID  string `json:"thread_id"`
+	TurnID    string `json:"turn_id"`
+}
+
 func NewHTTPClient(client *http.Client) *SDKClient {
 	return &SDKClient{HTTPClient: withDefaultDialTimeout(client)}
 }
@@ -211,6 +220,19 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 				option.WithHeader("session-id", request.PromptCacheKey),
 				option.WithHeader("thread-id", request.PromptCacheKey),
 			)
+			if request.TurnID != "" {
+				// Source: codex-rs/core/src/responses_metadata.rs:255:270
+				// CodexResponsesMetadata.compatibility_headers.
+				turnMetadata, err := sonic.MarshalString(codexTurnMetadata{
+					SessionID: request.PromptCacheKey,
+					ThreadID:  request.PromptCacheKey,
+					TurnID:    request.TurnID,
+				})
+				if err != nil {
+					return Response{}, fmt.Errorf("encoding Codex turn metadata: %w", err)
+				}
+				opts = append(opts, option.WithHeader(codexTurnMetadataHeader, turnMetadata))
+			}
 		}
 		if request.Model == "gpt-5.6" {
 			request.Model = "gpt-5.6-sol"

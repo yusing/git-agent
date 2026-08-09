@@ -20,6 +20,7 @@ type branchClient struct {
 	models     map[string]string
 	parallel   map[string]bool
 	turnStates map[string]string
+	turnIDs    map[string]string
 	b2Started  chan struct{}
 }
 
@@ -32,6 +33,7 @@ func (c *branchClient) CreateResponse(ctx context.Context, request openai.Reques
 	c.mu.Lock()
 	c.parallel[requestID] = request.ParallelToolCalls
 	c.turnStates[requestID] = request.TurnState
+	c.turnIDs[requestID] = request.TurnID
 	if branchID != "" {
 		c.models[branchID] = request.Model + "/" + request.ThinkingMode
 	}
@@ -70,7 +72,7 @@ func (c *branchClient) CreateResponse(ctx context.Context, request openai.Reques
 }
 
 func TestRunReviewTreeFansOutAggregatesAndPublishesOrderedBranchEvents(t *testing.T) {
-	client := &branchClient{models: map[string]string{}, parallel: map[string]bool{}, turnStates: map[string]string{}, b2Started: make(chan struct{})}
+	client := &branchClient{models: map[string]string{}, parallel: map[string]bool{}, turnStates: map[string]string{}, turnIDs: map[string]string{}, b2Started: make(chan struct{})}
 	var events []trace.Event
 	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
 		events = append(events, event)
@@ -112,6 +114,9 @@ func TestRunReviewTreeFansOutAggregatesAndPublishesOrderedBranchEvents(t *testin
 	}
 	if client.turnStates["root"] != "" || client.turnStates["b1"] != "sticky-route" || client.turnStates["b2"] != "sticky-route" {
 		t.Fatalf("review node turn states = %#v", client.turnStates)
+	}
+	if client.turnIDs["root"] == "" || client.turnIDs["b1"] != client.turnIDs["root"] || client.turnIDs["b2"] != client.turnIDs["root"] {
+		t.Fatalf("review node turn IDs = %#v", client.turnIDs)
 	}
 
 	fanoutIndex := eventIndex(events, "branch.fanout")

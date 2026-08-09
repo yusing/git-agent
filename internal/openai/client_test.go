@@ -211,6 +211,9 @@ func TestCreateResponseReplaysCodexTurnStateOnlyForChatGPT(t *testing.T) {
 
 	const turnState = "sticky-route"
 	const cacheKey = "review:task-id"
+	const nextCacheKey = "review:next-task"
+	const firstTurnID = "turn-1"
+	const nextTurnID = "turn-2"
 	requestCount := 0
 	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		requestCount++
@@ -222,12 +225,33 @@ func TestCreateResponseReplaysCodexTurnStateOnlyForChatGPT(t *testing.T) {
 			t.Fatalf("request %d turn state = %q, want %q", requestCount, got, wantTurnState)
 		}
 		wantLineage := ""
-		if requestCount < 3 {
+		switch requestCount {
+		case 1, 2:
 			wantLineage = cacheKey
+		case 4:
+			wantLineage = nextCacheKey
 		}
 		for _, name := range []string{"session-id", "thread-id"} {
 			if got := request.Header.Get(name); got != wantLineage {
 				t.Fatalf("request %d %s = %q, want %q", requestCount, name, got, wantLineage)
+			}
+		}
+		gotTurnMetadata := request.Header.Get(codexTurnMetadataHeader)
+		if wantLineage == "" {
+			if gotTurnMetadata != "" {
+				t.Fatalf("request %d turn metadata = %q, want empty", requestCount, gotTurnMetadata)
+			}
+		} else {
+			var metadata codexTurnMetadata
+			if err := json.Unmarshal([]byte(gotTurnMetadata), &metadata); err != nil {
+				t.Fatalf("request %d turn metadata = %q: %v", requestCount, gotTurnMetadata, err)
+			}
+			wantTurnID := firstTurnID
+			if requestCount == 4 {
+				wantTurnID = nextTurnID
+			}
+			if metadata.SessionID != wantLineage || metadata.ThreadID != wantLineage || metadata.TurnID != wantTurnID {
+				t.Fatalf("request %d turn metadata = %+v, want lineage %q and turn %q", requestCount, metadata, wantLineage, wantTurnID)
 			}
 		}
 		headers := make(http.Header)
@@ -249,7 +273,8 @@ func TestCreateResponseReplaysCodexTurnStateOnlyForChatGPT(t *testing.T) {
 	request := Request{
 		Model: "gpt-5.6-sol", BaseURL: "https://chatgpt.com/backend-api/codex",
 		APIKey: "test-key", AuthAccountID: "account-id", PromptCacheKey: cacheKey,
-		Input: []Item{NewMessage("user", "task")},
+		TurnID: firstTurnID,
+		Input:  []Item{NewMessage("user", "task")},
 	}
 	first, err := client.CreateResponse(t.Context(), request)
 	if err != nil {
@@ -274,6 +299,18 @@ func TestCreateResponseReplaysCodexTurnStateOnlyForChatGPT(t *testing.T) {
 	}
 	if custom.TurnState != "" {
 		t.Fatalf("custom response retained Codex turn state %q", custom.TurnState)
+	}
+
+	request.BaseURL = "https://chatgpt.com/backend-api/codex"
+	request.PromptCacheKey = nextCacheKey
+	request.TurnState = ""
+	request.TurnID = nextTurnID
+	reset, err := client.CreateResponse(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reset.TurnState != "" {
+		t.Fatalf("reset response retained Codex turn state %q", reset.TurnState)
 	}
 }
 

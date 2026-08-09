@@ -170,11 +170,13 @@ continue every terminal branch and may branch again. Follow-up accepts `--debug`
 and `--fast`, rejects every other additional flag, and uses the same SSE and
 `--wait` workflow. Three turns preserve the cache lineage before the next turn
 starts a new cache lineage while retaining the inherited input and report.
-The stable cache key also supplies Codex's `session-id` and `thread-id` routing
-identity. An opaque Codex turn-state header, when returned, follows the same
-lineage: child branches and context-preserving detached follow-ups inherit it,
-while a cache-lineage reset starts with new routing state. Follow-ups append only
-fresh repository diff
+The stable cache key supplies Codex's `session-id` and `thread-id` routing
+identity. Each initial inspection or detached follow-up also receives a fresh
+`x-codex-turn-metadata` turn identity that remains stable across tool calls and
+immediate child branches. An opaque Codex turn-state header, when returned,
+follows the cache lineage: child branches and context-preserving detached
+follow-ups inherit it, while a cache-lineage reset starts with new routing
+state. Follow-ups append only fresh repository diff
 context rather than repeating the initial mission and scope prompt.
 
 Without a trailing focus, review reports all actionable findings and simplify
