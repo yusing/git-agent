@@ -1022,9 +1022,11 @@ batch immediately. After batch collection, the leader starts one ordinary
 index-only synchronization beside the Responses API request; it waits for both
 operations before persisting sessions or publishing answers. Because that
 remote observation starts after the batch is collected, it confirms freshness
-for every included search. A missing vector makes the warm-only probe stop
-before embedding and rerun the original blocking synchronization path. Remote
-failure remains terminal even when provider work already completed.
+for every included warm search. A missing vector makes the warm-only probe stop
+before embedding and publish no semantic leads. The batch proceeds directly to
+the Responses API with the existing read-only exploration tools and does not
+build or synchronize the cold index. Remote failure on the warm path remains
+terminal even when provider work already completed.
 
 A matching remote-tracking ref and locally present commit skip object fetch; a
 clean synchronized worktree skips commit and push. Failed synchronization never

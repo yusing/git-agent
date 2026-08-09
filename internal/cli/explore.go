@@ -207,23 +207,15 @@ func (a *App) prepareExploreSearch(ctx context.Context, question string, timing 
 		return writeErr
 	}
 
-	var output searchtask.Output
-	deferredFreshness := false
-	if strings.TrimSpace(opts.IndexRemote) != "" {
-		warmOpts := opts
-		warmOpts.IndexRemote = ""
-		warmOpts.RequireWarmIndex = true
-		output, err = searchtask.Run(ctx, client, warmOpts, question)
-		if errors.Is(err, searchtask.ErrIndexNotWarm) {
-			for _, phase := range output.Diagnostics.Timings {
-				timing.recordSimple("semantic_search.warm_probe."+phase.Step, phase.Duration)
-			}
-			output, err = searchtask.Run(ctx, client, opts, question)
-		} else if err == nil && output.Source.OriginIdentity != "" {
-			deferredFreshness = true
+	warmOpts := opts
+	warmOpts.IndexRemote = ""
+	warmOpts.RequireWarmIndex = true
+	output, err := searchtask.Run(ctx, client, warmOpts, question)
+	if errors.Is(err, searchtask.ErrIndexNotWarm) {
+		for _, phase := range output.Diagnostics.Timings {
+			timing.recordSimple("semantic_search.warm_probe."+phase.Step, phase.Duration)
 		}
-	} else {
-		output, err = searchtask.Run(ctx, client, opts, question)
+		return explore.Prepared{}, nil
 	}
 	for _, phase := range output.Diagnostics.Timings {
 		timing.recordSimple("semantic_search."+phase.Step, phase.Duration)
@@ -231,6 +223,7 @@ func (a *App) prepareExploreSearch(ctx context.Context, question string, timing 
 	if err != nil {
 		return explore.Prepared{}, err
 	}
+	deferredFreshness := strings.TrimSpace(opts.IndexRemote) != "" && output.Source.OriginIdentity != ""
 	semantic, err := sonic.ConfigStd.Marshal(output)
 	if err != nil {
 		return explore.Prepared{}, fmt.Errorf("encode explore semantic results: %w", err)

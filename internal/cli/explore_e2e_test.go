@@ -37,8 +37,8 @@ func TestExploreCommandEndToEndChainResetAndReadTool(t *testing.T) {
 		t.Fatalf("initial stderr missing progress:\n%s", initial.stderr)
 	}
 	initialEmbeddingCalls := embeddingStats.calls()
-	if initialEmbeddingCalls == 0 {
-		t.Fatal("initial explore skipped semantic retrieval")
+	if initialEmbeddingCalls != 0 {
+		t.Fatalf("cold initial explore embedding calls = %d, want 0", initialEmbeddingCalls)
 	}
 
 	store, err := explore.NewStore(projectMetadataDir(t, repoDir))
@@ -88,8 +88,8 @@ func TestExploreCommandEndToEndChainResetAndReadTool(t *testing.T) {
 	if resetSession.InstructionTarget != explore.QueryTargetOwner || resetSession.ActiveTarget != explore.QueryTargetOwner {
 		t.Fatalf("reset targets = %q/%q, want inherited owner", resetSession.InstructionTarget, resetSession.ActiveTarget)
 	}
-	if got := embeddingStats.calls(); got <= initialEmbeddingCalls {
-		t.Fatalf("fourth follow-up embedding calls = %d, want > %d", got, initialEmbeddingCalls)
+	if got := embeddingStats.calls(); got != initialEmbeddingCalls {
+		t.Fatalf("cold fresh reset embedding calls = %d, want %d", got, initialEmbeddingCalls)
 	}
 	if calls, outputs := responseStats.readCounts(); calls != 1 || outputs != 1 {
 		t.Fatalf("read tool calls/observed outputs = %d/%d, want 1/1", calls, outputs)

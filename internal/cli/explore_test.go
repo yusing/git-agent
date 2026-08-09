@@ -81,6 +81,27 @@ func TestRunWithExploreFreshnessCancelsProviderOnConfirmationFailure(t *testing.
 	}
 }
 
+func TestPrepareExploreSearchSkipsColdIndexWithoutRemote(t *testing.T) {
+	root := initRepo(t)
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_EMBEDDING_DIMENSIONS", "3")
+	writeFixtureFile(t, filepath.Join(root, "app.go"), "package app\n\nfunc Stable() {}\n")
+	t.Chdir(root)
+	embedder := &exploreFakeEmbedder{}
+	app := &App{stderr: &bytes.Buffer{}, embeddingClient: embedder}
+
+	prepared, err := app.prepareExploreSearch(t.Context(), "find stable", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.SemanticResults != "" || len(prepared.GuidancePaths) != 0 || prepared.DeferredFreshness {
+		t.Fatalf("cold explore preparation = %#v, want empty", prepared)
+	}
+	if calls := embedder.calls.Load(); calls != 0 {
+		t.Fatalf("cold explore embedding calls = %d, want 0", calls)
+	}
+}
+
 func TestPrepareExploreSearchDefersFreshnessOnlyForWarmIndex(t *testing.T) {
 	root := initRepo(t)
 	t.Setenv("OPENAI_API_KEY", "test-key")
@@ -95,20 +116,39 @@ func TestPrepareExploreSearchDefersFreshnessOnlyForWarmIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(root)
-	app := &App{stderr: &bytes.Buffer{}, embeddingClient: &exploreFakeEmbedder{}}
+	embedder := &exploreFakeEmbedder{}
+	app := &App{stderr: &bytes.Buffer{}, embeddingClient: embedder}
+
 	cold, err := app.prepareExploreSearch(t.Context(), "find stable", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cold.DeferredFreshness {
-		t.Fatal("cold explore deferred freshness")
+	if cold.SemanticResults != "" || len(cold.GuidancePaths) != 0 || cold.DeferredFreshness {
+		t.Fatalf("cold explore preparation = %#v, want empty", cold)
 	}
+	if calls := embedder.calls.Load(); calls != 0 {
+		t.Fatalf("cold explore embedding calls = %d, want 0", calls)
+	}
+
+	client, opts, err := app.exploreSearchOptions(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts.IndexRemote = ""
+	if _, err := searchtask.Run(t.Context(), client, opts, "build stable index"); err != nil {
+		t.Fatal(err)
+	}
+	embedder.calls.Store(0)
+
 	warm, err := app.prepareExploreSearch(t.Context(), "find stable", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !warm.DeferredFreshness {
-		t.Fatal("warm explore kept freshness on the semantic-search critical path")
+	if !warm.DeferredFreshness || warm.SemanticResults == "" {
+		t.Fatalf("warm explore preparation = %#v", warm)
+	}
+	if calls := embedder.calls.Load(); calls == 0 {
+		t.Fatal("warm explore skipped semantic retrieval")
 	}
 }
 
@@ -267,7 +307,7 @@ func TestExploreReportsPhaseTimingsOnStderr(t *testing.T) {
 	for _, phase := range []string{
 		"setup",
 		"reservation",
-		"semantic_search.discover",
+		"semantic_search.warm_probe.discover",
 		"semantic_search",
 		"join_grace",
 		"batch_join",
@@ -574,8 +614,8 @@ func TestExploreInitialFollowUpsAndFreshReset(t *testing.T) {
 		t.Fatalf("initial output = %#v", output)
 	}
 	initialEmbeddingCalls := embedder.calls.Load()
-	if initialEmbeddingCalls == 0 {
-		t.Fatal("initial explore skipped semantic retrieval")
+	if initialEmbeddingCalls != 0 {
+		t.Fatalf("cold initial explore embedding calls = %d, want 0", initialEmbeddingCalls)
 	}
 
 	for depth := 1; depth <= explore.MaxFollowUps; depth++ {
@@ -586,8 +626,8 @@ func TestExploreInitialFollowUpsAndFreshReset(t *testing.T) {
 	}
 	beforeReset := embedder.calls.Load()
 	output = runExploreForTest(t, app, &stdout, "--follow-up", output.ID, "--for", "owner", "start", "fresh")
-	if got := embedder.calls.Load(); got <= beforeReset {
-		t.Fatalf("fourth follow-up embedding calls = %d, want > %d", got, beforeReset)
+	if got := embedder.calls.Load(); got != beforeReset {
+		t.Fatalf("cold fresh reset embedding calls = %d, want %d", got, beforeReset)
 	}
 	identity, err := projectidentity.Resolve(root)
 	if err != nil {
@@ -703,6 +743,13 @@ func TestExploreGlobalCWDIsCompleteWorkspaceBoundary(t *testing.T) {
 	app := &App{
 		stdin: strings.NewReader(""), stdout: &stdout, stderr: &bytes.Buffer{},
 		responseClient: responses, embeddingClient: &exploreFakeEmbedder{},
+	}
+	client, opts, err := app.exploreSearchOptions(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := searchtask.Run(t.Context(), client, opts, "where is Answer"); err != nil {
+		t.Fatal(err)
 	}
 	if err := app.Run(t.Context(), []string{"--cwd", workspace, "explore", "where", "is", "Answer"}); err != nil {
 		t.Fatal(err)
