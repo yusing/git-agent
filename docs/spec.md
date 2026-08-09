@@ -186,11 +186,11 @@ Mode flags are mutually exclusive. No mode flag means `--uncommitted`.
 - `--orchestration-artifact <absolute-path>` validates an owner-only manifest
   and its declared immutable files beneath manifest directory. It enables no
   arbitrary filesystem access.
-- `--dry-run` preserves repository preparation, detached launch, authenticated
-  SSE, optional orchestration validation, and repeatable wait output while
-  replacing provider execution with deterministic schema-valid reasoning, tool,
-  and final events. Fifteen emitted events each wait an independent random
-  500–1000 ms, keeping run observable for roughly 8–16 seconds.
+- `--dry-run` preserves repository preparation, detached launch, optional
+  orchestration validation, and repeatable wait output while replacing provider
+  execution with a deterministic schema-valid fixture. Its fifteen internal
+  steps each wait an independent random 500–1000 ms, keeping the run observable
+  through `--wait` completion after roughly 8–16 seconds.
 - `--help-agent` returns help for automated coding agents: the launch synopsis,
   the three scope modes, `--depth`, and the mutually exclusive reasoning-effort
   flags `--low`, `--medium`, `--high`, and `--xhigh` rendered on one line. Its
@@ -306,8 +306,9 @@ check result.
 #### `git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]`
 
 Run a read-only simplification audit using same mode selection, prepared diff,
-guidance, skill, tool, validation-repair, SSE, and trailing-prompt contracts as
-`review`. It reports opportunities; it never edits files. Output object requires
+guidance, skill, tool, validation-repair, detached launch, and trailing-prompt
+contracts as `review`. It reports opportunities; it never edits files. The
+output object requires
 `summary` and `opportunities`. Each opportunity requires `aspect`, `title`,
 `body`, `evidences`, and `proposed_change`; `aspect` is one of `reuse`,
 `clarity`, or `efficiency`. Evidence objects use same required location schema
@@ -391,54 +392,25 @@ parse, validation, cancellation, or deadline failure is instead a required-child
 failure: it cancels remaining siblings and fails the one detached task without
 publishing a partial report.
 
-Both commands always bind an HTTP server to a private local Unix-domain socket
-after local validation. The launcher publishes its socket network, absolute
-address, and token-bearing `http://localhost/events` request URL in launch JSON
-before the first provider request. Requests without that per-run token are rejected. SSE uses
-`id`, `event`, and JSON `data` fields, buffers events for late clients, and
-honors `Last-Event-ID`. Stream includes `session.started`, `session`, `request`,
-`reasoning_summary.delta`, `reasoning_summary.done`, `response`, `tool-call`,
-`tool-output`, `hosted-tool-call`, `hosted-capability`, `runtime.status`,
-`budget`, and terminal `final` or `error` events as applicable. Every `response`
-event includes the provider-reported integer `input_tokens` and
-`cached_input_tokens`; debug clients calculate the per-request cache ratio as
-`cached_input_tokens / input_tokens` when `input_tokens` is positive.
-Hosted-search
-events contain only bounded query, status, action, and source metadata, never
-fetched page bodies. `runtime.status` reports phase, model step, tool-call
-usage, elapsed runtime, latest provider input-token usage, estimated request
-tokens, and context-token budget. Before a provider retry it uses phase
-`retrying_provider` and additionally reports one-based `retry_attempt`,
-`max_retry_attempts`, `abandoned_provider_attempt`, the next
-`provider_attempt`, and bounded `retry_reason` without including the raw
-provider error. That status event marks all reasoning-summary progress from the
-abandoned attempt as superseded.
-Reasoning delta values contain `item_id`, `output_index`, `summary_index`,
-one-based `provider_attempt`, provider `sequence_number`, and `delta`; done
-values contain the same identity fields and complete `text`. Terminal event
-closes streams, then server shuts down. A truncated provider stream or HTTP/2
+Neither command starts a local HTTP event server. Nonterminal trace events
+remain process-local and are not published. The detached worker persists only
+its terminal `final` or `error` event for `--wait`.
+
+A truncated provider stream or HTTP/2
 `INTERNAL_ERROR` or
 `REFUSED_STREAM` received from the peer receives one semantically equivalent
 streaming retry of that model step with a fresh accumulator. A stream that ends
 without `response.completed` is truncated even when it contained partial text
 or tool calls; partial first-attempt response text and tool calls are discarded,
-while already-published reasoning progress remains identifiable by provider
-attempt and is superseded by the retry status. Cancellation or
+while partial first-attempt reasoning progress is discarded. Cancellation or
 deadline prevents or aborts the retry. Other, local, unrelated, and unknown
 provider stream failures remain terminal. If the retry fails, the terminal
 error preserves both attempt failures.
 
-The `session` event identifies `event_schema=git-agent.events/v2` and
-`root_node_id=root`. Accepted fan-out adds globally sequenced
-`branch.fanout`; non-root model activity appears only inside `branch.event`;
-validated leaves and failed nodes add `branch.completed` and `branch.failed`.
-Fan-out precedes child activity, lifecycle events do not terminate the stream,
-and only the existing task-level `final` or `error` closes it. Node identity,
-parent identity, depth, effective model/effort, and bounded untrusted display
-text are replayed through the same SSE buffer and `Last-Event-ID` cursor.
-Aggregate `runtime.status` remains unwrapped and uses `branches_running` and
-`aggregating_branches`, so consumers that ignore branch event kinds still
-receive useful task progress and the one final report.
+Accepted fan-out retains globally sequenced node identity, parent identity,
+depth, effective model and effort, and bounded untrusted display text inside the
+worker. Git-agent merges validated leaves into one task-level final report;
+branch progress is not exported.
 
 Neither command has a request or overall task deadline by default. Explicit
 `--timeout <duration>` applies that deadline to both the provider HTTP client
@@ -500,18 +472,14 @@ the command's fixed 48- or 36-call local tool ceiling for compatibility.
 
 Codebase mode has no changed-line input and retains fixed 60/48 review and 45/36
 simplify budgets for every automatic depth; `--max-steps` is the way to request
-a smaller or larger codebase audit. The `session` event includes an
-`inspection_budget` object containing policy, effective size, scope and work
-units, capability coverage, lower/selected/upper steps,
-local tool ceiling, hard caps, automatic/explicit state, and whether the fixed
-codebase budget applied.
+a smaller or larger codebase audit. The calculated inspection budget governs
+the run.
 
 Every provider request states the selected step and remaining tool-call budget.
 These local safety ceilings are never extended interactively for either command.
-At a ceiling, the runner records a JSON `budget` SSE event and makes a tool-free
-forced-finalization request using evidence already collected. On success, the
-detached worker persists and publishes the terminal report; it writes no report
-to stdout.
+At a ceiling, the runner makes a tool-free forced-finalization request using
+evidence already collected. On success, the detached worker persists the
+terminal report; it writes no report to stdout.
 
 Every normal review and simplification model step enables provider-hosted
 `web_search`. It uses existing provider authentication and requests both
@@ -535,12 +503,10 @@ recognized only when the rejected plan-auth request carried a positive hosted
 call cap; an empty response without that request shape remains terminal.
 
 Every `review` or `simplify` invocation without `--wait` starts a detached
-process. The launcher waits until the event server is listening, then writes
-exactly one JSON object and newline to stdout with string `command`, string
-`id`, positive integer `pid`, and strict `endpoint` object containing string
-`network`, `address`, and `url` fields. Successful launch writes nothing to
-stderr. The detached worker closes inherited standard streams and runs through
-the terminal SSE event.
+process. After local validation, the worker writes exactly one JSON object and
+newline containing only string `command`, string `id`, and positive integer
+`pid`. The launcher forwards that object to stdout. Successful launch writes
+nothing to stderr. No local event server is started.
 
 `review --wait <id>` and `simplify --wait <id>` accept no mode, prompt, timeout,
 model, generation, debug, or pprof option. A wait has no deadline, polls the
@@ -558,8 +524,8 @@ detached turn from a successful replayable provider turn created by the same
 command and cleaned absolute workspace. The prompt is required; after flag
 parsing, its argv elements are joined with one ASCII space. `--` permits a prompt
 whose first element starts with `-`. `--fast` sends `service_tier=priority` for
-the new provider work. `--debug` retains the standard response diagnostics on
-the detached SSE stream. `--follow-up` is isolated from `--wait`, scope modes,
+the new provider work. `--debug` does not change the strict launch or wait
+output. `--follow-up` is isolated from `--wait`, scope modes,
 ordinary trailing focus, `--append-prompt`, orchestration artifacts, and every
 other provider or execution override.
 
@@ -593,8 +559,8 @@ zero with no persisted parent ID, a new prompt-cache key, and no inherited turn
 state. Existing records without workspace, cache, depth, and replay tree
 metadata are not follow-up eligible.
 
-Each accepted follow-up allocates a new task ID, launch object, replayable
-authenticated SSE endpoint, durable report, and repeatable `--wait` result.
+Each accepted follow-up allocates a new task ID, three-field launch object,
+durable report, and repeatable `--wait` result.
 The `session` event records a context-preserving parent ID but never the prompt
 or prior report; a depth reset has no session parent.
 
@@ -667,9 +633,7 @@ each entry contains `id`, `parent_id`, resolved `model`, resolved
 from that branch conversation. Root-conversation usage remains represented in
 the aggregate and is not counted as a created branch.
 The session completion time and elapsed duration are captured immediately
-before hooks begin, so hook runtime is not inspection runtime. Before running
-configured hooks the SSE stream publishes `runtime.status` with
-`phase=running_post_inspection_hooks` and the nonblank `hook_count`.
+before hooks begin, so hook runtime is not inspection runtime.
 
 The detached producer creates a versioned running record before publishing its
 launch JSON, refreshes its update timestamp with a heartbeat while running, then
@@ -683,17 +647,11 @@ lines. Successful records contain
 no failure diagnostic. Readers continue to accept versions 1 and 2.
 Diagnostics never contain API credentials, provider endpoints, full
 requests/responses, or unbounded repository content; they are not full traces.
-Terminal events are written without trace compaction and published to SSE.
+Terminal events are written without trace compaction.
 Records live under
 `~/.git-agent/<project-identity-sha>/background/<task-id>.json` and are retained
 indefinitely. The containing directory is `0700`.
 
-`git-agent review-test` is an internal integration fixture. It requires no
-arguments, provider authentication, or repository access. It uses the same
-detached launch JSON and authenticated local-socket SSE transport as `review`, then
-publishes deterministic reasoning-summary, tool-call, tool-output, and final
-events. It creates no durable background record and is intentionally omitted
-from normal command help and shell completion.
 
 All agent loops use a 217,600-token context budget, 80% of the common
 272,000-token model context window. Before the first provider call, a serialized
@@ -1806,9 +1764,9 @@ unchanged. API-key providers retain the requested model identifier.
 
 - stdout for generation-only commands: final generated artifact only
 - stdout for `review` and `simplify` launchers: one strict JSON object containing
-  `command`, `id`, `pid`, and `url`
+  only `command`, `id`, and `pid`
 - stdout for `review --follow-up ...` and `simplify --follow-up ...`: the same
-  strict launch object for the newly allocated turn
+  three-field launch object for the newly allocated turn
 - stdout for `review --wait <id>` and `simplify --wait <id>`: the stored strict
   final report JSON only
 - stdout for `search`: JSON result by default; brief header and result lines
@@ -1831,7 +1789,7 @@ unchanged. API-key providers retain the requested model identifier.
 - `explore` always writes progress and provider usage to stderr; `--debug`
   additionally writes its human console trace and phase timings while preserving
   one strict result object on stdout
-- `review` and `simplify` keep trace events in memory for SSE replay; detached
+- `review` and `simplify` keep nonterminal trace events process-local; detached
   runs persist only their durable task record
 - `release-note --out <file>` and `commit` / `commit --amend` stream human
   console trace lines to stdout
@@ -1995,9 +1953,8 @@ including:
    `--append-prompt` hint as lower-priority escaped prompt data
 10. send a streaming request to the Responses API through the official OpenAI
    Go SDK
-11. stream each request and response when console or SSE tracing is active;
-    publish retry progress and repeat a retryable interrupted stream once
-    without changing request semantics
+11. stream each provider request and response into the process-local trace;
+    retry an interrupted eligible stream once without changing request semantics
 12. if the model requests one or more tools, validate the complete response
     batch before execution: require every call ID and allowed name, reject
     repeated calls and repeated batch IDs, permit at most one branch control
@@ -2762,7 +2719,7 @@ Unit coverage should include:
 - truncation metadata
 - strict tool schemas
 - tool result envelopes
-- console and SSE event redaction
+- console and process-local event redaction
 
 ### Golden tests
 

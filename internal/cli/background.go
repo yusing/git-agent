@@ -26,10 +26,9 @@ func detachedTaskID() string {
 }
 
 type detachedLaunch struct {
-	Command  string            `json:"command"`
-	ID       string            `json:"id"`
-	PID      int               `json:"pid"`
-	Endpoint localHTTPEndpoint `json:"endpoint"`
+	Command string `json:"command"`
+	ID      string `json:"id"`
+	PID     int    `json:"pid"`
 }
 
 const maxDetachedLaunchBytes = 4096
@@ -96,6 +95,16 @@ func writeDetachedLaunch(writer io.Writer, launch detachedLaunch) error {
 	return nil
 }
 
+func advertiseDetachedLaunch(stderr io.Writer, launch detachedLaunch) error {
+	if err := writeDetachedLaunch(stderr, launch); err != nil {
+		return err
+	}
+	if file, ok := stderr.(*os.File); ok {
+		_ = file.Close()
+	}
+	return nil
+}
+
 func readDetachedLaunch(reader io.Reader) (detachedLaunch, error) {
 	data, err := io.ReadAll(io.LimitReader(reader, maxDetachedLaunchBytes+1))
 	if err != nil {
@@ -115,7 +124,7 @@ func readDetachedLaunch(reader io.Reader) (detachedLaunch, error) {
 	if err := decoder.Decode(&launch); err != nil {
 		return detachedLaunch{}, fmt.Errorf("decode detached task launch metadata: %w", err)
 	}
-	if launch.Command == "" || launch.ID == "" || launch.PID <= 0 || launch.Endpoint.Network == "" || launch.Endpoint.Address == "" || launch.Endpoint.URL == "" {
+	if launch.Command == "" || launch.ID == "" || launch.PID <= 0 {
 		return detachedLaunch{}, errors.New("detached task launch metadata is incomplete")
 	}
 	var trailing any

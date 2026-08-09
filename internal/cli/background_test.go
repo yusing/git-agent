@@ -1,43 +1,19 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
-	"fmt"
-	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
 )
 
-func TestDetachedProcessKeepsEventEndpointAliveAfterAdvertisement(t *testing.T) {
+func TestDetachedProcessReadsLaunchMetadataWithoutEndpoint(t *testing.T) {
 	if os.Getenv("GIT_AGENT_DETACHED_TEST_HELPER") == "1" {
-		listener, endpoint, err := listenLocalHTTP("/events", url.Values{"token": []string{"test"}})
-		if err != nil {
-			os.Exit(2)
-		}
-		_ = writeDetachedLaunch(os.Stderr, detachedLaunch{
-			Command:  "review",
-			ID:       "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-			PID:      os.Getpid(),
-			Endpoint: endpoint,
+		_ = advertiseDetachedLaunch(os.Stderr, detachedLaunch{
+			Command: "review",
+			ID:      "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+			PID:     os.Getpid(),
 		})
-		_ = os.Stderr.Close()
-		conn, err := listener.Accept()
-		if err != nil {
-			os.Exit(3)
-		}
-		request := bufio.NewReader(conn)
-		for {
-			line, err := request.ReadString('\n')
-			if err != nil || line == "\r\n" {
-				break
-			}
-		}
-		_, _ = fmt.Fprint(conn, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nready")
-		_ = conn.Close()
-		_ = listener.Close()
 		os.Exit(0)
 	}
 
@@ -47,22 +23,14 @@ func TestDetachedProcessKeepsEventEndpointAliveAfterAdvertisement(t *testing.T) 
 	}
 	launch, err := startDetachedProcess(
 		executable,
-		[]string{"-test.run=^TestDetachedProcessKeepsEventEndpointAliveAfterAdvertisement$"},
+		[]string{"-test.run=^TestDetachedProcessReadsLaunchMetadataWithoutEndpoint$"},
 		append(os.Environ(), "GIT_AGENT_DETACHED_TEST_HELPER=1"),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if launch.Command != "review" || launch.ID != "ABCDEFGHIJKLMNOPQRSTUVWXYZ" || launch.PID <= 0 || launch.Endpoint.Address == "" {
+	if launch.Command != "review" || launch.ID != "ABCDEFGHIJKLMNOPQRSTUVWXYZ" || launch.PID <= 0 {
 		t.Fatalf("launch = %#v", launch)
-	}
-	response, err := localHTTPTestClient(t, launch.Endpoint).Get(launch.Endpoint.URL)
-	if err != nil {
-		t.Fatalf("event endpoint unavailable after launcher returned: %v", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("event endpoint status = %s", response.Status)
 	}
 }
 

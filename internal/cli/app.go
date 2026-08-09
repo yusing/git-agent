@@ -118,8 +118,6 @@ func (a *App) Run(ctx context.Context, args []string) (returnErr error) {
 		return a.runReleaseNote(ctx, args[1:])
 	case "review":
 		return a.runCodeReview(ctx, reviewtask.KindReview, args[1:])
-	case reviewTestCommand:
-		return a.runReviewTest(ctx, args[1:])
 	case "search":
 		return a.runSearch(ctx, args[1:])
 	case "simplify":
@@ -407,11 +405,13 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	if err != nil {
 		return fmt.Errorf("plan %s budget: %w", command, err)
 	}
-	eventServer, err := startDetachedAgentEventServer(a.stderr, command, taskID)
-	if err != nil {
+	if err := advertiseDetachedLaunch(a.stderr, detachedLaunch{
+		Command: command,
+		ID:      taskID,
+		PID:     os.Getpid(),
+	}); err != nil {
 		return err
 	}
-	defer eventServer.Close()
 	eventSink := func(event trace.Event) error {
 		failureDiagnostic.RecordToolEvent(event)
 		var recordErr error
@@ -425,7 +425,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 				recordCompleted = true
 			}
 		}
-		return errors.Join(recordErr, eventServer.Publish(event))
+		return recordErr
 	}
 	recorder, err := trace.NewEventStream(command, eventSink)
 	if err != nil {
@@ -469,14 +469,13 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 			return err
 		}
 		for _, event := range events {
-			if err := waitReviewTestEvent(taskCtx, dryRunEventDelay()); err != nil {
+			if err := waitDryRunEvent(taskCtx, dryRunEventDelay()); err != nil {
 				return err
 			}
 			if err := recorder.WriteExact(event.Kind, event.Value); err != nil {
 				return err
 			}
 		}
-		eventServer.Finish()
 		return nil
 	}
 
@@ -569,7 +568,6 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	}
 	if err != nil {
 		traceErr := recorder.WriteExact("error", map[string]any{"message": err.Error()})
-		eventServer.Finish()
 		return errors.Join(err, traceErr)
 	}
 	var report any
@@ -577,7 +575,6 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		checkSession, err := newReviewCheckSession(repo, mode, prepared)
 		if err != nil {
 			traceErr := recorder.WriteExact("error", map[string]any{"message": err.Error()})
-			eventServer.Finish()
 			return errors.Join(err, traceErr)
 		}
 		defer checkSession.Close()
@@ -593,7 +590,6 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		})
 		if err != nil {
 			traceErr := recorder.WriteExact("error", map[string]any{"message": err.Error()})
-			eventServer.Finish()
 			return errors.Join(err, traceErr)
 		}
 		orchestrationDigest := ""
@@ -675,7 +671,6 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	}); err != nil {
 		return err
 	}
-	eventServer.Finish()
 	return nil
 }
 

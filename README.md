@@ -99,7 +99,7 @@ entirely and format a deterministic local message.
 | Skill delegation | Prompt skill listing plus on-demand reading through `skills-mgr` |
 | Commit execution | Optional explicit `git commit --file -` or `git commit --amend --file -` after message generation |
 | Release-note writing | Release Markdown from explicit refs or `patch`, `minor`, and `major` shortcuts |
-| Review and simplification | Strict JSON reports with repository evidence and replayable SSE agent events |
+| Review and simplification | Strict JSON reports with repository evidence and repeatable detached `--wait` retrieval |
 | Embedding search | Local filesystem or committed-tree context search for agents and humans |
 | Debug output | Human console diagnostics with `--debug`; pprof with `--pprof <addr>` |
 
@@ -116,7 +116,7 @@ harnesses. Both default to all dirty changes, regardless of staging state.
 ```sh
 # Review staged and unstaged work together
 git-agent review
-# {"command":"review","id":"...","pid":12345,"endpoint":{"network":"unix","address":"/tmp/.../http.sock","url":"http://localhost/events?token=..."}}
+# {"command":"review","id":"...","pid":12345}
 git-agent review --wait <id-from-launch-json>
 
 # After applying fixes, re-evaluate an earlier report
@@ -146,15 +146,16 @@ git-agent review --orchestration-artifact /absolute/run/manifest.json
 # Limit the report to a lower-priority task focus after flags
 git-agent review --staged focus on cancellation and cleanup
 
-# Exercise launch, events, rendering, and wait without provider access
+# Exercise detached launch, rendering, and wait without provider access
 git-agent review --dry-run
 ```
 
 Exactly one mode may be selected: `--codebase`, `--uncommitted`, or `--staged`.
 No mode means `--uncommitted`. Both commands always launch detached and write
-one strict launch JSON object to stdout. It contains `command`, durable task
-`id`, producer `pid`, and authenticated event `url`. Successful launch writes
-nothing to stderr. Matching `--wait <id>` forms write strict, evidence-located
+one strict launch JSON object to stdout containing only `command`, durable task
+`id`, and producer `pid`. They do not start a local event server. Successful
+launch writes nothing to stderr. Matching `--wait <id>` forms write strict,
+evidence-located
 JSON reports to stdout. They have no request deadline by default; `--timeout
 <duration>` adds one explicitly. Without `--model` or `OPENAI_MODEL`, `review`
 uses `gpt-5.6-sol` and `simplify` uses `gpt-5.6-terra`. Reasoning defaults track
@@ -167,9 +168,10 @@ An eligible completed provider turn can be followed with
 complete provider input, complete report, scope mode, inspection depth, and
 cache identity; it also inspects current repository state. Branched parents
 continue every terminal branch and may branch again. Follow-up accepts `--debug`
-and `--fast`, rejects every other additional flag, and uses the same SSE and
-`--wait` workflow. Three turns preserve the cache lineage before the next turn
-starts a new cache lineage while retaining the inherited input and report.
+and `--fast`, rejects every other additional flag, and uses the same detached
+launch and `--wait` workflow. Three turns preserve the cache lineage before the
+next turn starts a new cache lineage while retaining the inherited input and
+report.
 The stable cache key supplies Codex's `session-id` and `thread-id` routing
 identity. Each initial inspection or detached follow-up also receives a fresh
 `x-codex-turn-metadata` turn identity that remains stable across tool calls and
@@ -188,8 +190,8 @@ When a remaining inspection is large and independently partitionable, the
 model may retire its current conversation and run bounded child inspections in
 parallel inside the same detached task. Children retain the selected Git scope,
 tool policy, cancellation, and per-conversation budgets. Git-agent merges
-validated leaf reports mechanically and publishes branch topology and progress
-through the same replayable SSE stream; `--wait` still returns one report.
+validated leaf reports mechanically into the detached task's final report;
+`--wait` still returns one report.
 When a provider turn combines `branch` with ordinary read calls, Git-agent
 completes those reads concurrently, appends their outputs in provider order,
 and only then forks the completed conversation. Diff-mode runs revalidate their
@@ -211,8 +213,7 @@ files with standard markers are discounted, not ignored. Automatic review is
 capped at 60 model steps and 48 local tool calls; simplify is capped at 45 and
 36. `--max-steps` is a mutually exclusive expert override. Codebase mode has no
 change-size input and retains the fixed command caps; use `--max-steps` for a
-smaller codebase audit. The selected range, inputs, and ceilings are published
-as `inspection_budget` in the session event.
+smaller codebase audit. The selected range, inputs, and ceilings govern the run.
 
 Diff-based review and simplification preload a bounded current-change context
 and, when available, a previous-`HEAD` context pack for contrast. Current dirty
@@ -274,50 +275,28 @@ secrets, source, diffs, credentials, personal data, or private repository
 details. Reports retain exact repository evidence and list deduplicated material
 external source URLs or local documentation locators in summary.
 
-The launch object's replayable local endpoint includes live reasoning-summary
-progress:
+The launch object contains only the detached command, durable task ID, and
+producer PID:
 
 ```text
-{"command":"review","id":"4YH2S7M6N5QK8J3C9RTPABCD","pid":12345,"endpoint":{"network":"unix","address":"/tmp/git-agent-.../http.sock","url":"http://localhost/events?token=..."}}
+{"command":"review","id":"4YH2S7M6N5QK8J3C9RTPABCD","pid":12345}
 ```
 
-The detached review or simplification process continues serving events through
-the terminal event. `review --wait <id>` or `simplify --wait <id>` waits without
-a deadline and prints only the strict final report JSON. Completed reports can
-be retrieved repeatedly from any working directory because task IDs are resolved
-across project metadata stores. Failed, unknown, malformed, corrupt, dead-producer,
-or wrong-command tasks fail with empty stdout; signals cancel an active wait.
-Invalid tool arguments and missing evidence paths are returned to the model as
-structured errors so it can correct the request instead of aborting the task;
-an authoritative repository-state change aborts immediately. Retryable HTTP/2
-stream resets and truncated provider streams receive one equivalent streaming
-retry. The event stream publishes `runtime.status` with
-`phase=retrying_provider`, the retry attempt, and a bounded reason before that
-retry; it marks the preceding attempt's live reasoning progress as superseded,
-and subsequent reasoning events carry the new provider-attempt number. Strict
-report stdout remains unchanged.
-Every `response` event includes `input_tokens` and `cached_input_tokens`, so
-debug consumers can calculate the provider-reported prompt-cache ratio for each
-initial or follow-up request.
+The detached review or simplification process persists its terminal result.
+`review --wait <id>` or `simplify --wait <id>` waits without a deadline and
+prints only the strict final report JSON. Completed reports can be retrieved
+repeatedly from any working directory because task IDs are resolved across
+project metadata stores. Failed, unknown, malformed, corrupt, dead-producer, or
+wrong-command tasks fail with empty stdout; signals cancel an active wait.
 
-See [docs/spec.md](docs/spec.md) for exact mode, schema, tool, and SSE contracts.
+Invalid tool arguments and missing evidence paths are returned to the model so
+it can correct the request instead of aborting the task; an authoritative
+repository-state change aborts immediately. Retryable HTTP/2 stream resets and
+truncated provider streams receive one equivalent streaming retry. Strict
+launch and report stdout remain unchanged.
 
-## codex-herdr integration
-
-[`git-agent`](https://github.com/yusing/git-agent) works with
-[`codex-herdr`](https://github.com/yusing/codex-herdr) to show live review and
-simplification progress in a Herdr activity pane. From a managed root Codex
-session, run:
-
-```sh
-git-agent review --uncommitted
-```
-
-The command returns launch JSON while `codex-herdr` follows the review. Its
-`pid` identifies the detached process when manual termination is needed.
-
-Git Agent does not require `codex-herdr`; both commands still work normally on
-their own.
+See [docs/spec.md](docs/spec.md) for exact mode, schema, tool, launch, and wait
+contracts.
 
 ## Explore
 
@@ -648,7 +627,7 @@ Common generation and inspection flags:
 | `--max-steps <n>` | Bound agent loop steps; overrides and conflicts with `--depth` |
 | `--max-web-searches <n>` | Review/simplify only: override hosted-search cap |
 | `--orchestration-artifact <path>` | Review/simplify only: authorize immutable helper artifact manifest |
-| `--dry-run` | Review/simplify only: emit deterministic events without provider access |
+| `--dry-run` | Review/simplify only: run a deterministic inspection without provider access |
 | `--follow-up <turn-id> <prompt...>` | Review/simplify only: re-evaluate a successful provider turn |
 | `--help-agent` | Review/simplify only: show scope, depth, and reasoning help intended for coding agents |
 | `--guidance-family auto\|agents\|claude\|codex\|none` | Force guidance family |
@@ -734,8 +713,7 @@ Simplify notifications render `opportunities` instead of `findings`; empty lists
 render as `None`. Malformed optional display fields, unrelated lookalike keys,
 and unknown future report fields do not break formatting. The exact report
 remains available as JSON from `review --wait` or `simplify --wait`. Hook
-failures are reported only on the live event stream; they do not replace a
-successful report or change wait output.
+failures do not replace a successful report or change wait output.
 
 See [the specification](docs/spec.md) for the v2 payload and template contract.
 
@@ -822,8 +800,8 @@ flowchart TD
     Search --> SearchOutput["JSON or brief stdout"]
 ```
 
-`review` and `simplify` stream events from memory over SSE. Detached runs
-persist only a small task record under:
+`review` and `simplify` keep nonterminal trace events process-local. Detached
+runs persist only a small task record under:
 
 ```text
 ~/.git-agent/<project-identity-sha>/background/<task-id>.json

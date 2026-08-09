@@ -162,8 +162,15 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 			if err := json.Unmarshal(stderr.Bytes(), &launch); err != nil {
 				t.Fatalf("worker launch metadata is not JSON: %v\n%s", err, stderr.String())
 			}
-			if launch.Command != test.command || launch.ID != cliWaitTaskID || launch.PID != os.Getpid() || launch.Endpoint.Network != localHTTPNetwork || !filepath.IsAbs(launch.Endpoint.Address) || !strings.HasPrefix(launch.Endpoint.URL, "http://localhost/events?token=") {
+			if launch.Command != test.command || launch.ID != cliWaitTaskID || launch.PID != os.Getpid() {
 				t.Fatalf("stderr = %q", stderr.String())
+			}
+			var launchFields map[string]any
+			if err := json.Unmarshal(stderr.Bytes(), &launchFields); err != nil {
+				t.Fatal(err)
+			}
+			if len(launchFields) != 3 || launchFields["command"] != test.command || launchFields["id"] != cliWaitTaskID {
+				t.Fatalf("launch fields = %#v", launchFields)
 			}
 		})
 	}
