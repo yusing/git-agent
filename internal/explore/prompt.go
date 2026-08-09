@@ -124,11 +124,11 @@ func UserPrompt(parent *Session, items []PromptItem) (string, error) {
 	if parent != nil {
 		envelope.Parent = &promptParent{SearchID: parent.ID, Items: parent.Items}
 	}
-	data, err := sonic.ConfigStd.Marshal(envelope)
+	text, err := sonic.ConfigStd.MarshalToString(envelope)
 	if err != nil {
 		return "", fmt.Errorf("encode explore prompt: %w", err)
 	}
-	return "Exploration input JSON:\n" + string(data), nil
+	return "Exploration input JSON:\n" + text, nil
 }
 
 func TextFormat() *openai.TextFormat {

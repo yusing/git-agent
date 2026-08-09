@@ -635,8 +635,8 @@ func toolCallSignature(call openai.ToolCall) string {
 	arguments := strings.TrimSpace(call.Arguments)
 	var value any
 	if sonic.ConfigStd.UnmarshalFromString(arguments, &value) == nil {
-		if canonical, err := sonic.ConfigStd.Marshal(value); err == nil {
-			arguments = string(canonical)
+		if canonical, err := sonic.ConfigStd.MarshalToString(value); err == nil {
+			arguments = canonical
 		}
 	}
 	return call.Name + "\x00" + arguments

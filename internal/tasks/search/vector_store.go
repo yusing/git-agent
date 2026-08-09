@@ -49,25 +49,9 @@ func newVectorStore(metadataDir string) vectorStore {
 	return vectorStore{dir: filepath.Join(metadataDir, "search", vectorStoreDirName)}
 }
 
-func sharedVectorPayloadPath(metadataDir string) string {
-	return filepath.Join(newVectorStore(metadataDir).dir, vectorStorePayloadName)
-}
-
 func vectorStoreKey(inputHash, model string, dimensions int) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{inputHash, model, strconv.Itoa(dimensions)}, "\x00")))
 	return hex.EncodeToString(sum[:])
-}
-
-func (store vectorStore) put(ctx context.Context, records []vectorRecord, forceKeys map[string]bool) (keys map[string]vectorStoreEntry, err error) {
-	if err := os.MkdirAll(store.dir, 0o700); err != nil {
-		return nil, err
-	}
-	lock, err := lockIndex(ctx, store.dir)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { err = errors.Join(err, lock.Unlock()) }()
-	return store.putLocked(records, forceKeys)
 }
 
 func (store vectorStore) putLocked(records []vectorRecord, forceKeys map[string]bool) (keys map[string]vectorStoreEntry, err error) {

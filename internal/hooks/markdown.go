@@ -225,12 +225,12 @@ func markdownObject(value any) (map[string]any, bool) {
 	if object, ok := value.(map[string]any); ok {
 		return object, true
 	}
-	data, err := sonic.Marshal(value)
+	data, err := sonic.MarshalString(value)
 	if err != nil {
 		return nil, false
 	}
 	var object map[string]any
-	if err := sonic.Unmarshal(data, &object); err != nil || object == nil {
+	if err := sonic.UnmarshalString(data, &object); err != nil || object == nil {
 		return nil, false
 	}
 	return object, true

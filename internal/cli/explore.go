@@ -224,7 +224,7 @@ func (a *App) prepareExploreSearch(ctx context.Context, question string, timing 
 		return explore.Prepared{}, err
 	}
 	deferredFreshness := strings.TrimSpace(opts.IndexRemote) != "" && output.Source.OriginIdentity != ""
-	semantic, err := sonic.ConfigStd.Marshal(output)
+	semantic, err := sonic.ConfigStd.MarshalToString(output)
 	if err != nil {
 		return explore.Prepared{}, fmt.Errorf("encode explore semantic results: %w", err)
 	}
@@ -235,7 +235,7 @@ func (a *App) prepareExploreSearch(ctx context.Context, question string, timing 
 		}
 	}
 	return explore.Prepared{
-		SemanticResults:   string(semantic),
+		SemanticResults:   semantic,
 		GuidancePaths:     paths,
 		DeferredFreshness: deferredFreshness,
 	}, nil

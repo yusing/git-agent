@@ -1,13 +1,13 @@
 package trace
 
 import (
-	stdjson "encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"maps"
 	"os"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -124,12 +124,12 @@ func Normalize(value any) any {
 }
 
 func normalizeValue(value any, expandStrings bool) any {
-	data, err := sonic.Marshal(value)
+	data, err := sonic.MarshalString(value)
 	if err != nil {
 		return value
 	}
 	var normalized any
-	if err := sonicUseNumber.Unmarshal(data, &normalized); err != nil {
+	if err := sonicUseNumber.UnmarshalFromString(data, &normalized); err != nil {
 		return value
 	}
 	if !expandStrings {
@@ -671,12 +671,13 @@ func consoleScalarSlice(value []any) bool {
 
 func consoleScalar(value any) bool {
 	switch value := value.(type) {
-	case nil, bool, stdjson.Number, int, int64, float64:
+	case nil, bool, int, int64, float64:
 		return true
 	case string:
 		return len(value) <= consoleStringPreviewBytes && !strings.Contains(value, "\n")
 	default:
-		return false
+		typ := reflect.TypeOf(value)
+		return typ != nil && typ.Kind() == reflect.String && typ.Name() == "Number"
 	}
 }
 
@@ -719,12 +720,12 @@ func (r *Recorder) compactedMapValueLocked(value map[string]any) (map[string]any
 }
 
 func (r *Recorder) compactedValueLocked(value any) (any, error) {
-	data, err := sonic.Marshal(value)
+	data, err := sonic.MarshalString(value)
 	if err != nil {
 		return nil, err
 	}
 	var normalized any
-	if err := sonicUseNumber.Unmarshal(data, &normalized); err != nil {
+	if err := sonicUseNumber.UnmarshalFromString(data, &normalized); err != nil {
 		return nil, err
 	}
 	return r.compactLargeStringsLocked(normalized)

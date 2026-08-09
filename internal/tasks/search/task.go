@@ -1438,10 +1438,6 @@ func clampEmbeddingLine(line string) string {
 	return line
 }
 
-func loadVectors(dir string) ([]vectorRecord, error) {
-	return loadVectorsContext(context.Background(), dir)
-}
-
 func loadVectorsContext(ctx context.Context, dir string) ([]vectorRecord, error) {
 	found, err := loadManifest(dir)
 	if err != nil {

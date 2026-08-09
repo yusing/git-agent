@@ -2,7 +2,6 @@ package search
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/bytedance/sonic"
 )
 
 const (
@@ -22,10 +23,7 @@ type indexSyncSchema struct {
 }
 
 func decodeStrictJSON(data []byte, value any) error {
-	if err := rejectDuplicateJSONKeys(data); err != nil {
-		return err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder := sonic.ConfigStd.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
 		return err
@@ -36,75 +34,6 @@ func decodeStrictJSON(data []byte, value any) error {
 			return errors.New("unexpected trailing JSON value")
 		}
 		return err
-	}
-	return nil
-}
-
-func rejectDuplicateJSONKeys(data []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	if err := checkJSONValue(decoder); err != nil {
-		return err
-	}
-	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("unexpected trailing JSON value")
-		}
-		return err
-	}
-	return nil
-}
-
-func checkJSONValue(decoder *json.Decoder) error {
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delimiter, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delimiter {
-	case '{':
-		keys := map[string]bool{}
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return errors.New("JSON object key is not a string")
-			}
-			if keys[key] {
-				return fmt.Errorf("duplicate JSON object key %q", key)
-			}
-			keys[key] = true
-			if err := checkJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		closing, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if closing != json.Delim('}') {
-			return errors.New("JSON object is not closed")
-		}
-	case '[':
-		for decoder.More() {
-			if err := checkJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		closing, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if closing != json.Delim(']') {
-			return errors.New("JSON array is not closed")
-		}
-	default:
-		return fmt.Errorf("unexpected JSON delimiter %q", delimiter)
 	}
 	return nil
 }

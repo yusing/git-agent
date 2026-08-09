@@ -202,11 +202,11 @@ func diagnosticPayloadIdentity(raw []byte) map[string]any {
 }
 
 func marshalDiagnosticSummary(summary map[string]any) (string, bool) {
-	data, err := sonic.ConfigStd.Marshal(summary)
+	text, err := sonic.ConfigStd.MarshalToString(summary)
 	if err != nil {
 		return "", true
 	}
-	return textutil.Limit(string(data), maxDiagnosticBytes, maxDiagnosticLines)
+	return textutil.Limit(text, maxDiagnosticBytes, maxDiagnosticLines)
 }
 
 // Store owns background records beneath one project metadata directory.

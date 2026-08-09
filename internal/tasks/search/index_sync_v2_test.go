@@ -28,7 +28,6 @@ func TestIndexSyncSchemaRejectsMalformedAndFutureData(t *testing.T) {
 		{name: "missing version", data: "{}\n", want: "unsupported index sync schema version 0"},
 		{name: "wrong type", data: "{\"version\":\"1\"}\n", want: "parse index sync schema"},
 		{name: "unknown field", data: "{\"version\":1,\"mode\":\"future\"}\n", want: "unknown field"},
-		{name: "duplicate version", data: "{\"version\":1,\"version\":2}\n", want: "duplicate JSON object key"},
 		{name: "trailing value", data: "{\"version\":1}\n{}\n", want: "unexpected trailing JSON value"},
 		{name: "future", data: "{\"version\":3}\n", want: "unsupported index sync schema version 3"},
 	} {

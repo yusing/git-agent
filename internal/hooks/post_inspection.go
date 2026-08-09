@@ -102,8 +102,8 @@ func render(source string, payload PostInspection) (string, error) {
 	tmpl, err := template.New("post_inspection").Option("missingkey=error").Funcs(template.FuncMap{
 		"format_markdown": formatMarkdown,
 		"json": func(value any) (string, error) {
-			data, err := sonic.Marshal(value)
-			return string(data), err
+			data, err := sonic.MarshalString(value)
+			return data, err
 		},
 		"shellquote": shellQuote,
 	}).Parse(source)

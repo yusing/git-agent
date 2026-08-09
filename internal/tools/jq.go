@@ -3,13 +3,13 @@ package tools
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 
+	"github.com/bytedance/sonic"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/textutil"
 )
@@ -83,7 +83,7 @@ func (t jqTool) Execute(ctx context.Context, invocation Invocation) (Result, err
 		return Result{}, err
 	}
 
-	formatted, err := json.MarshalIndent(value, "", "  ")
+	formatted, err := sonic.ConfigStd.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return Result{}, fmt.Errorf("encode value at JSON pointer %q: %w", args.Pointer, err)
 	}
@@ -127,7 +127,7 @@ func readJQDocument(ctx context.Context, reader io.Reader) ([]byte, error) {
 }
 
 func decodeJQDocument(document []byte) (any, error) {
-	decoder := json.NewDecoder(bytes.NewReader(document))
+	decoder := sonic.ConfigStd.NewDecoder(bytes.NewReader(document))
 	decoder.UseNumber()
 	var value any
 	if err := decoder.Decode(&value); err != nil {

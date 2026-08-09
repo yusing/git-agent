@@ -88,11 +88,11 @@ func (m *OrchestrationManifest) Inventory() string {
 	for i, artifact := range m.Artifacts {
 		artifacts[i] = inventoryArtifact{artifact.ID, artifact.Size, artifact.SHA256}
 	}
-	data, _ := sonic.ConfigStd.Marshal(struct {
+	text, _ := sonic.ConfigStd.MarshalToString(struct {
 		Digest    string              `json:"manifest_sha256"`
 		Artifacts []inventoryArtifact `json:"artifacts"`
 	}{m.Digest, artifacts})
-	return string(data)
+	return text
 }
 
 func (m *OrchestrationManifest) open(artifact OrchestrationArtifact) (*os.File, error) {
