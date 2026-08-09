@@ -175,7 +175,7 @@ func (c *exploreFakeResponseClient) CreateResponse(ctx context.Context, request 
 	matches := regexp.MustCompile(`"item_id":"([A-Z2-7]{26})"`).FindAllStringSubmatch(lastUser, -1)
 	answers := make([]explore.Answer, 0, len(matches))
 	for _, match := range matches {
-		answers = append(answers, explore.Answer{ItemID: match[1], Answer: "context for " + match[1]})
+		answers = append(answers, explore.Answer{ItemID: match[1], Items: []explore.Item{{Description: "context for " + match[1], References: []string{"main.go:1"}}}})
 	}
 	text, err := sonic.ConfigStd.MarshalToString(map[string]any{"answers": answers})
 	if err != nil {
@@ -575,7 +575,7 @@ func (c *exploreReadToolClient) CreateResponse(_ context.Context, request openai
 	}
 	match := regexp.MustCompile(`"item_id":"([A-Z2-7]{26})"`).FindStringSubmatch(lastUser)
 	text, err := sonic.ConfigStd.MarshalToString(map[string]any{"answers": []explore.Answer{{
-		ItemID: match[1], Answer: "main.go:3 owns Answer",
+		ItemID: match[1], Items: []explore.Item{{Description: "Answer is owned by main.go", References: []string{"main.go:3"}}},
 	}}})
 	if err != nil {
 		return openai.Response{}, err
@@ -610,7 +610,7 @@ func TestExploreInitialFollowUpsAndFreshReset(t *testing.T) {
 		responseClient: responses, embeddingClient: embedder,
 	}
 	output := runExploreForTest(t, app, &stdout, "where is Answer implemented?")
-	if output.ID == "" || output.Answer == "" {
+	if output.ID == "" || len(output.Items) == 0 {
 		t.Fatalf("initial output = %#v", output)
 	}
 	initialEmbeddingCalls := embedder.calls.Load()
@@ -830,8 +830,8 @@ func TestExploreExecutesEstablishedReadTool(t *testing.T) {
 		responseClient: client, embeddingClient: &exploreFakeEmbedder{},
 	}
 	output := runExploreForTest(t, app, &stdout, "read", "the", "Answer", "implementation")
-	if !strings.Contains(output.Answer, "main.go:3") {
-		t.Fatalf("answer = %q", output.Answer)
+	if len(output.Items) != 1 || len(output.Items[0].References) != 1 || output.Items[0].References[0] != "main.go:3" {
+		t.Fatalf("items = %#v", output.Items)
 	}
 	if client.calls.Load() != 2 || !client.read.Load() {
 		t.Fatalf("provider calls = %d, read output observed = %v", client.calls.Load(), client.read.Load())
@@ -852,8 +852,8 @@ func TestExploreExecutesReadToolOutsideGitRepository(t *testing.T) {
 		responseClient: client, embeddingClient: &exploreFakeEmbedder{},
 	}
 	output := runExploreForTest(t, app, &stdout, "read", "the", "Answer", "implementation")
-	if !strings.Contains(output.Answer, "main.go:3") {
-		t.Fatalf("answer = %q", output.Answer)
+	if len(output.Items) != 1 || len(output.Items[0].References) != 1 || output.Items[0].References[0] != "main.go:3" {
+		t.Fatalf("items = %#v", output.Items)
 	}
 	if client.calls.Load() != 2 || !client.read.Load() {
 		t.Fatalf("provider calls = %d, read output observed = %v", client.calls.Load(), client.read.Load())

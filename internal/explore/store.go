@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	sessionVersion  = 3
+	sessionVersion  = 4
 	MaxFollowUps    = followup.MaxDepth
 	maxSessionBytes = followup.MaxStateBytes
 )
@@ -33,7 +33,7 @@ type Session struct {
 	PromptCacheKey    string        `json:"prompt_cache_key"`
 	InstructionTarget QueryTarget   `json:"instruction_target,omitempty"`
 	ActiveTarget      QueryTarget   `json:"active_target,omitempty"`
-	Answer            string        `json:"answer"`
+	Items             []Item        `json:"items"`
 	History           []openai.Item `json:"history"`
 }
 
@@ -185,8 +185,8 @@ func validateSession(session Session) error {
 	if _, err := ParseQueryTarget(string(session.ActiveTarget)); err != nil {
 		return fmt.Errorf("invalid active target: %w", err)
 	}
-	if strings.TrimSpace(session.Answer) == "" {
-		return errors.New("explore session requires an answer")
+	if err := validateItems(session.ID, session.Items); err != nil {
+		return fmt.Errorf("invalid explore session items: %w", err)
 	}
 	if len(session.History) == 0 {
 		return errors.New("explore session requires conversation history")

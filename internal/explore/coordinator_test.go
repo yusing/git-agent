@@ -45,7 +45,7 @@ func TestCoordinatorBatchesConcurrentInitialSearches(t *testing.T) {
 		results := make(map[string]BatchResult, len(items))
 		for _, item := range items {
 			results[item.ID] = BatchResult{
-				Answer:  "answer for " + item.Question,
+				Items:   testItems("answer for " + item.Question),
 				History: []openai.Item{openai.NewMessage("assistant", item.Question)},
 			}
 		}
@@ -364,12 +364,17 @@ func TestSessionValidationRequiresVersionedCleanWorkspace(t *testing.T) {
 	valid := Session{
 		Version: sessionVersion, ID: "AAAAAAAAAAAAAAAAAAAAAAAAAA", Workspace: testWorkspace,
 		PromptCacheKey: "explore:AAAAAAAAAAAAAAAAAAAAAAAAAA",
-		Answer:         "answer", History: []openai.Item{openai.NewMessage("assistant", "answer")},
+		Items:          testItems("answer"), History: []openai.Item{openai.NewMessage("assistant", "answer")},
 	}
 	legacy := valid
 	legacy.Version = sessionVersion - 1
 	if err := validateSession(legacy); err == nil || !strings.Contains(err.Error(), "unsupported version") {
 		t.Fatalf("legacy session error = %v", err)
+	}
+	missingReferences := valid
+	missingReferences.Items = []Item{{Description: "answer"}}
+	if err := validateSession(missingReferences); err == nil || !strings.Contains(err.Error(), "at least one reference") {
+		t.Fatalf("missing session reference error = %v", err)
 	}
 	dirty := valid
 	dirty.Workspace = "nested/../workspace"
@@ -408,7 +413,7 @@ func TestCoordinatorForksConcurrentFollowUpsFromSameParent(t *testing.T) {
 		}
 		results := make(map[string]BatchResult, len(items))
 		for _, item := range items {
-			results[item.ID] = BatchResult{Answer: item.Question, History: append(parent.History, openai.NewMessage("assistant", item.Question))}
+			results[item.ID] = BatchResult{Items: testItems(item.Question), History: append(parent.History, openai.NewMessage("assistant", item.Question))}
 		}
 		return results, nil
 	}
@@ -708,11 +713,15 @@ func runFresh(t *testing.T, coordinator *Coordinator, question string) Output {
 	return output
 }
 
+func testItems(description string) []Item {
+	return []Item{{Description: description, References: []string{"test.go:1"}}}
+}
+
 func answerRunner(_ context.Context, _ *Session, items []BatchItem) (map[string]BatchResult, error) {
 	results := make(map[string]BatchResult, len(items))
 	for _, item := range items {
 		results[item.ID] = BatchResult{
-			Answer:  "answer for " + item.Question,
+			Items:   testItems("answer for " + item.Question),
 			History: []openai.Item{openai.NewMessage("assistant", item.Question)},
 		}
 	}

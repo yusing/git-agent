@@ -47,13 +47,13 @@ type BatchItem struct {
 }
 
 type BatchResult struct {
-	Answer  string
+	Items   []Item
 	History []openai.Item
 }
 
 type Output struct {
-	ID     string `json:"id"`
-	Answer string `json:"answer"`
+	ID    string `json:"id"`
+	Items []Item `json:"items"`
 }
 
 type PrepareFunc func(context.Context) (Prepared, error)
@@ -350,7 +350,7 @@ func (c *Coordinator) runLeader(ctx context.Context, keyDir, batchDir string, pa
 			instructionTarget := SystemPromptTarget(parent, item.QueryTarget)
 			session := Session{
 				Version: sessionVersion, ID: item.ID, ParentID: lineage.ParentID, Depth: lineage.Depth,
-				Workspace: c.workspace, PromptCacheKey: lineage.PromptCacheKey, Answer: result.Answer,
+				Workspace: c.workspace, PromptCacheKey: lineage.PromptCacheKey, Items: result.Items,
 				InstructionTarget: instructionTarget, ActiveTarget: item.QueryTarget,
 				History: append(slices.Clone(result.History), openai.NewMessage(
 					"developer",
@@ -361,7 +361,7 @@ func (c *Coordinator) runLeader(ctx context.Context, keyDir, batchDir string, pa
 				return err
 			}
 			answerPath := filepath.Join(batchDir, "items", item.ID, "answer.json")
-			if err := writeJSONAtomic(filepath.Dir(answerPath), answerPath, Output{ID: item.ID, Answer: result.Answer}); err != nil {
+			if err := writeJSONAtomic(filepath.Dir(answerPath), answerPath, Output{ID: item.ID, Items: result.Items}); err != nil {
 				return err
 			}
 		}

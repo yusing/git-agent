@@ -439,8 +439,8 @@ func (a *App) runExploreBatch(
 	}
 	history := result.History()
 	results := make(map[string]explore.BatchResult, len(answers))
-	for id, answer := range answers {
-		results[id] = explore.BatchResult{Answer: answer, History: history}
+	for id, items := range answers {
+		results[id] = explore.BatchResult{Items: items, History: history}
 	}
 	timing.recordSimple("answer_processing", time.Since(answerProcessingStarted))
 	if cfg.Debug {

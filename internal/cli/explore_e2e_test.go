@@ -30,8 +30,8 @@ func TestExploreCommandEndToEndChainResetAndReadTool(t *testing.T) {
 	projectID := runProjectIDProcess(t, executable, repoDir)
 
 	initial := runSuccessfulExploreProcess(t, executable, repoDir, "--for", "owner", "read-owner", "of", "Answer")
-	if !strings.Contains(initial.output.Answer, "main.go:3") {
-		t.Fatalf("initial answer = %q", initial.output.Answer)
+	if len(initial.output.Items) != 1 || len(initial.output.Items[0].References) != 1 || initial.output.Items[0].References[0] != "main.go:3" {
+		t.Fatalf("initial items = %#v", initial.output.Items)
 	}
 	if !strings.Contains(initial.stderr, "explore: searching") || !strings.Contains(initial.stderr, "explore: complete") {
 		t.Fatalf("initial stderr missing progress:\n%s", initial.stderr)
@@ -312,11 +312,13 @@ func newExploreE2EResponsesServer(t *testing.T) (*httptest.Server, *exploreE2ERe
 		} else {
 			answers := make([]explore.Answer, 0, len(itemIDs))
 			for _, itemID := range itemIDs {
-				answer := "e2e context for " + itemID
+				description := "e2e context for " + itemID
+				reference := "main.go:1"
 				if strings.Contains(userText, "read-owner") {
-					answer = "main.go:3 owns Answer"
+					description = "Answer is owned by main.go"
+					reference = "main.go:3"
 				}
-				answers = append(answers, explore.Answer{ItemID: itemID, Answer: answer})
+				answers = append(answers, explore.Answer{ItemID: itemID, Items: []explore.Item{{Description: description, References: []string{reference}}}})
 			}
 			answerJSON, marshalErr := json.Marshal(map[string]any{"answers": answers})
 			if marshalErr != nil {
@@ -568,8 +570,13 @@ func assertSuccessfulExploreProcess(t *testing.T, result *exploreProcessResult) 
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		t.Fatalf("stdout contains more than one JSON value: %v\n%s", err, result.stdout)
 	}
-	if result.output.ID == "" || result.output.Answer == "" {
+	if result.output.ID == "" || len(result.output.Items) == 0 {
 		t.Fatalf("explore output = %#v", result.output)
+	}
+	for _, item := range result.output.Items {
+		if strings.TrimSpace(item.Description) == "" || len(item.References) == 0 {
+			t.Fatalf("ungrounded explore item = %#v", item)
+		}
 	}
 	if strings.Contains(result.stdout, "explore:") {
 		t.Fatalf("progress leaked to stdout: %q", result.stdout)

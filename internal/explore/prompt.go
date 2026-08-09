@@ -102,12 +102,17 @@ type promptEnvelope struct {
 
 type promptParent struct {
 	SearchID string `json:"search_id"`
-	Answer   string `json:"selected_answer"`
+	Items    []Item `json:"selected_items"`
+}
+
+type Item struct {
+	Description string   `json:"description"`
+	References  []string `json:"references"`
 }
 
 type Answer struct {
 	ItemID string `json:"item_id"`
-	Answer string `json:"answer"`
+	Items  []Item `json:"items"`
 }
 
 type answerEnvelope struct {
@@ -117,7 +122,7 @@ type answerEnvelope struct {
 func UserPrompt(parent *Session, items []PromptItem) (string, error) {
 	envelope := promptEnvelope{Items: items}
 	if parent != nil {
-		envelope.Parent = &promptParent{SearchID: parent.ID, Answer: parent.Answer}
+		envelope.Parent = &promptParent{SearchID: parent.ID, Items: parent.Items}
 	}
 	data, err := sonic.ConfigStd.Marshal(envelope)
 	if err != nil {
@@ -129,7 +134,7 @@ func UserPrompt(parent *Session, items []PromptItem) (string, error) {
 func TextFormat() *openai.TextFormat {
 	return &openai.TextFormat{
 		Name:        "explore_answers",
-		Description: "Independent agent-ready answers for a synchronous explore batch.",
+		Description: "Independent repository-grounded item sets for a synchronous explore batch.",
 		Strict:      true,
 		Schema: map[string]any{
 			"type": "object",
@@ -140,9 +145,25 @@ func TextFormat() *openai.TextFormat {
 						"type": "object",
 						"properties": map[string]any{
 							"item_id": map[string]any{"type": "string"},
-							"answer":  map[string]any{"type": "string"},
+							"items": map[string]any{
+								"type":     "array",
+								"minItems": 1,
+								"items": map[string]any{
+									"type": "object",
+									"properties": map[string]any{
+										"description": map[string]any{"type": "string", "minLength": 1},
+										"references": map[string]any{
+											"type":     "array",
+											"minItems": 1,
+											"items":    map[string]any{"type": "string", "minLength": 1},
+										},
+									},
+									"required":             []string{"description", "references"},
+									"additionalProperties": false,
+								},
+							},
 						},
-						"required":             []string{"item_id", "answer"},
+						"required":             []string{"item_id", "items"},
 						"additionalProperties": false,
 					},
 				},
@@ -162,11 +183,8 @@ func ValidateAnswers(itemIDs []string) func(string) []string {
 			return []string{err.Error()}
 		}
 		got := make([]string, 0, len(answers))
-		for id, answer := range answers {
+		for id := range answers {
 			got = append(got, id)
-			if strings.TrimSpace(answer) == "" {
-				return []string{fmt.Sprintf("answer for item %s is empty", id)}
-			}
 		}
 		slices.Sort(got)
 		if !slices.Equal(got, want) {
@@ -176,22 +194,46 @@ func ValidateAnswers(itemIDs []string) func(string) []string {
 	}
 }
 
-func ParseAnswers(text string) (map[string]string, error) {
+func ParseAnswers(text string) (map[string][]Item, error) {
 	var envelope answerEnvelope
 	if err := sonic.ConfigStd.UnmarshalFromString(text, &envelope); err != nil {
 		return nil, fmt.Errorf("decode explore answers: %w", err)
 	}
-	answers := make(map[string]string, len(envelope.Answers))
-	for _, item := range envelope.Answers {
-		if err := validateID(item.ItemID); err != nil {
+
+	answers := make(map[string][]Item, len(envelope.Answers))
+	for _, answer := range envelope.Answers {
+		if err := validateID(answer.ItemID); err != nil {
 			return nil, err
 		}
-		if _, exists := answers[item.ItemID]; exists {
-			return nil, fmt.Errorf("duplicate explore answer for item %s", item.ItemID)
+		if _, exists := answers[answer.ItemID]; exists {
+			return nil, fmt.Errorf("duplicate explore answer for item %s", answer.ItemID)
 		}
-		answers[item.ItemID] = item.Answer
+		if err := validateItems(answer.ItemID, answer.Items); err != nil {
+			return nil, err
+		}
+		answers[answer.ItemID] = answer.Items
 	}
 	return answers, nil
+}
+
+func validateItems(itemID string, items []Item) error {
+	if len(items) == 0 {
+		return fmt.Errorf("answer for item %s requires at least one item", itemID)
+	}
+	for index, item := range items {
+		if strings.TrimSpace(item.Description) == "" {
+			return fmt.Errorf("answer for item %s item %d requires a description", itemID, index)
+		}
+		if len(item.References) == 0 {
+			return fmt.Errorf("answer for item %s item %d requires at least one reference", itemID, index)
+		}
+		for referenceIndex, reference := range item.References {
+			if strings.TrimSpace(reference) == "" {
+				return fmt.Errorf("answer for item %s item %d reference %d is empty", itemID, index, referenceIndex)
+			}
+		}
+	}
+	return nil
 }
 
 func FollowUpInput(parent Session, prompt string, target QueryTarget) []openai.Item {

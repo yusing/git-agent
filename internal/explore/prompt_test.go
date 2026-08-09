@@ -8,29 +8,48 @@ import (
 	"github.com/yusing/git-agent/internal/openai"
 )
 
-func TestValidateAnswersRequiresExactBatchIDs(t *testing.T) {
+func TestValidateAnswersRequiresExactBatchIDsAndGroundedItems(t *testing.T) {
 	first := "AAAAAAAAAAAAAAAAAAAAAAAAAA"
 	second := "BBBBBBBBBBBBBBBBBBBBBBBBBB"
 	validator := ValidateAnswers([]string{first, second})
-	valid := `{"answers":[{"item_id":"` + second + `","answer":"two"},{"item_id":"` + first + `","answer":"one"}]}`
+	valid := `{"answers":[{"item_id":"` + second + `","items":[{"description":"two","references":["two.go:2"]}]},{"item_id":"` + first + `","items":[{"description":"one","references":["one.go:1"]}]}]}`
 	if errs := validator(valid); len(errs) != 0 {
 		t.Fatalf("valid answers rejected: %v", errs)
 	}
-	missing := `{"answers":[{"item_id":"` + first + `","answer":"one"}]}`
+	missing := `{"answers":[{"item_id":"` + first + `","items":[{"description":"one","references":["one.go:1"]}]}]}`
 	if errs := validator(missing); len(errs) != 1 || !strings.Contains(errs[0], "do not match") {
 		t.Fatalf("missing answer errors = %v", errs)
+	}
+	withoutReferences := `{"answers":[{"item_id":"` + first + `","items":[{"description":"one","references":[]}]},{"item_id":"` + second + `","items":[{"description":"two","references":["two.go:2"]}]}]}`
+	if errs := validator(withoutReferences); len(errs) != 1 || !strings.Contains(errs[0], "at least one reference") {
+		t.Fatalf("missing reference errors = %v", errs)
+	}
+}
+
+func TestTextFormatRequiresAtLeastOneReferencePerItem(t *testing.T) {
+	properties := TextFormat().Schema["properties"].(map[string]any)
+	answerSchema := properties["answers"].(map[string]any)["items"].(map[string]any)
+	itemsSchema := answerSchema["properties"].(map[string]any)["items"].(map[string]any)
+	itemSchema := itemsSchema["items"].(map[string]any)
+	referencesSchema := itemSchema["properties"].(map[string]any)["references"].(map[string]any)
+
+	if itemsSchema["minItems"] != 1 {
+		t.Fatalf("answer items minItems = %v, want 1", itemsSchema["minItems"])
+	}
+	if referencesSchema["minItems"] != 1 {
+		t.Fatalf("item references minItems = %v, want 1", referencesSchema["minItems"])
 	}
 }
 
 func TestFollowUpPromptSelectsParentBranch(t *testing.T) {
-	parent := &Session{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAA", Answer: "prior branch answer"}
+	parent := &Session{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAA", Items: []Item{{Description: "prior branch answer", References: []string{"owner.go:10-12"}}}}
 	prompt, err := UserPrompt(parent, []PromptItem{{
 		ItemID: "BBBBBBBBBBBBBBBBBBBBBBBBBB", Question: "what changed?",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{parent.ID, parent.Answer, "what changed?"} {
+	for _, want := range []string{parent.ID, parent.Items[0].Description, parent.Items[0].References[0], "what changed?"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q: %s", want, prompt)
 		}

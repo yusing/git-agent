@@ -58,8 +58,8 @@ directory is on `PATH`.
 | Staged review | `git-agent review --staged` | Detached staged-review launch JSON |
 | Re-review a completed turn | `git-agent review [--debug] [--fast] --follow-up <turn-id> <prompt...>` | New detached task launch JSON |
 | Codebase simplification audit | `git-agent simplify --codebase` | Detached codebase-audit launch JSON |
-| Agent-ready codebase exploration | `git-agent explore [--for <target>] <question...>` | Search ID and grounded answer JSON |
-| Continue an exploration | `git-agent explore --follow-up <search-id> <question...>` | New branch ID and answer JSON |
+| Agent-ready codebase exploration | `git-agent explore [--for <target>] <question...>` | Search ID and grounded items JSON |
+| Continue an exploration | `git-agent explore --follow-up <search-id> <question...>` | New branch ID and grounded items JSON |
 | Print search project identity | `git-agent project_id` | Stable project hash on stdout |
 | Agent context search | `git-agent search --agent <query...>` | Brief results, plus progress endpoint when indexing |
 | Configure index sync | `git-agent config index.remote <git-url>` | Save a dedicated Git remote for shared revision indexes |
@@ -322,9 +322,11 @@ their own.
 ## Explore
 
 `git-agent explore` combines embedding search with the established read-only
-codebase tools and returns a synchronous JSON answer with an opaque ID. It works
-from either a Git repository or an ordinary directory; non-Git sessions use the
-current directory as their codebase and metadata identity.
+codebase tools and returns synchronous JSON containing an opaque ID and
+grounded items. Every item has a description and at least one repository
+reference. Explore works from either a Git repository or an ordinary directory;
+non-Git sessions use the current directory as their codebase and metadata
+identity.
 
 The current directory is the complete exploration boundary. When it is nested
 inside a Git repository, the ancestor repository still supplies project identity
@@ -339,7 +341,7 @@ file results stay inside that boundary and use paths relative to that directory.
 ```sh
 # Start a grounded codebase exploration
 git-agent explore "where is release note evidence prepared?"
-# {"id":"...","answer":"..."}
+# {"id":"...","items":[{"description":"...","references":["path/to/file.go:10-20"]}]}
 
 # Request priority Responses API processing
 git-agent explore --fast "where is release note evidence prepared?"

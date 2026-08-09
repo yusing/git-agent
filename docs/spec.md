@@ -723,7 +723,7 @@ Run a synchronous, read-only codebase exploration and write exactly one
 newline-terminated JSON object to stdout:
 
 ```json
-{"id":"opaque-search-id","answer":"agent-ready context pack"}
+{"id":"opaque-search-id","items":[{"description":"agent-ready grounded finding","references":["path/to/file.go:10-20"]}]}
 ```
 
 The initial form works in Git repositories and ordinary directories. It first
@@ -748,10 +748,11 @@ In an ordinary directory the tools use the same working-directory root, omit
 Git metadata and history tools, reject `index` and `head` file sources, and
 exclude internal state directories.
 The agent must inspect primary implementation owners and contract-defining
-tests, return direct answers with exploration-root-relative path-and-line
-evidence, and avoid delegating ownership or blast-radius rediscovery to the
-caller. Indexing, batch-wait, tool, and provider progress is written only to
-stderr. With `--fast`, the Responses API request sends only
+tests, then return a non-empty `items` array. Every item contains one direct,
+self-contained `description` and a non-empty `references` array of
+exploration-root-relative paths. References include line ranges when the
+evidence is line-specific. Indexing, batch-wait, tool, and provider progress is
+written only to stderr. With `--fast`, the Responses API request sends only
 `service_tier=priority`; it does not select a different prompt, model, reasoning
 effort, budget, cache policy, or search path. Without it, `service_tier` is
 omitted.
@@ -811,7 +812,7 @@ conversation was
 shared with sibling items.
 
 Successful sessions persist in the current project's owner-only metadata
-directory. A session records its selected answer, parent ID, follow-up depth,
+directory. A session records its selected grounded items, parent ID, follow-up depth,
 stable-instruction target, active target, one prompt-cache key, and replayable
 Responses API item history. Missing target fields in an existing session mean
 the universal target.
