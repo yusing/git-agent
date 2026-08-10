@@ -19,7 +19,7 @@ func TestDryRunEventsEndWithValidReportForEachKind(t *testing.T) {
 			}
 			results = []checks.Result{result}
 		}
-		events, err := dryRunEvents(kind, nil, results)
+		events, err := dryRunEvents(kind, results)
 		if err != nil {
 			t.Fatal(err)
 		}

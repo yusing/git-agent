@@ -140,7 +140,6 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	var staged bool
 	var waitID string
 	var followUpID string
-	var orchestrationArtifact string
 	var depthValue string
 	var dryRun bool
 	var helpAgent bool
@@ -149,7 +148,6 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	fs.BoolVar(&staged, "staged", false, "inspect staged changes only")
 	fs.StringVar(&waitID, "wait", "", "wait for a detached task and print its report")
 	fs.StringVar(&followUpID, "follow-up", "", "re-review a successful provider turn with a required prompt")
-	fs.StringVar(&orchestrationArtifact, "orchestration-artifact", "", "read helper-authorized orchestration artifacts from manifest")
 	fs.StringVar(&depthValue, "depth", "", codeReviewDepthUsage(kind))
 	fs.BoolVar(&dryRun, "dry-run", false, "emit deterministic provider events without a provider request")
 	fs.BoolVar(&helpAgent, "help-agent", false, "show help limited to agent-facing flags")
@@ -285,13 +283,6 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	if err != nil {
 		return err
 	}
-	var orchestration *tools.OrchestrationManifest
-	if orchestrationArtifact != "" {
-		orchestration, err = tools.LoadOrchestrationManifest(orchestrationArtifact)
-		if err != nil {
-			return err
-		}
-	}
 	identity := projectidentity.FromRepository(repo)
 	metadataDir, err := identity.Dir()
 	if err != nil {
@@ -390,7 +381,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		return err
 	}
 	toolCandidates := append(tools.ReviewToolCandidates(mode.ToolMode()), tools.SkillToolNames()...)
-	registry := tools.NewReviewRegistry(repo, skillManager, mode.ToolMode(), tools.NewReviewScope(prepared.Paths, prepared.Status, prepared.Stats), prepared.Fingerprint, orchestration)
+	registry := tools.NewReviewRegistry(repo, skillManager, mode.ToolMode(), tools.NewReviewScope(prepared.Paths, prepared.Status, prepared.Stats), prepared.Fingerprint)
 	registry.Register(reviewtask.BranchHelp(kind))
 	toolCandidates = append(toolCandidates, reviewtask.BranchHelpToolName)
 	toolSpecs := registry.Definitions(toolCandidates)
@@ -442,9 +433,6 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		session["prepared_change_context"] = prepared
 	}
 	session["inspection_budget"] = budgetPlan
-	if orchestration != nil {
-		session["orchestration_manifest_sha256"] = orchestration.Digest
-	}
 	if turnMetadata.ParentID != "" {
 		session["parent"] = turnMetadata.ParentID
 	}
@@ -464,7 +452,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 				return err
 			}
 		}
-		events, err := dryRunEvents(kind, orchestration, checkResults)
+		events, err := dryRunEvents(kind, checkResults)
 		if err != nil {
 			return err
 		}
@@ -491,7 +479,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	failureDiagnostic.MaxSteps = cfg.MaxSteps
 	failureDiagnostic.MaxToolCalls = cfg.MaxToolCalls
 	userPrompt := appendUserPrompt(
-		orchestrationPrompt(reviewtask.UserPrompt(kind, prepared), orchestration),
+		reviewtask.UserPrompt(kind, prepared),
 		opts.AppendPrompt,
 	)
 	followUpContext := ""
@@ -592,11 +580,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 			traceErr := recorder.WriteExact("error", map[string]any{"message": err.Error()})
 			return errors.Join(err, traceErr)
 		}
-		orchestrationDigest := ""
-		if orchestration != nil {
-			orchestrationDigest = orchestration.Digest
-		}
-		report, err = reviewtask.BuildFinalReviewReport(result.Text, checkResults, orchestrationDigest)
+		report, err = reviewtask.BuildFinalReviewReport(result.Text, checkResults)
 		if err != nil {
 			return err
 		}
@@ -606,9 +590,6 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		decoder.UseNumber()
 		if err := decoder.Decode(&simplifyReport); err != nil {
 			return fmt.Errorf("decode validated simplify report: %w", err)
-		}
-		if orchestration != nil {
-			simplifyReport["orchestration_manifest_sha256"] = orchestration.Digest
 		}
 		report = simplifyReport
 	}
@@ -713,13 +694,6 @@ func hookToolCalls(counts map[string]int) []hooks.ToolCallMetric {
 func inspectionTitle(command string, mode reviewtask.Mode, workPath string) string {
 	name := filepath.Base(filepath.Clean(workPath))
 	return fmt.Sprintf("%s %s (%s)", command, name, mode)
-}
-
-func orchestrationPrompt(prompt string, manifest *tools.OrchestrationManifest) string {
-	if manifest == nil {
-		return prompt
-	}
-	return prompt + "\n\n" + renderOrchestrationPrompt(manifest.Inventory(), tools.OrchestrationArtifactToolName)
 }
 
 func (a *App) waitForDetachedTask(ctx context.Context, command, id string) error {
@@ -2516,20 +2490,19 @@ func codeReviewUsageError(command string, fs *flag.FlagSet) error {
 	b.WriteString("  --codebase     inspect the full codebase\n\n")
 	b.WriteString("Flags:\n")
 	placeholders := map[string]string{
-		"append-prompt":          "text",
-		"base-url":               "url",
-		"dry-run":                "",
-		"depth":                  "fast|balanced|thorough",
-		"follow-up":              "turn-id",
-		"guidance-family":        "family",
-		"help-agent":             "",
-		"max-web-searches":       "n",
-		"max-steps":              "n",
-		"model":                  "model",
-		"orchestration-artifact": "path",
-		"pprof":                  "addr",
-		"timeout":                "duration",
-		"wait":                   "id",
+		"append-prompt":    "text",
+		"base-url":         "url",
+		"dry-run":          "",
+		"depth":            "fast|balanced|thorough",
+		"follow-up":        "turn-id",
+		"guidance-family":  "family",
+		"help-agent":       "",
+		"max-web-searches": "n",
+		"max-steps":        "n",
+		"model":            "model",
+		"pprof":            "addr",
+		"timeout":          "duration",
+		"wait":             "id",
 	}
 	fs.VisitAll(func(f *flag.Flag) {
 		if f.Name == "codebase" || f.Name == "uncommitted" || f.Name == "staged" {

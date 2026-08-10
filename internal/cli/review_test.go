@@ -1075,7 +1075,7 @@ func TestCodeReviewAgentHelpOnlyDocumentsAgentFacingFlags(t *testing.T) {
 			}
 			for _, unwanted := range []string{
 				"--wait", "--model", "--max-steps", "--max-web-searches", "--append-prompt",
-				"--dry-run", "--orchestration-artifact", "--pprof", "--help-agent",
+				"--dry-run", "--pprof", "--help-agent",
 			} {
 				if strings.Contains(help, unwanted) {
 					t.Fatalf("agent help unexpectedly contains %q:\n%s", unwanted, help)

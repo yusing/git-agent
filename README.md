@@ -140,9 +140,6 @@ git-agent review --codebase
 git-agent simplify
 git-agent simplify --wait <id-from-launch-json>
 
-# Allow an orchestrator-owned manifest to expose immutable external evidence
-git-agent review --orchestration-artifact /absolute/run/manifest.json
-
 # Limit the report to a lower-priority task focus after flags
 git-agent review --staged focus on cancellation and cleanup
 
@@ -228,13 +225,6 @@ Simplification also checks explicitly
 for behavior-preserving removal of overengineering such as unnecessary
 abstractions, premature generalization, needless indirection or configuration,
 redundant state or concurrency, and disproportionate architecture.
-
-`--orchestration-artifact <absolute-path>` enables helper-authorized evidence
-for review or simplify. Manifest and declared files must be owner-only regular
-files beneath manifest directory and match recorded size and SHA-256. Model can
-read only declared IDs through `read_orchestration_artifact`; repository
-`read_file` remains repository-confined. Final report adds trusted
-`orchestration_manifest_sha256`.
 
 Diff-mode prompts include a bounded context-pack view and bounded unified diff.
 Moved submodule pointers include locally available commit summaries. Full
@@ -626,7 +616,6 @@ Common generation and inspection flags:
 | `--depth fast\|balanced\|thorough` | Review/simplify only: select calculated inspection depth and its command-specific reasoning default |
 | `--max-steps <n>` | Bound agent loop steps; overrides and conflicts with `--depth` |
 | `--max-web-searches <n>` | Review/simplify only: override hosted-search cap |
-| `--orchestration-artifact <path>` | Review/simplify only: authorize immutable helper artifact manifest |
 | `--dry-run` | Review/simplify only: run a deterministic inspection without provider access |
 | `--follow-up <turn-id> <prompt...>` | Review/simplify only: re-evaluate a successful provider turn |
 | `--help-agent` | Review/simplify only: show scope, depth, and reasoning help intended for coding agents |

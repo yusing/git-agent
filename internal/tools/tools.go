@@ -98,7 +98,7 @@ func NewReviewScope(paths []string, status []gitctx.PathChange, stats []gitctx.F
 	return ReviewScope{Changes: changes}
 }
 
-func NewReviewRegistry(repo *gitctx.Repository, skillManager *skillcmd.Manager, mode ReviewMode, scope ReviewScope, fingerprint gitctx.ChangeFingerprint, manifests ...*OrchestrationManifest) *Registry {
+func NewReviewRegistry(repo *gitctx.Repository, skillManager *skillcmd.Manager, mode ReviewMode, scope ReviewScope, fingerprint gitctx.ChangeFingerprint) *Registry {
 	registry := &Registry{tools: map[string]Tool{}}
 	if repo != nil && mode != ReviewModeCodebase {
 		registry.reviewGuard = &reviewStateGuard{repo: repo, mode: mode, fingerprint: fingerprint}
@@ -114,9 +114,6 @@ func NewReviewRegistry(repo *gitctx.Repository, skillManager *skillcmd.Manager, 
 			reviewDiffTool{repo: repo, mode: mode},
 			reviewDiffForPathsTool{repo: repo, mode: mode},
 		})
-	}
-	if len(manifests) == 1 && manifests[0] != nil {
-		register(registry, []Tool{orchestrationArtifactTool{manifest: manifests[0]}})
 	}
 	register(registry, skillTools(skillManager))
 	docRoot := "."
@@ -280,7 +277,7 @@ func CommitMessageToolNames() []string {
 
 func ReviewToolCandidates(mode ReviewMode) []string {
 	names := []string{
-		"repo_summary", "list_files", "read_file", "inspect_file", jqToolName, "grep", "find", OrchestrationArtifactToolName,
+		"repo_summary", "list_files", "read_file", "inspect_file", jqToolName, "grep", "find",
 		string(doccmd.GoDoc), string(doccmd.RustDoc), string(doccmd.Context7Library), string(doccmd.Context7Docs),
 	}
 	if mode != ReviewModeCodebase {

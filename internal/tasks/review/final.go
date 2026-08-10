@@ -8,14 +8,13 @@ import (
 )
 
 type FinalReviewReport struct {
-	Summary                     string          `json:"summary"`
-	Recommendation              string          `json:"recommendation"`
-	Findings                    []Finding       `json:"findings"`
-	Checks                      []checks.Result `json:"checks"`
-	OrchestrationManifestSHA256 string          `json:"orchestration_manifest_sha256,omitempty"`
+	Summary        string          `json:"summary"`
+	Recommendation string          `json:"recommendation"`
+	Findings       []Finding       `json:"findings"`
+	Checks         []checks.Result `json:"checks"`
 }
 
-func BuildFinalReviewReport(providerText string, results []checks.Result, orchestrationDigest string) (FinalReviewReport, error) {
+func BuildFinalReviewReport(providerText string, results []checks.Result) (FinalReviewReport, error) {
 	var providerReport ReviewReport
 	if err := decodeStrict(providerText, &providerReport); err != nil {
 		return FinalReviewReport{}, fmt.Errorf("decode validated review report: %w", err)
@@ -24,11 +23,10 @@ func BuildFinalReviewReport(providerText string, results []checks.Result, orches
 		return FinalReviewReport{}, fmt.Errorf("validated review report is invalid: %s", strings.Join(errs, "; "))
 	}
 	report := FinalReviewReport{
-		Summary:                     providerReport.Summary,
-		Recommendation:              providerReport.Recommendation,
-		Findings:                    providerReport.Findings,
-		Checks:                      cloneCheckResults(results),
-		OrchestrationManifestSHA256: orchestrationDigest,
+		Summary:        providerReport.Summary,
+		Recommendation: providerReport.Recommendation,
+		Findings:       providerReport.Findings,
+		Checks:         cloneCheckResults(results),
 	}
 	if err := ValidateFinalReviewReport(report); err != nil {
 		return FinalReviewReport{}, err

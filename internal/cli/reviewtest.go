@@ -7,7 +7,6 @@ import (
 
 	"github.com/yusing/git-agent/internal/checks"
 	reviewtask "github.com/yusing/git-agent/internal/tasks/review"
-	"github.com/yusing/git-agent/internal/tools"
 	"github.com/yusing/git-agent/internal/trace"
 )
 
@@ -26,26 +25,18 @@ func waitDryRunEvent(ctx context.Context, interval time.Duration) error {
 	}
 }
 
-func dryRunEvents(kind reviewtask.Kind, manifest *tools.OrchestrationManifest, checkResults []checks.Result) ([]trace.Event, error) {
+func dryRunEvents(kind reviewtask.Kind, checkResults []checks.Result) ([]trace.Event, error) {
 	var report any
 	if kind == reviewtask.KindSimplify {
 		simplifyReport := map[string]any{
 			"summary":       "Deterministic dry-run fixture completed.",
 			"opportunities": []any{},
 		}
-		if manifest != nil {
-			simplifyReport["orchestration_manifest_sha256"] = manifest.Digest
-		}
 		report = simplifyReport
 	} else {
-		digest := ""
-		if manifest != nil {
-			digest = manifest.Digest
-		}
 		finalReport, err := reviewtask.BuildFinalReviewReport(
 			`{"summary":"Deterministic dry-run fixture completed.","recommendation":"APPROVE","findings":[]}`,
 			checkResults,
-			digest,
 		)
 		if err != nil {
 			return nil, err

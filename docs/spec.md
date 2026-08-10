@@ -183,22 +183,18 @@ Mode flags are mutually exclusive. No mode flag means `--uncommitted`.
   `fast=low`, `balanced=low`, and `thorough=medium`.
 - `--max-steps <positive-n>` is an exact expert override and is mutually
   exclusive with `--depth`.
-- `--orchestration-artifact <absolute-path>` validates an owner-only manifest
-  and its declared immutable files beneath manifest directory. It enables no
-  arbitrary filesystem access.
-- `--dry-run` preserves repository preparation, detached launch, optional
-  orchestration validation, and repeatable wait output while replacing provider
-  execution with a deterministic schema-valid fixture. Its fifteen internal
-  steps each wait an independent random 500–1000 ms, keeping the run observable
-  through `--wait` completion after roughly 8–16 seconds.
+- `--dry-run` preserves repository preparation, detached launch, and repeatable
+  wait output while replacing provider execution with a deterministic
+  schema-valid fixture. Its fifteen internal steps each wait an independent
+  random 500–1000 ms, keeping the run observable through `--wait` completion
+  after roughly 8–16 seconds.
 - `--help-agent` returns help for automated coding agents: the launch synopsis,
   the three scope modes, `--depth`, and the mutually exclusive reasoning-effort
   flags `--low`, `--medium`, `--high`, and `--xhigh` rendered on one line. Its
   depth guidance tells agents to use `thorough` only for security-related issues
   or very complex logic, and to use `fast` or `balanced` otherwise. It omits
-  operator, provider, retrieval, diagnostic, budget-override, dry-run, and
-  orchestration flags. Like `--help`, it exits without launching a detached
-  task.
+  operator, provider, retrieval, diagnostic, budget-override, and dry-run flags.
+  Like `--help`, it exits without launching a detached task.
 
 Diff modes prepare paths, staged/worktree status, line stats, generated-heavy
 context pack, bounded unified diff, and a best-effort previous-`HEAD` context
@@ -256,8 +252,6 @@ Provider text format uses strict JSON Schema. Output object requires `summary`,
 repository-relative `path`, and positive inclusive `line_start`/`line_end`.
 Validator rejects unknown fields, missing evidence, invalid paths/ranges,
 severity-order violations, invalid style severity, and recommendation mismatch.
-When orchestration input is present, Git-agent adds its validated manifest
-SHA-256 to stored final report after model-schema validation.
 
 After the validated provider review report (and after branch reports are merged,
 when applicable), review selects the registered host checks that apply to the
@@ -525,9 +519,8 @@ command and cleaned absolute workspace. The prompt is required; after flag
 parsing, its argv elements are joined with one ASCII space. `--` permits a prompt
 whose first element starts with `-`. `--fast` sends `service_tier=priority` for
 the new provider work. `--debug` does not change the strict launch or wait
-output. `--follow-up` is isolated from `--wait`, scope modes,
-ordinary trailing focus, `--append-prompt`, orchestration artifacts, and every
-other provider or execution override.
+output. `--follow-up` is isolated from `--wait`, scope modes, ordinary trailing
+focus, `--append-prompt`, and every other provider or execution override.
 
 The new turn inherits the parent's uncommitted, staged, or codebase mode,
 inspection depth, prompt-cache identity, complete replayable provider input,
@@ -2405,12 +2398,6 @@ Diff modes additionally expose:
 - `review_changes`
 - `review_diff`
 - `review_diff_for_paths`
-
-With `--orchestration-artifact`, they additionally expose
-`read_orchestration_artifact`. Tool accepts only manifest-declared artifact ID
-and bounded line/byte window, revalidates file size and SHA-256 on every read,
-and never accepts filesystem path. Initial prompt receives compact ID/size/digest
-inventory, not artifact bodies.
 
 These names are stable across staged and uncommitted modes; registry binds them
 to selected authoritative scope. `review_changes` pages through the complete

@@ -354,7 +354,6 @@ func fishCompletionCommands(refs, remotes, paths []string) []fishCompletionComma
 		fishCompletionOption{name: "max-web-searches", takesValue: true, value: "4"},
 		fishCompletionOption{name: "dry-run"},
 		fishCompletionOption{name: "help"},
-		fishCompletionOption{name: "orchestration-artifact", takesValue: true, value: "artifact.json", valueCandidates: slices.Clone(paths)},
 	)
 	search := []fishCompletionOption{
 		{name: "rev", takesValue: true, value: "main", valueCandidates: slices.Clone(refs)},

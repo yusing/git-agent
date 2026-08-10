@@ -122,7 +122,7 @@ function __git_agent_command_has_option
         case release-note
             contains -- "$option" out $shared
         case review simplify
-            contains -- "$option" codebase uncommitted staged wait follow-up depth max-web-searches dry-run help orchestration-artifact $shared
+            contains -- "$option" codebase uncommitted staged wait follow-up depth max-web-searches dry-run help $shared
         case search
             contains -- "$option" rev remote scope min-score limit format index reindex code no-tests agent ls ls-remotes ls-files embedding-model embedding-dimensions base-url timeout debug pprof
         case '*'
@@ -131,7 +131,7 @@ function __git_agent_command_has_option
 end
 
 function __git_agent_option_takes_value
-    contains -- "$argv[1]" model base-url timeout max-steps guidance-family append-prompt pprof wait follow-up for depth max-web-searches orchestration-artifact out rev remote scope min-score limit format embedding-model embedding-dimensions
+    contains -- "$argv[1]" model base-url timeout max-steps guidance-family append-prompt pprof wait follow-up for depth max-web-searches out rev remote scope min-score limit format embedding-model embedding-dimensions
 end
 
 function __git_agent_option_value_is_valid
@@ -544,7 +544,6 @@ complete -c git-agent -n '__git_agent_option_available depth simplify' -l depth 
 complete -c git-agent -n '__git_agent_option_available max-web-searches review simplify' -l max-web-searches -r -f -d 'Cap provider-hosted web searches'
 complete -c git-agent -n '__git_agent_option_available dry-run review simplify' -l dry-run -d 'Emit deterministic provider events without a provider request'
 complete -c git-agent -n '__git_agent_option_available help review simplify' -l help -d 'Show command help'
-complete -c git-agent -n '__git_agent_option_available orchestration-artifact review simplify' -l orchestration-artifact -r -d 'Read helper-authorized orchestration artifact manifest'
 
 complete -c git-agent -n '__git_agent_option_available model commit commit-msg pr-message release-note review simplify' -l model -r -f -d 'Set generation model'
 complete -c git-agent -n '__git_agent_option_available fast commit commit-msg explore pr-message release-note review simplify' -l fast -d 'Use priority service tier'

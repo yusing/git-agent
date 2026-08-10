@@ -8,9 +8,6 @@ import (
 	"github.com/yusing/git-agent/internal/textutil"
 )
 
-//go:embed prompts/orchestration.md.tmpl
-var orchestrationPromptSource string
-
 //go:embed prompts/operator-hint.md.tmpl
 var operatorHintPromptSource string
 
@@ -24,15 +21,9 @@ var reviewToolPolicyPrompt string
 var environmentPromptSource string
 
 var (
-	orchestrationPromptTemplate = template.Must(template.New("orchestration").Parse(orchestrationPromptSource))
-	operatorHintPromptTemplate  = template.Must(template.New("operator-hint").Parse(operatorHintPromptSource))
-	environmentPromptTemplate   = template.Must(template.New("environment").Parse(environmentPromptSource))
+	operatorHintPromptTemplate = template.Must(template.New("operator-hint").Parse(operatorHintPromptSource))
+	environmentPromptTemplate  = template.Must(template.New("environment").Parse(environmentPromptSource))
 )
-
-type orchestrationPromptData struct {
-	Inventory string
-	ToolName  string
-}
 
 type environmentPromptData struct {
 	WorkPath       string
@@ -42,13 +33,6 @@ type environmentPromptData struct {
 	GuidanceFamily string
 	MaxSteps       int
 	MaxToolCalls   int
-}
-
-func renderOrchestrationPrompt(inventory, toolName string) string {
-	return strings.TrimSpace(textutil.ExecuteTemplate(orchestrationPromptTemplate, orchestrationPromptData{
-		Inventory: inventory,
-		ToolName:  toolName,
-	}))
 }
 
 func renderOperatorHintPrompt(hint string) string {

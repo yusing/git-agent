@@ -20,7 +20,6 @@ func TestBuildFinalReviewReportPreservesProviderAndFutureCheckerResults(t *testi
 	report, err := BuildFinalReviewReport(
 		`{"summary":"ready","recommendation":"APPROVE","findings":[]}`,
 		results,
-		"abc123",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -31,9 +30,6 @@ func TestBuildFinalReviewReportPreservesProviderAndFutureCheckerResults(t *testi
 	if len(report.Checks) != 2 || report.Checks[0].Name != "golangci-lint" ||
 		report.Checks[1].Name != "future-language-checker" {
 		t.Fatalf("checks = %#v", report.Checks)
-	}
-	if report.OrchestrationManifestSHA256 != "abc123" {
-		t.Fatalf("orchestration digest = %q", report.OrchestrationManifestSHA256)
 	}
 
 	results[0].Name = "mutated"
@@ -50,7 +46,6 @@ func TestBuildFinalReviewReportRejectsUnknownProviderFields(t *testing.T) {
 	_, err = BuildFinalReviewReport(
 		`{"summary":"ready","recommendation":"APPROVE","findings":[],"future":true}`,
 		[]checks.Result{result},
-		"",
 	)
 	if err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("error = %v", err)
@@ -61,7 +56,6 @@ func TestBuildFinalReviewReportAllowsNoApplicableChecks(t *testing.T) {
 	report, err := BuildFinalReviewReport(
 		`{"summary":"ready","recommendation":"APPROVE","findings":[]}`,
 		nil,
-		"",
 	)
 	if err != nil {
 		t.Fatal(err)
