@@ -768,7 +768,14 @@ func TestUserPromptContainsSchemaInstructionsAndPreparedContext(t *testing.T) {
 		`ref type must be one of: "commit", "pr", "issue"`,
 		`avoid low-signal benefit clauses`,
 		`add a second clause only when it adds non-obvious operator impact`,
-		`use candidate_items as the primary narrative plan`,
+		`describe the net base-to-release result, not one bullet per commit`,
+		`use candidate_items as the primary evidence inventory`,
+		`candidate inclusion and omission policy as heuristic rather than exhaustive`,
+		`require concrete parent-commit or submodule-commit evidence`,
+		`merge related candidates into one final release story`,
+		`recommended_section as a hint`,
+		`classify an item as "Bug Fixes" only when the evidence establishes that the defect existed at the base revision`,
+		`classify the effect rather than the commit type`,
 		`referenced commit's changed paths, diffstat, operator_signals, and patch_excerpt`,
 		`use each commit's clamped "message" content, not just "summary"`,
 		"only use fallback tools if the prepared context is missing information you need",
@@ -777,6 +784,26 @@ func TestUserPromptContainsSchemaInstructionsAndPreparedContext(t *testing.T) {
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestSystemPromptDefinesReleaseBoundaryAndClassification(t *testing.T) {
+	t.Parallel()
+
+	got := SystemPrompt()
+	for _, want := range []string{
+		"net operator-visible difference between the base revision and the release revision",
+		"A commit is evidence, not automatically a release-note item.",
+		"If a later commit fully reverts an earlier change in the range, omit the story",
+		"A chore has no narrative section of its own.",
+		`"Bug Fixes": the release corrects faulty behavior that already existed at the base revision.`,
+		"A `fix` prefix or the word \"bug\" is not sufficient by itself.",
+		"Commit order, a shared directory, or a `fix` prefix alone does not establish that relationship.",
+		"Fold a same-range update into the earlier story, include refs for both",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("system prompt missing %q:\n%s", want, got)
 		}
 	}
 }

@@ -2630,6 +2630,23 @@ Behavior:
 - precompute candidate release-note items with draft facts, recommended sections,
   confidence, refs, and evidence; the model should polish these candidates rather
   than inventing new behavior
+- describe the net base-to-release behavior rather than emitting one narrative
+  item per commit; related implementation, fixup, completion, and partial-revert
+  commits are folded into one story with all supporting refs, while fully reverted
+  changes are omitted
+- include only operator-visible behavior, compatibility or upgrade requirements,
+  security changes, new capabilities, established base-revision bug fixes, and
+  meaningful operational improvements; omit maintenance-only work such as tests,
+  refactors, formatting, CI, release administration, and generated or dependency
+  metadata unless it has a concrete operator consequence
+- classify from verified release effect rather than conventional commit prefixes or
+  candidate hints; in particular, `Bug Fixes` requires evidence that the defect
+  existed at the base revision or an earlier released state
+- treat a later commit as an update to earlier work in the same range only when
+  messages, refs, changed paths, or patches connect the changes; commit order, a
+  shared directory, or a `fix` prefix alone is insufficient, and verified
+  same-range updates are folded into the original net story instead of appearing
+  as separate bug fixes
 - inspect submodule gitlink changes
 - include submodule commit groups only when the gitlink moved and local commit
   history is available; submodule commit messages follow the same 10-line and
