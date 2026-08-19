@@ -2435,11 +2435,7 @@ discloses failed hosted lookup capability.
 Release-note generation precomputes ref resolution, parent logs, submodule
 gitlink changes, submodule history, and repository ownership in Go before the
 first provider call. The model receives only the `repo_summary` fallback tool
-for rare metadata gaps plus available skill manager tools; legacy
-range/submodule tools are intentionally not exposed to the model. `resolve_ref`,
-`git_log_range`, `gitmodules_table`, `submodule_gitlink_range`,
-`submodule_log_range`, and `repo_kind` remain in the registry only as deprecated
-legacy tools.
+for rare metadata gaps plus available skill manager tools.
 
 ### Tool I/O expectations
 

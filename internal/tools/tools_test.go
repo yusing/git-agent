@@ -623,9 +623,6 @@ func TestRepositoryToolsDoNotFollowSymlinks(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(dir, "leak.txt")); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
-	if err := os.Symlink(outside, filepath.Join(dir, ".gitmodules")); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
-	}
 
 	repo, err := gitctx.Open(dir)
 	if err != nil {
@@ -655,9 +652,6 @@ func TestRepositoryToolsDoNotFollowSymlinks(t *testing.T) {
 	}
 	if strings.Contains(searchResult.Content, "outside-secret") {
 		t.Fatalf("grep followed symlink: %s", searchResult.Content)
-	}
-	if _, err := registry.Execute(t.Context(), Invocation{Name: "gitmodules_table", Arguments: "{}"}); err == nil {
-		t.Fatal("gitmodules_table followed symlink outside repository")
 	}
 }
 
@@ -871,7 +865,7 @@ func TestParseArgsAllowsBOMAndOuterWhitespace(t *testing.T) {
 	}
 }
 
-func TestLegacyReleaseNoteToolsAreMarkedDeprecated(t *testing.T) {
+func TestNewRegistryOmitsPrecomputedEvidenceTools(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -881,17 +875,22 @@ func TestLegacyReleaseNoteToolsAreMarkedDeprecated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	registry := NewRegistry(repo, nil)
-	for _, def := range registry.Definitions([]string{
+	names := []string{
 		"resolve_ref",
 		"gitmodules_table",
 		"submodule_gitlink_range",
 		"submodule_log_range",
 		"repo_kind",
-	}) {
-		if !strings.HasPrefix(def.Description, "Deprecated:") {
-			t.Fatalf("%s description is not marked deprecated: %q", def.Name, def.Description)
-		}
+		"git_pr_base",
+		"git_pr_paths",
+		"git_pr_stat",
+		"git_pr_diff",
+		"git_pr_commits",
+		"git_log_range",
+	}
+	defs := NewRegistry(repo, nil).Definitions(names)
+	if len(defs) != 0 {
+		t.Fatalf("shared registry still exposes precomputed evidence tools: %#v", defs)
 	}
 }
 

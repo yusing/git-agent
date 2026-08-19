@@ -178,17 +178,6 @@ func NewRegistry(repo *gitctx.Repository, skillManager *skillcmd.Manager) *Regis
 		gitFinalAmendedDiffTool{repo: repo},
 		gitAmendDeltaTool{repo: repo},
 		gitShowFileAtRevTool{repo: repo},
-		gitPRBaseTool{repo: repo},
-		gitPRPathsTool{repo: repo},
-		gitPRStatTool{repo: repo},
-		gitPRDiffTool{repo: repo},
-		gitPRCommitsTool{repo: repo},
-		resolveRefTool{repo: repo},
-		gitLogRangeTool{repo: repo},
-		gitmodulesTableTool{repo: repo},
-		submoduleGitlinkRangeTool{repo: repo},
-		submoduleLogRangeTool{repo: repo},
-		repoKindTool{repo: repo},
 	})
 	register(registry, skillTools(skillManager))
 	return registry
@@ -302,8 +291,6 @@ const (
 	defaultMaxLines = 800
 	maxErrorBytes   = 4 * 1024
 	maxErrorLines   = 40
-
-	deprecatedReleaseNoteToolPrefix = "Deprecated: release-note generation now precomputes this evidence in Go and no longer exposes this tool to the model. "
 )
 
 var skippedDirs = map[string]bool{
@@ -1503,118 +1490,6 @@ func (t gitShowFileAtRevTool) Execute(_ context.Context, invocation Invocation) 
 	return jsonResult("git_show_file_at_rev", map[string]any{"content": text}, truncated)
 }
 
-type gitPRBaseTool repoTool
-
-func (t gitPRBaseTool) Definition() Definition {
-	return Definition{Name: "git_pr_base", Description: "Return origin/HEAD base and current HEAD metadata for pr-message generation.", Schema: emptySchema(), Strict: true}
-}
-
-func (t gitPRBaseTool) Execute(context.Context, Invocation) (Result, error) {
-	base, err := t.repo.PullRequestBase()
-	if err != nil {
-		return Result{}, err
-	}
-	return jsonResult("git_pr_base", map[string]any{
-		"base_ref": gitctx.PullRequestBaseRef,
-		"base":     base,
-		"head_sha": t.repo.HeadSHA,
-		"branch":   t.repo.Branch,
-	}, false)
-}
-
-type gitPRPathsTool repoTool
-
-func (t gitPRPathsTool) Definition() Definition {
-	return Definition{Name: "git_pr_paths", Description: "List paths changed between origin/HEAD and current HEAD.", Schema: emptySchema(), Strict: true}
-}
-
-func (t gitPRPathsTool) Execute(context.Context, Invocation) (Result, error) {
-	paths, err := t.repo.PullRequestPaths()
-	if err != nil {
-		return Result{}, err
-	}
-	return jsonResult("git_pr_paths", map[string]any{"paths": paths}, false)
-}
-
-type gitPRStatTool repoTool
-
-func (t gitPRStatTool) Definition() Definition {
-	return Definition{Name: "git_pr_stat", Description: "Return diff line stats for current HEAD versus origin/HEAD.", Schema: emptySchema(), Strict: true}
-}
-
-func (t gitPRStatTool) Execute(context.Context, Invocation) (Result, error) {
-	stats, err := t.repo.PullRequestStat()
-	if err != nil {
-		return Result{}, err
-	}
-	return jsonResult("git_pr_stat", stats, false)
-}
-
-type gitPRDiffTool repoTool
-
-func (t gitPRDiffTool) Definition() Definition {
-	return Definition{Name: "git_pr_diff", Description: "Return current HEAD diff versus origin/HEAD with caps.", Schema: cappedSchema(), Strict: true}
-}
-
-func (t gitPRDiffTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
-	args, err := parseArgs[capArgs](invocation.Arguments)
-	if err != nil {
-		return Result{}, err
-	}
-	text, truncated, err := t.repo.PullRequestDiff(normalizeCaps(args.MaxBytes, args.MaxLines))
-	if err != nil {
-		return Result{}, err
-	}
-	return jsonResult("git_pr_diff", map[string]any{"diff": text}, truncated)
-}
-
-type gitPRCommitsTool repoTool
-
-func (t gitPRCommitsTool) Definition() Definition {
-	return Definition{Name: "git_pr_commits", Description: "Return commits reachable from current HEAD, stopping before origin/HEAD.", Schema: schema(map[string]any{
-		"limit": intProp("Maximum commits to return.", 1, 100),
-	}), Strict: true}
-}
-
-func (t gitPRCommitsTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
-	args, err := parseArgs[struct {
-		Limit int `json:"limit"`
-	}](invocation.Arguments)
-	if err != nil {
-		return Result{}, err
-	}
-	if args.Limit <= 0 {
-		args.Limit = 20
-	}
-	commits, err := t.repo.PullRequestCommits(args.Limit)
-	if err != nil {
-		return Result{}, err
-	}
-	return jsonResult("git_pr_commits", commits, len(commits) >= args.Limit)
-}
-
-type resolveRefTool repoTool
-
-func (t resolveRefTool) Definition() Definition {
-	return Definition{Name: "resolve_ref", Description: deprecatedReleaseNoteToolPrefix + "Resolve a ref to a commit hash.", Schema: schema(map[string]any{
-		"ref": stringProp("Git revision/ref/tag name."),
-	}, "ref"), Strict: true}
-}
-
-func (t resolveRefTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
-	args, err := parseArgs[struct {
-		Ref string `json:"ref"`
-	}](invocation.Arguments)
-	if err != nil {
-		return Result{}, err
-	}
-	hash, err := t.repo.ResolveRef(args.Ref)
-	if err != nil {
-		return Result{}, err
-	}
-	return jsonResult("resolve_ref", map[string]string{"ref": args.Ref, "sha": hash}, false)
-}
-
 type gitLogRangeTool repoTool
 
 func (t gitLogRangeTool) Definition() Definition {
@@ -1659,112 +1534,6 @@ func (t gitLogRangeTool) Execute(_ context.Context, invocation Invocation) (Resu
 		return Result{}, err
 	}
 	return jsonResult("git_log_range", commits, capTruncated || len(commits) >= args.Limit)
-}
-
-type gitmodulesTableTool repoTool
-
-func (t gitmodulesTableTool) Definition() Definition {
-	return Definition{Name: "gitmodules_table", Description: deprecatedReleaseNoteToolPrefix + "Read .gitmodules if present.", Schema: emptySchema(), Strict: true}
-}
-
-func (t gitmodulesTableTool) Execute(context.Context, Invocation) (Result, error) {
-	root, err := os.OpenRoot(t.repo.RootPath)
-	if err != nil {
-		return Result{}, err
-	}
-	defer root.Close()
-	content, err := root.ReadFile(".gitmodules")
-	if os.IsNotExist(err) {
-		return jsonResult("gitmodules_table", map[string]any{"present": false}, false)
-	}
-	if err != nil {
-		return Result{}, err
-	}
-	limited, truncated := textutil.Limit(string(content), defaultMaxBytes, defaultMaxLines)
-	return jsonResult("gitmodules_table", map[string]any{"present": true, "content": limited}, truncated)
-}
-
-type submoduleGitlinkRangeTool repoTool
-
-func (t submoduleGitlinkRangeTool) Definition() Definition {
-	return Definition{Name: "submodule_gitlink_range", Description: deprecatedReleaseNoteToolPrefix + "Return changed submodule gitlinks between two refs.", Schema: schema(map[string]any{
-		"base":    stringProp("Base ref excluded from the range."),
-		"release": stringProp("Release ref included as range tip."),
-	}, "base", "release"), Strict: true}
-}
-
-func (t submoduleGitlinkRangeTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
-	args, err := parseArgs[struct {
-		Base    string `json:"base"`
-		Release string `json:"release"`
-	}](invocation.Arguments)
-	if err != nil {
-		return Result{}, err
-	}
-	changes, err := t.repo.SubmoduleGitlinkRange(args.Base, args.Release)
-	if err != nil {
-		return Result{}, err
-	}
-	return jsonResult("submodule_gitlink_range", changes, false)
-}
-
-type submoduleLogRangeTool repoTool
-
-func (t submoduleLogRangeTool) Definition() Definition {
-	return Definition{Name: "submodule_log_range", Description: deprecatedReleaseNoteToolPrefix + "Return submodule commits when local checkout is available.", Schema: schema(map[string]any{
-		"path":    stringProp("Repository-relative submodule path."),
-		"base":    stringProp("Base submodule commit/ref excluded from range."),
-		"release": stringProp("Release submodule commit/ref included as range tip."),
-		"limit":   intProp("Maximum commits to return.", 1, 500),
-	}, "path", "base", "release"), Strict: true}
-}
-
-func (t submoduleLogRangeTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
-	args, err := parseArgs[struct {
-		Path    string `json:"path"`
-		Base    string `json:"base"`
-		Release string `json:"release"`
-		Limit   int    `json:"limit"`
-	}](invocation.Arguments)
-	if err != nil {
-		return Result{}, err
-	}
-	rel, err := cleanRepoPath(args.Path)
-	if err != nil {
-		return Result{}, err
-	}
-	root, err := os.OpenRoot(t.repo.RootPath)
-	if err != nil {
-		return Result{}, err
-	}
-	defer root.Close()
-	subRoot, err := root.OpenRoot(rel)
-	if err != nil {
-		return jsonResult("submodule_log_range", map[string]any{"available": false, "error": err.Error()}, false)
-	}
-	defer subRoot.Close()
-	sub, err := gitctx.Open(subRoot.Name())
-	if err != nil {
-		return jsonResult("submodule_log_range", map[string]any{"available": false, "error": err.Error()}, false)
-	}
-	if args.Limit <= 0 {
-		args.Limit = 100
-	}
-	commits, err := sub.LogFrom(args.Base, args.Release, args.Limit)
-	if err != nil {
-		return Result{}, err
-	}
-	return jsonResult("submodule_log_range", map[string]any{"available": true, "commits": commits}, len(commits) >= args.Limit)
-}
-
-type repoKindTool repoTool
-
-func (t repoKindTool) Definition() Definition {
-	return Definition{Name: "repo_kind", Description: deprecatedReleaseNoteToolPrefix + "Return coarse repository kind.", Schema: emptySchema(), Strict: true}
-}
-
-func (t repoKindTool) Execute(context.Context, Invocation) (Result, error) {
-	return jsonResult("repo_kind", map[string]string{"kind": t.repo.RepoKind()}, false)
 }
 
 type capArgs struct {
