@@ -537,6 +537,9 @@ func TestReleaseNoteEndToEndWithRealisticFixture(t *testing.T) {
 			}
 			for _, want := range []string{
 				`"repo_summary"`,
+				`"git_show_commit"`,
+				`"git_show_file_at_rev"`,
+				`"read_file"`,
 				`\"required_submodule_groups\": [`,
 				`\"goutils\"`,
 				`\"webui\"`,

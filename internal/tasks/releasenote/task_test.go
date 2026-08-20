@@ -58,7 +58,7 @@ func TestValidateRejectsInvalidRef(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsChildBullets(t *testing.T) {
+func TestValidateRejectsEmptyChildSummary(t *testing.T) {
 	t.Parallel()
 
 	errs := Validate(`{
@@ -70,14 +70,98 @@ func TestValidateRejectsChildBullets(t *testing.T) {
           "label":"Core/Middleware",
           "summary":"Fix middleware ordering",
           "refs":[{"type":"commit","value":"deadbeef"}],
-          "children":[{"summary":""}]
+          "children":[{"summary":"","refs":[]}]
         }
       ]
     }
   ]
 }`)
 	if len(errs) == 0 {
-		t.Fatal("expected child bullet error")
+		t.Fatal("expected empty child summary error")
+	}
+}
+
+func TestValidateAcceptsChildBullets(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+  "sections": [
+    {
+      "heading":"Bug Fixes",
+      "bullets":[
+        {
+          "label":"Core/Shutdown",
+          "summary":"Shutdown no longer hangs on unconfigured servers",
+          "refs":[{"type":"commit","value":"deadbeef"}],
+          "children":[
+            {"summary":"In-flight responses still finish","refs":[{"type":"commit","value":"cafebabe"}]},
+            {"summary":"Stuck tasks are reported on timeout","refs":[]}
+          ]
+        }
+      ]
+    }
+  ]
+}`
+	if errs := Validate(raw); len(errs) > 0 {
+		t.Fatalf("Validate() errors = %v", errs)
+	}
+}
+
+func TestValidateRejectsLongBulletSummary(t *testing.T) {
+	t.Parallel()
+
+	summary := "Graceful shutdown and stream-route reloads now finish unconfigured or canceled tasks, preserve in-flight responses, bound nested waits to the shutdown deadline, and report stuck tasks"
+	errs := Validate(fmt.Sprintf(`{
+  "sections": [
+    {
+      "heading":"Bug Fixes",
+      "bullets":[
+        {
+          "label":"Core/Shutdown",
+          "summary":%q,
+          "refs":[{"type":"commit","value":"deadbeef"}],
+          "children":[]
+        }
+      ]
+    }
+  ]
+}`, summary))
+	if len(errs) == 0 {
+		t.Fatal("expected long summary error")
+	}
+	if got := strings.Join(errs, "\n"); !strings.Contains(got, "too long") || !strings.Contains(got, "move extra facts into children") {
+		t.Fatalf("expected parent too-long error, got:\n%s", got)
+	}
+}
+
+func TestValidateRejectsLongChildSummary(t *testing.T) {
+	t.Parallel()
+
+	child := "Graceful shutdown and stream-route reloads now finish unconfigured or canceled tasks, preserve in-flight responses, bound nested waits, and report stuck tasks"
+	errs := Validate(fmt.Sprintf(`{
+  "sections": [
+    {
+      "heading":"Bug Fixes",
+      "bullets":[
+        {
+          "label":"Core/Shutdown",
+          "summary":"Shutdown no longer hangs",
+          "refs":[{"type":"commit","value":"deadbeef"}],
+          "children":[{"summary":%q,"refs":[]}]
+        }
+      ]
+    }
+  ]
+}`, child))
+	if len(errs) == 0 {
+		t.Fatal("expected long child summary error")
+	}
+	got := strings.Join(errs, "\n")
+	if !strings.Contains(got, "too long") || !strings.Contains(got, "shorten the child line") {
+		t.Fatalf("expected child too-long error, got:\n%s", got)
+	}
+	if strings.Contains(got, "move extra facts into children") {
+		t.Fatalf("child length error asked to nest further:\n%s", got)
 	}
 }
 
@@ -108,6 +192,9 @@ func TestValidateRejectsLowSignalReleaseNoteContinuations(t *testing.T) {
 	}
 	if got := strings.Join(errs, "\n"); !strings.Contains(got, "low-signal continuation") {
 		t.Fatalf("expected low-signal continuation error, got:\n%s", got)
+	}
+	if got := strings.Join(errs, "\n"); !strings.Contains(got, "move extra facts into children") || strings.Contains(got, "add a second clause") {
+		t.Fatalf("low-signal error should point at children, got:\n%s", got)
 	}
 }
 
@@ -177,11 +264,11 @@ func TestOutputSchemaSatisfiesStrictRequiredProperties(t *testing.T) {
 	}
 }
 
-func TestOutputSchemaDoesNotRequestChildBullets(t *testing.T) {
+func TestOutputSchemaRequestsChildBullets(t *testing.T) {
 	t.Parallel()
 
-	if schemaHasProperty(OutputSchema(), "children") {
-		t.Fatal("schema should not expose children; release notes should stay flat")
+	if !schemaHasProperty(OutputSchema(), "children") {
+		t.Fatal("schema should expose children so related facts can be nested")
 	}
 }
 
@@ -352,6 +439,89 @@ func TestCandidateItemsSkipSubmodulePointerCommits(t *testing.T) {
 	}
 	if candidates[0].ID != "webui-child123" || candidates[0].Label != "WebUI/Types" || candidates[0].RecommendedSection != "Bug Fixes" {
 		t.Fatalf("candidate = %#v", candidates[0])
+	}
+}
+
+func TestCandidateItemsSkipBuildOnlyCommits(t *testing.T) {
+	t.Parallel()
+
+	prepared := preparedCommits([]gitctx.CommitMessageInfo{
+		{
+			SHA:     "build123",
+			Summary: "chore(docker): ignore generated frontend build directories",
+			Message: "chore(docker): ignore generated frontend build directories\n\nKeep image build context smaller.",
+			Files: []gitctx.CommitFileChange{
+				{Path: ".dockerignore", Status: "modified", Additions: 3},
+			},
+			Diffstat: gitctx.CommitDiffstat{FilesChanged: 1, Additions: 3},
+		},
+	}, "")
+	if len(prepared) != 1 || prepared[0].Policy == nil || prepared[0].Policy.IncludeNarrative {
+		t.Fatalf("build-only policy = %#v", prepared[0].Policy)
+	}
+	if candidates := candidateItems(prepared, nil); len(candidates) != 0 {
+		t.Fatalf("build-only candidates = %#v", candidates)
+	}
+}
+
+func TestIsBuildPathCoversToolingAndSkipsOperatorDeployFiles(t *testing.T) {
+	t.Parallel()
+
+	build := []string{
+		"Dockerfile",
+		"docker/app.Dockerfile",
+		".dockerignore",
+		".github/workflows/ci.yml",
+		".gitlab-ci.yml",
+		".circleci/config.yml",
+		"ci/pipeline.yml",
+		"Jenkinsfile.prod",
+		"Makefile",
+		"justfile",
+		"CMakeLists.txt",
+		"MODULE.bazel",
+		"pom.xml",
+		"build.gradle.kts",
+		".golangci.yml",
+		".goreleaser.yaml",
+		"rust-toolchain.toml",
+		"tox.ini",
+		"eslint.config.mjs",
+		"vite.config.ts",
+		"tsconfig.json",
+		"codecov.yml",
+		"sonar-project.properties",
+		".husky/pre-commit",
+		".pre-commit-config.yaml",
+		"renovate.json",
+		".nvmrc",
+		".tool-versions",
+	}
+	for _, path := range build {
+		if !isBuildPath(path) {
+			t.Fatalf("%s should be a build path", path)
+		}
+	}
+
+	notBuild := []string{
+		"compose.yml",
+		"compose.example.yml",
+		"docker-compose.yml",
+		"internal/route/handler.go",
+		"cmd/git-agent/main.go",
+		"pkg/config/schema.go",
+		"deploy/k8s/deployment.yaml",
+		"charts/app/values.yaml",
+		"fly.toml",
+		"Caddyfile",
+		"nginx.conf",
+		"README.md",
+		"docs/install.md",
+	}
+	for _, path := range notBuild {
+		if isBuildPath(path) {
+			t.Fatalf("%s should not be a build path", path)
+		}
 	}
 }
 
@@ -654,7 +824,7 @@ func TestRenderBuildsCanonicalMarkdown(t *testing.T) {
 	}
 }
 
-func TestRenderOmitsChildBullets(t *testing.T) {
+func TestRenderIncludesChildBullets(t *testing.T) {
 	t.Parallel()
 
 	rendered := Render(Document{
@@ -663,12 +833,12 @@ func TestRenderOmitsChildBullets(t *testing.T) {
 				Heading: "Bug Fixes",
 				Bullets: []Bullet{
 					{
-						Label:   "Core/Proxy",
-						Summary: "Reverse proxy routes now close idle upstream connections when canceled",
+						Label:   "Core/Shutdown",
+						Summary: "Shutdown no longer hangs on unconfigured servers",
 						Refs:    []Reference{{Type: "commit", Value: "c4cec0a"}},
 						Children: []ChildBullet{
-							{Summary: "Helps avoid stale reverse-proxy idle connections lingering after route shutdown"},
-							{Summary: "Route shutdown no longer depends on idle upstream cleanup timing"},
+							{Summary: "In-flight responses still finish", Refs: []Reference{{Type: "commit", Value: "cafebabe"}}},
+							{Summary: "Stuck tasks are reported on timeout"},
 						},
 					},
 				},
@@ -676,11 +846,14 @@ func TestRenderOmitsChildBullets(t *testing.T) {
 		},
 	})
 
-	if strings.Contains(rendered, "  - ") {
-		t.Fatalf("rendered child bullet:\n%s", rendered)
-	}
-	if want := "- **Core/Proxy**: Reverse proxy routes now close idle upstream connections when canceled (c4cec0a)"; !strings.Contains(rendered, want) {
-		t.Fatalf("render missing %q:\n%s", want, rendered)
+	for _, want := range []string{
+		"- **Core/Shutdown**: Shutdown no longer hangs on unconfigured servers (c4cec0a)",
+		"  - In-flight responses still finish (cafebab)",
+		"  - Stuck tasks are reported on timeout",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("render missing %q:\n%s", want, rendered)
+		}
 	}
 }
 
@@ -767,9 +940,10 @@ func TestUserPromptContainsSchemaInstructionsAndPreparedContext(t *testing.T) {
 		`"refs"`,
 		`ref type must be one of: "commit", "pr", "issue"`,
 		`avoid low-signal benefit clauses`,
-		`add a second clause only when it adds non-obvious operator impact`,
+		`do not describe internals, wait ordering, or implementation machinery`,
+		`put extra outcomes of the same story in "children"`,
 		`describe the net base-to-release result, not one bullet per commit`,
-		`use candidate_items as the primary evidence inventory`,
+		`use candidate_items as the starting inventory`,
 		`candidate inclusion and omission policy as heuristic rather than exhaustive`,
 		`require concrete parent-commit or submodule-commit evidence`,
 		`merge related candidates into one final release story`,
@@ -778,7 +952,7 @@ func TestUserPromptContainsSchemaInstructionsAndPreparedContext(t *testing.T) {
 		`classify the effect rather than the commit type`,
 		`referenced commit's changed paths, diffstat, operator_signals, and patch_excerpt`,
 		`use each commit's clamped "message" content, not just "summary"`,
-		"only use fallback tools if the prepared context is missing information you need",
+		"use git_show_commit, git_show_file_at_rev, or repository read tools",
 		`<prepared_release_note_context format="json">`,
 		`</prepared_release_note_context>`,
 	} {
@@ -801,6 +975,10 @@ func TestSystemPromptDefinesReleaseBoundaryAndClassification(t *testing.T) {
 		"A `fix` prefix or the word \"bug\" is not sufficient by itself.",
 		"Commit order, a shared directory, or a `fix` prefix alone does not establish that relationship.",
 		"Fold a same-range update into the earlier story, include refs for both",
+		"Each parent `summary` is a short headline of one operator-visible outcome",
+		"put each extra outcome in `children`",
+		"`git_show_commit` reads a parent or submodule commit message and first-parent patch",
+		"Look at submodule commits themselves",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("system prompt missing %q:\n%s", want, got)

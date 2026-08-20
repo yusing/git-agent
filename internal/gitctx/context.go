@@ -916,6 +916,65 @@ func (r *Repository) FinalAmendedStat() ([]FileStat, error) {
 	return fileStatsFromPatch(patch), nil
 }
 
+func (r *Repository) ShowCommit(rev string, maxBytes, maxLines int) (string, bool, error) {
+	return r.ShowCommitForPaths(rev, nil, maxBytes, maxLines)
+}
+
+func (r *Repository) ShowCommitForPaths(rev string, paths []string, maxBytes, maxLines int) (string, bool, error) {
+	commit, err := r.ResolveCommit(rev)
+	if err != nil {
+		return "", false, err
+	}
+	text := formatCommit(commit)
+	patch, err := patchCommitAgainstFirstParent(commit)
+	if err != nil {
+		return "", false, err
+	}
+	patchText := patch.String()
+	if len(paths) > 0 {
+		patchText, err = patchForPaths(patch, paths)
+		if err != nil {
+			return "", false, err
+		}
+	}
+	if patchText != "" {
+		text += "\n" + patchText
+	}
+	limited, truncated := textutil.Limit(text, maxBytes, maxLines)
+	return limited, truncated, nil
+}
+
+func (r *Repository) OpenSubmodule(path string) (*Repository, error) {
+	rel := filepath.ToSlash(filepath.Clean(path))
+	if rel == "" || rel == "." {
+		return nil, fmt.Errorf("submodule path is required")
+	}
+	if filepath.IsAbs(path) || rel == ".." || strings.HasPrefix(rel, "../") {
+		return nil, fmt.Errorf("path escapes repository: %s", path)
+	}
+	root, err := os.OpenRoot(r.RootPath)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	subRoot, err := root.OpenRoot(filepath.FromSlash(rel))
+	if err != nil {
+		return nil, err
+	}
+	defer subRoot.Close()
+	if _, err := subRoot.Stat(".git"); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %s", ErrNotRepository, path)
+		}
+		return nil, err
+	}
+	repo, err := git.PlainOpen(subRoot.Name())
+	if err != nil {
+		return nil, err
+	}
+	return repositoryFromHead(subRoot.Name(), subRoot.Name(), repo)
+}
+
 func (r *Repository) ShowFileAtRev(rev, path string, maxBytes, maxLines int) (string, bool, error) {
 	commit, err := r.ResolveCommit(rev)
 	if err != nil {

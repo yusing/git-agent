@@ -64,6 +64,7 @@ type PreparedChangedFile struct {
 	Test       bool   `json:"test,omitempty"`
 	Docs       bool   `json:"docs,omitempty"`
 	Dependency bool   `json:"dependency,omitempty"`
+	Build      bool   `json:"build,omitempty"`
 }
 
 type PreparedDiffstat struct {
@@ -75,6 +76,7 @@ type PreparedDiffstat struct {
 	GeneratedFilesChanged  int `json:"generated_files_changed,omitempty"`
 	DependencyFilesChanged int `json:"dependency_files_changed,omitempty"`
 	SubmoduleFilesChanged  int `json:"submodule_files_changed,omitempty"`
+	BuildFilesChanged      int `json:"build_files_changed,omitempty"`
 }
 
 type OperatorSignals struct {
@@ -87,6 +89,7 @@ type OperatorSignals struct {
 	TestsOnly           bool `json:"tests_only,omitempty"`
 	DependencyOnly      bool `json:"dependency_only,omitempty"`
 	SubmoduleOnly       bool `json:"submodule_only,omitempty"`
+	BuildOnly           bool `json:"build_only,omitempty"`
 	InternalOnly        bool `json:"internal_only,omitempty"`
 }
 
@@ -361,6 +364,7 @@ func preparedChangedFiles(files []gitctx.CommitFileChange) []PreparedChangedFile
 			Test:       isTestPath(path),
 			Docs:       isDocsPath(path),
 			Dependency: isDependencyPath(path),
+			Build:      isBuildPath(path),
 		})
 	}
 	return prepared
@@ -382,6 +386,8 @@ func preparedDiffstat(files []PreparedChangedFile, raw gitctx.CommitDiffstat) *P
 		switch {
 		case file.Submodule:
 			stat.SubmoduleFilesChanged++
+		case file.Build:
+			stat.BuildFilesChanged++
 		case file.Test:
 			stat.TestFilesChanged++
 		case file.Docs:
@@ -404,6 +410,7 @@ func operatorSignals(files []PreparedChangedFile) *OperatorSignals {
 		TestsOnly:      true,
 		DependencyOnly: true,
 		SubmoduleOnly:  true,
+		BuildOnly:      true,
 		InternalOnly:   true,
 	}
 	for _, file := range files {
@@ -420,7 +427,10 @@ func operatorSignals(files []PreparedChangedFile) *OperatorSignals {
 		if !file.Submodule {
 			signals.SubmoduleOnly = false
 		}
-		if !strings.HasPrefix(path, "internal/") || file.Docs || file.Test || file.Generated || file.Dependency || file.Submodule {
+		if !file.Build {
+			signals.BuildOnly = false
+		}
+		if !strings.HasPrefix(path, "internal/") || file.Docs || file.Test || file.Generated || file.Dependency || file.Submodule || file.Build {
 			signals.InternalOnly = false
 		}
 		if file.Docs {
@@ -435,7 +445,7 @@ func operatorSignals(files []PreparedChangedFile) *OperatorSignals {
 		if isConfigSchemaPath(path) {
 			signals.ConfigSchemaChanged = true
 		}
-		if !file.Test && !file.Docs && !file.Generated && !file.Dependency && !file.Submodule {
+		if !file.Test && !file.Docs && !file.Generated && !file.Dependency && !file.Submodule && !file.Build {
 			signals.RuntimeChanged = true
 		}
 	}
@@ -454,6 +464,8 @@ func releaseNotePolicy(summary string, signals *OperatorSignals) *ReleaseNotePol
 		return &ReleaseNotePolicy{IncludeNarrative: false, Reason: "submodule pointer update; use submodule commits as narrative evidence"}
 	case signals.TestsOnly:
 		return &ReleaseNotePolicy{IncludeNarrative: false, Reason: "tests only"}
+	case signals.BuildOnly:
+		return &ReleaseNotePolicy{IncludeNarrative: false, Reason: "build or CI files only"}
 	case signals.GeneratedOnly && !signals.ConfigSchemaChanged && !signals.APIChanged && !signals.DocsChanged:
 		return &ReleaseNotePolicy{IncludeNarrative: false, Reason: "generated files only"}
 	case signals.DependencyOnly:
@@ -576,7 +588,7 @@ func commitLabel(commit PreparedCommit, submodulePath string) string {
 		return stableLabel(scope)
 	}
 	for _, file := range commit.Files {
-		if file.Submodule || file.Test || file.Generated || file.Dependency {
+		if file.Submodule || file.Test || file.Generated || file.Dependency || file.Build {
 			continue
 		}
 		return labelFromPath(file.Path)
@@ -733,6 +745,107 @@ func isDocsPath(path string) bool {
 	base := strings.ToLower(filepath.Base(path))
 	ext := strings.ToLower(filepath.Ext(path))
 	return strings.HasPrefix(path, "docs/") || strings.Contains(path, "/docs/") || strings.Contains(path, "/wiki/") || strings.HasPrefix(base, "readme") || ext == ".md" || ext == ".mdx" || ext == ".rst" || ext == ".txt"
+}
+
+func isBuildPath(path string) bool {
+	path = strings.ToLower(cleanSlashPath(path))
+	base := filepath.Base(path)
+	for _, prefix := range buildPathDirPrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	if buildPathBasenames[base] {
+		return true
+	}
+	for _, prefix := range buildPathBasenamePrefixes {
+		if strings.HasPrefix(base, prefix) {
+			return true
+		}
+	}
+	for _, suffix := range buildPathSuffixes {
+		if strings.HasSuffix(base, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+var buildPathDirPrefixes = []string{
+	".github/",
+	".gitlab/",
+	".gitea/",
+	".forgejo/",
+	".circleci/",
+	".buildkite/",
+	".woodpecker/",
+	".teamcity/",
+	".semaphore/",
+	".azure-pipelines/",
+	".ci/",
+	"ci/",
+	".devcontainer/",
+	".husky/",
+	".pre-commit/",
+	".yarn/",
+	".nx/",
+	".turbo/",
+	"gradle/",
+	".mvn/",
+	".cargo/",
+}
+
+var buildPathBasenames = map[string]bool{
+	"dockerfile": true, ".dockerignore": true, ".containerignore": true, "containerfile": true,
+	"jenkinsfile": true, ".travis.yml": true, ".appveyor.yml": true,
+	".gitlab-ci.yml": true, "gitlab-ci.yml": true,
+	"azure-pipelines.yml": true, "azure-pipelines.yaml": true,
+	"bitbucket-pipelines.yml": true, "bitbucket-pipelines.yaml": true,
+	"cloudbuild.yml": true, "cloudbuild.yaml": true,
+	".drone.yml": true, ".cirrus.yml": true, "codefresh.yml": true,
+	"makefile": true, "gnumakefile": true, "makefile.am": true, "makefile.in": true,
+	"cmakelists.txt": true, "meson.build": true, "meson_options.txt": true,
+	"build.bazel": true, "workspace": true, "workspace.bazel": true, "module.bazel": true,
+	".bazelrc": true, ".bazelignore": true, ".bazelversion": true,
+	"justfile": true, "taskfile.yml": true, "taskfile.yaml": true, "earthfile": true,
+	"build.ninja": true, "configure": true, "configure.ac": true,
+	"gradlew": true, "gradlew.bat": true, "mvnw": true, "mvnw.cmd": true,
+	"pom.xml": true, "build.gradle": true, "build.gradle.kts": true,
+	"settings.gradle": true, "settings.gradle.kts": true,
+	".npmrc": true, ".yarnrc": true, ".yarnrc.yml": true, ".npmignore": true,
+	".nvmrc": true, ".node-version": true, ".python-version": true, ".ruby-version": true,
+	".go-version": true, ".sdkmanrc": true, ".tool-versions": true,
+	"nx.json": true, "turbo.json": true, "lerna.json": true,
+	"tsconfig.json": true, "jsconfig.json": true,
+	"biome.json": true, "biome.jsonc": true, ".editorconfig": true,
+	".prettierrc": true, ".prettierignore": true, ".eslintignore": true,
+	"eslint.config.js": true, "eslint.config.cjs": true, "eslint.config.mjs": true, "eslint.config.ts": true,
+	".pre-commit-config.yaml": true, "lefthook.yml": true, "lefthook.yaml": true,
+	".golangci.yml": true, ".golangci.yaml": true, ".golangci.toml": true,
+	".goreleaser.yml": true, ".goreleaser.yaml": true, "goreleaser.yml": true, "goreleaser.yaml": true,
+	"rust-toolchain": true, "rust-toolchain.toml": true, "rustfmt.toml": true, ".rustfmt.toml": true, "clippy.toml": true,
+	"tox.ini": true, "noxfile.py": true, "pytest.ini": true, ".flake8": true, ".pylintrc": true,
+	"ruff.toml": true, ".ruff.toml": true, "mypy.ini": true, ".mypy.ini": true,
+	"rakefile": true, "guardfile": true, ".rspec": true, ".rubocop.yml": true,
+	"phpunit.xml": true, "phpunit.xml.dist": true, "phpcs.xml": true, ".php-cs-fixer.php": true,
+	".coveralls.yml": true, "codecov.yml": true, ".codecov.yml": true, ".codeclimate.yml": true,
+	"sonar-project.properties": true, "sonar-project.json": true,
+	".releaserc": true, ".releaserc.json": true, ".releaserc.yml": true, "release.config.js": true,
+	"renovate.json": true, ".renovaterc": true, ".renovaterc.json": true,
+	"commitlint.config.js": true, "commitlint.config.cjs": true, "commitlint.config.mjs": true,
+}
+
+var buildPathBasenamePrefixes = []string{
+	"dockerfile.", "jenkinsfile.", "makefile.",
+	".eslintrc", "eslint.config.", "prettier.config.", ".prettierrc.",
+	"jest.config.", "vitest.config.", "playwright.config.", "cypress.config.",
+	"webpack.config.", "rollup.config.", "vite.config.", "esbuild.config.",
+	"tsconfig.", "jsconfig.",
+	".golangci.", ".goreleaser.", ".releaserc.",
+}
+
+var buildPathSuffixes = []string{
+	".dockerfile", ".containerfile", ".mk",
 }
 
 func isDependencyPath(path string) bool {

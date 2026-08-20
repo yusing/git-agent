@@ -10,19 +10,21 @@ Rules:
 - prefer the recommended section order from the prepared context
 - omit empty sections
 - set "label" to a concise stable area such as "Core/Middleware" or "WebUI/Dashboard" when natural; otherwise use null
-- every bullet must use a concise operator-facing summary in "summary"
-- write the summary as the change itself first; keep one sentence when it is complete
+- every parent bullet uses a short operator-facing headline in "summary"; prefer one clause in ordinary words
+- name what the operator sees, can do, or must change; do not describe internals, wait ordering, or implementation machinery unless they must act on it
 - avoid low-signal benefit clauses such as "enabling operators to...", "reducing editing errors...", "making it easier...", or "improving usability" when the change already states the capability
-- add a second clause only when it adds non-obvious operator impact, required action, compatibility/risk, rollout scope, or behavior change
+- do not stack several facts into one long sentence; put extra outcomes of the same story in "children"
+- each child summary is one concrete fact; child "refs" may be an empty array when the parent refs already cover it
 - put references only in "refs"; do not embed commit SHAs, PR numbers, or issue numbers into "summary"
-- each bullet must include at least one ref
-- do not emit sub-bullets; keep each release-note item as one complete top-level bullet
+- each parent bullet must include at least one ref
+- set "children" to an empty array when the headline is complete
 - ref type must be one of: "commit", "pr", "issue"
 - use "commit" refs for commit SHAs and "pr"/"issue" refs for numeric identifiers without the leading #
 - preserve parent/submodule ownership of references
-- downplay internal sync, generated docs, and schema churn unless deployers must act on them
+- omit Docker build-context, CI, wiki, generated-frontend, and other packaging chores unless a deployer must change how they run the software
+- inspect submodule commits, not only parent pointer updates, so operator-visible WebUI or library changes are not dropped
 - describe the net base-to-release result, not one bullet per commit
-- use candidate_items as the primary evidence inventory when present, but treat candidate inclusion and omission policy as heuristic rather than exhaustive
+- use candidate_items as the starting inventory, but treat candidate inclusion and omission policy as heuristic rather than exhaustive
 - require concrete parent-commit or submodule-commit evidence before including an operator-visible effect that the candidate heuristics omitted
 - merge related candidates into one final release story when the evidence connects them
 - treat each candidate's recommended_section as a hint and apply the system classification rules to the verified final story
@@ -32,7 +34,7 @@ Rules:
 - use each candidate's evidence plus its referenced commit's changed paths, diffstat, operator_signals, and patch_excerpt to verify wording before writing a bullet
 - do not invent behavior beyond draft_fact and evidence; narrow or omit low-confidence candidates instead
 - use each commit's clamped "message" content, not just "summary", before inferring operator impact
-- only use fallback tools if the prepared context is missing information you need
+- use git_show_commit, git_show_file_at_rev, or repository read tools when a patch excerpt, candidate, or submodule commit is not enough to judge operator impact
 
 <prepared_release_note_context format="json">
 {{.PreparedContext}}

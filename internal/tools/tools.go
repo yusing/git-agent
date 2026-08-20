@@ -178,6 +178,7 @@ func NewRegistry(repo *gitctx.Repository, skillManager *skillcmd.Manager) *Regis
 		gitFinalAmendedDiffTool{repo: repo},
 		gitAmendDeltaTool{repo: repo},
 		gitShowFileAtRevTool{repo: repo},
+		gitShowCommitTool{repo: repo},
 	})
 	register(registry, skillTools(skillManager))
 	return registry
@@ -284,6 +285,18 @@ func ExploreToolNames() []string {
 
 func SkillToolNames() []string {
 	return []string{SkillsReadToolName}
+}
+
+func ReleaseNoteToolNames() []string {
+	return []string{
+		"repo_summary",
+		"list_files",
+		"read_file",
+		"inspect_file",
+		"grep",
+		"git_show_commit",
+		"git_show_file_at_rev",
+	}
 }
 
 const (
@@ -1488,6 +1501,64 @@ func (t gitShowFileAtRevTool) Execute(_ context.Context, invocation Invocation) 
 		return Result{}, err
 	}
 	return jsonResult("git_show_file_at_rev", map[string]any{"content": text}, truncated)
+}
+
+type gitShowCommitTool repoTool
+
+func (t gitShowCommitTool) Definition() Definition {
+	return Definition{Name: "git_show_commit", Description: "Return a commit message and its first-parent patch from the parent repository or a local submodule.", Schema: schema(map[string]any{
+		"rev":       stringProp("Commit SHA or ref from prepared release-note context."),
+		"submodule": stringProp("Repository-relative submodule path; use an empty string for the parent repository."),
+		"paths":     stringArrayProp("Optional repository-relative paths to include in the patch; use an empty array for the full commit."),
+		"max_bytes": intProp("Maximum bytes to return.", 1, 65536),
+		"max_lines": intProp("Maximum lines to return.", 1, 2000),
+	}, "rev", "submodule", "paths"), Strict: true}
+}
+
+func (t gitShowCommitTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
+	args, err := parseArgs[struct {
+		Rev       string   `json:"rev"`
+		Submodule string   `json:"submodule"`
+		Paths     []string `json:"paths"`
+		MaxBytes  int      `json:"max_bytes"`
+		MaxLines  int      `json:"max_lines"`
+	}](invocation.Arguments)
+	if err != nil {
+		return Result{}, err
+	}
+	if strings.TrimSpace(args.Rev) == "" {
+		return Result{}, fmt.Errorf("rev is required")
+	}
+	repo := t.repo
+	submodule := strings.TrimSpace(args.Submodule)
+	if submodule != "" {
+		repo, err = t.repo.OpenSubmodule(submodule)
+		if err != nil {
+			return Result{}, err
+		}
+	}
+	paths := make([]string, 0, len(args.Paths))
+	for _, path := range args.Paths {
+		cleaned, err := cleanRepoPath(path)
+		if err != nil {
+			return Result{}, err
+		}
+		if cleaned == "." {
+			continue
+		}
+		paths = append(paths, cleaned)
+	}
+	maxBytes, maxLines := normalizeCaps(args.MaxBytes, args.MaxLines)
+	text, truncated, err := repo.ShowCommitForPaths(args.Rev, paths, maxBytes, maxLines)
+	if err != nil {
+		return Result{}, err
+	}
+	return jsonResult("git_show_commit", map[string]any{
+		"rev":       args.Rev,
+		"submodule": submodule,
+		"paths":     paths,
+		"show":      text,
+	}, truncated)
 }
 
 type gitLogRangeTool repoTool

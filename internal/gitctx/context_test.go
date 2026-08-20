@@ -852,6 +852,76 @@ func TestLogMessagesFromIncludesFullCommitMessage(t *testing.T) {
 	if !strings.Contains(commits[0].PatchExcerpt, "--- app.txt") || !strings.Contains(commits[0].PatchExcerpt, "+ release") {
 		t.Fatalf("patch excerpt missing expected change:\n%s", commits[0].PatchExcerpt)
 	}
+
+	show, truncated, err := repo.ShowCommit("HEAD", 16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if truncated {
+		t.Fatal("show commit marked truncated")
+	}
+	for _, want := range []string{
+		"feat(webui): add command option highlighting",
+		"Adds completion support for RuleDo option blocks.",
+		"+release",
+	} {
+		if !strings.Contains(show, want) {
+			t.Fatalf("show commit missing %q:\n%s", want, show)
+		}
+	}
+	filtered, _, err := repo.ShowCommitForPaths("HEAD", []string{"missing.txt"}, 16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(filtered, "+release") {
+		t.Fatalf("path-filtered show leaked unrelated patch:\n%s", filtered)
+	}
+}
+
+func TestOpenSubmoduleRejectsEscapingPaths(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "app.txt"), "base\n")
+	runGit(t, repoDir, "add", "app.txt")
+	runGit(t, repoDir, "commit", "-m", "base")
+	nested := filepath.Join(repoDir, "nested")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(nested, "inner.txt"), "inner\n")
+	runGit(t, nested, "init")
+	runGit(t, nested, "config", "user.name", "Test User")
+	runGit(t, nested, "config", "user.email", "test@example.com")
+	runGit(t, nested, "add", "inner.txt")
+	runGit(t, nested, "commit", "-m", "nested base")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, err := repo.OpenSubmodule("nested")
+	if err != nil {
+		t.Fatal(err)
+	}
+	show, _, err := sub.ShowCommit("HEAD", 4096, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(show, "nested base") {
+		t.Fatalf("submodule show used parent evidence:\n%s", show)
+	}
+	if _, err := repo.OpenSubmodule("../secret"); err == nil {
+		t.Fatal("escaped parent directory")
+	}
+
+	plain := filepath.Join(repoDir, "plain")
+	if err := os.Mkdir(plain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.OpenSubmodule("plain"); !errors.Is(err, ErrNotRepository) {
+		t.Fatalf("plain directory error = %v, want ErrNotRepository", err)
+	}
 }
 
 func TestStagedStatusExcludesUnstagedOnlyChanges(t *testing.T) {

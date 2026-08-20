@@ -4,10 +4,16 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/bytedance/sonic"
 	"github.com/yusing/git-agent/internal/openai"
 	"github.com/yusing/git-agent/internal/textutil"
+)
+
+const (
+	maxNarrativeSummaryRunes = 160
+	maxChildSummaryRunes     = 140
 )
 
 type Request struct {
@@ -39,7 +45,8 @@ type Bullet struct {
 }
 
 type ChildBullet struct {
-	Summary string `json:"summary"`
+	Summary string      `json:"summary"`
+	Refs    []Reference `json:"refs,omitempty"`
 }
 
 type Reference struct {
@@ -84,7 +91,20 @@ func TextFormat() *openai.TextFormat {
 
 func OutputSchema() map[string]any {
 	sectionEnum := []string{"Breaking Changes", "Security", "New Features", "Improvements", "Bug Fixes"}
-	refTypeEnum := []string{"commit", "pr", "issue"}
+	refItem := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"type": map[string]any{
+				"type": "string",
+				"enum": []string{"commit", "pr", "issue"},
+			},
+			"value": map[string]any{
+				"type": "string",
+			},
+		},
+		"required":             []string{"type", "value"},
+		"additionalProperties": false,
+	}
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -111,23 +131,27 @@ func OutputSchema() map[string]any {
 									"refs": map[string]any{
 										"type":     "array",
 										"minItems": 1,
+										"items":    refItem,
+									},
+									"children": map[string]any{
+										"type": "array",
 										"items": map[string]any{
 											"type": "object",
 											"properties": map[string]any{
-												"type": map[string]any{
+												"summary": map[string]any{
 													"type": "string",
-													"enum": refTypeEnum,
 												},
-												"value": map[string]any{
-													"type": "string",
+												"refs": map[string]any{
+													"type":  "array",
+													"items": refItem,
 												},
 											},
-											"required":             []string{"type", "value"},
+											"required":             []string{"summary", "refs"},
 											"additionalProperties": false,
 										},
 									},
 								},
-								"required":             []string{"label", "summary", "refs"},
+								"required":             []string{"label", "summary", "refs", "children"},
 								"additionalProperties": false,
 							},
 						},
@@ -216,6 +240,9 @@ func Render(doc Document) string {
 		out = append(out, "### "+sec.Heading, "")
 		for _, bullet := range sec.Bullets {
 			out = append(out, "- "+renderBullet(bullet))
+			for _, child := range bullet.Children {
+				out = append(out, "  - "+renderChildBullet(child))
+			}
 		}
 		out = append(out, "")
 	}
@@ -300,15 +327,22 @@ func enrichNarrativeCommitRefs(doc *Document, prepared PreparedContext) {
 	}
 	for sectionIdx := range doc.Sections {
 		for bulletIdx := range doc.Sections[sectionIdx].Bullets {
-			for refIdx := range doc.Sections[sectionIdx].Bullets[bulletIdx].Refs {
-				ref := &doc.Sections[sectionIdx].Bullets[bulletIdx].Refs[refIdx]
-				if ref.Type != "commit" || ref.URL != "" {
-					continue
-				}
-				if url := resolveCommitURL(ref.Value, submoduleURLs); url != "" {
-					ref.URL = url
-				}
+			enrichCommitRefs(doc.Sections[sectionIdx].Bullets[bulletIdx].Refs, submoduleURLs)
+			for childIdx := range doc.Sections[sectionIdx].Bullets[bulletIdx].Children {
+				enrichCommitRefs(doc.Sections[sectionIdx].Bullets[bulletIdx].Children[childIdx].Refs, submoduleURLs)
 			}
+		}
+	}
+}
+
+func enrichCommitRefs(refs []Reference, urls map[string]string) {
+	for i := range refs {
+		ref := &refs[i]
+		if ref.Type != "commit" || ref.URL != "" {
+			continue
+		}
+		if url := resolveCommitURL(ref.Value, urls); url != "" {
+			ref.URL = url
 		}
 	}
 }
@@ -358,9 +392,22 @@ func renderBullet(bullet Bullet) string {
 		b.WriteString("**: ")
 	}
 	b.WriteString(strings.TrimSpace(bullet.Summary))
-	b.WriteString(" (")
-	b.WriteString(strings.Join(renderRefs(bullet.Refs), ", "))
-	b.WriteString(")")
+	if refs := renderRefs(bullet.Refs); len(refs) > 0 {
+		b.WriteString(" (")
+		b.WriteString(strings.Join(refs, ", "))
+		b.WriteString(")")
+	}
+	return b.String()
+}
+
+func renderChildBullet(child ChildBullet) string {
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(child.Summary))
+	if refs := renderRefs(child.Refs); len(refs) > 0 {
+		b.WriteString(" (")
+		b.WriteString(strings.Join(refs, ", "))
+		b.WriteString(")")
+	}
 	return b.String()
 }
 
@@ -440,12 +487,15 @@ func validateBullets(sections []Section) []string {
 				errs = append(errs, fmt.Sprintf("section %q bullet summary contains code fence", sec.Heading))
 			}
 			if hasLowSignalContinuation(bullet.Summary) {
-				errs = append(errs, fmt.Sprintf("section %q bullet %q has low-signal continuation; keep summaries concise and add a second clause only for non-obvious operator impact, required action, compatibility/risk, rollout scope, or behavior change", sec.Heading, bullet.Summary))
+				errs = append(errs, fmt.Sprintf("section %q bullet %q has low-signal continuation; keep the parent line as a short headline and move extra facts into children", sec.Heading, bullet.Summary))
+			}
+			if err := summaryLengthError(sec.Heading, "bullet", bullet.Summary, maxNarrativeSummaryRunes); err != "" {
+				errs = append(errs, err)
 			}
 			if len(bullet.Refs) == 0 {
 				errs = append(errs, fmt.Sprintf("section %q bullet %q has no refs", sec.Heading, bullet.Summary))
 			}
-			errs = append(errs, validateRefs(sec.Heading, bullet)...)
+			errs = append(errs, validateRefs(sec.Heading, bullet.Summary, bullet.Refs)...)
 			errs = append(errs, validateChildBullets(sec.Heading, bullet)...)
 		}
 	}
@@ -526,10 +576,7 @@ func isLowSignalContinuation(clause string) bool {
 }
 
 func validateChildBullets(heading string, bullet Bullet) []string {
-	if len(bullet.Children) == 0 {
-		return nil
-	}
-	errs := []string{fmt.Sprintf("section %q bullet %q has sub-bullets; fold child details into the parent summary or split them into separate top-level bullets", heading, bullet.Summary)}
+	var errs []string
 	for _, child := range bullet.Children {
 		if strings.TrimSpace(child.Summary) == "" {
 			errs = append(errs, fmt.Sprintf("section %q bullet %q has empty child summary", heading, bullet.Summary))
@@ -538,17 +585,35 @@ func validateChildBullets(heading string, bullet Bullet) []string {
 		if strings.Contains(child.Summary, "```") {
 			errs = append(errs, fmt.Sprintf("section %q bullet %q child summary contains code fence", heading, bullet.Summary))
 		}
+		if hasLowSignalContinuation(child.Summary) {
+			errs = append(errs, fmt.Sprintf("section %q child %q has low-signal continuation; keep child lines to one concrete operator-facing fact", heading, child.Summary))
+		}
+		if err := summaryLengthError(heading, "child", child.Summary, maxChildSummaryRunes); err != "" {
+			errs = append(errs, err)
+		}
+		errs = append(errs, validateRefs(heading, child.Summary, child.Refs)...)
 	}
 	return errs
 }
 
-func validateRefs(heading string, bullet Bullet) []string {
+func summaryLengthError(heading, role, summary string, limit int) string {
+	n := utf8.RuneCountInString(strings.TrimSpace(summary))
+	if n <= limit {
+		return ""
+	}
+	if role == "child" {
+		return fmt.Sprintf("section %q child %q is too long (%d characters); shorten the child line to one concrete fact", heading, summary, n)
+	}
+	return fmt.Sprintf("section %q bullet %q is too long (%d characters); keep the parent line as a short headline and move extra facts into children", heading, summary, n)
+}
+
+func validateRefs(heading, summary string, refs []Reference) []string {
 	var errs []string
 	seen := map[string]bool{}
-	for _, ref := range bullet.Refs {
+	for _, ref := range refs {
 		key := ref.Type + ":" + ref.Value
 		if seen[key] {
-			errs = append(errs, fmt.Sprintf("section %q bullet %q has duplicate ref %q", heading, bullet.Summary, key))
+			errs = append(errs, fmt.Sprintf("section %q bullet %q has duplicate ref %q", heading, summary, key))
 			continue
 		}
 		seen[key] = true
@@ -556,14 +621,14 @@ func validateRefs(heading string, bullet Bullet) []string {
 		switch ref.Type {
 		case "commit":
 			if !isCommitSHA(ref.Value) {
-				errs = append(errs, fmt.Sprintf("section %q bullet %q has invalid commit ref %q", heading, bullet.Summary, ref.Value))
+				errs = append(errs, fmt.Sprintf("section %q bullet %q has invalid commit ref %q", heading, summary, ref.Value))
 			}
 		case "pr", "issue":
 			if !isDigits(ref.Value) {
-				errs = append(errs, fmt.Sprintf("section %q bullet %q has invalid %s ref %q", heading, bullet.Summary, ref.Type, ref.Value))
+				errs = append(errs, fmt.Sprintf("section %q bullet %q has invalid %s ref %q", heading, summary, ref.Type, ref.Value))
 			}
 		default:
-			errs = append(errs, fmt.Sprintf("section %q bullet %q has invalid ref type %q", heading, bullet.Summary, ref.Type))
+			errs = append(errs, fmt.Sprintf("section %q bullet %q has invalid ref type %q", heading, summary, ref.Type))
 		}
 	}
 	return errs

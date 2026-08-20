@@ -2050,8 +2050,7 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	const releaseNoteFallbackTools = "repo_summary"
-	toolCandidates := append([]string{releaseNoteFallbackTools}, tools.SkillToolNames()...)
+	toolCandidates := append(tools.ReleaseNoteToolNames(), tools.SkillToolNames()...)
 	toolSpecs := registry.Definitions(toolCandidates)
 	allowedTools := toolDefinitionNames(toolSpecs)
 	runner := agent.OpenAIRunner{

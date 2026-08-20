@@ -16,6 +16,53 @@ import (
 	"github.com/yusing/git-agent/internal/gitctx"
 )
 
+func TestReleaseNoteToolNamesIncludeEvidenceReads(t *testing.T) {
+	want := []string{
+		"repo_summary", "list_files", "read_file", "inspect_file", "grep",
+		"git_show_commit", "git_show_file_at_rev",
+	}
+	if got := ReleaseNoteToolNames(); !slices.Equal(got, want) {
+		t.Fatalf("release-note tools = %v, want %v", got, want)
+	}
+
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.name", "Test User")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	mustWriteFile(t, filepath.Join(dir, "app.txt"), "base\n")
+	runGit(t, dir, "add", "app.txt")
+	runGit(t, dir, "commit", "-m", "base")
+	mustWriteFile(t, filepath.Join(dir, "app.txt"), "release\n")
+	runGit(t, dir, "add", "app.txt")
+	runGit(t, dir, "commit", "-m", "feat: change app")
+
+	repo, err := gitctx.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry(repo, nil)
+	defs := registry.Definitions(ReleaseNoteToolNames())
+	if len(defs) != len(ReleaseNoteToolNames()) {
+		t.Fatalf("defs = %d, want %d", len(defs), len(ReleaseNoteToolNames()))
+	}
+	result, err := registry.Execute(t.Context(), Invocation{
+		Name:      "git_show_commit",
+		Arguments: `{"rev":"HEAD","submodule":"","paths":[],"max_bytes":4096,"max_lines":200}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, "feat: change app") || !strings.Contains(result.Content, "+release") {
+		t.Fatalf("git_show_commit = %s", result.Content)
+	}
+	if _, err := registry.Execute(t.Context(), Invocation{
+		Name:      "git_show_commit",
+		Arguments: `{"rev":"HEAD","submodule":"../secret","paths":[],"max_bytes":4096,"max_lines":200}`,
+	}); err == nil {
+		t.Fatal("git_show_commit followed path outside repository")
+	}
+}
+
 func TestExploreToolNamesAreRepositoryReadsOnly(t *testing.T) {
 	want := []string{
 		"repo_summary", "list_files", "read_file", "inspect_file", "jq", "grep", "find",
