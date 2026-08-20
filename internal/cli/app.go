@@ -1708,7 +1708,7 @@ func parseCommitFlags(command string, args []string) (commitmsg.Mode, config.Opt
 }
 
 func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo *gitctx.Repository, stagedPaths []string, mode commitmsg.Mode, command string, recorder *trace.Recorder) (agent.Result, error) {
-	userPrompt := commitmsg.UserPrompt(mode, cfg.MaxSteps, cfg.MaxToolCalls)
+	var userPrompt string
 	var preparedCommit *commitmsg.PreparedCommitContext
 	var preparedAmend *commitmsg.PreparedAmendContext
 	var originalAmendMessage string
@@ -1773,7 +1773,11 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 			return commitmsg.ValidateAmendAgainstOriginal(originalAmendMessage, text)
 		}
 	}
-	toolCandidates := append(tools.CommitMessageToolNames(), tools.SkillToolNames()...)
+	toolNames := tools.CommitMessageToolNames()
+	if mode == commitmsg.ModeAmend {
+		toolNames = tools.AmendMessageToolNames()
+	}
+	toolCandidates := append(toolNames, tools.SkillToolNames()...)
 	registry := tools.NewRegistry(repo, skillManager)
 	toolSpecs := registry.Definitions(toolCandidates)
 	allowedTools := toolDefinitionNames(toolSpecs)

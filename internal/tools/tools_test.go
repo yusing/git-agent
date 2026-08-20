@@ -941,6 +941,32 @@ func TestNewRegistryOmitsPrecomputedEvidenceTools(t *testing.T) {
 	}
 }
 
+func TestCommitMessageToolNamesAreFollowUpReads(t *testing.T) {
+	wantCommit := []string{
+		"list_files", "read_file", "inspect_file", "grep",
+		"git_staged_diff_for_paths", "git_show_file_at_rev",
+	}
+	if got := CommitMessageToolNames(); !slices.Equal(got, wantCommit) {
+		t.Fatalf("commit-message tools = %v, want %v", got, wantCommit)
+	}
+	wantAmend := []string{
+		"list_files", "read_file", "inspect_file", "grep",
+		"git_final_amended_diff", "git_show_file_at_rev",
+	}
+	if got := AmendMessageToolNames(); !slices.Equal(got, wantAmend) {
+		t.Fatalf("amend-message tools = %v, want %v", got, wantAmend)
+	}
+	for _, name := range []string{
+		"repo_summary", "git_staged_paths", "git_staged_status", "git_staged_stat",
+		"git_staged_diff", "git_recent_commits", "git_head_show", "git_diff_against_parent",
+		"git_amend_delta",
+	} {
+		if slices.Contains(CommitMessageToolNames(), name) || slices.Contains(AmendMessageToolNames(), name) {
+			t.Fatalf("message tools still expose inventory tool %q", name)
+		}
+	}
+}
+
 func TestStagedDiffForPathsReturnsSelectedStagedPatch(t *testing.T) {
 	t.Parallel()
 

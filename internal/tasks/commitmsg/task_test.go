@@ -170,10 +170,10 @@ func TestFormatSubmoduleOnlyCommitRejectsMixedStagedChanges(t *testing.T) {
 func TestPromptsNameRequiredScope(t *testing.T) {
 	t.Parallel()
 
-	if got := UserPrompt(ModeNormal, 30, 24); !containsAll(got, "Current limits: 30 total model steps, 24 total tool calls.", "staged diff", "git_staged_diff", "ignore unstaged", "task IDs", "cover every distinct staged-diff change cluster") {
+	if got := UserPrompt(ModeNormal, 30, 24); !containsAll(got, "Current limits: 30 total model steps, 24 total tool calls.", "staged diff", "git_staged_diff_for_paths", "ignore unstaged", "task IDs", "cover every distinct staged-diff change cluster") {
 		t.Fatalf("normal prompt missing staged scope: %s", got)
 	}
-	if got := SystemPrompt(ModeNormal); !containsAll(got, "staged paths", "authoritative scope", "distinct high-signal staged change cluster") {
+	if got := SystemPrompt(ModeNormal); !containsAll(got, "staged paths", "authoritative scope", "distinct high-signal staged change cluster", "git_staged_diff_for_paths") {
 		t.Fatalf("normal system prompt missing cluster coverage: %s", got)
 	}
 	if got := SystemPrompt(ModeNormal); !containsAll(got, "previous HEAD diff", "contrast", "avoid restating previous work") {
@@ -184,7 +184,7 @@ func TestPromptsNameRequiredScope(t *testing.T) {
 	} else if strings.Contains(got, "Wrap body lines") {
 		t.Fatalf("normal system prompt still asks model to wrap body lines: %s", got)
 	}
-	if got := SystemPrompt(ModeAmend); !containsAll(got, "final amended commit", "versus its parent", "one commit", "Do not narrate a delta or process") {
+	if got := SystemPrompt(ModeAmend); !containsAll(got, "final amended commit", "versus its parent", "one commit", "Do not narrate a delta or process", "git_final_amended_diff only for narrower follow-up") {
 		t.Fatalf("amend prompt missing final commit scope: %s", got)
 	}
 	if got := UserPrompt(ModeAmend, 12, 9); !containsAll(got, "Current limits: 12 total model steps, 9 total tool calls.", "How to read the evidence", "authoritative", "do not dual-narrate", "subject, tone, scope, and task IDs") {
@@ -222,6 +222,7 @@ func TestPreparedCommitPromptUsesStagedDiffAsAuthoritativeScope(t *testing.T) {
 		"rely on previous_head_paths/stats for contrast shape",
 		"describe only the new staged delta",
 		"do not copy phrasing from recent commits or previous_head_diff",
+		"do not call tools to repeat staged inventory",
 		"go_types_generator/typedef.go.tmpl",
 		"internal/web/uc/schedtask/task.go",
 		"json.Valid(task.Parameter)",
@@ -270,6 +271,8 @@ Store verified providers in config after successful verification.`,
 		"head, head_paths, head_stats, head_context_pack, and head_diff describe the current HEAD/latest commit being amended",
 		"staged_paths, staged_status, staged_stats, staged_context_pack, staged_submodules, and amend_delta are diagnostics only",
 		"never base the subject or narrative on staged changes alone",
+		"use git_final_amended_diff only when final_diff is truncated or ambiguous",
+		"do not call tools to repeat prepared HEAD, staged-delta, or final-diff evidence",
 		"fix(agent): persist verified providers",
 		"internal/agent/verify.go",
 		"docs/verify.md",
@@ -787,8 +790,8 @@ func TestPromptsReflectExampleStyleExpectations(t *testing.T) {
 	if got := SystemPrompt(ModeNormal); !containsAll(got, "Choose 'refactor'", "moves, extracts, centralizes, or reorganizes existing behavior", "Choose 'feat' only", "prefer verbs such as \"extract\"") {
 		t.Fatalf("normal system prompt missing refactor-vs-feat guidance: %s", got)
 	}
-	if got := UserPrompt(ModeNormal, 30, 24); !containsAll(got, "git_staged_status", "recent commits", "full staged diff") {
-		t.Fatalf("normal user prompt missing structured context guidance: %s", got)
+	if got := UserPrompt(ModeNormal, 30, 24); !containsAll(got, "do not call tools just to repeat staged inventory", "inspect related files only if the staged diff is ambiguous") {
+		t.Fatalf("normal user prompt missing follow-up tool guidance: %s", got)
 	}
 	if got := UserPrompt(ModeNormal, 30, 24); !containsAll(got, "git_staged_diff_for_paths", "large or truncated", "classify extraction/move-only work as refactor, not feat") {
 		t.Fatalf("normal user prompt missing large-refactor follow-up guidance: %s", got)

@@ -16,10 +16,9 @@ Rules:
 - if evidence remains incomplete or ambiguous, return original_head_message unchanged
 - never replace a broad original commit message with a narrow message about only staged cleanup, tests, docs, or formatting
 - no delta/process phrasing such as "also", "this amend", or "in addition"
-Tools remain available for narrow follow-up inspection when prepared evidence is truncated or ambiguous:
-- git_final_amended_diff is the authoritative extra diff tool
-- git_head_show and git_diff_against_parent inspect HEAD diagnostics
-- git_amend_delta inspects staged-vs-HEAD diagnostics
+- use git_final_amended_diff only when final_diff is truncated or ambiguous
+- use related file reads only when the final amended diff is ambiguous
+- do not call tools to repeat prepared HEAD, staged-delta, or final-diff evidence
 Return only the commit message.
 
 <prepared_amend_context>

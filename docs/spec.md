@@ -2359,22 +2359,34 @@ definition are omitted.
 
 ### Commit message tools
 
-Commit message tools:
+Normal `commit-msg` and `commit` precompute staged inventory, recent style
+commits, previous HEAD contrast, and a bounded staged diff in Go. They expose
+only these follow-up tools plus available skill manager tools:
 
-- `git_staged_paths`
-- `git_staged_status`
-- `git_staged_stat`
-- `git_staged_diff`
+- `list_files`
+- `read_file`
+- `inspect_file`
+- `grep`
 - `git_staged_diff_for_paths`
-- `git_recent_commits`
-- `git_head_show`
-- `git_diff_against_parent`
-- `git_final_amended_diff`
-- `git_amend_delta`
 - `git_show_file_at_rev`
 
-`commit-msg` and `commit` expose these tools plus available skill manager
-tools. `pr-message` exposes only available skill manager tools. It precomputes
+Amend mode precomputes original HEAD, HEAD-vs-parent diagnostics, staged
+diagnostics, and the bounded final amended diff. It exposes:
+
+- `list_files`
+- `read_file`
+- `inspect_file`
+- `grep`
+- `git_final_amended_diff`
+- `git_show_file_at_rev`
+
+Staged inventory, recent-commit, full staged-diff, HEAD-show, parent-diff, and
+amend-delta tools are not exposed, because they only repeat prepared context.
+`git_staged_diff_for_paths` inspects omitted or high-churn staged clusters.
+`git_final_amended_diff` is for narrower follow-up when the prepared final diff
+is truncated or ambiguous.
+
+`pr-message` exposes only available skill manager tools. It precomputes
 `origin/HEAD` base
 metadata, changed paths, diff stats, branch commits, recent style commits, and
 a bounded full diff in Go before the first provider call.
@@ -2531,6 +2543,8 @@ Behavior:
   ambiguous
 - allow the model to request path-filtered staged diffs for omitted or
   high-churn clusters when the bounded full staged diff is large or truncated
+- do not expose staged inventory, recent-commit, or full staged-diff tools that
+  repeat prepared context
 - avoid tool calls that merely repeat prepared context; use narrow read-only
   tools only when they reduce material uncertainty
 - cover each distinct high-signal staged change cluster present in the staged
@@ -2584,6 +2598,8 @@ Behavior:
 - treat prepared final amended diff fields as authoritative initial evidence;
   use `git_final_amended_diff` only for narrower follow-up when the prepared
   diff is truncated or ambiguous
+- do not expose HEAD-show, parent-diff, recent-commit, or amend-delta tools that
+  repeat prepared amend context
 - treat the current HEAD message as the output anchor; preserve its subject and
   high-level story, revising body details only when the final amended diff
   proves them false

@@ -9,3 +9,5 @@ Do not sound like an addendum, follow-up, or layered update.
 Never tell the story as previous HEAD plus extra staged changes.
 Avoid "also", "this amend", "in addition", and similar process phrasing.
 Preserve task IDs or scope markers only when supported by the final diff.
+Use git_final_amended_diff only for narrower follow-up when the prepared final diff is truncated or ambiguous.
+Do not call tools to repeat prepared HEAD, staged-delta, or final-diff evidence.

@@ -246,21 +246,22 @@ func (g *reviewStateGuard) check() error {
 
 func CommitMessageToolNames() []string {
 	return []string{
-		"repo_summary",
 		"list_files",
 		"read_file",
 		"inspect_file",
 		"grep",
-		"git_staged_paths",
-		"git_staged_status",
-		"git_staged_stat",
-		"git_staged_diff",
 		"git_staged_diff_for_paths",
-		"git_recent_commits",
-		"git_head_show",
-		"git_diff_against_parent",
+		"git_show_file_at_rev",
+	}
+}
+
+func AmendMessageToolNames() []string {
+	return []string{
+		"list_files",
+		"read_file",
+		"inspect_file",
+		"grep",
 		"git_final_amended_diff",
-		"git_amend_delta",
 		"git_show_file_at_rev",
 	}
 }

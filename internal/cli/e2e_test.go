@@ -169,26 +169,22 @@ func TestCommitMsgEndToEndWithRealisticFixture(t *testing.T) {
 				`previous_head_stats`,
 				`previous_head_diff`,
 				`diff_truncated`,
-				`"git_staged_paths"`,
-				`"git_staged_status"`,
-				`"git_staged_stat"`,
-				`"git_staged_diff"`,
-				`"git_recent_commits"`,
+				`"git_staged_diff_for_paths"`,
 				`"read_file"`,
 			} {
 				if !strings.Contains(body, want) {
 					t.Fatalf("first request missing tool %s\n%s", want, body)
 				}
 			}
+			for _, name := range []string{`"git_staged_paths"`, `"git_staged_status"`, `"git_staged_stat"`, `"git_staged_diff"`, `"git_recent_commits"`} {
+				if strings.Contains(body, name) {
+					t.Fatalf("first request should not expose inventory tool %s\n%s", name, body)
+				}
+			}
 			return responseWithToolCalls("resp_commit_1",
-				toolCallSpec{ID: "fc_1", CallID: "call_1", Name: "git_staged_paths", Arguments: `{}`},
-				toolCallSpec{ID: "fc_2", CallID: "call_2", Name: "git_staged_status", Arguments: `{}`},
-				toolCallSpec{ID: "fc_3", CallID: "call_3", Name: "git_staged_stat", Arguments: `{}`},
-				toolCallSpec{ID: "fc_4", CallID: "call_4", Name: "git_staged_diff", Arguments: `{"max_bytes":32768,"max_lines":800}`},
-				toolCallSpec{ID: "fc_5", CallID: "call_5", Name: "git_recent_commits", Arguments: `{"limit":6}`},
-				toolCallSpec{ID: "fc_6", CallID: "call_6", Name: "read_file", Arguments: `{"path":"internal/route/do_parser.go","max_bytes":8192,"max_lines":260}`},
-				toolCallSpec{ID: "fc_7", CallID: "call_7", Name: "read_file", Arguments: `{"path":"internal/route/do_types.go","max_bytes":8192,"max_lines":260}`},
-				toolCallSpec{ID: "fc_8", CallID: "call_8", Name: "read_file", Arguments: `{"path":"docs/routing.md","max_bytes":8192,"max_lines":260}`},
+				toolCallSpec{ID: "fc_1", CallID: "call_1", Name: "read_file", Arguments: `{"path":"internal/route/do_parser.go","max_bytes":8192,"max_lines":260}`},
+				toolCallSpec{ID: "fc_2", CallID: "call_2", Name: "read_file", Arguments: `{"path":"internal/route/do_types.go","max_bytes":8192,"max_lines":260}`},
+				toolCallSpec{ID: "fc_3", CallID: "call_3", Name: "read_file", Arguments: `{"path":"docs/routing.md","max_bytes":8192,"max_lines":260}`},
 			)
 		},
 		func(body string) string {
@@ -328,23 +324,20 @@ func TestCommitMsgAmendEndToEndWithRealisticFixture(t *testing.T) {
 				`docs/verify.md`,
 				`fix(agent): persist verified providers`,
 				`"git_final_amended_diff"`,
-				`"git_head_show"`,
-				`"git_diff_against_parent"`,
-				`"git_amend_delta"`,
-				`"git_recent_commits"`,
 				`"read_file"`,
 			} {
 				if !strings.Contains(body, want) {
 					t.Fatalf("first request missing tool %s\n%s", want, body)
 				}
 			}
+			for _, name := range []string{`"git_head_show"`, `"git_diff_against_parent"`, `"git_amend_delta"`, `"git_recent_commits"`, `"git_staged_diff_for_paths"`} {
+				if strings.Contains(body, name) {
+					t.Fatalf("first request should not expose inventory tool %s\n%s", name, body)
+				}
+			}
 			return responseWithToolCalls("resp_amend_1",
 				toolCallSpec{ID: "fc_1", CallID: "call_1", Name: "git_final_amended_diff", Arguments: `{"max_bytes":32768,"max_lines":900}`},
-				toolCallSpec{ID: "fc_2", CallID: "call_2", Name: "git_head_show", Arguments: `{"max_bytes":16384,"max_lines":500}`},
-				toolCallSpec{ID: "fc_3", CallID: "call_3", Name: "git_diff_against_parent", Arguments: `{"max_bytes":16384,"max_lines":500}`},
-				toolCallSpec{ID: "fc_4", CallID: "call_4", Name: "git_amend_delta", Arguments: `{"max_bytes":16384,"max_lines":500}`},
-				toolCallSpec{ID: "fc_5", CallID: "call_5", Name: "git_recent_commits", Arguments: `{"limit":6}`},
-				toolCallSpec{ID: "fc_6", CallID: "call_6", Name: "read_file", Arguments: `{"path":"internal/agent/verify.go","max_bytes":8192,"max_lines":260}`},
+				toolCallSpec{ID: "fc_2", CallID: "call_2", Name: "read_file", Arguments: `{"path":"internal/agent/verify.go","max_bytes":8192,"max_lines":260}`},
 			)
 		},
 		func(body string) string {
