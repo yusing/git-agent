@@ -1,8 +1,10 @@
 package review
 
 import (
-	"strings"
+	"errors"
 	"testing"
+
+	json "encoding/json/v2"
 
 	"github.com/yusing/git-agent/internal/checks"
 )
@@ -47,7 +49,7 @@ func TestBuildFinalReviewReportRejectsUnknownProviderFields(t *testing.T) {
 		`{"summary":"ready","recommendation":"APPROVE","findings":[],"future":true}`,
 		[]checks.Result{result},
 	)
-	if err == nil || !strings.Contains(err.Error(), "unknown field") {
+	if err == nil || !errors.Is(err, json.ErrUnknownName) {
 		t.Fatalf("error = %v", err)
 	}
 }

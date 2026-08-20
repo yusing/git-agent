@@ -14,11 +14,13 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
+
 	"github.com/golangci/golangci-lint/v2/pkg/commands"
 	"github.com/golangci/golangci-lint/v2/pkg/printers"
 	"github.com/golangci/golangci-lint/v2/pkg/result"
 	"github.com/yusing/git-agent/internal/checks"
+	"github.com/yusing/git-agent/internal/jsonx"
 )
 
 const (
@@ -310,13 +312,11 @@ func readJSONResult(path string) (printers.JSONResult, error) {
 		return printers.JSONResult{}, fmt.Errorf("bundled golangci-lint JSON result exceeds %d bytes", maxHelperOutputBytes)
 	}
 	var parsed printers.JSONResult
-	decoder := sonic.ConfigStd.NewDecoder(bytes.NewReader(data))
-	if err := decoder.Decode(&parsed); err != nil {
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		if jsonx.ExtraJSON(err) {
+			return printers.JSONResult{}, fmt.Errorf("decode bundled golangci-lint JSON result: trailing data")
+		}
 		return printers.JSONResult{}, fmt.Errorf("decode bundled golangci-lint JSON result: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return printers.JSONResult{}, fmt.Errorf("decode bundled golangci-lint JSON result: trailing data")
 	}
 	if parsed.Issues == nil {
 		return printers.JSONResult{}, fmt.Errorf("decode bundled golangci-lint JSON result: issues must be an array")

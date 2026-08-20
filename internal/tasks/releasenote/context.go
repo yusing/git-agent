@@ -8,7 +8,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/bytedance/sonic"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
+
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/textutil"
 )
@@ -185,7 +187,7 @@ func PrepareContextFromRevision(repo *gitctx.Repository, baseRef, releaseRef, re
 }
 
 func (c PreparedContext) Render() string {
-	data, err := sonic.MarshalIndent(c, "", "  ")
+	data, err := json.Marshal(c, jsontext.WithIndent("  "))
 	if err != nil {
 		return fmt.Sprintf(`{"range":%q}`, c.Range)
 	}

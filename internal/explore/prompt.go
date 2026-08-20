@@ -5,7 +5,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
+
 	"github.com/yusing/git-agent/internal/agent"
 	"github.com/yusing/git-agent/internal/openai"
 )
@@ -124,11 +125,11 @@ func UserPrompt(parent *Session, items []PromptItem) (string, error) {
 	if parent != nil {
 		envelope.Parent = &promptParent{SearchID: parent.ID, Items: parent.Items}
 	}
-	text, err := sonic.ConfigStd.MarshalToString(envelope)
+	text, err := json.Marshal(envelope)
 	if err != nil {
 		return "", fmt.Errorf("encode explore prompt: %w", err)
 	}
-	return "Exploration input JSON:\n" + text, nil
+	return "Exploration input JSON:\n" + string(text), nil
 }
 
 func TextFormat() *openai.TextFormat {
@@ -196,7 +197,7 @@ func ValidateAnswers(itemIDs []string) func(string) []string {
 
 func ParseAnswers(text string) (map[string][]Item, error) {
 	var envelope answerEnvelope
-	if err := sonic.ConfigStd.UnmarshalFromString(text, &envelope); err != nil {
+	if err := json.Unmarshal([]byte(text), &envelope); err != nil {
 		return nil, fmt.Errorf("decode explore answers: %w", err)
 	}
 

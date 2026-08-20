@@ -6,7 +6,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
+
 	"github.com/yusing/git-agent/internal/openai"
 	"github.com/yusing/git-agent/internal/textutil"
 )
@@ -168,7 +169,7 @@ func OutputSchema() map[string]any {
 
 func ParseDocument(raw string) (Document, error) {
 	var doc Document
-	if err := sonic.UnmarshalString(raw, &doc); err != nil {
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
 		return Document{}, err
 	}
 	return doc, nil

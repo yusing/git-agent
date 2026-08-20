@@ -9,8 +9,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bytedance/sonic"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
+
 	"github.com/yusing/git-agent/internal/gitctx"
+	"github.com/yusing/git-agent/internal/jsonx"
 	"github.com/yusing/git-agent/internal/textutil"
 )
 
@@ -83,7 +86,7 @@ func (t jqTool) Execute(ctx context.Context, invocation Invocation) (Result, err
 		return Result{}, err
 	}
 
-	formatted, err := sonic.ConfigStd.MarshalIndent(value, "", "  ")
+	formatted, err := json.Marshal(value, jsontext.WithIndent("  "))
 	if err != nil {
 		return Result{}, fmt.Errorf("encode value at JSON pointer %q: %w", args.Pointer, err)
 	}
@@ -127,21 +130,14 @@ func readJQDocument(ctx context.Context, reader io.Reader) ([]byte, error) {
 }
 
 func decodeJQDocument(document []byte) (any, error) {
-	decoder := sonic.ConfigStd.NewDecoder(bytes.NewReader(document))
-	decoder.UseNumber()
 	var value any
-	if err := decoder.Decode(&value); err != nil {
+	if err := json.Unmarshal(document, &value, jsonx.UseNumber); err != nil {
+		if jsonx.ExtraJSON(err) {
+			return nil, errors.New("document contains more than one JSON value")
+		}
 		return nil, err
 	}
-	var extra any
-	switch err := decoder.Decode(&extra); {
-	case errors.Is(err, io.EOF):
-		return value, nil
-	case err == nil:
-		return nil, errors.New("document contains more than one JSON value")
-	default:
-		return nil, fmt.Errorf("invalid trailing data: %w", err)
-	}
+	return value, nil
 }
 
 func resolveJSONPointer(root any, pointer string) (any, error) {

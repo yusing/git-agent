@@ -11,7 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
+
 	git "github.com/go-git/go-git/v6"
 	gitconfig "github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -542,7 +543,7 @@ func (sync *indexSync) writeSnapshot(target indexSyncTarget, compatible []vector
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return 0, err
 	}
-	data, err := sonic.Marshal(snapshot)
+	data, err := json.Marshal(snapshot)
 	if err != nil {
 		return 0, err
 	}
@@ -751,7 +752,7 @@ func (sync *indexSync) mergeSnapshots(local map[string]syncedIndex) error {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return err
 		}
-		data, err := sonic.Marshal(snapshot)
+		data, err := json.Marshal(snapshot)
 		if err != nil {
 			return err
 		}

@@ -21,7 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
+
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -226,7 +227,7 @@ func TestRemoteCodeSearchSyncFiltersPreservedLegacyRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	var snapshot syncedIndex
-	if err := sonic.Unmarshal(data, &snapshot); err != nil {
+	if err := json.Unmarshal(data, &snapshot); err != nil {
 		t.Fatal(err)
 	}
 	if len(snapshot.Records) != 1 || snapshot.Records[0].Path != "app.go" || snapshot.Records[0].EmbeddingInputHash == "" {
@@ -592,7 +593,7 @@ func TestSyncAllPublishesEveryCompletedRevisionOnly(t *testing.T) {
 			t.Fatalf("read synced revision %s: %v", revision, err)
 		}
 		var snapshot syncedIndex
-		if err := sonic.Unmarshal(data, &snapshot); err != nil || len(snapshot.Records) == 0 {
+		if err := json.Unmarshal(data, &snapshot); err != nil || len(snapshot.Records) == 0 {
 			t.Fatalf("snapshot %s = %#v, %v", revision, snapshot, err)
 		}
 	}

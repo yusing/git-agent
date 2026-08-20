@@ -13,7 +13,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/bytedance/sonic"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
+
 	git "github.com/go-git/go-git/v6"
 	gitconfig "github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -377,7 +379,7 @@ func loadRemoteCache(path string) remoteCache {
 	if err != nil {
 		return cache
 	}
-	_ = sonic.Unmarshal(data, &cache)
+	_ = json.Unmarshal(data, &cache)
 	return cache
 }
 
@@ -385,7 +387,7 @@ func saveRemoteCache(path string, cache remoteCache) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	data, err := sonic.MarshalIndent(cache, "", "  ")
+	data, err := json.Marshal(cache, jsontext.WithIndent("  "))
 	if err != nil {
 		return err
 	}

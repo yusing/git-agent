@@ -8,9 +8,12 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/bytedance/sonic"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
+
 	"github.com/yusing/git-agent/internal/contextpack"
 	"github.com/yusing/git-agent/internal/gitctx"
+	"github.com/yusing/git-agent/internal/jsonx"
 	"github.com/yusing/git-agent/internal/openai"
 	"github.com/yusing/git-agent/internal/textutil"
 	"github.com/yusing/git-agent/internal/tools"
@@ -294,14 +297,14 @@ func SystemPrompt(kind Kind) string {
 // FollowUpPrompt constructs the user message that adds the complete parent
 // report and the requested re-evaluation to inherited conversation input.
 func FollowUpPrompt(kind Kind, report any, prompt string) (string, error) {
-	data, err := sonic.MarshalString(report)
+	data, err := json.Marshal(report)
 	if err != nil {
 		return "", fmt.Errorf("encode parent report: %w", err)
 	}
 	switch kind {
 	case KindReview:
 		var parent FinalReviewReport
-		if err := sonic.UnmarshalString(data, &parent); err != nil {
+		if err := json.Unmarshal(data, &parent); err != nil {
 			return "", fmt.Errorf("decode parent review report: %w", err)
 		}
 		if err := ValidateFinalReviewReport(parent); err != nil {
@@ -313,7 +316,7 @@ func FollowUpPrompt(kind Kind, report any, prompt string) (string, error) {
 		}{PreviousReport: parent, Prompt: prompt})
 	case KindSimplify:
 		var parent SimplifyReport
-		if err := sonic.UnmarshalString(data, &parent); err != nil {
+		if err := json.Unmarshal(data, &parent); err != nil {
 			return "", fmt.Errorf("decode parent simplify report: %w", err)
 		}
 		if errs := validateSimplify(parent); len(errs) > 0 {
@@ -347,11 +350,11 @@ func FollowUpContextPrompt(prepared PreparedContext) (string, error) {
 }
 
 func marshalFollowUp(value any) (string, error) {
-	data, err := sonic.MarshalString(value)
+	data, err := json.Marshal(value)
 	if err != nil {
 		return "", fmt.Errorf("encode follow-up prompt: %w", err)
 	}
-	return data, nil
+	return string(data), nil
 }
 
 func UserPrompt(kind Kind, prepared PreparedContext) string {
@@ -362,7 +365,7 @@ func UserPrompt(kind Kind, prepared PreparedContext) string {
 	if prepared.Mode == ModeCodebase {
 		return renderUserPrompt(userPromptData{Mission: mission, Scope: codebaseScopePrompt})
 	}
-	data, err := sonic.MarshalIndent(contextForPrompt(prepared), "", "  ")
+	data, err := json.Marshal(contextForPrompt(prepared), jsontext.WithIndent("  "))
 	if err != nil {
 		data = fmt.Appendf(nil, `{"mode":%q}`, prepared.Mode)
 	}
@@ -605,14 +608,8 @@ func readerHasLine(reader io.Reader, wanted int) (bool, error) {
 }
 
 func decodeStrict(text string, target any) error {
-	decoder := sonic.ConfigStd.NewDecoder(strings.NewReader(text))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return fmt.Errorf("invalid report JSON: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		if err == nil {
+	if err := json.Unmarshal([]byte(text), target, json.RejectUnknownMembers(true), json.MatchCaseInsensitiveNames(true)); err != nil {
+		if jsonx.ExtraJSON(err) {
 			return fmt.Errorf("invalid report JSON: trailing value")
 		}
 		return fmt.Errorf("invalid report JSON: %w", err)
@@ -714,14 +711,14 @@ func Shape(kind Kind, text string) string {
 	case KindReview:
 		var report ReviewReport
 		if decodeStrict(text, &report) == nil {
-			if data, err := sonic.MarshalIndent(report, "", "  "); err == nil {
+			if data, err := json.Marshal(report, jsontext.WithIndent("  ")); err == nil {
 				return string(data)
 			}
 		}
 	case KindSimplify:
 		var report SimplifyReport
 		if decodeStrict(text, &report) == nil {
-			if data, err := sonic.MarshalIndent(report, "", "  "); err == nil {
+			if data, err := json.Marshal(report, jsontext.WithIndent("  ")); err == nil {
 				return string(data)
 			}
 		}

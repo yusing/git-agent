@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,7 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
+
+	"github.com/yusing/git-agent/internal/jsonx"
 )
 
 const (
@@ -343,13 +344,11 @@ func (c *Commands) runContext7(ctx context.Context, args []string) (Output, erro
 		return Output{}, err
 	}
 	var data any
-	decoder := sonic.ConfigStd.NewDecoder(strings.NewReader(result.Stdout))
-	decoder.UseNumber()
-	if err := decoder.Decode(&data); err != nil {
+	if err := json.Unmarshal([]byte(result.Stdout), &data, jsonx.UseNumber); err != nil {
+		if jsonx.ExtraJSON(err) {
+			return Output{}, errors.New("Context7 returned multiple JSON values")
+		}
 		return Output{}, fmt.Errorf("Context7 returned malformed JSON: %w", err)
-	}
-	if decoder.Decode(&struct{}{}) != io.EOF {
-		return Output{}, errors.New("Context7 returned multiple JSON values")
 	}
 	return Output{Data: data, Truncated: result.Truncated}, nil
 }

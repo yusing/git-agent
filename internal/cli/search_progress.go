@@ -7,7 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
+
 	searchtask "github.com/yusing/git-agent/internal/tasks/search"
 )
 
@@ -118,7 +119,7 @@ func (a *searchProgressAgent) handleProgress(w http.ResponseWriter, _ *http.Requ
 	snapshot := a.snapshot
 	a.mu.RUnlock()
 
-	data, err := sonic.Marshal(snapshot)
+	data, err := json.Marshal(snapshot)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return

@@ -13,7 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
+
 	"github.com/yusing/git-agent/internal/agent"
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/explore"
@@ -224,10 +225,11 @@ func (a *App) prepareExploreSearch(ctx context.Context, question string, timing 
 		return explore.Prepared{}, err
 	}
 	deferredFreshness := strings.TrimSpace(opts.IndexRemote) != "" && output.Source.OriginIdentity != ""
-	semantic, err := sonic.ConfigStd.MarshalToString(output)
+	semanticBytes, err := json.Marshal(output)
 	if err != nil {
 		return explore.Prepared{}, fmt.Errorf("encode explore semantic results: %w", err)
 	}
+	semantic := string(semanticBytes)
 	paths := make([]string, 0, len(output.Results))
 	for _, result := range output.Results {
 		if result.Path != "" && !slices.Contains(paths, result.Path) {

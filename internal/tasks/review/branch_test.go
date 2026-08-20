@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"slices"
 	"strings"
 	"testing"
@@ -126,7 +127,7 @@ func TestParseBranchRequestValidatesCompleteShapeBeforeFanout(t *testing.T) {
 		want string
 	}{
 		{name: "one child", json: `{"branches":[{"scope":"one","path_hints":[],"model":"inherit","reasoning_effort":"inherit"}]}`, want: "requires 2 to 3"},
-		{name: "unknown field", json: strings.Replace(valid, `"scope":"Review lifecycle behavior."`, `"scope":"Review lifecycle behavior.","extra":true`, 1), want: "unknown field"},
+		{name: "unknown field", json: strings.Replace(valid, `"scope":"Review lifecycle behavior."`, `"scope":"Review lifecycle behavior.","extra":true`, 1), want: jsonv2.ErrUnknownName.Error()},
 		{name: "unsafe hint", json: strings.Replace(valid, `"internal/cli"`, `"../outside"`, 1), want: "safe repository-relative"},
 		{name: "invented model", json: strings.Replace(valid, `"gpt-5.6-sol"`, `"gpt-next"`, 1), want: "model is invalid"},
 		{name: "simplify xhigh", json: strings.Replace(valid, `"high"`, `"xhigh"`, 1), want: "reasoning_effort is invalid"},

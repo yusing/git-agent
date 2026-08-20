@@ -1,16 +1,16 @@
 package search
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
+
+	"github.com/yusing/git-agent/internal/jsonx"
 )
 
 const (
@@ -23,14 +23,8 @@ type indexSyncSchema struct {
 }
 
 func decodeStrictJSON(data []byte, value any) error {
-	decoder := sonic.ConfigStd.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(value); err != nil {
-		return err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
+	if err := json.Unmarshal(data, value, json.RejectUnknownMembers(true)); err != nil {
+		if jsonx.ExtraJSON(err) {
 			return errors.New("unexpected trailing JSON value")
 		}
 		return err

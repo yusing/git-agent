@@ -15,6 +15,7 @@
 - `internal/explore/`: synchronous exploration batching and durable follow-up
   sessions.
 - `internal/tools/`: curated read-only model tool registry and tool envelopes.
+- `internal/jsonx/`: encoding/json/v2 helpers for number preservation and extra-value detection.
 - `internal/textutil/`: text normalization and output shaping helpers.
 - `internal/trace/`: in-memory event recording and human console trace rendering.
 - `docs/spec.md`: behavioral specification and execution-flow diagrams.

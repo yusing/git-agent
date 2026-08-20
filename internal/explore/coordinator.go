@@ -16,7 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
+
 	"github.com/yusing/git-agent/internal/followup"
 	"github.com/yusing/git-agent/internal/openai"
 )
@@ -721,7 +722,7 @@ func readJSONFile(path string, value any) error {
 	if len(data) > maxBatchFileBytes {
 		return fmt.Errorf("%s exceeds %d bytes", filepath.Base(path), maxBatchFileBytes)
 	}
-	if err := sonic.ConfigStd.Unmarshal(data, value); err != nil {
+	if err := json.Unmarshal(data, value); err != nil {
 		return fmt.Errorf("decode %s: %w", filepath.Base(path), err)
 	}
 	return nil

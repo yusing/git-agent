@@ -11,7 +11,7 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
 )
 
 const SchemaVersion = 2
@@ -72,7 +72,7 @@ type Usage struct {
 }
 
 func RunPostInspection(ctx context.Context, configured []string, payload PostInspection) error {
-	data, err := sonic.Marshal(payload)
+	data, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("encode post-inspection hook payload: %w", err)
 	}
@@ -102,8 +102,8 @@ func render(source string, payload PostInspection) (string, error) {
 	tmpl, err := template.New("post_inspection").Option("missingkey=error").Funcs(template.FuncMap{
 		"format_markdown": formatMarkdown,
 		"json": func(value any) (string, error) {
-			data, err := sonic.MarshalString(value)
-			return data, err
+			data, err := json.Marshal(value)
+			return string(data), err
 		},
 		"shellquote": shellQuote,
 	}).Parse(source)

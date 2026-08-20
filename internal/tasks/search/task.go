@@ -28,7 +28,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
+
 	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
 	"github.com/yusing/git-agent/internal/gitctx"
 	ignorectx "github.com/yusing/git-agent/internal/ignore"
@@ -1625,7 +1626,7 @@ func loadLegacyVectors(dir string) ([]vectorRecord, error) {
 		return nil, err
 	}
 	var records []vectorRecord
-	if err := sonic.Unmarshal(data, &records); err != nil {
+	if err := json.Unmarshal(data, &records); err != nil {
 		return nil, err
 	}
 	return records, nil
@@ -2388,7 +2389,7 @@ func saveIndex(ctx context.Context, metadataDir, dir string, source Source, root
 }
 
 func writeJSON(path string, value any) error {
-	data, err := sonic.Marshal(value)
+	data, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
@@ -2397,7 +2398,7 @@ func writeJSON(path string, value any) error {
 }
 
 func writeJSONSync(path string, value any) (err error) {
-	data, err := sonic.Marshal(value)
+	data, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
@@ -2693,7 +2694,7 @@ func loadHistory(dir string) ([]historyEntry, error) {
 		return nil, err
 	}
 	var entries []historyEntry
-	return entries, sonic.Unmarshal(data, &entries)
+	return entries, json.Unmarshal(data, &entries)
 }
 
 func appendHistory(dir string, entry historyEntry) error {

@@ -15,7 +15,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
+
+	"github.com/yusing/git-agent/internal/jsonx"
 )
 
 type Recorder struct {
@@ -39,8 +41,6 @@ const (
 	consoleInlineFields         = 6
 	consoleInlineWidth          = 140
 )
-
-var sonicUseNumber = sonic.Config{UseNumber: true}.Froze()
 
 func NewStream(command string, writer io.Writer) (*Recorder, error) {
 	return startMemory(&Recorder{eventWriter: writer}, command)
@@ -124,12 +124,12 @@ func Normalize(value any) any {
 }
 
 func normalizeValue(value any, expandStrings bool) any {
-	data, err := sonic.MarshalString(value)
+	data, err := json.Marshal(value)
 	if err != nil {
 		return value
 	}
 	var normalized any
-	if err := sonicUseNumber.UnmarshalFromString(data, &normalized); err != nil {
+	if err := json.Unmarshal(data, &normalized, jsonx.UseNumber); err != nil {
 		return value
 	}
 	if !expandStrings {
@@ -174,7 +174,7 @@ func expandJSONString(value string) any {
 		return value
 	}
 	var expanded any
-	if err := sonicUseNumber.UnmarshalFromString(trimmed, &expanded); err != nil {
+	if err := json.Unmarshal([]byte(trimmed), &expanded, jsonx.UseNumber); err != nil {
 		return value
 	}
 	return expandJSONStrings(expanded)
@@ -720,12 +720,12 @@ func (r *Recorder) compactedMapValueLocked(value map[string]any) (map[string]any
 }
 
 func (r *Recorder) compactedValueLocked(value any) (any, error) {
-	data, err := sonic.MarshalString(value)
+	data, err := json.Marshal(value)
 	if err != nil {
 		return nil, err
 	}
 	var normalized any
-	if err := sonicUseNumber.UnmarshalFromString(data, &normalized); err != nil {
+	if err := json.Unmarshal(data, &normalized, jsonx.UseNumber); err != nil {
 		return nil, err
 	}
 	return r.compactLargeStringsLocked(normalized)

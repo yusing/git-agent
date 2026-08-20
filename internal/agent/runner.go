@@ -13,7 +13,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
+
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/openai"
@@ -601,7 +602,7 @@ func (r *OpenAIRunner) runtimeStatusValue(phase string, step, maxSteps, toolCall
 }
 
 func estimateRequestTokens(request openai.Request) int {
-	data, _ := sonic.ConfigStd.Marshal(struct {
+	data, _ := json.Marshal(struct {
 		Instructions       string                      `json:"instructions"`
 		Input              []openai.Item               `json:"input"`
 		Tools              []openai.ToolSpec           `json:"tools"`
@@ -634,9 +635,9 @@ func (r *OpenAIRunner) writeUsageMetrics(step int, usage openai.Usage) {
 func toolCallSignature(call openai.ToolCall) string {
 	arguments := strings.TrimSpace(call.Arguments)
 	var value any
-	if sonic.ConfigStd.UnmarshalFromString(arguments, &value) == nil {
-		if canonical, err := sonic.ConfigStd.MarshalToString(value); err == nil {
-			arguments = canonical
+	if json.Unmarshal([]byte(arguments), &value) == nil {
+		if canonical, err := json.Marshal(&value, json.Deterministic(true)); err == nil {
+			arguments = string(canonical)
 		}
 	}
 	return call.Name + "\x00" + arguments
@@ -901,7 +902,7 @@ func functionItemFields(item openai.Item, expectedType string) (string, string, 
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
 	}
-	if err := sonic.ConfigStd.UnmarshalFromString(item.RawJSON, &raw); err != nil {
+	if err := json.Unmarshal([]byte(item.RawJSON), &raw); err != nil {
 		return "", "", "", "", fmt.Errorf("decode %s: %w", strings.ReplaceAll(expectedType, "_", " "), err)
 	}
 	if raw.Type != expectedType {

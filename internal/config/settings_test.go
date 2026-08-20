@@ -1,10 +1,12 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+
+	json "encoding/json/v2"
 )
 
 func TestLoadSettingsUsesHomeGitAgentDirectory(t *testing.T) {
@@ -50,7 +52,7 @@ func TestLoadSettingsRejectsValuesOutsideV1Schema(t *testing.T) {
 	}
 
 	_, err := LoadSettings()
-	if err == nil || !strings.Contains(err.Error(), "unknown field") {
+	if err == nil || !errors.Is(err, json.ErrUnknownName) {
 		t.Fatalf("error = %v", err)
 	}
 }

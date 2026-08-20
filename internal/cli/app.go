@@ -20,7 +20,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bytedance/sonic"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
+
 	"github.com/yusing/git-agent/internal/agent"
 	backgroundtask "github.com/yusing/git-agent/internal/background"
 	"github.com/yusing/git-agent/internal/checks"
@@ -31,6 +33,7 @@ import (
 	"github.com/yusing/git-agent/internal/giturl"
 	"github.com/yusing/git-agent/internal/guidance"
 	"github.com/yusing/git-agent/internal/hooks"
+	"github.com/yusing/git-agent/internal/jsonx"
 	"github.com/yusing/git-agent/internal/metadata"
 	"github.com/yusing/git-agent/internal/openai"
 	"github.com/yusing/git-agent/internal/projectidentity"
@@ -586,9 +589,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		}
 	} else {
 		var simplifyReport map[string]any
-		decoder := sonic.ConfigStd.NewDecoder(strings.NewReader(result.Text))
-		decoder.UseNumber()
-		if err := decoder.Decode(&simplifyReport); err != nil {
+		if err := json.Unmarshal([]byte(result.Text), &simplifyReport, jsonx.UseNumber); err != nil {
 			return fmt.Errorf("decode validated simplify report: %w", err)
 		}
 		report = simplifyReport
@@ -709,7 +710,7 @@ func (a *App) waitForDetachedTask(ctx context.Context, command, id string) error
 	if err != nil {
 		return err
 	}
-	data, err := sonic.Marshal(report)
+	data, err := json.Marshal(report)
 	if err != nil {
 		return fmt.Errorf("encode background task %s report: %w", id, err)
 	}
@@ -1096,7 +1097,7 @@ func (a *App) runSearch(ctx context.Context, args []string) error {
 				if err != nil {
 					return err
 				}
-				if err := sonic.ConfigDefault.NewEncoder(a.stderr).Encode(progressAgent.Endpoint()); err != nil {
+				if err := json.MarshalEncode(jsontext.NewEncoder(a.stderr), progressAgent.Endpoint()); err != nil {
 					progressAgent.Close()
 					return err
 				}
@@ -1312,9 +1313,7 @@ func parseScopeFlag(scope string) ([]string, error) {
 }
 
 func writeJSONOutput(w io.Writer, value any) error {
-	encoder := sonic.ConfigDefault.NewEncoder(w)
-	encoder.SetEscapeHTML(false)
-	return encoder.Encode(value)
+	return json.MarshalEncode(jsontext.NewEncoder(w), value)
 }
 
 func writeSearchBrief(w io.Writer, output searchtask.Output) error {

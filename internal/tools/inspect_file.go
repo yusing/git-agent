@@ -14,7 +14,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/bytedance/sonic"
+	jsonv1 "encoding/json"
+	json "encoding/json/v2"
+
 	"github.com/yusing/git-agent/internal/gitctx"
 )
 
@@ -252,7 +254,7 @@ func jsonOutline(content []byte) ([]fileOutlineEntry, bool) {
 		return nil, false
 	}
 	var value any
-	if err := sonic.ConfigStd.Unmarshal(content, &value); err != nil {
+	if err := json.Unmarshal(content, &value); err != nil {
 		return nil, false
 	}
 	var outline outlineBuilder
@@ -309,7 +311,7 @@ func jsonValueKind(value any) string {
 		return "null"
 	case bool:
 		return "boolean"
-	case float64:
+	case jsonv1.Number, float64:
 		return "number"
 	case string:
 		return "string"

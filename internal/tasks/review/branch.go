@@ -7,7 +7,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
+
 	"github.com/yusing/git-agent/internal/tools"
 )
 
@@ -193,11 +194,11 @@ func ParseBranchRequest(kind Kind, depth Depth, nodeDepth int, arguments string)
 }
 
 func EncodeBranchResult(result BranchResult) (string, error) {
-	data, err := sonic.MarshalString(result)
+	data, err := json.Marshal(result)
 	if err != nil {
 		return "", fmt.Errorf("encode branch result: %w", err)
 	}
-	return data, nil
+	return string(data), nil
 }
 
 func Aggregate(kind Kind, leaves []LeafReport) (string, error) {
@@ -264,10 +265,11 @@ func BoundedBranchMessage(message string) string {
 }
 
 func encodeAggregated(kind Kind, report any) (string, error) {
-	text, err := sonic.MarshalString(report)
+	encoded, err := json.Marshal(report)
 	if err != nil {
 		return "", fmt.Errorf("encode aggregated %s report: %w", kind, err)
 	}
+	text := string(encoded)
 	if errs := Validate(kind, text); len(errs) > 0 {
 		return "", fmt.Errorf("validate aggregated %s report: %s", kind, strings.Join(errs, "; "))
 	}

@@ -7,7 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bytedance/sonic"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
 )
 
 const IndexRemoteKey = "index.remote"
@@ -33,7 +34,7 @@ func LoadFile() (File, error) {
 		return File{}, fmt.Errorf("read config: %w", err)
 	}
 	var cfg File
-	if err := sonic.Unmarshal(data, &cfg); err != nil {
+	if err := json.Unmarshal(data, &cfg); err != nil {
 		return File{}, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	return cfg, nil
@@ -47,7 +48,7 @@ func SaveFile(cfg File) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
 	}
-	data, err := sonic.MarshalIndent(cfg, "", "  ")
+	data, err := json.Marshal(&cfg, jsontext.WithIndent("  "))
 	if err != nil {
 		return fmt.Errorf("encode config: %w", err)
 	}

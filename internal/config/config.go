@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
 )
 
 const (
@@ -320,7 +320,7 @@ func readCodexAuth() (codexAuthFile, error) {
 		return codexAuthFile{}, fmt.Errorf("read %s: %w", defaultCodexAuthPath, err)
 	}
 	var auth codexAuthFile
-	if err := sonic.Unmarshal(data, &auth); err != nil {
+	if err := json.Unmarshal(data, &auth); err != nil {
 		return codexAuthFile{}, fmt.Errorf("parse %s: %w", defaultCodexAuthPath, err)
 	}
 	return auth, nil

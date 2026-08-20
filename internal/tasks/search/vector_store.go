@@ -18,7 +18,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
 )
 
 const (
@@ -203,7 +203,7 @@ func (store vectorStore) loadCatalog() (vectorStoreCatalog, uint64, error) {
 }
 
 func marshalVectorStoreCatalog(catalog vectorStoreCatalog) ([]byte, error) {
-	data, err := sonic.Marshal(catalog)
+	data, err := json.Marshal(catalog)
 	if err != nil {
 		return nil, err
 	}

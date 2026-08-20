@@ -1,16 +1,16 @@
 package config
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
-	"github.com/bytedance/sonic"
+	json "encoding/json/v2"
+
+	"github.com/yusing/git-agent/internal/jsonx"
 	"github.com/yusing/git-agent/internal/metadata"
 )
 
@@ -35,15 +35,9 @@ func LoadSettings() (Settings, error) {
 	if err != nil {
 		return Settings{}, fmt.Errorf("read settings: %w", err)
 	}
-	decoder := sonic.ConfigStd.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
 	var settings Settings
-	if err := decoder.Decode(&settings); err != nil {
-		return Settings{}, fmt.Errorf("parse settings %s: %w", path, err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
+	if err := json.Unmarshal(data, &settings, json.RejectUnknownMembers(true)); err != nil {
+		if jsonx.ExtraJSON(err) {
 			err = errors.New("multiple JSON values")
 		}
 		return Settings{}, fmt.Errorf("parse settings %s: %w", path, err)

@@ -16,7 +16,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/bytedance/sonic"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
+
 	"github.com/yusing/git-agent/internal/doccmd"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/skillcmd"
@@ -474,7 +476,7 @@ func ErrorResult(tool string, err error) (Result, error) {
 }
 
 func marshalResultEnvelope(envelope map[string]any, truncated bool) (Result, error) {
-	data, err := sonic.MarshalIndent(envelope, "", "  ")
+	data, err := json.Marshal(envelope, jsontext.WithIndent("  "))
 	if err != nil {
 		return Result{}, err
 	}
@@ -489,7 +491,7 @@ func parseArgs[T any](raw string) (T, error) {
 	if raw == "" {
 		return value, nil
 	}
-	err := sonic.UnmarshalString(raw, &value)
+	err := json.Unmarshal([]byte(raw), &value)
 	if err != nil {
 		return value, fmt.Errorf("invalid tool arguments %q: %w", raw, err)
 	}
@@ -1634,7 +1636,7 @@ func limitCommitInfos(commits []gitctx.CommitInfo, maxBytes, maxLines int) ([]gi
 		commit.Summary, summaryTruncated = textutil.Limit(commit.Summary, fieldMaxBytes, fieldMaxLines)
 		commit.Author, authorTruncated = textutil.Limit(commit.Author, fieldMaxBytes, fieldMaxLines)
 		candidate := append(limited, commit)
-		data, err := sonic.MarshalIndent(candidate, "", "  ")
+		data, err := json.Marshal(candidate, jsontext.WithIndent("  "))
 		if err != nil {
 			return nil, false, err
 		}

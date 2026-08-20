@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,7 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bytedance/sonic"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
+
 	openaisdk "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
@@ -223,7 +224,7 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 			if request.TurnID != "" {
 				// Source: codex-rs/core/src/responses_metadata.rs:255:270
 				// CodexResponsesMetadata.compatibility_headers.
-				turnMetadata, err := sonic.MarshalString(codexTurnMetadata{
+				turnMetadataBytes, err := json.Marshal(codexTurnMetadata{
 					SessionID: request.PromptCacheKey,
 					ThreadID:  request.PromptCacheKey,
 					TurnID:    request.TurnID,
@@ -231,7 +232,7 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 				if err != nil {
 					return Response{}, fmt.Errorf("encoding Codex turn metadata: %w", err)
 				}
-				opts = append(opts, option.WithHeader(codexTurnMetadataHeader, turnMetadata))
+				opts = append(opts, option.WithHeader(codexTurnMetadataHeader, string(turnMetadataBytes)))
 			}
 		}
 		if request.Model == "gpt-5.6" {
@@ -940,7 +941,7 @@ func (r Request) toSDKParams() (responses.ResponseNewParams, error) {
 func (i Item) toSDKParam(explicitPromptCaching bool) (responses.ResponseInputItemUnionParam, error) {
 	if i.RawJSON != "" {
 		var param responses.ResponseInputItemUnionParam
-		if err := sonic.ConfigStd.UnmarshalFromString(i.RawJSON, &param); err != nil {
+		if err := json.Unmarshal([]byte(i.RawJSON), &param); err != nil {
 			return responses.ResponseInputItemUnionParam{}, fmt.Errorf("decode continuation item %q: %w", i.Type, err)
 		}
 		return param, nil
@@ -1061,14 +1062,7 @@ func (r Request) MarshalTraceJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var buf bytes.Buffer
-	encoder := sonic.ConfigDefault.NewEncoder(&buf)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(traceValue); err != nil {
-		return nil, err
-	}
-	return bytes.TrimSuffix(buf.Bytes(), []byte{'\n'}), nil
+	return json.Marshal(traceValue, jsontext.WithIndent("  "))
 }
 
 func sanitizeTraceRequestValue(value any) any {

@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bytedance/sonic"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
+
 	"github.com/yusing/git-agent/internal/followup"
 	"github.com/yusing/git-agent/internal/openai"
 )
@@ -79,7 +81,7 @@ func (s *Store) Read(id string) (Session, error) {
 		return Session{}, fmt.Errorf("explore session %s exceeds %d bytes", id, maxSessionBytes)
 	}
 	var session Session
-	if err := sonic.ConfigStd.Unmarshal(data, &session); err != nil {
+	if err := json.Unmarshal(data, &session); err != nil {
 		return Session{}, fmt.Errorf("decode explore session %s: %w", id, err)
 	}
 	if err := validateSession(session); err != nil {
@@ -113,7 +115,7 @@ func (s *Store) create(session Session) error {
 	if err := validateSession(session); err != nil {
 		return err
 	}
-	encoded, err := sonic.ConfigStd.Marshal(session)
+	encoded, err := json.Marshal(session)
 	if err != nil {
 		return fmt.Errorf("encode explore session %s: %w", session.ID, err)
 	}
@@ -205,9 +207,7 @@ func writeJSONAtomic(dir, path string, value any) error {
 		_ = temporary.Close()
 		return err
 	}
-	encoder := sonic.ConfigStd.NewEncoder(temporary)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(value); err != nil {
+	if err := json.MarshalEncode(jsontext.NewEncoder(temporary), value); err != nil {
 		_ = temporary.Close()
 		return err
 	}

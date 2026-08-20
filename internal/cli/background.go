@@ -8,8 +8,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/bytedance/sonic"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
+
 	backgroundtask "github.com/yusing/git-agent/internal/background"
+	"github.com/yusing/git-agent/internal/jsonx"
 )
 
 const (
@@ -89,7 +92,7 @@ func startDetachedProcess(executable string, args, env []string) (detachedLaunch
 }
 
 func writeDetachedLaunch(writer io.Writer, launch detachedLaunch) error {
-	if err := sonic.ConfigStd.NewEncoder(writer).Encode(launch); err != nil {
+	if err := json.MarshalEncode(jsontext.NewEncoder(writer), launch); err != nil {
 		return fmt.Errorf("encode detached task launch metadata: %w", err)
 	}
 	return nil
@@ -118,21 +121,15 @@ func readDetachedLaunch(reader io.Reader) (detachedLaunch, error) {
 	if len(trimmed) > 0 && trimmed[0] != '{' {
 		return detachedLaunch{}, fmt.Errorf("detached task startup: %q", string(trimmed))
 	}
-	decoder := sonic.ConfigStd.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
 	var launch detachedLaunch
-	if err := decoder.Decode(&launch); err != nil {
+	if err := json.Unmarshal(data, &launch, json.RejectUnknownMembers(true)); err != nil {
+		if jsonx.ExtraJSON(err) {
+			err = errors.New("multiple JSON values")
+		}
 		return detachedLaunch{}, fmt.Errorf("decode detached task launch metadata: %w", err)
 	}
 	if launch.Command == "" || launch.ID == "" || launch.PID <= 0 {
 		return detachedLaunch{}, errors.New("detached task launch metadata is incomplete")
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			err = errors.New("multiple JSON values")
-		}
-		return detachedLaunch{}, fmt.Errorf("decode detached task launch metadata: %w", err)
 	}
 	return launch, nil
 }

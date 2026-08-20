@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	json "encoding/json/v2"
+
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
@@ -27,7 +29,7 @@ func TestIndexSyncSchemaRejectsMalformedAndFutureData(t *testing.T) {
 		{name: "malformed", data: "{", want: "parse index sync schema"},
 		{name: "missing version", data: "{}\n", want: "unsupported index sync schema version 0"},
 		{name: "wrong type", data: "{\"version\":\"1\"}\n", want: "parse index sync schema"},
-		{name: "unknown field", data: "{\"version\":1,\"mode\":\"future\"}\n", want: "unknown field"},
+		{name: "unknown field", data: "{\"version\":1,\"mode\":\"future\"}\n", want: json.ErrUnknownName.Error()},
 		{name: "trailing value", data: "{\"version\":1}\n{}\n", want: "unexpected trailing JSON value"},
 		{name: "future", data: "{\"version\":3}\n", want: "unsupported index sync schema version 3"},
 	} {
@@ -755,7 +757,7 @@ func TestV2SnapshotRejectsUnknownAndFutureJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	unknown := bytes.Replace(valid, []byte("{\"version\":2,"), []byte("{\"version\":2,\"future\":true,"), 1)
-	if _, err := sync.decodeV2Snapshot(unknown, target); err == nil || !strings.Contains(err.Error(), "unknown field") {
+	if _, err := sync.decodeV2Snapshot(unknown, target); err == nil || !errors.Is(err, json.ErrUnknownName) {
 		t.Fatalf("unknown snapshot field error = %v", err)
 	}
 	future := bytes.Replace(valid, []byte("\"version\":2"), []byte("\"version\":3"), 1)

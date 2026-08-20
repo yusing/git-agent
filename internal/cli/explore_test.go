@@ -12,7 +12,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/bytedance/sonic"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
+
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/explore"
 	"github.com/yusing/git-agent/internal/openai"
@@ -177,11 +179,12 @@ func (c *exploreFakeResponseClient) CreateResponse(ctx context.Context, request 
 	for _, match := range matches {
 		answers = append(answers, explore.Answer{ItemID: match[1], Items: []explore.Item{{Description: "context for " + match[1], References: []string{"main.go:1"}}}})
 	}
-	text, err := sonic.ConfigStd.MarshalToString(map[string]any{"answers": answers})
+	text, err := json.Marshal(map[string]any{"answers": answers})
 	if err != nil {
 		return openai.Response{}, err
 	}
-	return openai.Response{Text: text, Continuation: []openai.Item{openai.NewMessage("assistant", text)}, Usage: c.usage}, nil
+	body := string(text)
+	return openai.Response{Text: body, Continuation: []openai.Item{openai.NewMessage("assistant", body)}, Usage: c.usage}, nil
 }
 
 func TestExploreDoesNotApplyRequestTimeoutToWholeBatch(t *testing.T) {
@@ -252,7 +255,7 @@ func TestExploreReportsProviderUsageWithoutChangingStdout(t *testing.T) {
 	}
 	runExploreForTest(t, app, &stdout, "inspect", "the", "repository")
 
-	if !sonic.Valid(stdout.Bytes()) {
+	if !jsontext.Value(stdout.Bytes()).IsValid() {
 		t.Fatalf("stdout is not JSON: %q", stdout.String())
 	}
 	for _, want := range []string{
@@ -574,13 +577,14 @@ func (c *exploreReadToolClient) CreateResponse(_ context.Context, request openai
 		}
 	}
 	match := regexp.MustCompile(`"item_id":"([A-Z2-7]{26})"`).FindStringSubmatch(lastUser)
-	text, err := sonic.ConfigStd.MarshalToString(map[string]any{"answers": []explore.Answer{{
+	text, err := json.Marshal(map[string]any{"answers": []explore.Answer{{
 		ItemID: match[1], Items: []explore.Item{{Description: "Answer is owned by main.go", References: []string{"main.go:3"}}},
 	}}})
 	if err != nil {
 		return openai.Response{}, err
 	}
-	return openai.Response{Text: text, Continuation: []openai.Item{openai.NewMessage("assistant", text)}}, nil
+	body := string(text)
+	return openai.Response{Text: body, Continuation: []openai.Item{openai.NewMessage("assistant", body)}}, nil
 }
 
 func (e *exploreFakeEmbedder) CreateEmbeddings(_ context.Context, request openai.EmbeddingRequest) (openai.EmbeddingResponse, error) {
@@ -787,7 +791,7 @@ func TestExploreGlobalCWDIsCompleteWorkspaceBoundary(t *testing.T) {
 	}
 
 	var output explore.Output
-	if err := sonic.ConfigStd.Unmarshal(stdout.Bytes(), &output); err != nil {
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
 		t.Fatal(err)
 	}
 	identity, err := projectidentity.Resolve(repoRoot)
@@ -904,7 +908,7 @@ func runExploreForTest(t *testing.T, app *App, stdout *bytes.Buffer, args ...str
 		t.Fatal(err)
 	}
 	var output explore.Output
-	if err := sonic.ConfigStd.Unmarshal(stdout.Bytes(), &output); err != nil {
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, stdout.String())
 	}
 	return output
