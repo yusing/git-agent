@@ -84,8 +84,11 @@ submodule history, guidance files, release ranges, and stdout/stderr contracts.
 3. It exposes only narrow read-only tools when the model needs more context.
 4. It validates and shapes final output for the requested workflow.
 
-For submodule-only staged updates, normal `commit-msg` and `commit` skip the LLM
-entirely and format a deterministic local message.
+For staged submodule updates, normal `commit-msg` and `commit` append a
+deterministic local changelog block after model generation. If the staged
+changes contain only submodule updates, they skip the LLM entirely and format
+the whole message locally. Locally initialized nested submodules are expanded
+recursively, using repository-relative headings such as `webui/wiki`.
 
 ## What It Provides
 

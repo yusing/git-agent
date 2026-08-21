@@ -1762,11 +1762,6 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 		}
 	}
 	validator := func(text string) []string { return commitmsg.Validate(mode, text) }
-	if preparedCommit != nil {
-		validator = func(text string) []string {
-			return commitmsg.ValidateWithPreparedCommitContext(*preparedCommit, text)
-		}
-	}
 	if mode == commitmsg.ModeAmend {
 		validator = func(text string) []string {
 			return commitmsg.ValidateAmendAgainstOriginal(originalAmendMessage, text)
@@ -1809,6 +1804,9 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 	}
 	if recent, err := repo.RecentCommits(10); err == nil {
 		result.Text = commitmsg.PreserveTaskIDSuffix(result.Text, recent)
+	}
+	if preparedCommit != nil {
+		result.Text = commitmsg.AppendSubmoduleTrailer(result.Text, preparedCommit.StagedSubmodules)
 	}
 	if errs := validator(result.Text); len(errs) > 0 {
 		return agent.Result{}, fmt.Errorf("validation failed after shaping: %v", errs)

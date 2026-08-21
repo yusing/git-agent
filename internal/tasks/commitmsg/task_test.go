@@ -43,31 +43,39 @@ func TestValidateAmendAgainstOriginalPreservesHeadSubject(t *testing.T) {
 	}
 }
 
-func TestValidateWithPreparedCommitContextRequiresSubmoduleSummaries(t *testing.T) {
+func TestAppendSubmoduleTrailerUsesPreparedHistory(t *testing.T) {
 	t.Parallel()
 
-	prepared := PreparedCommitContext{
-		Mode: ModeNormal,
-		StagedSubmodules: []PreparedSubmodule{{
-			Path: "wiki",
+	submodules := []PreparedSubmodule{
+		{
+			Path: "webui",
+			Commits: []gitctx.CommitInfo{{
+				SHA:     "2222222222222222222222222222222222222222",
+				Summary: "fix(webui): refresh login",
+			}},
+		},
+		{
+			Path: "api",
 			Commits: []gitctx.CommitInfo{
-				{Summary: "docs(godoxy): document Docker label shortcuts"},
-				{Summary: "docs(godoxy): document wildcard route aliases"},
+				{SHA: "1111111111111111111111111111111111111111", Summary: "feat(api): add session lookup"},
 			},
-		}},
+		},
 	}
 
-	errs := ValidateWithPreparedCommitContext(prepared, "chore: update wiki")
-	if len(errs) == 0 || !strings.Contains(strings.Join(errs, "\n"), "docs(godoxy): document Docker label shortcuts") {
-		t.Fatalf("expected missing submodule summary error, got %v", errs)
-	}
+	got := AppendSubmoduleTrailer(`feat(app): refresh dependencies
 
-	valid := `chore: update wiki
+Keep the application integration current.`, submodules)
+	want := `feat(app): refresh dependencies
 
-- docs(godoxy): document Docker label shortcuts
-- docs(godoxy): document wildcard route aliases`
-	if errs := ValidateWithPreparedCommitContext(prepared, valid); len(errs) != 0 {
-		t.Fatalf("expected submodule summaries to pass, got %v", errs)
+Keep the application integration current.
+
+api
+  - 1111111: feat(api): add session lookup
+
+webui
+  - 2222222: fix(webui): refresh login`
+	if got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
 }
 
@@ -125,6 +133,45 @@ webui
 	}
 }
 
+func TestFormatSubmoduleOnlyCommitKeepsNestedHistoryOutOfSubject(t *testing.T) {
+	t.Parallel()
+
+	prepared := PreparedCommitContext{
+		StagedPaths: []string{"webui"},
+		StagedSubmodules: []PreparedSubmodule{
+			{
+				Path: "webui",
+				Commits: []gitctx.CommitInfo{{
+					SHA:     "1111111111111111111111111111111111111111",
+					Summary: "chore(deps): update wiki submodule",
+				}},
+			},
+			{
+				Path: "webui/wiki",
+				Commits: []gitctx.CommitInfo{{
+					SHA:     "2222222222222222222222222222222222222222",
+					Summary: "docs(wiki): document Docker labels",
+				}},
+			},
+		},
+		RecentCommits: []gitctx.CommitInfo{{Summary: "chore(deps): update module refs"}},
+	}
+
+	got, ok := FormatSubmoduleOnlyCommit(prepared)
+	if !ok {
+		t.Fatal("expected deterministic submodule commit message")
+	}
+	if !strings.HasPrefix(got, "chore(deps): update webui submodule\n\n") {
+		t.Fatalf("nested history leaked into subject:\n%s", got)
+	}
+	if !containsAll(got,
+		"webui\n  - 1111111: chore(deps): update wiki submodule",
+		"webui/wiki\n  - 2222222: docs(wiki): document Docker labels",
+	) {
+		t.Fatalf("message missing recursive submodule history:\n%s", got)
+	}
+}
+
 func TestFormatSubmoduleOnlyCommitSimplifiesManySubmoduleSubject(t *testing.T) {
 	t.Parallel()
 
@@ -178,6 +225,9 @@ func TestPromptsNameRequiredScope(t *testing.T) {
 	}
 	if got := SystemPrompt(ModeNormal); !containsAll(got, "previous HEAD diff", "contrast", "avoid restating previous work") {
 		t.Fatalf("normal system prompt missing previous-diff contrast guard: %s", got)
+	}
+	if got := SystemPrompt(ModeNormal); !containsAll(got, "caller renders the fixed staged-submodule changelog trailer locally", "do not reproduce it") {
+		t.Fatalf("normal system prompt missing caller-owned submodule trailer rule: %s", got)
 	}
 	if got := SystemPrompt(ModeNormal); !containsAll(got, "Do not insert manual line breaks", "output shaping wraps the final message") {
 		t.Fatalf("normal system prompt missing formatter-owned wrapping guidance: %s", got)
@@ -567,9 +617,12 @@ func TestPrepareCommitContextIncludesStagedSubmoduleCommits(t *testing.T) {
 		"staged_submodules",
 		"fix(webui): repair login redirect",
 		"feat(webui): add profile menu",
-		"do not collapse them to a generic \"newer submodule refs\" message",
+		"caller appends its fixed changelog trailer locally",
 	) {
 		t.Fatalf("prompt missing staged submodule evidence:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "include each submodule commit summary in the commit message") {
+		t.Fatalf("prompt still delegates the submodule trailer to the model:\n%s", prompt)
 	}
 }
 

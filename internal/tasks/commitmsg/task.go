@@ -114,15 +114,10 @@ func FormatSubmoduleOnlyCommit(prepared PreparedCommitContext) (string, bool) {
 		return "", false
 	}
 
-	submodules := slices.Clone(prepared.StagedSubmodules)
-	slices.SortFunc(submodules, func(a, b PreparedSubmodule) int {
-		return strings.Compare(a.Path, b.Path)
-	})
+	submodules := sortedSubmodules(prepared.StagedSubmodules)
 
-	paths := make([]string, 0, len(submodules))
-	for _, submodule := range submodules {
-		paths = append(paths, submodule.Path)
-	}
+	paths := slices.Clone(prepared.StagedPaths)
+	slices.Sort(paths)
 
 	subject := formatSubmoduleSubject(detectCommitMessageStyle(prepared.RecentCommits), paths)
 	body := formatSubmoduleBody(submodules)
@@ -130,6 +125,22 @@ func FormatSubmoduleOnlyCommit(prepared PreparedCommitContext) (string, bool) {
 		return subject, true
 	}
 	return Shape(subject + "\n\n" + body), true
+}
+
+func AppendSubmoduleTrailer(message string, stagedSubmodules []PreparedSubmodule) string {
+	body := formatSubmoduleBody(sortedSubmodules(stagedSubmodules))
+	if body == "" {
+		return Shape(message)
+	}
+	return Shape(strings.TrimSpace(message) + "\n\n" + body)
+}
+
+func sortedSubmodules(submodules []PreparedSubmodule) []PreparedSubmodule {
+	sorted := slices.Clone(submodules)
+	slices.SortFunc(sorted, func(a, b PreparedSubmodule) int {
+		return strings.Compare(a.Path, b.Path)
+	})
+	return sorted
 }
 
 // FormatSubmoduleOnlyCommitForRepo checks the submodule-only path without preparing full commit context.
@@ -152,9 +163,6 @@ func FormatSubmoduleOnlyCommitForRepo(repo *gitctx.Repository, stagedPaths []str
 
 func isSubmoduleOnlyCommit(prepared PreparedCommitContext) bool {
 	if len(prepared.StagedPaths) == 0 || len(prepared.StagedSubmodules) == 0 {
-		return false
-	}
-	if len(prepared.StagedPaths) != len(prepared.StagedSubmodules) {
 		return false
 	}
 
@@ -877,28 +885,54 @@ func prepareStagedSubmodules(repo *gitctx.Repository) ([]PreparedSubmodule, erro
 	if err != nil {
 		return nil, err
 	}
-	submodules := make([]PreparedSubmodule, 0, len(changes))
+	var submodules []PreparedSubmodule
 	for _, change := range changes {
-		submodule := PreparedSubmodule{
-			Path:   change.Path,
-			OldSHA: change.Old,
-			NewSHA: change.New,
-		}
-		if change.Old == "" || change.New == "" {
-			submodules = append(submodules, submodule)
-			continue
-		}
-		commits, err := repo.SubmoduleCommits(change.Path, change.Old, change.New, 50)
+		prepared, err := prepareSubmoduleTree(repo, change, change.Path)
 		if err != nil {
-			submodule.AvailabilityError = err.Error()
-			submodules = append(submodules, submodule)
-			continue
+			return nil, err
 		}
-		submodule.LocalHistoryAvailable = true
-		submodule.Commits = commits
-		submodules = append(submodules, submodule)
+		submodules = append(submodules, prepared...)
 	}
 	return submodules, nil
+}
+
+func prepareSubmoduleTree(repo *gitctx.Repository, change gitctx.SubmoduleChange, displayPath string) ([]PreparedSubmodule, error) {
+	submodule := PreparedSubmodule{
+		Path:   filepath.ToSlash(displayPath),
+		OldSHA: change.Old,
+		NewSHA: change.New,
+	}
+	if change.Old == "" || change.New == "" {
+		return []PreparedSubmodule{submodule}, nil
+	}
+
+	subRepo, err := repo.OpenSubmodule(change.Path)
+	if err != nil {
+		submodule.AvailabilityError = err.Error()
+		return []PreparedSubmodule{submodule}, nil
+	}
+	commits, err := subRepo.LogFrom(change.Old, change.New, 50)
+	if err != nil {
+		submodule.AvailabilityError = err.Error()
+		return []PreparedSubmodule{submodule}, nil
+	}
+	submodule.LocalHistoryAvailable = true
+	submodule.Commits = commits
+	prepared := []PreparedSubmodule{submodule}
+
+	nestedChanges, err := subRepo.SubmoduleGitlinkRange(change.Old, change.New)
+	if err != nil {
+		return nil, fmt.Errorf("inspect nested submodule changes below %q: %w", displayPath, err)
+	}
+	for _, nestedChange := range nestedChanges {
+		nestedPath := filepath.Join(displayPath, nestedChange.Path)
+		nested, err := prepareSubmoduleTree(subRepo, nestedChange, nestedPath)
+		if err != nil {
+			return nil, err
+		}
+		prepared = append(prepared, nested...)
+	}
+	return prepared, nil
 }
 
 func PreparePRContext(repo *gitctx.Repository) (PreparedPRContext, error) {
@@ -1005,47 +1039,6 @@ func ValidateAmendAgainstOriginal(originalMessage, output string) []string {
 		errs = append(errs, fmt.Sprintf("amend output must preserve original HEAD subject %q, got %q", originalSubject, subject))
 	}
 	return errs
-}
-
-func ValidateWithPreparedCommitContext(prepared PreparedCommitContext, output string) []string {
-	errs := Validate(ModeNormal, output)
-	return append(errs, validateStagedSubmoduleSummaries(prepared.StagedSubmodules, output)...)
-}
-
-func validateStagedSubmoduleSummaries(submodules []PreparedSubmodule, output string) []string {
-	expected := stagedSubmoduleCommitSummaries(submodules)
-	if len(expected) == 0 {
-		return nil
-	}
-
-	normalizedOutput := normalizeSummaryText(output)
-	var missing []string
-	for _, summary := range expected {
-		if !strings.Contains(normalizedOutput, normalizeSummaryText(summary)) {
-			missing = append(missing, summary)
-		}
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-	return []string{fmt.Sprintf("commit message must include staged submodule commit summaries: %s", strings.Join(missing, "; "))}
-}
-
-func stagedSubmoduleCommitSummaries(submodules []PreparedSubmodule) []string {
-	var summaries []string
-	for _, submodule := range submodules {
-		for _, commit := range submodule.Commits {
-			summary := strings.TrimSpace(commit.Summary)
-			if summary != "" {
-				summaries = append(summaries, summary)
-			}
-		}
-	}
-	return summaries
-}
-
-func normalizeSummaryText(text string) string {
-	return strings.Join(strings.Fields(strings.ToLower(text)), " ")
 }
 
 func firstSubjectLine(message string) string {

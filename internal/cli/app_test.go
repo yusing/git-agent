@@ -1900,7 +1900,7 @@ func TestAppendPromptEscapesOperatorHintData(t *testing.T) {
 	}
 }
 
-func TestCommitMsgRepairsSubmoduleUpdateThatDropsCommitSummary(t *testing.T) {
+func TestCommitMsgAppendsDeterministicSubmoduleTrailer(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	root := t.TempDir()
@@ -1924,30 +1924,46 @@ func TestCommitMsgRepairsSubmoduleUpdateThatDropsCommitSummary(t *testing.T) {
 	runGit(t, wikiDir, "commit", "-m", "docs(godoxy): document Docker label shortcuts")
 	releaseSHA := strings.TrimSpace(gitOutputString(t, wikiDir, "rev-parse", "HEAD"))
 
-	repoDir := filepath.Join(root, "webui")
+	webuiDir := filepath.Join(root, "webui-src")
+	if err := os.MkdirAll(webuiDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, webuiDir, "init")
+	runGit(t, webuiDir, "config", "user.name", "Test User")
+	runGit(t, webuiDir, "config", "user.email", "test@example.com")
+	runGit(t, webuiDir, "-c", "protocol.file.allow=always", "submodule", "add", wikiDir, "wiki")
+	runGit(t, filepath.Join(webuiDir, "wiki"), "checkout", baseSHA)
+	runGit(t, webuiDir, "add", ".")
+	runGit(t, webuiDir, "commit", "-m", "feat: add wiki submodule")
+	webuiBaseSHA := strings.TrimSpace(gitOutputString(t, webuiDir, "rev-parse", "HEAD"))
+	runGit(t, filepath.Join(webuiDir, "wiki"), "checkout", releaseSHA)
+	runGit(t, webuiDir, "add", "wiki")
+	runGit(t, webuiDir, "commit", "-m", "chore(deps): update wiki submodule")
+	webuiReleaseSHA := strings.TrimSpace(gitOutputString(t, webuiDir, "rev-parse", "HEAD"))
+
+	repoDir := filepath.Join(root, "parent")
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	runGit(t, repoDir, "init")
 	runGit(t, repoDir, "config", "user.name", "Test User")
 	runGit(t, repoDir, "config", "user.email", "test@example.com")
-	runGit(t, repoDir, "-c", "protocol.file.allow=always", "submodule", "add", wikiDir, "wiki")
-	runGit(t, filepath.Join(repoDir, "wiki"), "checkout", baseSHA)
+	runGit(t, repoDir, "-c", "protocol.file.allow=always", "submodule", "add", webuiDir, "webui")
+	runGit(t, filepath.Join(repoDir, "webui"), "checkout", webuiBaseSHA)
+	runGit(t, filepath.Join(repoDir, "webui"), "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive")
 	runGit(t, repoDir, "add", ".")
-	runGit(t, repoDir, "commit", "-m", "feat: add wiki submodule")
+	runGit(t, repoDir, "commit", "-m", "feat: add webui submodule")
 
-	runGit(t, filepath.Join(repoDir, "wiki"), "checkout", releaseSHA)
-	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("wiki docs\n"), 0o644); err != nil {
+	runGit(t, filepath.Join(repoDir, "webui"), "checkout", webuiReleaseSHA)
+	runGit(t, filepath.Join(repoDir, "webui"), "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive")
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("webui docs\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	runGit(t, repoDir, "add", "wiki")
+	runGit(t, repoDir, "add", "webui")
 	runGit(t, repoDir, "add", "README.md")
 	t.Chdir(repoDir)
 
-	server := commitMessageSequenceServer(t,
-		"chore: update wiki",
-		"chore: update wiki\n\n- docs(godoxy): document Docker label shortcuts",
-	)
+	server := commitMessageServer(t, "chore: update webui and docs")
 	defer server.Close()
 
 	t.Setenv("OPENAI_API_KEY", "test-key")
@@ -1963,7 +1979,10 @@ func TestCommitMsgRepairsSubmoduleUpdateThatDropsCommitSummary(t *testing.T) {
 	if stderr.String() != "" {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
-	if got := strings.TrimSpace(stdout.String()); got != "chore: update wiki\n\n- docs(godoxy): document Docker label shortcuts" {
+	want := "chore: update webui and docs\n\n" +
+		"webui\n  - " + webuiReleaseSHA[:7] + ": chore(deps): update wiki submodule\n\n" +
+		"webui/wiki\n  - " + releaseSHA[:7] + ": docs(godoxy): document Docker label shortcuts"
+	if got := strings.TrimSpace(stdout.String()); got != want {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 }

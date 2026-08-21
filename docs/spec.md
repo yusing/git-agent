@@ -76,9 +76,19 @@ When the staged changes are exclusively submodule gitlink updates, normal
 deterministic message from prepared submodule history, using recent commits to
 choose conventional style (`chore(deps): update ... submodule`) or Title-case
 style (`Update ... submodule`). The body mirrors the release-note submodule
-changelog shape with each submodule heading followed by indented
-`short-sha: summary` entries. If more than three submodules are staged, the
-subject says `submodules` instead of listing every path.
+changelog shape with each direct or locally available nested submodule heading
+followed by indented `short-sha: summary` entries. If more than three direct
+submodules are staged, the subject says `submodules` instead of listing every
+path.
+
+When normal staged changes mix submodule gitlink updates with other files, the
+model generates only the commit narrative. The command then appends the same
+sorted submodule changelog block locally from prepared history. The prompt
+identifies that block as caller-owned and tells the model not to reproduce it.
+Preparation recursively follows net nested gitlink changes when the nested
+checkout and commit history are locally available. Nested headings use their
+full repository-relative path, such as `webui/wiki`; the outer submodule's
+pointer-update commit remains in its own group.
 
 #### `git-agent commit-msg --amend`
 
@@ -1973,7 +1983,9 @@ including:
     preserving any structured text format required by the task
 18. validate output against task rules
 19. if invalid and repair budget remains, run exactly one repair pass
-20. print final text to stdout for generation-only commands, write it to
+20. for normal mixed staged changes, append the prepared submodule changelog
+    block locally after model generation
+21. print final text to stdout for generation-only commands, write it to
     `--out` for `release-note --out <file>`, or stream human console trace
     lines while generating the message and then print Git's raw commit summary
     after creating or amending through `git commit`
@@ -2015,7 +2027,8 @@ flowchart TD
     Reshape --> Revalidate[Revalidate shaped repaired output]
     Revalidate --> Preserve
     Valid -- yes --> Preserve[Preserve supported task ID suffix]
-    Preserve --> FinalValidate[Validate shaped output]
+    Preserve --> Trailer[Append prepared submodule trailer locally]
+    Trailer --> FinalValidate[Validate shaped output]
     FinalValidate --> Stdout([Print artifact only to stdout])
 ```
 
@@ -2088,7 +2101,8 @@ flowchart TD
     RecordTools --> Continue[Append function call and output items]
     Continue --> Model
     ToolDecision -- no --> Validate[Validate and shape commit message]
-    Validate --> FinalTrace[Record final artifact]
+    Validate --> Trailer[For normal mode, append prepared submodule trailer locally]
+    Trailer --> FinalTrace[Record final artifact]
     FinalTrace --> Commit{Amend?}
     Commit -- no --> GitCommit[Run git commit --file]
     Commit -- yes --> GitAmend[Run git commit --amend --file]
@@ -2556,9 +2570,11 @@ Behavior:
   helper files or tests are added
 - use `feat` only when the staged diff introduces a genuinely new user-visible
   capability, API, command, config option, or behavior
-- when staged submodule commit summaries are available, include those summaries
-  in the generated message rather than emitting only a generic submodule-ref
-  update subject
+- treat staged submodule history as narrative evidence, but do not ask the model
+  to render its changelog block; append the sorted `short-sha: summary` block
+  locally after normal model generation
+- recursively expand locally available nested gitlink ranges into distinct
+  repository-relative groups while retaining each outer pointer-update commit
 - for normal submodule-only staged changes, skip model generation and format a
   deterministic message locally from staged submodule history; detect
   conventional versus Title-case subject style from recent commits, use a
@@ -2715,8 +2731,6 @@ Commit message validator checks at minimum:
 - no stray commentary
 - amend mode does not use process/delta phrasing
 - amend mode preserves the original HEAD subject
-- normal mode includes staged submodule commit summaries when prepared context
-  exposes them
 - body lines stay within the target width after output shaping (target width: 72
   characters after shaping, except for long unbreakable tokens such as URLs)
 - output shaping reflows soft line breaks inside body paragraphs so generated
@@ -2789,6 +2803,7 @@ Use a local fake OpenAI-compatible server to test:
 Use temporary repositories to test:
 
 - staged commit message generation scenarios
+- nested staged submodule history expansion
 - amend scenarios
 - staged-path guidance scoping
 - detached HEAD

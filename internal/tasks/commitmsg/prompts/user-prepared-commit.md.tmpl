@@ -18,7 +18,7 @@ Rules:
 - if focus_diff is present, use it together with diff and context_pack; focus_diff_paths explains which omitted or cut-off paths it covers
 - choose refactor when staged evidence shows extraction, relocation, deduplication, or internal reorganization of existing behavior; choose feat only for genuinely new user-visible capability/API/command/config behavior
 - do not default to "add" phrasing because files are new; for extraction-heavy changes prefer "extract", "move", "centralize", "consolidate", or "reuse"
-- if staged_submodules contains commits, include each submodule commit summary in the commit message and use those summaries as staged evidence; do not collapse them to a generic "newer submodule refs" message
+- staged_submodules is evidence for understanding the staged change; the caller appends its fixed changelog trailer locally, so do not reproduce that trailer
 - do not copy phrasing from recent commits or previous_head_diff as if it were current staged work
 - if diff_truncated is true, stay conservative and describe only visible evidence
 - if outlier_diff_truncated is true, stay conservative for outlier details beyond visible hunks
