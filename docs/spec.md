@@ -2600,11 +2600,22 @@ Behavior:
 - ground each subject/body claim in added or removed staged hunks, not unchanged
   context or existing supporting code; syntax validation does not certify factual
   claim grounding
-- prefer `refactor` when staged evidence shows extraction, relocation,
-  deduplication, or internal reorganization of existing behavior, even if new
-  helper files or tests are added
-- use `feat` only when the staged diff introduces a genuinely new user-visible
-  capability, API, command, config option, or behavior
+- choose a new subject's type by the primary supported outcome, not the
+  implementation technique, file additions/deletions, or diff size:
+  `fix` corrects faulty behavior or restores an existing contract; `feat`
+  introduces a genuinely new capability; `refactor` reorganizes code while
+  preserving intended observable behavior; `perf` improves efficiency without
+  changing the intended result
+- classify a correction as `fix` even when implemented through extraction,
+  deletion, or prompt changes; accompanying docs and regression tests do not
+  turn it into `docs`, `test`, or `chore`
+- use the matching maintenance type when documentation, testing, build, CI, or
+  routine upkeep is itself the primary outcome; describe meaningful secondary
+  outcomes in the body
+- qualify claims by the affected mode and execution path: removing automatic
+  preloading does not mean removing optional inspection or support entirely
+- apply the same outcome distinctions to non-conventional subjects; shared
+  classification guidance does not override amend's original-subject anchor
 - treat staged submodule history as narrative evidence, but do not ask the model
   to render its changelog block; append the sorted `short-sha: summary` block
   locally after normal model generation

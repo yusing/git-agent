@@ -16,3 +16,9 @@ A live evaluation should keep the observed `gpt-5.6-luna` model and compare old
 and new requests. Accept messages describing the staged fixes without claiming
 local or recursive submodule changelog formatting is newly introduced. Also
 check secondary staged changes, genuine submodule updates, and amend behavior.
+
+When evaluating classification, the staged corrections warrant `fix`, even
+though their implementation removes context or reorganizes internals. For claims
+about history removal, also distinguish automatic preloading from retained
+optional historical file inspection. These are semantic evaluation criteria,
+not properties established by prompt-text assertions.

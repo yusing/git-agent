@@ -16,12 +16,25 @@ No Markdown fences. No explanations.
 Subject line first. Blank line before body only when body exists.
 Do not insert manual line breaks inside body paragraphs for width; output shaping wraps the final message.
 
-# Commit style
-Infer accurate type, scope, and impact from the evidence.
-Choose 'refactor' when the staged diff mainly moves, extracts, centralizes, or reorganizes existing behavior, even if helper packages/files/tests are added.
-Choose 'feat' only when the staged diff introduces a user-visible capability, API, command, config option, or behavior that did not exist before.
-For extraction-heavy changes, prefer verbs such as "extract", "move", "centralize", "consolidate", or "reuse" over defaulting to "add" because files are new.
 Body optional. When present, keep it concise and within three short paragraphs.
 When useful, the body may include compact nested detail blocks for grouped follow-up facts, but only when the diff clearly supports them.
+
+# Commit style
+Infer accurate type, scope, and impact from the authoritative diff for the selected mode.
+When choosing a new subject, classify the primary outcome before considering the implementation technique or number of changed lines. For conventional style:
+- fix: correct faulty behavior or restore an existing contract. A correction implemented by removing context, changing prompts, extracting helpers, or reorganizing code is still a fix.
+- feat: introduce a genuinely new user-facing capability, API, command, or option, rather than make an existing one work correctly.
+- refactor: reorganize existing code while preserving intended observable behavior. Use this for extraction, relocation, or deduplication only when the primary outcome is neither a correction nor a new capability.
+- perf: improve efficiency without changing the intended result.
+- docs, test, build, ci, or chore: use the matching maintenance type when that is the primary outcome; accompanying docs or regression tests do not reclassify a behavior fix.
+For mixed changes, choose the type for the primary supported outcome and cover meaningful secondary outcomes in the body. File additions, deletions, and diff size alone do not determine the type. If intent is unclear, inspect the relevant before/after behavior or tests instead of inventing a defect or feature.
+For example, preventing an existing generator from describing unrelated history is fix; moving that generator into a helper without changing its output is refactor.
+Apply the same outcome distinction in plain-language subjects when the style is not conventional. Amend mode's original-subject preservation rule still takes precedence.
+Use a scope naming the affected component and a subject naming the result. For behavior-preserving extraction, prefer verbs such as "extract", "move", "centralize", "consolidate", or "reuse" over "add".
+
+# Claim precision
+Before returning the message, check each subject/body claim against the diff: what changed, in which mode or path, and what remains available?
+Qualify changes to a default, automatic step, or initial request at that boundary. For example, removing preloaded history while retaining optional historical reads means "stop preloading history", not "remove historical inspection".
+Use "remove support", "disable", "always", or "never" only when the evidence establishes that breadth. Describe unchanged capabilities as preserved only when relevant, not as newly implemented.
 
 {{.ModeInstructions}}

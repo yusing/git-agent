@@ -16,8 +16,6 @@ Rules:
 - cover every distinct staged-diff change cluster; account for small outlier files when they carry behavior changes
 - if diff_truncated is true or broad clusters are represented only by paths/stats/context_pack, use git_staged_diff_for_paths for omitted or high-churn clusters before finalizing broad claims
 - if focus_diff is present, use it together with diff and context_pack; focus_diff_paths explains which omitted or cut-off paths it covers
-- choose refactor when staged evidence shows extraction, relocation, deduplication, or internal reorganization of existing behavior; choose feat only for genuinely new user-visible capability/API/command/config behavior
-- do not default to "add" phrasing because files are new; for extraction-heavy changes prefer "extract", "move", "centralize", "consolidate", or "reuse"
 - staged_submodules is evidence for understanding the staged change; the caller appends its fixed changelog trailer locally, so do not reproduce that trailer
 - if diff_truncated is true, stay conservative and describe only visible evidence
 - if outlier_diff_truncated is true, stay conservative for outlier details beyond visible hunks
