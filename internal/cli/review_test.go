@@ -42,7 +42,7 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 			output:    `{"summary":"No simplifications found","opportunities":[]}`,
 			key:       "opportunities",
 			model:     simplifyDefaultModel,
-			reasoning: "low",
+			reasoning: "",
 			steps:     9,
 			tools:     8,
 		},
@@ -510,8 +510,15 @@ func TestDetachedSimplifyBranchesThroughExistingTaskAndPersistsMergedFinal(t *te
 	usageByModel := map[string]float64{}
 	for _, value := range branches {
 		branch := value.(map[string]any)
-		if branch["id"] == "" || branch["parent_id"] != "root" || branch["reasoning_effort"] == "" {
+		if branch["id"] == "" || branch["parent_id"] != "root" {
 			t.Fatalf("branch = %#v", branch)
+		}
+		wantEffort := ""
+		if branch["model"] == "gpt-5.6-sol" {
+			wantEffort = "medium"
+		}
+		if branch["reasoning_effort"] != wantEffort {
+			t.Fatalf("branch effort = %#v, want %q", branch["reasoning_effort"], wantEffort)
 		}
 		usageByModel[branch["model"].(string)] = branch["usage"].(map[string]any)["input_tokens"].(float64)
 	}
@@ -1032,7 +1039,7 @@ func TestReviewHelpDocumentsDefaultMode(t *testing.T) {
 		"set request timeout (disabled by default)",
 		"override model (default gpt-5.6-sol)",
 		"--depth <fast|balanced|thorough>",
-		"select automatic inspection depth and default reasoning effort: fast=low, balanced=medium, thorough=high (default balanced)",
+		"select automatic inspection depth: fast, balanced, thorough (default balanced); reasoning defaults by model",
 		"--max-web-searches <n>",
 		"API-key default 4; ChatGPT auth uncapped",
 		"--help-agent",
@@ -1052,10 +1059,7 @@ func TestCodeReviewAgentHelpOnlyDocumentsAgentFacingFlags(t *testing.T) {
 				t.Fatal("expected help error")
 			}
 			help := err.Error()
-			depthUsage := "select automatic inspection depth and default reasoning effort: fast=low, balanced=medium, thorough=high (default balanced)"
-			if command == "simplify" {
-				depthUsage = "select automatic inspection depth and default reasoning effort: fast=low, balanced=low, thorough=medium (default balanced)"
-			}
+			depthUsage := "select automatic inspection depth: fast, balanced, thorough (default balanced); reasoning defaults by model"
 			for _, want := range []string{
 				"Usage: git-agent " + command,
 				"--uncommitted  inspect all dirty changes (default)",
@@ -1129,39 +1133,35 @@ func TestCodeReviewContextHasNoDefaultDeadline(t *testing.T) {
 func TestCodeReviewDefaultsPreserveExplicitOverrides(t *testing.T) {
 	t.Setenv("OPENAI_MODEL", "env-model")
 	cfg := config.Config{Model: "env-model"}
-	applyCodeReviewDefaults(reviewtask.KindReview, reviewtask.DepthBalanced, config.Options{}, &cfg)
-	if cfg.Model != "env-model" || cfg.ThinkingEffort != "medium" {
+	applyCodeReviewDefaults(reviewtask.KindReview, config.Options{}, &cfg)
+	if cfg.Model != "env-model" || cfg.ThinkingEffort != "" {
 		t.Fatalf("environment override config = %#v", cfg)
 	}
 
 	cfg = config.Config{Model: "flag-model", ThinkingEffort: "low"}
-	applyCodeReviewDefaults(reviewtask.KindReview, reviewtask.DepthThorough, config.Options{Model: "flag-model", Low: true}, &cfg)
+	applyCodeReviewDefaults(reviewtask.KindReview, config.Options{Model: "flag-model", Low: true}, &cfg)
 	if cfg.Model != "flag-model" || cfg.ThinkingEffort != "low" {
 		t.Fatalf("flag override config = %#v", cfg)
 	}
 }
 
-func TestCodeReviewDefaultsByKindAndDepth(t *testing.T) {
+func TestCodeReviewDefaultsByModel(t *testing.T) {
 	t.Setenv("OPENAI_MODEL", "")
-	tests := []struct {
-		kind       reviewtask.Kind
-		depth      reviewtask.Depth
-		wantModel  string
-		wantEffort string
+	for _, tc := range []struct {
+		kind  reviewtask.Kind
+		model string
+		want  string
 	}{
-		{reviewtask.KindReview, reviewtask.DepthFast, reviewDefaultModel, "low"},
-		{reviewtask.KindReview, reviewtask.DepthBalanced, reviewDefaultModel, "medium"},
-		{reviewtask.KindReview, reviewtask.DepthThorough, reviewDefaultModel, "high"},
-		{reviewtask.KindSimplify, reviewtask.DepthFast, simplifyDefaultModel, "low"},
-		{reviewtask.KindSimplify, reviewtask.DepthBalanced, simplifyDefaultModel, "low"},
-		{reviewtask.KindSimplify, reviewtask.DepthThorough, simplifyDefaultModel, "medium"},
-	}
-	for _, test := range tests {
-		t.Run(string(test.kind)+"/"+string(test.depth), func(t *testing.T) {
-			var cfg config.Config
-			applyCodeReviewDefaults(test.kind, test.depth, config.Options{}, &cfg)
-			if cfg.Model != test.wantModel || cfg.ThinkingEffort != test.wantEffort {
-				t.Fatalf("defaults for %q/%q = %#v, want model %q effort %q", test.kind, test.depth, cfg, test.wantModel, test.wantEffort)
+		{reviewtask.KindReview, reviewDefaultModel, "medium"},
+		{reviewtask.KindSimplify, simplifyDefaultModel, ""},
+	} {
+		t.Run(string(tc.kind), func(t *testing.T) {
+			// Simulate the general default already resolved before selecting the
+			// command model, including a nonempty default that must be replaced.
+			cfg := config.Config{Model: config.DefaultModel, ThinkingEffort: "xhigh"}
+			applyCodeReviewDefaults(tc.kind, config.Options{}, &cfg)
+			if cfg.Model != tc.model || cfg.ThinkingEffort != tc.want {
+				t.Fatalf("model/effort = %q/%q, want %q/%q", cfg.Model, cfg.ThinkingEffort, tc.model, tc.want)
 			}
 		})
 	}

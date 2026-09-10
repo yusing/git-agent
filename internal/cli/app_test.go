@@ -2723,24 +2723,51 @@ func TestCommitMsgForwardsFastAndThinkingFlags(t *testing.T) {
 
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_BASE_URL", server.URL)
-	t.Setenv("OPENAI_MODEL", "test-model")
+	t.Setenv("HOME", t.TempDir())
 
-	app := &App{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
-	if err := app.Run(t.Context(), []string{"commit-msg", "--fast", "--medium"}); err != nil {
-		t.Fatal(err)
-	}
-	if len(requests) != 1 {
-		t.Fatalf("request count = %d", len(requests))
-	}
-	if got := requests[0]["service_tier"]; got != "priority" {
-		t.Fatalf("service_tier = %#v", got)
-	}
-	reasoning, ok := requests[0]["reasoning"].(map[string]any)
-	if !ok {
-		t.Fatalf("reasoning = %#v", requests[0]["reasoning"])
-	}
-	if got := reasoning["effort"]; got != "medium" {
-		t.Fatalf("reasoning.effort = %#v", got)
+	for _, tc := range []struct {
+		model string
+		flag  string
+		want  string
+	}{
+		{"gpt-5.3-codex-spark", "", "xhigh"},
+		{"gpt-5.6-luna", "", "xhigh"},
+		{"gpt-5.6-sol", "", "medium"},
+		{"gpt-6-astra", "", "low"},
+		{"gpt-5.6-terra", "", ""},
+		{"gpt-5.6", "", ""},
+		{"test-model", "", ""},
+		{"gpt-5.6-luna", "--medium", "medium"},
+	} {
+		t.Run(tc.model+tc.flag, func(t *testing.T) {
+			t.Setenv("OPENAI_MODEL", tc.model)
+			requests = nil
+			args := []string{"commit-msg", "--fast"}
+			if tc.flag != "" {
+				args = append(args, tc.flag)
+			}
+			app := &App{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
+			if err := app.Run(t.Context(), args); err != nil {
+				t.Fatal(err)
+			}
+			if len(requests) != 1 {
+				t.Fatalf("request count = %d", len(requests))
+			}
+			if got := requests[0]["service_tier"]; got != "priority" {
+				t.Fatalf("service_tier = %#v", got)
+			}
+			if got := requests[0]["model"]; got != tc.model {
+				t.Fatalf("model = %#v, want %q", got, tc.model)
+			}
+			reasoning, ok := requests[0]["reasoning"].(map[string]any)
+			if tc.want == "" {
+				if ok {
+					t.Fatalf("unexpected reasoning = %#v", reasoning)
+				}
+			} else if !ok || reasoning["effort"] != tc.want {
+				t.Fatalf("reasoning = %#v, want effort %q", reasoning, tc.want)
+			}
+		})
 	}
 }
 

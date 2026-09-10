@@ -207,10 +207,8 @@ Mode flags are mutually exclusive. No mode flag means `--uncommitted`.
 - `--staged` reviews index state against `HEAD` and ignores unstaged content.
 - `--codebase` audits full repository without preloaded diff scope.
 - `--depth fast|balanced|thorough` selects the lower bound, midpoint, or upper
-  bound of the automatic inspection budget and the command-specific default
-  reasoning effort. Omission means `balanced`. Review defaults are
-  `fast=low`, `balanced=medium`, and `thorough=high`; simplify defaults are
-  `fast=low`, `balanced=low`, and `thorough=medium`.
+  bound of the automatic inspection budget. Omission means `balanced`.
+  Reasoning effort defaults by model, independently of inspection depth.
 - `--max-steps <positive-n>` is an exact expert override and is mutually
   exclusive with `--depth`.
 - `--dry-run` preserves repository preparation, detached launch, and repeatable
@@ -443,10 +441,9 @@ and the complete agent loop.
 Model precedence is `--model`, then `OPENAI_MODEL`, then the command default.
 Both commands request `reasoning.summary=auto` so summaries can stream as live
 agent progress. `review` defaults to `gpt-5.6-sol`; `simplify` defaults to
-`gpt-5.6-terra`. Review reasoning defaults by depth are `fast=low`,
-`balanced=medium`, and `thorough=high`; simplify defaults are `fast=low`,
-`balanced=low`, and `thorough=medium`. An explicit reasoning flag overrides
-the depth-derived default.
+`gpt-5.6-terra`. The shared model-based reasoning defaults give review `medium`
+and leave simplify's effort omitted. An explicit reasoning flag overrides the
+model default; inspection depth only changes the step budget.
 
 Diff-based review and simplify calculate deterministic lower and upper model-step
 bounds after preparing the authoritative snapshot and building the concrete
@@ -1716,9 +1713,15 @@ Flag behavior:
   guidance, and authoritative repository evidence.
 - `--pprof <addr>`: bind the requested address and serve `/debug/pprof/`
   endpoints until the command exits
-- default: omit `service_tier`; omit `reasoning` for commands other than
-  `review` and `simplify`; for those inspection commands, use the
-  depth-derived reasoning defaults documented above
+- default: omit `service_tier`; choose reasoning effort after resolving the
+  command model (`--model`, then `OPENAI_MODEL`, then command default):
+  `gpt-5.3-codex-spark` and `gpt-5.6-luna` use `xhigh`;
+  `gpt-5.6-sol` uses `medium`; `gpt-6-astra` uses `low`.
+  Defaults match the configured model ID. Other model IDs omit `reasoning.effort` and use the provider's default.
+  `reasoning.summary=auto` remains available for progress independently of effort.
+  Explicit reasoning flags override these defaults in every command.
+  Review/simplify follow-ups and child branches preserve their explicit/inherited
+  effort rather than reapplying initial-request defaults.
 
 `commit-msg` and `commit` additionally support:
 

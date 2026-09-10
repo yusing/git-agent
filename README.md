@@ -170,10 +170,10 @@ launch writes nothing to stderr. Matching `--wait <id>` forms write strict,
 evidence-located
 JSON reports to stdout. They have no request deadline by default; `--timeout
 <duration>` adds one explicitly. Without `--model` or `OPENAI_MODEL`, `review`
-uses `gpt-5.6-sol` and `simplify` uses `gpt-5.6-terra`. Reasoning defaults track
-inspection depth: review uses `low`, `medium`, and `high` for
-`fast`, `balanced`, and `thorough`; simplify uses `low`, `low`, and `medium`.
-An explicit effort flag overrides these defaults.
+uses `gpt-5.6-sol` and `simplify` uses `gpt-5.6-terra`. Reasoning defaults follow
+the model, independently of inspection depth: review therefore uses `medium`,
+while simplify leaves the effort to the provider. An explicit effort flag
+overrides the model default.
 
 An eligible completed provider turn can be followed with
 `--follow-up <turn-id> <prompt...>`. The detached follow-up inherits the
@@ -628,7 +628,7 @@ Common generation and inspection flags:
 | `--low`, `--medium`, `--high`, `--xhigh` | Set reasoning effort |
 | `--base-url <url>` | Override provider base URL |
 | `--timeout <duration>` | Set request timeout; `review`/`simplify` default to none |
-| `--depth fast\|balanced\|thorough` | Review/simplify only: select calculated inspection depth and its command-specific reasoning default |
+| `--depth fast\|balanced\|thorough` | Review/simplify only: select calculated inspection depth; reasoning defaults by model |
 | `--max-steps <n>` | Bound agent loop steps; overrides and conflicts with `--depth` |
 | `--max-web-searches <n>` | Review/simplify only: override hosted-search cap |
 | `--dry-run` | Review/simplify only: run a deterministic inspection without provider access |
@@ -782,11 +782,14 @@ unchanged.
 Behavior defaults:
 
 - `service_tier` is omitted unless `--fast` is set.
-- Review reasoning defaults by depth are `fast=low`, `balanced=medium`, and
-  `thorough=high`; simplify defaults are `fast=low`, `balanced=low`, and
-  `thorough=medium`. Explicit reasoning flags override these defaults.
-- Other message-generation commands omit reasoning effort unless `--low`,
-  `--medium`, `--high`, or `--xhigh` is set.
+- Reasoning effort defaults to `xhigh` for `gpt-5.3-codex-spark` and
+  `gpt-5.6-luna`, `medium` for `gpt-5.6-sol`, and `low` for `gpt-6-astra`.
+  These defaults match the configured model ID; other IDs omit the effort and
+  use the provider's default.
+- `--low`, `--medium`, `--high`, and `--xhigh` override the model default.
+  Review/simplify `--depth` controls inspection budget, not reasoning effort.
+  Review/simplify follow-ups and child branches retain their existing
+  explicit/inherited effort.
 - `--append-prompt` can steer style or emphasis only when consistent with the
   task contract and repository evidence.
 

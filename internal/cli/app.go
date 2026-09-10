@@ -151,7 +151,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 	fs.BoolVar(&staged, "staged", false, "inspect staged changes only")
 	fs.StringVar(&waitID, "wait", "", "wait for a detached task and print its report")
 	fs.StringVar(&followUpID, "follow-up", "", "re-review a successful provider turn with a required prompt")
-	fs.StringVar(&depthValue, "depth", "", codeReviewDepthUsage(kind))
+	fs.StringVar(&depthValue, "depth", "", "select automatic inspection depth: fast, balanced, thorough (default balanced); reasoning defaults by model")
 	fs.BoolVar(&dryRun, "dry-run", false, "emit deterministic provider events without a provider request")
 	fs.BoolVar(&helpAgent, "help-agent", false, "show help limited to agent-facing flags")
 	registerSharedFlags(fs, &opts)
@@ -475,7 +475,7 @@ func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []st
 		return err
 	}
 	cfg.Timeout = reviewTimeout
-	applyCodeReviewDefaults(kind, depth, opts, &cfg)
+	applyCodeReviewDefaults(kind, opts, &cfg)
 	cfg.MaxSteps = budgetPlan.SelectedSteps
 	cfg.MaxToolCalls = budgetPlan.MaxToolCalls
 	failureDiagnostic.Model = cfg.Model
@@ -733,36 +733,14 @@ func codeReviewDefaultModel(kind reviewtask.Kind) string {
 	return reviewDefaultModel
 }
 
-func codeReviewDefaultReasoningEffort(kind reviewtask.Kind, depth reviewtask.Depth) string {
-	if kind == reviewtask.KindSimplify {
-		if depth == reviewtask.DepthThorough {
-			return "medium"
-		}
-		return "low"
-	}
-	switch depth {
-	case reviewtask.DepthFast:
-		return "low"
-	case reviewtask.DepthThorough:
-		return "high"
-	default:
-		return "medium"
-	}
-}
-
-func codeReviewDepthUsage(kind reviewtask.Kind) string {
-	if kind == reviewtask.KindSimplify {
-		return "select automatic inspection depth and default reasoning effort: fast=low, balanced=low, thorough=medium (default balanced)"
-	}
-	return "select automatic inspection depth and default reasoning effort: fast=low, balanced=medium, thorough=high (default balanced)"
-}
-
-func applyCodeReviewDefaults(kind reviewtask.Kind, depth reviewtask.Depth, opts config.Options, cfg *config.Config) {
+func applyCodeReviewDefaults(kind reviewtask.Kind, opts config.Options, cfg *config.Config) {
 	if opts.Model == "" && os.Getenv("OPENAI_MODEL") == "" {
 		cfg.Model = codeReviewDefaultModel(kind)
 	}
-	if cfg.ThinkingEffort == "" {
-		cfg.ThinkingEffort = codeReviewDefaultReasoningEffort(kind, depth)
+	// ResolveFromLocal may have applied the general model's default before the
+	// command selected its own model. Recompute only when no effort was explicit.
+	if !opts.Low && !opts.Medium && !opts.High && !opts.XHigh {
+		cfg.ThinkingEffort = config.DefaultThinkingEffort(cfg.Model)
 	}
 }
 

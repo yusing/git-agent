@@ -396,7 +396,7 @@ func TestResolveUsesRaisedDefaultMaxSteps(t *testing.T) {
 	if cfg.ServiceTier != "" {
 		t.Fatalf("ServiceTier = %q", cfg.ServiceTier)
 	}
-	if cfg.ThinkingEffort != "" {
+	if cfg.ThinkingEffort != "xhigh" {
 		t.Fatalf("ThinkingEffort = %q", cfg.ThinkingEffort)
 	}
 }
@@ -432,5 +432,61 @@ func writeCodexAuth(t *testing.T, content string) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestResolveModelReasoningDefaults(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_MODEL", "")
+	for _, tc := range []struct {
+		model string
+		want  string
+	}{
+		{"gpt-5.3-codex-spark", "xhigh"},
+		{"gpt-5.6-luna", "xhigh"},
+		{"gpt-5.6-sol", "medium"},
+		{"gpt-5.6", ""},
+		{"gpt-6-astra", "low"},
+		{"gpt-5.6-terra", ""},
+		{"gpt-5.3-codex", ""},
+		{"custom-luna", ""},
+	} {
+		t.Run(tc.model, func(t *testing.T) {
+			t.Setenv("OPENAI_MODEL", tc.model)
+			cfg, err := Resolve(Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ThinkingEffort != tc.want {
+				t.Fatalf("effort = %q, want %q", cfg.ThinkingEffort, tc.want)
+			}
+			// The explicit model wins over the environment's model and effort.
+			cfg, err = Resolve(Options{Model: "gpt-6-astra"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ThinkingEffort != "low" {
+				t.Fatalf("flag model effort = %q", cfg.ThinkingEffort)
+			}
+			for _, opts := range []Options{{Low: true}, {Medium: true}, {High: true}, {XHigh: true}} {
+				cfg, err = Resolve(opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := "high"
+				switch {
+				case opts.Low:
+					want = "low"
+				case opts.Medium:
+					want = "medium"
+				case opts.XHigh:
+					want = "xhigh"
+				}
+				if cfg.ThinkingEffort != want {
+					t.Fatalf("explicit effort = %q, want %q", cfg.ThinkingEffort, want)
+				}
+			}
+		})
 	}
 }

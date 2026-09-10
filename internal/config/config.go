@@ -111,12 +111,30 @@ func ResolveFromLocal(opts Options, cfg Config) (Config, error) {
 	cfg.AuthAccountID = auth.accountID
 	cfg.BaseURL = resolveBaseURL(opts.BaseURL, auth)
 	cfg.Model = firstNonEmpty(opts.Model, os.Getenv("OPENAI_MODEL"), DefaultModel)
+	if cfg.ThinkingEffort == "" {
+		cfg.ThinkingEffort = DefaultThinkingEffort(cfg.Model)
+	}
 	if opts.MaxWebSearches > 0 {
 		cfg.MaxWebSearches = opts.MaxWebSearches
 	} else if auth.mode == AuthModeAPIKey {
 		cfg.MaxWebSearches = DefaultMaxWebSearches
 	}
 	return cfg, nil
+}
+
+// DefaultThinkingEffort is the application policy for known model IDs.
+// Unlisted models keep the provider's default; explicit effort flags take precedence.
+func DefaultThinkingEffort(model string) string {
+	switch model {
+	case "gpt-5.3-codex-spark", "gpt-5.6-luna":
+		return "xhigh"
+	case "gpt-5.6-sol":
+		return "medium"
+	case "gpt-6-astra":
+		return "low"
+	default:
+		return ""
+	}
 }
 
 func ResolveLocal(opts Options) (Config, error) {
