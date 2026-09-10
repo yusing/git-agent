@@ -165,15 +165,18 @@ func TestCommitMsgEndToEndWithRealisticFixture(t *testing.T) {
 			for _, want := range []string{
 				`prepared_commit_context`,
 				`staged_stats`,
-				`previous_head_paths`,
-				`previous_head_stats`,
-				`previous_head_diff`,
+				`commit_style`,
 				`diff_truncated`,
 				`"git_staged_diff_for_paths"`,
 				`"read_file"`,
 			} {
 				if !strings.Contains(body, want) {
 					t.Fatalf("first request missing tool %s\n%s", want, body)
+				}
+			}
+			for _, field := range []string{"previous_head_", "recent_commits"} {
+				if strings.Contains(body, field) {
+					t.Fatalf("normal request leaked historical field %s", field)
 				}
 			}
 			for _, name := range []string{`"git_staged_paths"`, `"git_staged_status"`, `"git_staged_stat"`, `"git_staged_diff"`, `"git_recent_commits"`} {
@@ -194,12 +197,18 @@ func TestCommitMsgEndToEndWithRealisticFixture(t *testing.T) {
 				`internal/route/do_types.go`,
 				`README.md`,
 				`docs/routing.md`,
-				`feat(route): add parser for do actions`,
-				`refactor(cli): preserve ordered help output`,
-				`feat(schema): add route rule structs`,
 			} {
 				if !strings.Contains(body, want) {
 					t.Fatalf("second request missing %q\n%s", want, body)
+				}
+			}
+			for _, oldSubject := range []string{
+				"feat(route): add parser for do actions",
+				"refactor(cli): preserve ordered help output",
+				"feat(schema): add route rule structs",
+			} {
+				if strings.Contains(body, oldSubject) {
+					t.Fatalf("normal request leaked old subject %q", oldSubject)
 				}
 			}
 			return responseWithText("resp_commit_2", `feat(route): add named do option blocks

@@ -75,7 +75,7 @@ not interpret those redirects. Errors name the variable without printing its
 value. Native Git is bound to the inspected worktree; ordinary Git configuration
 and signing overrides remain available.
 
-The command precomputes staged paths, status, stats, recent style commits, and
+The command precomputes staged paths, status, stats, a locally inferred style hint, and
 the bounded staged diff before generation so the authoritative staged scope is
 visible before any optional follow-up tool calls. For generated-heavy staged
 changes, the request may compact dominant generated hunks into a context pack,
@@ -2392,8 +2392,9 @@ definition are omitted.
 
 ### Commit message tools
 
-Normal `commit-msg` and `commit` precompute staged inventory, recent style
-commits, previous HEAD contrast, and a bounded staged diff in Go. They expose
+Normal `commit-msg` and `commit` precompute staged inventory, a local style hint,
+and a bounded staged diff in Go. Recent message text and previous-HEAD
+paths/stats/patches/context packs are not included in normal requests. They expose
 only these follow-up tools plus available skill manager tools:
 
 - `list_files`
@@ -2422,7 +2423,8 @@ diagnostics, and the bounded final amended diff. It exposes:
 - `git_show_file_at_rev`
 
 Staged inventory, recent-commit, full staged-diff, HEAD-show, parent-diff, and
-amend-delta tools are not exposed, because they only repeat prepared context.
+amend-delta tools are not exposed. Normal mode keeps historical subject matter
+out of the initial request; amend already includes its HEAD and delta evidence.
 `git_staged_diff_for_paths` inspects omitted or high-churn staged clusters.
 `git_final_amended_diff` is for narrower follow-up when the prepared final diff
 is truncated or ambiguous.
@@ -2568,23 +2570,23 @@ Behavior:
 - inspect the staged diff only
 - treat staged paths as authoritative scope
 - precompute staged context before generation, with changed paths, status,
-  stats, recent style commits, previous HEAD paths/stats/diff for contrast,
-  and a bounded staged diff
+  stats, a bounded staged diff, and a locally derived conventional or Title-case
+  style hint; do not preload recent message text or previous-HEAD evidence
 - when the bounded staged diff is truncated, precompute an additional focus
   diff for high-churn paths that were omitted or cut off, unless the change is
   handled by generated-heavy compaction/outlier rules
-- retain current focus-diff hunks and their path/truncation metadata when
-  previous-HEAD contrast is compacted independently
+- retain current focus-diff hunks and their path/truncation metadata in the
+  initial request
 - compact generated-heavy staged changes with a context pack only when raw
   outlier diffs for small handwritten change clusters remain visible in the
   initial request
-- use recent commit history as style reference only
+- infer the style hint locally from recent summaries, using the same detection
+  as submodule-only commits; never pass those summaries as normal change evidence
 - do not attach task IDs merely because they appear in recent history; normal
   messages use IDs supported by current task evidence or explicitly supplied by
   the caller, without post-generation suffix restoration
-- use previous HEAD paths/stats/diff only as contrast to understand what was
-  already done, not as current staged scope; for large previous diffs, paths
-  and stats preserve contrast shape even when the previous diff text is capped
+- retain narrow `git_show_file_at_rev` comparisons for ambiguous staged changes;
+  historical file contents are supporting evidence, not additional scope
 - allow the model to request extra related file reads when the diff is
   ambiguous
 - allow the model to request path-filtered staged diffs for omitted or
@@ -2595,8 +2597,9 @@ Behavior:
   tools only when they reduce material uncertainty
 - cover each distinct high-signal staged change cluster present in the staged
   diff, rather than letting a dominant cluster hide a secondary behavior change
-- avoid copying phrasing from recent commits or previous HEAD diff as if it
-  were current staged work
+- ground each subject/body claim in added or removed staged hunks, not unchanged
+  context or existing supporting code; syntax validation does not certify factual
+  claim grounding
 - prefer `refactor` when staged evidence shows extraction, relocation,
   deduplication, or internal reorganization of existing behavior, even if new
   helper files or tests are added

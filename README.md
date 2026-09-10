@@ -92,7 +92,9 @@ Git configuration, hooks, and signing still apply.
 
 Commit generation reads related files and project guidance from the index,
 not from unstaged or untracked work. Stage guidance changes too if you want
-them to apply to the generated message.
+them to apply to the generated message. Normal commit messages use a locally
+inferred style hint rather than copying recent messages; amend still uses the
+original message as its anchor.
 
 For staged submodule updates, normal `commit-msg` and `commit` append a
 deterministic local changelog block after model generation. If the staged

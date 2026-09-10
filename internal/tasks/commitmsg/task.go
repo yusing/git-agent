@@ -47,25 +47,20 @@ type PreparedPRContext struct {
 }
 
 type PreparedCommitContext struct {
-	Mode                      Mode                    `json:"mode"`
-	StagedPaths               []string                `json:"staged_paths"`
-	StagedStatus              []gitctx.PathChange     `json:"staged_status"`
-	StagedStats               []gitctx.FileStat       `json:"staged_stats"`
-	StagedSubmodules          []PreparedSubmodule     `json:"staged_submodules,omitempty"`
-	ContextPack               contextpack.ContextPack `json:"context_pack"`
-	RecentCommits             []gitctx.CommitInfo     `json:"recent_commits"`
-	PreviousHeadPaths         []string                `json:"previous_head_paths,omitempty"`
-	PreviousHeadStats         []gitctx.FileStat       `json:"previous_head_stats,omitempty"`
-	PreviousHeadContextPack   contextpack.ContextPack `json:"previous_head_context_pack"`
-	PreviousHeadDiff          string                  `json:"previous_head_diff,omitempty"`
-	PreviousHeadDiffTruncated bool                    `json:"previous_head_diff_truncated,omitempty"`
-	FocusDiff                 string                  `json:"focus_diff,omitempty"`
-	FocusDiffPaths            []string                `json:"focus_diff_paths,omitempty"`
-	FocusDiffTruncated        bool                    `json:"focus_diff_truncated,omitempty"`
-	OutlierDiff               string                  `json:"outlier_diff,omitempty"`
-	OutlierDiffTruncated      bool                    `json:"outlier_diff_truncated,omitempty"`
-	Diff                      string                  `json:"diff"`
-	DiffTruncated             bool                    `json:"diff_truncated"`
+	Mode                 Mode                    `json:"mode"`
+	StagedPaths          []string                `json:"staged_paths"`
+	StagedStatus         []gitctx.PathChange     `json:"staged_status"`
+	StagedStats          []gitctx.FileStat       `json:"staged_stats"`
+	StagedSubmodules     []PreparedSubmodule     `json:"staged_submodules,omitempty"`
+	ContextPack          contextpack.ContextPack `json:"context_pack"`
+	RecentCommits        []gitctx.CommitInfo     `json:"-"` // Used locally for style detection, never supplied as change evidence.
+	FocusDiff            string                  `json:"focus_diff,omitempty"`
+	FocusDiffPaths       []string                `json:"focus_diff_paths,omitempty"`
+	FocusDiffTruncated   bool                    `json:"focus_diff_truncated,omitempty"`
+	OutlierDiff          string                  `json:"outlier_diff,omitempty"`
+	OutlierDiffTruncated bool                    `json:"outlier_diff_truncated,omitempty"`
+	Diff                 string                  `json:"diff"`
+	DiffTruncated        bool                    `json:"diff_truncated"`
 }
 
 type PreparedAmendContext struct {
@@ -362,12 +357,6 @@ func PrepareCommitContext(repo *gitctx.Repository) (PreparedCommitContext, error
 	recentCommits := collectBestEffortWithRepo(&wg, root, func(taskRepo *gitctx.Repository) ([]gitctx.CommitInfo, error) {
 		return taskRepo.RecentCommits(10)
 	})
-	previousHeadPaths := collectBestEffortWithRepo(&wg, root, (*gitctx.Repository).DiffAgainstParentPaths)
-	previousHeadStats := collectBestEffortWithRepo(&wg, root, (*gitctx.Repository).DiffAgainstParentStat)
-	previousHeadDiff := collectBestEffortWithRepo(&wg, root, func(taskRepo *gitctx.Repository) (boundedDiffResult, error) {
-		text, truncated, err := taskRepo.DiffAgainstParent(24*1024, 700)
-		return boundedDiffResult{Text: text, Truncated: truncated}, err
-	})
 	wg.Wait()
 
 	if stagedPaths.err != nil {
@@ -389,15 +378,9 @@ func PrepareCommitContext(repo *gitctx.Repository) (PreparedCommitContext, error
 	contextPack := collectWithRepo(&wg, root, func(taskRepo *gitctx.Repository) (contextpack.ContextPack, error) {
 		return prepareContextPack(taskRepo, stagedPaths.value, stagedStatus.value, stagedStats.value), nil
 	})
-	previousHeadContextPack := collectWithRepo(&wg, root, func(taskRepo *gitctx.Repository) (contextpack.ContextPack, error) {
-		return prepareRevisionContextPack(taskRepo, "HEAD", previousHeadPaths.value, previousHeadStats.value), nil
-	})
 	wg.Wait()
 	if contextPack.err != nil {
 		return PreparedCommitContext{}, contextPack.err
-	}
-	if previousHeadContextPack.err != nil {
-		return PreparedCommitContext{}, previousHeadContextPack.err
 	}
 
 	focusDiff := collectWithRepo(&wg, root, func(taskRepo *gitctx.Repository) (focusDiffResult, error) {
@@ -417,25 +400,20 @@ func PrepareCommitContext(repo *gitctx.Repository) (PreparedCommitContext, error
 	}
 
 	return PreparedCommitContext{
-		Mode:                      ModeNormal,
-		StagedPaths:               stagedPaths.value,
-		StagedStatus:              stagedStatus.value,
-		StagedStats:               stagedStats.value,
-		StagedSubmodules:          stagedSubmodules.value,
-		ContextPack:               contextPack.value,
-		RecentCommits:             recentCommits.value,
-		PreviousHeadPaths:         previousHeadPaths.value,
-		PreviousHeadStats:         previousHeadStats.value,
-		PreviousHeadContextPack:   previousHeadContextPack.value,
-		PreviousHeadDiff:          previousHeadDiff.value.Text,
-		PreviousHeadDiffTruncated: previousHeadDiff.value.Truncated,
-		FocusDiff:                 focusDiff.value.Text,
-		FocusDiffPaths:            focusDiff.value.Paths,
-		FocusDiffTruncated:        focusDiff.value.Truncated,
-		OutlierDiff:               outlierDiff.value.Text,
-		OutlierDiffTruncated:      outlierDiff.value.Truncated,
-		Diff:                      diff.value.Text,
-		DiffTruncated:             diff.value.Truncated,
+		Mode:                 ModeNormal,
+		StagedPaths:          stagedPaths.value,
+		StagedStatus:         stagedStatus.value,
+		StagedStats:          stagedStats.value,
+		StagedSubmodules:     stagedSubmodules.value,
+		ContextPack:          contextPack.value,
+		RecentCommits:        recentCommits.value,
+		FocusDiff:            focusDiff.value.Text,
+		FocusDiffPaths:       focusDiff.value.Paths,
+		FocusDiffTruncated:   focusDiff.value.Truncated,
+		OutlierDiff:          outlierDiff.value.Text,
+		OutlierDiffTruncated: outlierDiff.value.Truncated,
+		Diff:                 diff.value.Text,
+		DiffTruncated:        diff.value.Truncated,
 	}, nil
 }
 
@@ -642,7 +620,10 @@ func diffMentionsPath(diff, path string) bool {
 }
 
 func (c PreparedCommitContext) Render() string {
-	data, err := json.Marshal(c, jsontext.WithIndent("  "))
+	data, err := json.Marshal(struct {
+		PreparedCommitContext
+		CommitStyle string `json:"commit_style"`
+	}{c, c.commitStyle()}, jsontext.WithIndent("  "))
 	if err != nil {
 		return fmt.Sprintf(`{"mode":%q}`, c.Mode)
 	}
@@ -666,45 +647,25 @@ func (c PreparedAmendContext) TraceValue() any {
 }
 
 func (c PreparedCommitContext) RenderForPrompt() string {
-	if !c.useCompactPrompt() {
+	if !c.compactCurrentForPrompt() {
 		return c.Render()
 	}
 	view := map[string]any{
 		"mode":              c.Mode,
-		"recent_commits":    c.RecentCommits,
+		"commit_style":      c.commitStyle(),
 		"staged_submodules": c.StagedSubmodules,
 	}
-	if c.compactCurrentForPrompt() {
-		view["context_pack"] = c.ContextPack
-		view["diff_ref"] = "prepared_commit_context.diff"
-		view["diff_truncated"] = c.DiffTruncated
-		if c.OutlierDiff != "" {
-			view["outlier_diff"] = c.OutlierDiff
-			view["outlier_diff_truncated"] = c.OutlierDiffTruncated
-		}
-	} else {
-		view["staged_paths"] = c.StagedPaths
-		view["staged_status"] = c.StagedStatus
-		view["staged_stats"] = c.StagedStats
-		view["context_pack"] = c.ContextPack
-		view["diff"] = c.Diff
-		view["diff_truncated"] = c.DiffTruncated
+	view["context_pack"] = c.ContextPack
+	view["diff_ref"] = "prepared_commit_context.diff"
+	view["diff_truncated"] = c.DiffTruncated
+	if c.OutlierDiff != "" {
+		view["outlier_diff"] = c.OutlierDiff
+		view["outlier_diff_truncated"] = c.OutlierDiffTruncated
 	}
 	if c.FocusDiff != "" {
 		view["focus_diff"] = c.FocusDiff
 		view["focus_diff_paths"] = c.FocusDiffPaths
 		view["focus_diff_truncated"] = c.FocusDiffTruncated
-	}
-	if c.compactPreviousForPrompt() {
-		view["previous_head_ref"] = "prepared_commit_context.previous_head_diff"
-		view["previous_head_context_pack"] = c.PreviousHeadContextPack
-		view["previous_head_summary"] = summarizePreviousHead(c.PreviousHeadPaths, c.PreviousHeadStats, c.PreviousHeadDiffTruncated)
-	} else {
-		view["previous_head_paths"] = c.PreviousHeadPaths
-		view["previous_head_stats"] = c.PreviousHeadStats
-		view["previous_head_context_pack"] = c.PreviousHeadContextPack
-		view["previous_head_diff"] = c.PreviousHeadDiff
-		view["previous_head_diff_truncated"] = c.PreviousHeadDiffTruncated
 	}
 	data, err := json.Marshal(view, jsontext.WithIndent("  "))
 	if err != nil {
@@ -714,20 +675,16 @@ func (c PreparedCommitContext) RenderForPrompt() string {
 }
 
 func (c PreparedCommitContext) TraceValue() any {
-	if len(c.PreviousHeadPaths) <= 100 && len(c.StagedPaths) <= 100 {
+	if len(c.StagedPaths) <= 100 {
 		return c
 	}
 	view := map[string]any{
-		"mode":                         c.Mode,
-		"staged_submodules":            c.StagedSubmodules,
-		"context_pack":                 c.ContextPack,
-		"recent_commits":               c.RecentCommits,
-		"previous_head_summary":        summarizePreviousHead(c.PreviousHeadPaths, c.PreviousHeadStats, c.PreviousHeadDiffTruncated),
-		"previous_head_context_pack":   c.PreviousHeadContextPack,
-		"previous_head_diff":           c.PreviousHeadDiff,
-		"previous_head_diff_truncated": c.PreviousHeadDiffTruncated,
-		"diff":                         c.Diff,
-		"diff_truncated":               c.DiffTruncated,
+		"mode":              c.Mode,
+		"staged_submodules": c.StagedSubmodules,
+		"context_pack":      c.ContextPack,
+		"commit_style":      c.commitStyle(),
+		"diff":              c.Diff,
+		"diff_truncated":    c.DiffTruncated,
 	}
 	if c.OutlierDiff != "" {
 		view["outlier_diff"] = c.OutlierDiff
@@ -738,27 +695,21 @@ func (c PreparedCommitContext) TraceValue() any {
 		view["focus_diff"] = c.FocusDiff
 		view["focus_diff_truncated"] = c.FocusDiffTruncated
 	}
-	if len(c.StagedPaths) > 100 {
-		view["staged_summary"] = summarizeStaged(c.StagedPaths, c.StagedStats, c.DiffTruncated)
-	} else {
-		view["staged_paths"] = c.StagedPaths
-		view["staged_status"] = c.StagedStatus
-		view["staged_stats"] = c.StagedStats
-	}
+	view["staged_summary"] = summarizeStaged(c.StagedPaths, c.StagedStats, c.DiffTruncated)
 	return view
 }
 
-func (c PreparedCommitContext) useCompactPrompt() bool {
-	return c.compactCurrentForPrompt() || c.compactPreviousForPrompt()
+// Keep historical subject matter out of normal generation while preserving the
+// same local style choice used by submodule-only commits.
+func (c PreparedCommitContext) commitStyle() string {
+	if detectCommitMessageStyle(c.RecentCommits) == commitMessageStyleTitle {
+		return "title-case"
+	}
+	return "conventional"
 }
 
 func (c PreparedCommitContext) compactCurrentForPrompt() bool {
 	return contextpack.IsLargeGeneratedHeavy(c.ContextPack)
-}
-
-func (c PreparedCommitContext) compactPreviousForPrompt() bool {
-	return len(c.PreviousHeadPaths) > 100 ||
-		contextpack.IsLargeGeneratedHeavy(c.PreviousHeadContextPack)
 }
 
 func UserPromptWithPreparedCommitContext(prepared PreparedCommitContext, maxSteps, maxToolCalls int) string {
@@ -854,12 +805,6 @@ func prepareRevisionContextPack(repo *gitctx.Repository, rev string, paths []str
 		})
 	}
 	return contextpack.Build(files, contextpack.Options{})
-}
-
-func summarizePreviousHead(paths []string, stats []gitctx.FileStat, truncated bool) map[string]any {
-	summary := summarizeFileSet(paths, stats)
-	summary["diff_truncated"] = truncated
-	return summary
 }
 
 func summarizeStaged(paths []string, stats []gitctx.FileStat, truncated bool) map[string]any {
