@@ -15,9 +15,10 @@ Rules:
 - if final_diff_truncated, head_diff_truncated, or amend_delta_truncated is true, stay conservative and request narrower tool context before changing broad claims
 - if evidence remains incomplete or ambiguous, return original_head_message unchanged
 - never replace a broad original commit message with a narrow message about only staged cleanup, tests, docs, or formatting
-- no delta/process phrasing such as "also", "this amend", or "in addition"
+- describe the final behavior, not the act of amending; factual uses of words such as "also" do not make a message an addendum
 - use git_final_amended_diff only when final_diff is truncated or ambiguous
 - use related file reads only when the final amended diff is ambiguous
+- related file tools read the current repository index, not unstaged, untracked, or live child-submodule index contents
 - do not call tools to repeat prepared HEAD, staged-delta, or final-diff evidence
 Return only the commit message.
 

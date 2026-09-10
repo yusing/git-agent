@@ -29,7 +29,6 @@ type Request struct {
 }
 
 var (
-	taskIDSuffixPattern              = regexp.MustCompile(`(?:\s+\(T\d+\))+$`)
 	conventionalSubjectPrefixPattern = regexp.MustCompile(`^[a-z]+(?:\([^)]+\))?!?$`)
 )
 
@@ -691,6 +690,11 @@ func (c PreparedCommitContext) RenderForPrompt() string {
 		view["diff"] = c.Diff
 		view["diff_truncated"] = c.DiffTruncated
 	}
+	if c.FocusDiff != "" {
+		view["focus_diff"] = c.FocusDiff
+		view["focus_diff_paths"] = c.FocusDiffPaths
+		view["focus_diff_truncated"] = c.FocusDiffTruncated
+	}
 	if c.compactPreviousForPrompt() {
 		view["previous_head_ref"] = "prepared_commit_context.previous_head_diff"
 		view["previous_head_context_pack"] = c.PreviousHeadContextPack
@@ -1006,22 +1010,23 @@ func Validate(mode Mode, output string) []string {
 	if subject == "" {
 		errs = append(errs, "subject is missing")
 	}
-	forbidden := []string{"here is", "commit message:", "explanation:", "i would"}
-	lower := strings.ToLower(trimmed)
-	for _, phrase := range forbidden {
-		if strings.Contains(lower, phrase) {
-			errs = append(errs, fmt.Sprintf("stray commentary phrase %q", phrase))
+	for _, line := range lines {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		for _, phrase := range []string{"here is ", "here is:", "commit message:", "explanation:", "i would "} {
+			if strings.HasPrefix(lower, phrase) {
+				errs = append(errs, fmt.Sprintf("stray commentary phrase %q", strings.TrimSpace(phrase)))
+			}
 		}
-	}
-	if mode == ModeAmend {
-		for _, phrase := range []string{"this amend", "in addition", "also"} {
-			if strings.Contains(lower, phrase) {
-				errs = append(errs, fmt.Sprintf("amend output uses process/delta phrase %q", phrase))
+		if mode == ModeAmend {
+			for _, phrase := range []string{"this amend ", "this amendment ", "in this amend ", "in this amendment "} {
+				if strings.HasPrefix(lower, phrase) {
+					errs = append(errs, fmt.Sprintf("amend output uses process/delta phrase %q", strings.TrimSpace(phrase)))
+				}
 			}
 		}
 	}
 	for i, line := range lines[1:] {
-		if len(line) > 90 {
+		if !textutil.BodyLineFits(line, 72) {
 			errs = append(errs, fmt.Sprintf("body line %d is too long", i+2))
 		}
 	}
@@ -1124,96 +1129,4 @@ func joinTrimmedLines(lines []string) string {
 		}
 	}
 	return strings.Join(trimmed, " ")
-}
-
-func PreserveTaskIDSuffix(output string, references []gitctx.CommitInfo) string {
-	trimmed := strings.TrimSpace(output)
-	if trimmed == "" {
-		return ""
-	}
-	lines := strings.Split(trimmed, "\n")
-	subject := strings.TrimSpace(lines[0])
-	if subject == "" || taskIDSuffixPattern.MatchString(subject) {
-		return trimmed
-	}
-	for _, reference := range references {
-		referenceSubject := strings.TrimSpace(reference.Summary)
-		suffixLocation := taskIDSuffixPattern.FindStringIndex(referenceSubject)
-		if suffixLocation == nil {
-			continue
-		}
-		baseSubject := strings.TrimSpace(referenceSubject[:suffixLocation[0]])
-		if subject != baseSubject {
-			continue
-		}
-		lines[0] = subject + referenceSubject[suffixLocation[0]:]
-		return strings.Join(lines, "\n")
-	}
-	if suffix := dominantRecentTaskIDSuffix(subject, references); suffix != "" {
-		lines[0] = subject + suffix
-		return strings.Join(lines, "\n")
-	}
-	if suffix := latestRecentTaskIDSuffix(references); suffix != "" {
-		lines[0] = subject + suffix
-		return strings.Join(lines, "\n")
-	}
-	return trimmed
-}
-
-func latestRecentTaskIDSuffix(references []gitctx.CommitInfo) string {
-	if len(references) == 0 {
-		return ""
-	}
-	referenceSubject := strings.TrimSpace(references[0].Summary)
-	suffixLocation := taskIDSuffixPattern.FindStringIndex(referenceSubject)
-	if suffixLocation == nil {
-		return ""
-	}
-	return referenceSubject[suffixLocation[0]:]
-}
-
-func dominantRecentTaskIDSuffix(subject string, references []gitctx.CommitInfo) string {
-	var suffix string
-	var sameSuffixRun []string
-	for _, reference := range references {
-		referenceSubject := strings.TrimSpace(reference.Summary)
-		suffixLocation := taskIDSuffixPattern.FindStringIndex(referenceSubject)
-		if suffixLocation == nil {
-			break
-		}
-		referenceSuffix := referenceSubject[suffixLocation[0]:]
-		if suffix == "" {
-			suffix = referenceSuffix
-		}
-		if referenceSuffix != suffix {
-			break
-		}
-		sameSuffixRun = append(sameSuffixRun, referenceSubject)
-	}
-	if len(sameSuffixRun) < 2 {
-		return ""
-	}
-
-	subjectScope := conventionalScope(subject)
-	if subjectScope == "" {
-		return suffix
-	}
-	for _, referenceSubject := range sameSuffixRun {
-		if conventionalScope(referenceSubject) == subjectScope {
-			return suffix
-		}
-	}
-	return ""
-}
-
-func conventionalScope(subject string) string {
-	prefix, _, ok := strings.Cut(subject, ":")
-	if !ok {
-		return ""
-	}
-	open := strings.Index(prefix, "(")
-	if open < 0 || !strings.HasSuffix(prefix, ")") {
-		return ""
-	}
-	return prefix[open+1 : len(prefix)-1]
 }

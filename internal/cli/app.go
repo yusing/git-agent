@@ -1556,7 +1556,7 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 	taskCtx, cancel := context.WithTimeout(ctx, localCfg.Timeout)
 	defer cancel()
 
-	repo, err := gitctx.Open(".")
+	repo, state, err := openCommitRepository(".")
 	if err != nil {
 		return err
 	}
@@ -1574,6 +1574,9 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	} else if ok {
+		if err := state.check(repo.RootPath); err != nil {
+			return err
+		}
 		return a.writeResult(localCfg, deterministicResult)
 	}
 
@@ -1581,7 +1584,7 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	result, err := a.generateCommitMessage(taskCtx, cfg, repo, stagedPaths, mode, "commit-msg", nil)
+	result, err := a.generateCommitMessage(taskCtx, cfg, repo, stagedPaths, mode, "commit-msg", nil, state)
 	if err != nil {
 		return err
 	}
@@ -1603,7 +1606,7 @@ func (a *App) runCommit(ctx context.Context, args []string) error {
 	taskCtx, cancel := context.WithTimeout(ctx, localCfg.Timeout)
 	defer cancel()
 
-	repo, err := gitctx.Open(".")
+	repo, state, err := openCommitRepository(".")
 	if err != nil {
 		return err
 	}
@@ -1621,6 +1624,9 @@ func (a *App) runCommit(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	} else if ok {
+		if err := state.check(repo.RootPath); err != nil {
+			return err
+		}
 		if localCfg.Debug {
 			a.writeDebugEvent("agent_summary", slog.Int("tool_calls", deterministicResult.ToolCalls), slog.Int("repair_calls", deterministicResult.RepairCalls))
 		}
@@ -1645,7 +1651,7 @@ func (a *App) runCommit(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	result, err := a.generateCommitMessage(taskCtx, cfg, repo, stagedPaths, mode, "commit", recorder)
+	result, err := a.generateCommitMessage(taskCtx, cfg, repo, stagedPaths, mode, "commit", recorder, state)
 	if err != nil {
 		return err
 	}
@@ -1653,6 +1659,9 @@ func (a *App) runCommit(ctx context.Context, args []string) error {
 		a.writeDebugEvent("agent_summary", slog.Int("tool_calls", result.ToolCalls), slog.Int("repair_calls", result.RepairCalls))
 	}
 
+	if err := state.check(repo.RootPath); err != nil {
+		return err
+	}
 	commitOutput, err := gitCommit(taskCtx, repo, result.Text, mode == commitmsg.ModeAmend)
 	if err != nil {
 		if writeErr := recorder.Write("error", map[string]any{
@@ -1706,7 +1715,7 @@ func parseCommitFlags(command string, args []string) (commitmsg.Mode, config.Opt
 	return mode, opts, nil
 }
 
-func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo *gitctx.Repository, stagedPaths []string, mode commitmsg.Mode, command string, recorder *trace.Recorder) (agent.Result, error) {
+func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo *gitctx.Repository, stagedPaths []string, mode commitmsg.Mode, command string, recorder *trace.Recorder, state commitState) (agent.Result, error) {
 	var userPrompt string
 	var preparedCommit *commitmsg.PreparedCommitContext
 	var preparedAmend *commitmsg.PreparedAmendContext
@@ -1732,13 +1741,19 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 			guidancePaths = prepared.FinalPaths
 		}
 	}
-	renderedGuidance, err := resolveGuidanceForPaths(repo, cfg.GuidanceFamily, guidancePaths)
+	if err := state.check(repo.RootPath); err != nil {
+		return agent.Result{}, err
+	}
+	renderedGuidance, err := resolveIndexGuidance(repo, cfg.GuidanceFamily, guidancePaths)
 	if err != nil {
 		return agent.Result{}, err
 	}
 	skillManager := skillcmd.Discover(repo.WorkPath)
 	skillInstructions, err := resolveSkillInstructions(ctx, skillManager)
 	if err != nil {
+		return agent.Result{}, err
+	}
+	if err := state.check(repo.RootPath); err != nil {
 		return agent.Result{}, err
 	}
 	if recorder != nil {
@@ -1772,7 +1787,7 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 		toolNames = tools.AmendMessageToolNames()
 	}
 	toolCandidates := append(toolNames, tools.SkillToolNames()...)
-	registry := tools.NewRegistry(repo, skillManager)
+	registry := tools.NewCommitRegistry(repo, skillManager, func() error { return state.check(repo.RootPath) })
 	toolSpecs := registry.Definitions(toolCandidates)
 	allowedTools := toolDefinitionNames(toolSpecs)
 	runner := agent.OpenAIRunner{
@@ -1802,14 +1817,14 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 	if err != nil {
 		return agent.Result{}, err
 	}
-	if recent, err := repo.RecentCommits(10); err == nil {
-		result.Text = commitmsg.PreserveTaskIDSuffix(result.Text, recent)
-	}
 	if preparedCommit != nil {
 		result.Text = commitmsg.AppendSubmoduleTrailer(result.Text, preparedCommit.StagedSubmodules)
 	}
 	if errs := validator(result.Text); len(errs) > 0 {
 		return agent.Result{}, fmt.Errorf("validation failed after shaping: %v", errs)
+	}
+	if err := state.check(repo.RootPath); err != nil {
+		return agent.Result{}, err
 	}
 	if err := recorder.Write("final", map[string]any{
 		"text":         result.Text,
@@ -1834,7 +1849,7 @@ func gitCommit(ctx context.Context, repo *gitctx.Repository, message string, ame
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, "git", append([]string{"--work-tree", repo.RootPath}, args...)...)
 	cmd.Dir = repo.RootPath
 	cmd.Stdin = strings.NewReader(strings.TrimSpace(message) + "\n")
 	cmd.Stdout = &stdout
@@ -2322,6 +2337,10 @@ func resolveReviewGuidance(repo *gitctx.Repository, requestedFamily string, path
 	if mode != reviewtask.ModeStaged {
 		return resolveGuidanceForPaths(repo, requestedFamily, paths)
 	}
+	return resolveIndexGuidance(repo, requestedFamily, paths)
+}
+
+func resolveIndexGuidance(repo *gitctx.Repository, requestedFamily string, paths []string) (string, error) {
 	family, err := guidance.ParseFamily(requestedFamily)
 	if err != nil {
 		return "", err

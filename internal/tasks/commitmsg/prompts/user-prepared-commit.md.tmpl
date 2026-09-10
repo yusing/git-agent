@@ -23,6 +23,7 @@ Rules:
 - if diff_truncated is true, stay conservative and describe only visible evidence
 - if outlier_diff_truncated is true, stay conservative for outlier details beyond visible hunks
 - use read_file, inspect_file, grep, or list_files only when the staged diff is ambiguous
+- related file tools read the current repository index, including unchanged supporting files; they do not expose unstaged, untracked, or live child-submodule index contents
 - do not call tools to repeat staged inventory, recent commits, previous HEAD contrast, or a diff already in prepared context
 Return only the commit message.
 

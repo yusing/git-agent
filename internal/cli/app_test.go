@@ -2348,7 +2348,7 @@ func TestCommitRequiresStagedChanges(t *testing.T) {
 	}
 }
 
-func TestCommitMsgRestoresMatchingRecentTaskIDSuffix(t *testing.T) {
+func TestCommitMsgDoesNotInheritRecentTaskIDSuffix(t *testing.T) {
 	repoDir := initRepo(t)
 	runGit(t, repoDir, "commit", "-m", "fix(schedtask): log skipped duplicate task creation (T46571)")
 	if err := os.WriteFile(filepath.Join(repoDir, "app.txt"), []byte("updated\n"), 0o644); err != nil {
@@ -2378,7 +2378,7 @@ func TestCommitMsgRestoresMatchingRecentTaskIDSuffix(t *testing.T) {
 	if err := app.Run(t.Context(), []string{"commit-msg"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(stdout.String(), "fix(schedtask): log skipped duplicate task creation (T46571)\n\n") {
+	if !strings.HasPrefix(stdout.String(), "fix(schedtask): log skipped duplicate task creation\n\n") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 }

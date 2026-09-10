@@ -35,8 +35,10 @@
   `docs/spec.md` for the normative contract, `README.md` for user-facing usage,
   `internal/cli/app.go` help text and related tests, and
   `completions/git-agent.*` when completion candidates change.
-- Do not use `exec.Command*` outside tests, including for `git`, unless the
-  user explicitly asks to change that policy.
+- Keep Git inspection in typed Go code. Outside tests, `exec.Command*` is limited
+  to native commit execution in `internal/cli`, fixed skill/documentation commands
+  in `internal/skillcmd` and `internal/doccmd`, and explicitly configured hooks
+  in `internal/hooks`. New subprocess capabilities require user authorization.
 - Do not add write-capable model tools, arbitrary shell tools, or generic
   "run any git command" tools unless the user explicitly asks for that design
   change.
@@ -46,7 +48,8 @@
   docs when changing them.
 - Do not log API keys, bearer tokens, or auth files in traces, debug output, or
   errors.
-- Store long model prompts in `internal/agent/prompts`; do not hardcode them in Go code.
+- Store long model prompts in the owning package's `prompts` directory; shared
+  loop prompts belong in `internal/agent/prompts`. Do not hardcode them in Go code.
 - Prefer tests that use temporary repositories and fake servers over tests that
   depend on local Git configuration, network access, or real provider calls.
 

@@ -475,7 +475,7 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, stableInstructions s
 			timing(Timing{Phase: "tool_batch", Duration: time.Since(toolBatchStarted), Step: step + 1})
 		}
 		if len(localCalls) > 0 {
-			if err := r.Tools.CheckReviewSnapshot(); err != nil {
+			if err := r.Tools.CheckSnapshot(); err != nil {
 				return NodeResult{}, err
 			}
 		}

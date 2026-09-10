@@ -1024,3 +1024,114 @@ func mustWriteFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestCommitToolsUseParentIndexEvidence(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.name", "Test User")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	mustWriteFile(t, filepath.Join(dir, "app.go"), "package app\nfunc HistoricalEvidence() {}\n")
+	runGit(t, dir, "add", "app.go")
+	runGit(t, dir, "commit", "-m", "base")
+	mustWriteFile(t, filepath.Join(dir, "app.go"), "package app\nfunc StagedEvidence() {}\n")
+	mustWriteFile(t, filepath.Join(dir, ".gitignore"), ".env\n")
+	runGit(t, dir, "add", "app.go", ".gitignore")
+	mustWriteFile(t, filepath.Join(dir, "app.go"), "package app\nfunc PrivateWorktreeEvidence() {}\n")
+	mustWriteFile(t, filepath.Join(dir, ".env"), "PrivateWorktreeEvidence\n")
+	mustWriteFile(t, filepath.Join(dir, "private-untracked.txt"), "PrivateWorktreeEvidence\n")
+	repo, err := gitctx.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewCommitRegistry(repo, nil, nil)
+	for _, invocation := range []Invocation{
+		{Name: "read_file", Arguments: `{"path":"app.go"}`},
+		{Name: "inspect_file", Arguments: `{"path":"app.go"}`},
+		{Name: "grep", Arguments: `{"pattern":"StagedEvidence|PrivateWorktreeEvidence"}`},
+	} {
+		result, err := registry.Execute(t.Context(), invocation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(result.Content, "StagedEvidence") || strings.Contains(result.Content, "PrivateWorktreeEvidence") {
+			t.Fatalf("%s returned wrong evidence: %s", invocation.Name, result.Content)
+		}
+	}
+	for _, invocation := range []Invocation{
+		{Name: "list_files", Arguments: `{}`},
+		{Name: "find", Arguments: `{"type":"file"}`},
+	} {
+		result, err := registry.Execute(t.Context(), invocation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(result.Content, "app.go") || strings.Contains(result.Content, ".env") || strings.Contains(result.Content, "private-untracked") {
+			t.Fatalf("%s returned worktree paths: %s", invocation.Name, result.Content)
+		}
+	}
+	for _, name := range []string{"read_file", "inspect_file"} {
+		for _, args := range []string{`{"path":"app.go","source":"worktree"}`, `{"path":".env"}`, `{"path":"private-untracked.txt"}`} {
+			if _, err := registry.Execute(t.Context(), Invocation{Name: name, Arguments: args}); err == nil {
+				t.Fatalf("%s allowed %s", name, args)
+			}
+		}
+	}
+	for _, invocation := range []Invocation{
+		{Name: "read_file", Arguments: `{"path":"app.go","source":"head"}`},
+		{Name: "git_show_file_at_rev", Arguments: `{"path":"app.go","rev":"HEAD"}`},
+	} {
+		result, err := registry.Execute(t.Context(), invocation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(result.Content, "HistoricalEvidence") {
+			t.Fatalf("historical evidence missing: %s", result.Content)
+		}
+	}
+}
+
+func TestCommitToolsDoNotTraverseSubmoduleIndex(t *testing.T) {
+	t.Parallel()
+	child := t.TempDir()
+	runGit(t, child, "init")
+	runGit(t, child, "config", "user.name", "Test User")
+	runGit(t, child, "config", "user.email", "test@example.com")
+	mustWriteFile(t, filepath.Join(child, "app.txt"), "committed child\n")
+	runGit(t, child, "add", "app.txt")
+	runGit(t, child, "commit", "-m", "child")
+	parent := t.TempDir()
+	runGit(t, parent, "init")
+	runGit(t, parent, "config", "user.name", "Test User")
+	runGit(t, parent, "config", "user.email", "test@example.com")
+	runGit(t, parent, "-c", "protocol.file.allow=always", "submodule", "add", child, "child")
+	runGit(t, parent, "commit", "-m", "parent")
+	mustWriteFile(t, filepath.Join(parent, "child", "app.txt"), "private-child-index-evidence\n")
+	runGit(t, filepath.Join(parent, "child"), "add", "app.txt")
+	repo, err := gitctx.Open(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewCommitRegistry(repo, nil, nil)
+	for _, invocation := range []Invocation{
+		{Name: "read_file", Arguments: `{"path":"child/app.txt"}`},
+		{Name: "inspect_file", Arguments: `{"path":"child/app.txt"}`},
+	} {
+		if _, err := registry.Execute(t.Context(), invocation); err == nil {
+			t.Fatalf("%s traversed child index", invocation.Name)
+		}
+	}
+	for _, invocation := range []Invocation{
+		{Name: "list_files", Arguments: `{}`},
+		{Name: "find", Arguments: `{"type":"file"}`},
+		{Name: "grep", Arguments: `{"pattern":"private-child-index-evidence"}`},
+	} {
+		result, err := registry.Execute(t.Context(), invocation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(result.Content, "child/app.txt") || strings.Contains(result.Content, "private-child-index-evidence") {
+			t.Fatalf("%s leaked child index: %s", invocation.Name, result.Content)
+		}
+	}
+}

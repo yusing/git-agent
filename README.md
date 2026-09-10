@@ -84,6 +84,16 @@ submodule history, guidance files, release ranges, and stdout/stderr contracts.
 3. It exposes only narrow read-only tools when the model needs more context.
 4. It validates and shapes final output for the requested workflow.
 
+Finish staging before starting a commit command. If HEAD or staged contents
+change during message generation, the command stops; rerun it after your Git
+changes are finished. Repository/index redirection variables such as
+`GIT_DIR` and `GIT_INDEX_FILE` are not supported for commit commands. Ordinary
+Git configuration, hooks, and signing still apply.
+
+Commit generation reads related files and project guidance from the index,
+not from unstaged or untracked work. Stage guidance changes too if you want
+them to apply to the generated message.
+
 For staged submodule updates, normal `commit-msg` and `commit` append a
 deterministic local changelog block after model generation. If the staged
 changes contain only submodule updates, they skip the LLM entirely and format

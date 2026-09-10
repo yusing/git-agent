@@ -98,6 +98,19 @@ func WrapBody(text string, width int) string {
 	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
+// BodyLineFits permits overlong lines only for a single unbreakable token,
+// excluding the structural prefix used by WrapBody.
+func BodyLineFits(line string, width int) bool {
+	if utf8.RuneCountInString(line) <= width {
+		return true
+	}
+	content := strings.TrimSpace(line)
+	if _, _, rest, ok := wrappableStructuralBodyLine(line); ok {
+		content = rest
+	}
+	return len(strings.Fields(content)) == 1
+}
+
 func wrappableStructuralBodyLine(line string) (string, string, string, bool) {
 	rest := strings.TrimLeft(line, " \t")
 	indent := line[:len(line)-len(rest)]

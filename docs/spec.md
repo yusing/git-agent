@@ -62,6 +62,19 @@ Supported workflows:
 
 Generate a commit message from the staged diff in the current repository.
 Stdout contains only the final message.
+Both commit commands capture HEAD identity and staged tree contents before
+preparation, then recheck after preparation and before returning the message or
+handing it to Git. Observed state changes abort with a rerun error, including
+HEAD replacement that leaves tree contents unchanged. Deterministic submodule
+messages receive the same pre-output check.
+
+Commit commands reject `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`,
+`GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`,
+`GIT_NAMESPACE`, and `GIT_SHALLOW_FILE` when set, because context collection does
+not interpret those redirects. Errors name the variable without printing its
+value. Native Git is bound to the inspected worktree; ordinary Git configuration
+and signing overrides remain available.
+
 The command precomputes staged paths, status, stats, recent style commits, and
 the bounded staged diff before generation so the authoritative staged scope is
 visible before any optional follow-up tool calls. For generated-heavy staged
@@ -96,7 +109,9 @@ Generate a commit message for the final post-amend commit result, not a delta
 note about the newly staged changes. The current HEAD commit message is the
 anchor for subject, scope, task IDs, and high-level intent; staged cleanups or
 refinements must not replace a broad original message with a narrow delta
-message. The command precomputes amend context before generation: original HEAD
+message. Like normal commit generation, amend requires at least one staged
+change; it is not a message-only reword command. The command precomputes amend
+context before generation: original HEAD
 message, latest HEAD commit metadata, HEAD-vs-parent paths/stats/diff, staged
 diagnostics, recent style commits, and the bounded final amended diff versus
 HEAD's first parent. This gives the model enough latest-commit context before
@@ -118,6 +133,10 @@ creation fails after message generation, including because signing fails or a ke
 is locked, the command returns nonzero, keeps the streamed trace events on
 stdout, and reports both the generated message and the Git error so the user can
 commit manually.
+
+The state check is immediately before Git handoff, not an atomic lock across
+native Git execution. Hooks and concurrent edits after that check retain normal
+Git behavior; the harness does not disable hooks or roll back commits.
 
 For normal submodule-only staged changes, `commit` uses the same deterministic
 local formatter as `commit-msg`, skips provider auth and trace generation, then
@@ -2025,9 +2044,8 @@ flowchart TD
     Valid -- no --> Repair[Run one repair pass]
     Repair --> Reshape[Shape repaired output]
     Reshape --> Revalidate[Revalidate shaped repaired output]
-    Revalidate --> Preserve
-    Valid -- yes --> Preserve[Preserve supported task ID suffix]
-    Preserve --> Trailer[Append prepared submodule trailer locally]
+    Revalidate --> Trailer
+    Valid -- yes --> Trailer[Append prepared submodule trailer locally]
     Trailer --> FinalValidate[Validate shaped output]
     FinalValidate --> Stdout([Print artifact only to stdout])
 ```
@@ -2063,9 +2081,8 @@ flowchart TD
     Valid -- no --> Repair[Run one repair pass]
     Repair --> Reshape[Shape repaired output]
     Reshape --> Revalidate[Revalidate shaped repaired output]
-    Revalidate --> Preserve
-    Valid -- yes --> Preserve[Preserve supported task ID suffix]
-    Preserve --> FinalValidate[Reject delta or process phrasing]
+    Revalidate --> FinalValidate
+    Valid -- yes --> FinalValidate[Reject explicit amend-process narration]
     FinalValidate --> Stdout([Print artifact only to stdout])
 ```
 
@@ -2292,15 +2309,17 @@ cwd.
 
 Task defaults:
 
-- `commit-msg`: staged paths when present in normal mode; final amended paths
-  for `--amend`; if no task paths are available, current repository root
+- `commit-msg` and `commit`: indexed guidance for staged paths in normal mode;
+  indexed guidance for final amended paths with `--amend`; if no task paths are
+  available, current repository root
 - `pr-message`: changed paths between `origin/HEAD` and `HEAD`; if no changed
   paths are available, current repository root
 - `release-note`: current repository root
 
-For `commit-msg`, guidance is resolved across all task paths. Normal mode uses
-staged paths; amend mode uses the final amended paths so guidance can cover the
-latest HEAD commit being amended as well as staged refinements. Family selection
+For `commit-msg` and `commit`, guidance is resolved across all task paths.
+Normal mode uses staged paths; amend mode uses the final amended paths so
+guidance can cover the latest HEAD commit being amended as well as staged
+refinements. Family selection
 remains global for the task: if any task path has AGENTS-family guidance,
 AGENTS-family is selected and CLAUDE-family files are ignored for the whole
 request. Sources are de-duplicated while preserving root-to-leaf order.
@@ -2383,6 +2402,14 @@ only these follow-up tools plus available skill manager tools:
 - `grep`
 - `git_staged_diff_for_paths`
 - `git_show_file_at_rev`
+
+For both normal and amend commit generation, file reads, outlines, listings,
+and searches use the current repository's index. Supporting unchanged indexed
+files remain available, but worktree reads, untracked files, and live child
+submodule indexes are unavailable. Explicit HEAD/revision reads provide
+historical context. Project guidance is resolved from indexed guidance files
+for the authoritative task paths. Repository state is checked around tool
+batches before their outputs enter the next provider request.
 
 Amend mode precomputes original HEAD, HEAD-vs-parent diagnostics, staged
 diagnostics, and the bounded final amended diff. It exposes:
@@ -2546,10 +2573,15 @@ Behavior:
 - when the bounded staged diff is truncated, precompute an additional focus
   diff for high-churn paths that were omitted or cut off, unless the change is
   handled by generated-heavy compaction/outlier rules
+- retain current focus-diff hunks and their path/truncation metadata when
+  previous-HEAD contrast is compacted independently
 - compact generated-heavy staged changes with a context pack only when raw
   outlier diffs for small handwritten change clusters remain visible in the
   initial request
 - use recent commit history as style reference only
+- do not attach task IDs merely because they appear in recent history; normal
+  messages use IDs supported by current task evidence or explicitly supplied by
+  the caller, without post-generation suffix restoration
 - use previous HEAD paths/stats/diff only as contrast to understand what was
   already done, not as current staged scope; for large previous diffs, paths
   and stats preserve contrast shape even when the previous diff text is capped
@@ -2629,9 +2661,10 @@ Output rules:
 
 - one narrative only
 - the original HEAD subject must be preserved by validation
-- no delta/process phrasing such as “also”, “this amend”, or “in addition”
-- preserve task IDs or scope markers only when still supported by the final
-  diff
+- describe final behavior rather than the act of amending; ordinary factual
+  uses of “also” or “in addition” are allowed, including in the preserved subject
+- preserve the original subject's task IDs and scope markers as part of the
+  anchor; new body details require support from the final diff
 
 ### PR message mode
 
@@ -2730,6 +2763,8 @@ Commit message validator checks at minimum:
 - subject present
 - no stray commentary
 - amend mode does not use process/delta phrasing
+- commentary checks recognize actual preambles and explicit amend-process
+  narration rather than banning ordinary words throughout the message
 - amend mode preserves the original HEAD subject
 - body lines stay within the target width after output shaping (target width: 72
   characters after shaping, except for long unbreakable tokens such as URLs)

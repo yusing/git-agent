@@ -19,6 +19,7 @@ import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 
+	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/yusing/git-agent/internal/doccmd"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/skillcmd"
@@ -48,8 +49,8 @@ type Tool interface {
 }
 
 type Registry struct {
-	tools       map[string]Tool
-	reviewGuard *reviewStateGuard
+	tools      map[string]Tool
+	checkState func() error
 }
 
 type reviewStateGuard struct {
@@ -64,6 +65,7 @@ const (
 	ReviewModeCodebase    ReviewMode = "codebase"
 	ReviewModeUncommitted ReviewMode = "uncommitted"
 	ReviewModeStaged      ReviewMode = "staged"
+	commitIndexFiles      ReviewMode = "commit-index"
 )
 
 type ReviewChange struct {
@@ -103,7 +105,8 @@ func NewReviewScope(paths []string, status []gitctx.PathChange, stats []gitctx.F
 func NewReviewRegistry(repo *gitctx.Repository, skillManager *skillcmd.Manager, mode ReviewMode, scope ReviewScope, fingerprint gitctx.ChangeFingerprint) *Registry {
 	registry := &Registry{tools: map[string]Tool{}}
 	if repo != nil && mode != ReviewModeCodebase {
-		registry.reviewGuard = &reviewStateGuard{repo: repo, mode: mode, fingerprint: fingerprint}
+		guard := &reviewStateGuard{repo: repo, mode: mode, fingerprint: fingerprint}
+		registry.checkState = guard.check
 	}
 	root := "."
 	if repo != nil {
@@ -186,6 +189,15 @@ func NewRegistry(repo *gitctx.Repository, skillManager *skillcmd.Manager) *Regis
 	return registry
 }
 
+// NewCommitRegistry confines current file evidence to the parent repository index.
+// Gitlinks are opaque: a child repository's index is not part of a parent commit.
+func NewCommitRegistry(repo *gitctx.Repository, skillManager *skillcmd.Manager, checkState func() error) *Registry {
+	registry := NewRegistry(repo, skillManager)
+	registerCodebaseTools(registry, repo, repo.RootPath, commitIndexFiles)
+	registry.checkState = checkState
+	return registry
+}
+
 func register(registry *Registry, tools []Tool) {
 	for _, tool := range tools {
 		registry.tools[tool.Definition().Name] = tool
@@ -218,21 +230,20 @@ func (r *Registry) Execute(ctx context.Context, invocation Invocation) (Result, 
 	if !ok {
 		return Result{}, fmt.Errorf("tool %q is not registered", invocation.Name)
 	}
-	if r.reviewGuard != nil {
-		if err := r.reviewGuard.check(); err != nil {
+	if r.checkState != nil {
+		if err := r.checkState(); err != nil {
 			return Result{}, err
 		}
 	}
 	return tool.Execute(ctx, invocation)
 }
 
-// CheckReviewSnapshot verifies that a guarded diff review still matches its
-// launch snapshot after a batch of repository tools completes.
-func (r *Registry) CheckReviewSnapshot() error {
-	if r.reviewGuard == nil {
+// CheckSnapshot verifies task evidence after a batch of repository tools completes.
+func (r *Registry) CheckSnapshot() error {
+	if r.checkState == nil {
 		return nil
 	}
-	return r.reviewGuard.check()
+	return r.checkState()
 }
 
 func (g *reviewStateGuard) check() error {
@@ -556,14 +567,28 @@ type listFilesTool struct {
 
 var errListFilesComplete = errors.New("list_files entry cap reached")
 
-func stagedFilePaths(repo *gitctx.Repository, requested string, maxEntries int) ([]string, bool, error) {
+func indexedFilePaths(repo *gitctx.Repository, mode ReviewMode, requested string, maxEntries int) ([]string, bool, error) {
 	root, err := cleanRepoPath(requested)
 	if err != nil {
 		return nil, false, err
 	}
-	files, err := repo.StagedReviewFiles()
-	if err != nil {
-		return nil, false, err
+	var files []string
+	if mode == commitIndexFiles {
+		idx, err := repo.ReadIndex()
+		if err != nil {
+			return nil, false, err
+		}
+		for _, entry := range idx.Entries {
+			if entry.Mode != filemode.Submodule {
+				files = append(files, entry.Name)
+			}
+		}
+		sort.Strings(files)
+	} else {
+		files, err = repo.StagedReviewFiles()
+		if err != nil {
+			return nil, false, err
+		}
 	}
 	prefix := ""
 	if root != "." {
@@ -602,8 +627,8 @@ func (t listFilesTool) Execute(_ context.Context, invocation Invocation) (Result
 	if maxEntries <= 0 {
 		maxEntries = 200
 	}
-	if t.mode == ReviewModeStaged {
-		files, truncated, err := stagedFilePaths(t.repo, args.Path, maxEntries)
+	if t.mode == ReviewModeStaged || t.mode == commitIndexFiles {
+		files, truncated, err := indexedFilePaths(t.repo, t.mode, args.Path, maxEntries)
 		if err != nil {
 			return Result{}, err
 		}
@@ -653,6 +678,10 @@ func fileSourceProp(mode ReviewMode) map[string]any {
 	if mode == ReviewModeStaged {
 		description = "File source. Empty means index; worktree is unavailable in staged mode."
 	}
+	if mode == commitIndexFiles {
+		description = "File source: index (default) or head; worktree reads are unavailable for commit generation."
+		return enumStringProp(description, "", "index", "head")
+	}
 	return enumStringProp(description, "", "worktree", "index", "head")
 }
 
@@ -696,7 +725,7 @@ func openInspectedFile(repo *gitctx.Repository, root string, mode ReviewMode, ra
 	if err != nil {
 		return nil, "", err
 	}
-	if mode == ReviewModeStaged {
+	if mode == ReviewModeStaged || mode == commitIndexFiles {
 		if source == "worktree" {
 			return nil, "", fmt.Errorf("source worktree is unavailable in staged mode; use index or head")
 		}
@@ -883,7 +912,7 @@ func (t grepTool) Execute(_ context.Context, invocation Invocation) (Result, err
 	if maxMatches <= 0 {
 		maxMatches = 100
 	}
-	if t.mode == ReviewModeStaged {
+	if t.mode == ReviewModeStaged || t.mode == commitIndexFiles {
 		return t.executeStaged(pattern, args.Path, args.Glob, maxMatches)
 	}
 	var matches []map[string]any
@@ -947,7 +976,7 @@ func (t grepTool) Execute(_ context.Context, invocation Invocation) (Result, err
 }
 
 func (t grepTool) executeStaged(pattern *regexp.Regexp, requested, glob string, maxMatches int) (Result, error) {
-	paths, _, err := stagedFilePaths(t.repo, requested, int(^uint(0)>>1))
+	paths, _, err := indexedFilePaths(t.repo, t.mode, requested, int(^uint(0)>>1))
 	if err != nil {
 		return Result{}, err
 	}
@@ -957,7 +986,7 @@ func (t grepTool) executeStaged(pattern *regexp.Regexp, requested, glob string, 
 		if glob != "" && !globMatches(glob, path) {
 			continue
 		}
-		reader, err := t.repo.OpenStagedReviewFile(gitctx.FileSourceIndex, path)
+		reader, _, err := openInspectedFile(t.repo, t.root, t.mode, path, "index")
 		if err != nil {
 			continue
 		}
@@ -1044,7 +1073,7 @@ func (t findTool) Execute(_ context.Context, invocation Invocation) (Result, err
 	if maxEntries <= 0 {
 		maxEntries = 200
 	}
-	if t.mode == ReviewModeStaged {
+	if t.mode == ReviewModeStaged || t.mode == commitIndexFiles {
 		return t.executeStaged(args.Path, args.Name, args.Type, maxEntries)
 	}
 	var entries []map[string]any
@@ -1077,7 +1106,7 @@ func (t findTool) Execute(_ context.Context, invocation Invocation) (Result, err
 }
 
 func (t findTool) executeStaged(requested, name, entryType string, maxEntries int) (Result, error) {
-	files, _, err := stagedFilePaths(t.repo, requested, int(^uint(0)>>1))
+	files, _, err := indexedFilePaths(t.repo, t.mode, requested, int(^uint(0)>>1))
 	if err != nil {
 		return Result{}, err
 	}

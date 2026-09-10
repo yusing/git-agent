@@ -279,87 +279,110 @@ func TestRunnerExecutesAdmittedToolBatchConcurrently(t *testing.T) {
 	})
 }
 
-func TestRunnerRejectsConcurrentBatchWhenReviewSnapshotChanges(t *testing.T) {
+func TestRunnerRejectsConcurrentBatchWhenSnapshotChanges(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	runGit(t, dir, "init")
-	runGit(t, dir, "config", "user.name", "Test User")
-	runGit(t, dir, "config", "user.email", "test@example.com")
-	path := filepath.Join(dir, "app.txt")
-	if err := os.WriteFile(path, []byte("base\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGit(t, dir, "add", "app.txt")
-	runGit(t, dir, "commit", "-m", "base")
-	if err := os.WriteFile(path, []byte("launch\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	repo, err := gitctx.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fingerprint, err := repo.UncommittedFingerprint()
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, task := range []string{"review", "commit"} {
+		t.Run(task, func(t *testing.T) {
+			dir := t.TempDir()
+			runGit(t, dir, "init")
+			runGit(t, dir, "config", "user.name", "Test User")
+			runGit(t, dir, "config", "user.email", "test@example.com")
+			path := filepath.Join(dir, "app.txt")
+			if err := os.WriteFile(path, []byte("base\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runGit(t, dir, "add", "app.txt")
+			runGit(t, dir, "commit", "-m", "base")
+			if err := os.WriteFile(path, []byte("launch\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			repo, err := gitctx.Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if task == "commit" {
+				runGit(t, dir, "add", "app.txt")
+			}
+			fingerprint, err := repo.UncommittedFingerprint()
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	control := tools.Definition{Name: "branch", Strict: true, Schema: map[string]any{"type": "object"}}
-	started := make(chan string)
-	release := make(chan struct{})
-	names := []string{"read_file", "grep"}
-	registry := tools.NewReviewRegistry(repo, nil, tools.ReviewModeUncommitted, tools.ReviewScope{}, fingerprint)
-	for _, name := range names {
-		registry.Register(blockingTool{name: name, started: started, release: release})
-	}
-	client := &fakeClient{responses: []openai.Response{{ToolCalls: []openai.ToolCall{
-		{ID: "fc_1", CallID: "call_1", Name: "branch", Arguments: `{"branches":[]}`},
-		{ID: "fc_2", CallID: "call_2", Name: names[0], Arguments: `{}`},
-		{ID: "fc_3", CallID: "call_3", Name: names[1], Arguments: `{}`},
-	}}}}
-	var events []trace.Event
-	recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
-		events = append(events, event)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	runner := OpenAIRunner{
-		Config: config.Config{MaxSteps: 2, MaxToolCalls: 3}, Client: client,
-		Tools: registry, ToolSpecs: registry.Definitions(names), Trace: recorder,
-	}
-	outcomeResult := make(chan NodeResult, 1)
-	errResult := make(chan error, 1)
-	go func() {
-		outcome, err := runner.RunNode(t.Context(), Request{
-			UserPrompt: "review", MaxSteps: 2, ControlTool: &control, ParallelToolCalls: true,
+			control := tools.Definition{Name: "branch", Strict: true, Schema: map[string]any{"type": "object"}}
+			started := make(chan string)
+			release := make(chan struct{})
+			names := []string{"read_file", "grep"}
+			registry := tools.NewReviewRegistry(repo, nil, tools.ReviewModeUncommitted, tools.ReviewScope{}, fingerprint)
+			if task == "commit" {
+				staged, err := repo.StagedFingerprint()
+				if err != nil {
+					t.Fatal(err)
+				}
+				registry = tools.NewCommitRegistry(repo, nil, func() error {
+					fresh, err := gitctx.Open(dir)
+					if err != nil {
+						return err
+					}
+					return fresh.CheckStagedFingerprint(staged)
+				})
+			}
+			for _, name := range names {
+				registry.Register(blockingTool{name: name, started: started, release: release})
+			}
+			client := &fakeClient{responses: []openai.Response{{ToolCalls: []openai.ToolCall{
+				{ID: "fc_1", CallID: "call_1", Name: "branch", Arguments: `{"branches":[]}`},
+				{ID: "fc_2", CallID: "call_2", Name: names[0], Arguments: `{}`},
+				{ID: "fc_3", CallID: "call_3", Name: names[1], Arguments: `{}`},
+			}}}}
+			var events []trace.Event
+			recorder, err := trace.NewEventStream("review", func(event trace.Event) error {
+				events = append(events, event)
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := OpenAIRunner{
+				Config: config.Config{MaxSteps: 2, MaxToolCalls: 3}, Client: client,
+				Tools: registry, ToolSpecs: registry.Definitions(names), Trace: recorder,
+			}
+			outcomeResult := make(chan NodeResult, 1)
+			errResult := make(chan error, 1)
+			go func() {
+				outcome, err := runner.RunNode(t.Context(), Request{
+					UserPrompt: "review", MaxSteps: 2, ControlTool: &control, ParallelToolCalls: true,
+				})
+				outcomeResult <- outcome
+				errResult <- err
+			}()
+
+			startedNames := []string{<-started, <-started}
+			if err := os.WriteFile(path, []byte("changed\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if task == "commit" {
+				runGit(t, dir, "add", "app.txt")
+			}
+			close(release)
+			outcome := <-outcomeResult
+			err = <-errResult
+			slices.Sort(startedNames)
+			wantStarted := slices.Clone(names)
+			slices.Sort(wantStarted)
+			if !slices.Equal(startedNames, wantStarted) {
+				t.Fatalf("started tools = %v, want %v", startedNames, wantStarted)
+			}
+			if !errors.Is(err, gitctx.ErrChangeSnapshotStale) {
+				t.Fatalf("error = %v, want stale snapshot", err)
+			}
+			if outcome.Branch != nil || outcome.Final != nil {
+				t.Fatalf("stale batch produced outcome = %#v", outcome)
+			}
+			if slices.ContainsFunc(events, func(event trace.Event) bool { return event.Kind == "tool-output" }) {
+				t.Fatalf("stale batch traced tool output: %#v", events)
+			}
 		})
-		outcomeResult <- outcome
-		errResult <- err
-	}()
-
-	startedNames := []string{<-started, <-started}
-	if err := os.WriteFile(path, []byte("changed\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	close(release)
-	outcome := <-outcomeResult
-	err = <-errResult
-	slices.Sort(startedNames)
-	wantStarted := slices.Clone(names)
-	slices.Sort(wantStarted)
-	if !slices.Equal(startedNames, wantStarted) {
-		t.Fatalf("started tools = %v, want %v", startedNames, wantStarted)
-	}
-	if !errors.Is(err, gitctx.ErrChangeSnapshotStale) {
-		t.Fatalf("error = %v, want stale snapshot", err)
-	}
-	if outcome.Branch != nil || outcome.Final != nil {
-		t.Fatalf("stale batch produced outcome = %#v", outcome)
-	}
-	if slices.ContainsFunc(events, func(event trace.Event) bool { return event.Kind == "tool-output" }) {
-		t.Fatalf("stale batch traced tool output: %#v", events)
 	}
 }
 
