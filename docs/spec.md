@@ -84,15 +84,18 @@ clusters. Large or capped staged diffs expose a path-filtered staged-diff tool
 so the model can inspect omitted high-churn or secondary clusters without
 reading unrelated hunks.
 
-When the staged changes are exclusively submodule gitlink updates, normal
-`commit-msg` does not call the model or require provider auth. It formats a
-deterministic message from prepared submodule history, using recent commits to
+When the staged changes are exclusively submodule gitlink updates and no
+nonblank `--hint` is supplied, normal `commit-msg` does not call the
+model or require provider auth. It formats a deterministic message from prepared submodule history, using recent commits to
 choose conventional style (`chore(deps): update ... submodule`) or Title-case
 style (`Update ... submodule`). The body mirrors the release-note submodule
 changelog shape with each direct or locally available nested submodule heading
 followed by indented `short-sha: summary` entries. If more than three direct
 submodules are staged, the subject says `submodules` instead of listing every
 path.
+
+A nonblank caller prompt uses normal model generation and provider auth even
+for submodule-only changes, preserving the locally appended submodule changelog.
 
 When normal staged changes mix submodule gitlink updates with other files, the
 model generates only the commit narrative. The command then appends the same
@@ -138,8 +141,9 @@ The state check is immediately before Git handoff, not an atomic lock across
 native Git execution. Hooks and concurrent edits after that check retain normal
 Git behavior; the harness does not disable hooks or roll back commits.
 
-For normal submodule-only staged changes, `commit` uses the same deterministic
-local formatter as `commit-msg`, skips provider auth and trace generation, then
+For normal submodule-only staged changes without a nonblank `--hint`,
+`commit` uses the same deterministic local formatter as `commit-msg`, skips
+provider auth and trace generation, then
 passes the formatted message directly to `git commit --file -`.
 
 #### `git-agent commit --amend`
@@ -245,7 +249,7 @@ live and has no fingerprint guard. Empty diff scope fails before provider
 resolution. Codebase mode provides no packed diff; model discovers
 implementation, contracts, callers, and tests through read-only tools.
 Positional text remaining after flag parsing is escaped and appended as a
-lower-priority operator hint, using same precedence rules as `--append-prompt`.
+lower-priority operator hint, using same precedence rules as `--hint`.
 Without a hint that identifies a narrower inspection focus, review reports every
 actionable finding and simplify inspects the full authoritative scope. When a
 hint identifies a focus, the model may inspect supporting repository context but
@@ -547,7 +551,7 @@ parsing, its argv elements are joined with one ASCII space. `--` permits a promp
 whose first element starts with `-`. `--fast` sends `service_tier=priority` for
 the new provider work. `--debug` does not change the strict launch or wait
 output. `--follow-up` is isolated from `--wait`, scope modes, ordinary trailing
-focus, `--append-prompt`, and every other provider or execution override.
+focus, `--hint`, and every other provider or execution override.
 
 The new turn inherits the parent's uncommitted, staged, or codebase mode,
 inspection depth, prompt-cache identity, complete replayable provider input,
@@ -1640,7 +1644,7 @@ Message-generation subcommands reserve this shared flag surface:
 - `--timeout`
 - `--max-steps`
 - `--guidance-family`
-- `--append-prompt <text>`
+- `--hint <text>`
 - `--debug`
 - `--pprof <addr>`
 
@@ -1707,10 +1711,14 @@ Flag behavior:
 - `--medium`: send `reasoning.effort=medium`
 - `--high`: send `reasoning.effort=high`
 - `--xhigh`: send `reasoning.effort=xhigh`
-- `--append-prompt <text>`: append a bounded `## Operator hint` section to the
+- `--hint <text>`: append a bounded `## Operator hint` section to the
   task user prompt. The hint is escaped inside `<operator_hint>` tags and is
-  explicitly lower priority than task instructions, tool policy, project
-  guidance, and authoritative repository evidence.
+  lower priority than task instructions, tool policy, project guidance, and
+  authoritative repository evidence except in normal commit generation. There,
+  caller intent, wording, references, and formatting override default
+  classification and project style defaults, without changing staged scope,
+  tool policy, or factual grounding. Supplied port/revision references and task
+  IDs must be preserved. Amend retains its original-subject anchor.
 - `--pprof <addr>`: bind the requested address and serve `/debug/pprof/`
   endpoints until the command exits
 - default: omit `service_tier`; choose reasoning effort after resolving the
@@ -1962,8 +1970,8 @@ including:
 3. for commit-message tasks, collect staged paths
 4. precompute normal staged context early enough to detect deterministic
    submodule-only messages before provider auth is required
-5. for normal submodule-only staged changes, format and return the local
-   message without the SDK-backed agent loop
+5. for normal submodule-only staged changes without a nonblank caller prompt,
+   format and return the local message without the SDK-backed agent loop
 6. resolve provider config and create a stdout-streaming human console trace
    for `commit` / `commit --amend`
 7. precompute task context before the first provider call: staged context for
@@ -1976,7 +1984,8 @@ including:
 9. when `skills-mgr` is available, call `skills-mgr list`, inject its Markdown
    output verbatim as a developer prompt layer, then build the remaining task-specific
    instructions, developer context, and initial user prompt, appending any
-   `--append-prompt` hint as lower-priority escaped prompt data
+   escaped `--hint` content with normal commit intent precedence or
+   the lower-priority hint contract for other modes
 10. send a streaming request to the Responses API through the official OpenAI
    Go SDK
 11. stream each provider request and response into the process-local trace;
@@ -2426,8 +2435,10 @@ diagnostics, and the bounded final amended diff. It exposes:
 - `git_show_file_at_rev`
 
 Staged inventory, recent-commit, full staged-diff, HEAD-show, parent-diff, and
-amend-delta tools are not exposed. Normal mode keeps historical subject matter
-out of the initial request; amend already includes its HEAD and delta evidence.
+amend-delta tools are not exposed. Normal mode supplies at most ten recent
+subjects, each capped at 300 bytes plus a truncation marker, in a separate
+convention-reference block outside authoritative staged context. It does not
+preload historical patches; amend already includes its HEAD and delta evidence.
 `git_staged_diff_for_paths` inspects omitted or high-churn staged clusters.
 `git_final_amended_diff` is for narrower follow-up when the prepared final diff
 is truncated or ambiguous.
@@ -2574,7 +2585,8 @@ Behavior:
 - treat staged paths as authoritative scope
 - precompute staged context before generation, with changed paths, status,
   stats, a bounded staged diff, and a locally derived conventional or Title-case
-  style hint; do not preload recent message text or previous-HEAD evidence
+  style hint; keep recent subject references separate from authoritative staged
+  context and do not preload previous-HEAD patches
 - when the bounded staged diff is truncated, precompute an additional focus
   diff for high-churn paths that were omitted or cut off, unless the change is
   handled by generated-heavy compaction/outlier rules
@@ -2583,11 +2595,16 @@ Behavior:
 - compact generated-heavy staged changes with a context pack only when raw
   outlier diffs for small handwritten change clusters remain visible in the
   initial request
-- infer the style hint locally from recent summaries, using the same detection
-  as submodule-only commits; never pass those summaries as normal change evidence
-- do not attach task IDs merely because they appear in recent history; normal
-  messages use IDs supported by current task evidence or explicitly supplied by
-  the caller, without post-generation suffix restoration
+- infer the fallback style hint locally, using the same detection as
+  submodule-only commits; supply bounded recent subjects separately as
+  convention and related-task references, never as current change evidence
+- prioritize explicit caller intent, then applicable repository conventions,
+  then fallback classification; caller-declared ports retain the supplied
+  revision and the repository's sync/port notation rather than defaulting to feat
+- preserve caller-supplied IDs; infer a historical task ID only when staged work
+  or caller intent connects concretely to a related subject, not merely because
+  an ID is recent or frequent, a broad directory matches, or revision numbers
+  are nearby; omit ambiguous inferred IDs and never restore suffixes blindly
 - retain narrow `git_show_file_at_rev` comparisons for ambiguous staged changes;
   historical file contents are supporting evidence, not additional scope
 - allow the model to request extra related file reads when the diff is
@@ -2624,8 +2641,9 @@ Behavior:
   locally after normal model generation
 - recursively expand locally available nested gitlink ranges into distinct
   repository-relative groups while retaining each outer pointer-update commit
-- for normal submodule-only staged changes, skip model generation and format a
-  deterministic message locally from staged submodule history; detect
+- for normal submodule-only staged changes without a nonblank caller prompt,
+  skip model generation and format a deterministic message locally from staged
+  submodule history; detect
   conventional versus Title-case subject style from recent commits, use a
   release-note-like submodule body, and collapse subjects with more than three
   submodules to `submodules`
@@ -2850,6 +2868,15 @@ Use a local fake OpenAI-compatible server to test:
 - official SDK request compatibility
 - stdout-only artifact behavior
 
+### Opt-in model evaluation
+
+`GIT_AGENT_LIVE_COMMIT_INTENT=1 shadowtree test ./internal/cli -run=TestLiveCommitIntent -count=1 -v`
+uses configured provider credentials and `gpt-5.6-luna` on temporary synthetic
+repositories. It checks port-reference retention, related task-ID inference,
+explicit ID overrides, and omission of unrelated historical metadata. These
+billable requests are skipped by ordinary tests. Fake-provider tests establish
+prompt delivery and output shaping, not semantic model compliance.
+
 ### Integration tests
 
 Use temporary repositories to test:
@@ -2916,11 +2943,11 @@ The in-repository implementation is complete when:
 - `shadowtree install destdir=<tmp> prefix=/usr/local` installs an executable
   binary
 - `git-agent commit-msg` and `git-agent commit-msg --amend` route through the
-  bounded SDK-backed agent loop except for normal submodule-only staged changes,
-  which are formatted locally without provider auth
+  bounded SDK-backed agent loop except for normal submodule-only staged changes
+  without a nonblank caller prompt, which are formatted locally without provider auth
 - `git-agent commit` and `git-agent commit --amend` route through the same
   bounded SDK-backed commit-message loop except for normal submodule-only
-  staged changes, stream human console trace lines to stdout for SDK-backed
+  staged changes without a nonblank caller prompt, stream human console trace lines to stdout for SDK-backed
   generation, create or amend the commit
   through `git commit`, and print Git's raw commit summary after success
 - `git-agent pr-message` routes through the bounded SDK-backed agent loop,

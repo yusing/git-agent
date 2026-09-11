@@ -207,8 +207,10 @@ func TestCommitMsgEndToEndWithRealisticFixture(t *testing.T) {
 				"refactor(cli): preserve ordered help output",
 				"feat(schema): add route rule structs",
 			} {
-				if strings.Contains(body, oldSubject) {
-					t.Fatalf("normal request leaked old subject %q", oldSubject)
+				references := strings.Index(body, "<commit_convention_references>")
+				subject := strings.Index(body, oldSubject)
+				if references < 0 || subject < references || subject > strings.Index(body, "</commit_convention_references>") {
+					t.Fatalf("old subject must stay inside convention references: %q", oldSubject)
 				}
 			}
 			return responseWithText("resp_commit_2", `feat(route): add named do option blocks

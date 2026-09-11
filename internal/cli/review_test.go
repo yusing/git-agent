@@ -1078,7 +1078,7 @@ func TestCodeReviewAgentHelpOnlyDocumentsAgentFacingFlags(t *testing.T) {
 				}
 			}
 			for _, unwanted := range []string{
-				"--wait", "--model", "--max-steps", "--max-web-searches", "--append-prompt",
+				"--wait", "--model", "--max-steps", "--max-web-searches", "--hint",
 				"--dry-run", "--pprof", "--help-agent",
 			} {
 				if strings.Contains(help, unwanted) {

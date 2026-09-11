@@ -53,7 +53,7 @@ type PreparedCommitContext struct {
 	StagedStats          []gitctx.FileStat       `json:"staged_stats"`
 	StagedSubmodules     []PreparedSubmodule     `json:"staged_submodules,omitempty"`
 	ContextPack          contextpack.ContextPack `json:"context_pack"`
-	RecentCommits        []gitctx.CommitInfo     `json:"-"` // Used locally for style detection, never supplied as change evidence.
+	RecentCommits        []gitctx.CommitInfo     `json:"-"` // Kept outside staged evidence; summaries supply separate convention references.
 	FocusDiff            string                  `json:"focus_diff,omitempty"`
 	FocusDiffPaths       []string                `json:"focus_diff_paths,omitempty"`
 	FocusDiffTruncated   bool                    `json:"focus_diff_truncated,omitempty"`
@@ -699,8 +699,7 @@ func (c PreparedCommitContext) TraceValue() any {
 	return view
 }
 
-// Keep historical subject matter out of normal generation while preserving the
-// same local style choice used by submodule-only commits.
+// Preserve the same fallback style choice used by submodule-only commits.
 func (c PreparedCommitContext) commitStyle() string {
 	if detectCommitMessageStyle(c.RecentCommits) == commitMessageStyleTitle {
 		return "title-case"
@@ -713,10 +712,25 @@ func (c PreparedCommitContext) compactCurrentForPrompt() bool {
 }
 
 func UserPromptWithPreparedCommitContext(prepared PreparedCommitContext, maxSteps, maxToolCalls int) string {
+	// History can establish formatting and related task metadata, never changes
+	// to describe. Keep bounded subjects outside the authoritative staged object.
+	var summaries []string
+	for _, commit := range prepared.RecentCommits[:min(10, len(prepared.RecentCommits))] {
+		summary, _, _ := strings.Cut(commit.Summary, "\n")
+		summary, _ = textutil.Limit(strings.ToValidUTF8(summary, ""), 300, 0)
+		if summary = strings.TrimSpace(summary); summary != "" {
+			summaries = append(summaries, summary)
+		}
+	}
+	references, err := json.Marshal(&summaries, jsontext.EscapeForHTML(true))
+	if err != nil {
+		panic("marshal commit convention summaries: " + err.Error())
+	}
 	return executeUserPrompt(userPreparedCommitPromptTemplate, userPromptData{
 		MaxSteps:        maxSteps,
 		MaxToolCalls:    maxToolCalls,
 		PreparedContext: prepared.RenderForPrompt(),
+		StyleReferences: string(references),
 	})
 }
 

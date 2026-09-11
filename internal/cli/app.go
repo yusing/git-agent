@@ -1548,7 +1548,7 @@ func (a *App) runCommitMsg(ctx context.Context, args []string) error {
 	if len(stagedPaths) == 0 {
 		return errors.New("commit-msg requires staged changes")
 	}
-	deterministicResult, ok, err := deterministicCommitMessage(repo, mode, stagedPaths)
+	deterministicResult, ok, err := deterministicCommitMessage(repo, mode, stagedPaths, opts.AppendPrompt)
 	if err != nil {
 		return err
 	} else if ok {
@@ -1598,7 +1598,7 @@ func (a *App) runCommit(ctx context.Context, args []string) error {
 	if len(stagedPaths) == 0 {
 		return errors.New("commit requires staged changes")
 	}
-	deterministicResult, ok, err := deterministicCommitMessage(repo, mode, stagedPaths)
+	deterministicResult, ok, err := deterministicCommitMessage(repo, mode, stagedPaths, opts.AppendPrompt)
 	if err != nil {
 		return err
 	} else if ok {
@@ -1659,8 +1659,8 @@ func (a *App) runCommit(ctx context.Context, args []string) error {
 	return err
 }
 
-func deterministicCommitMessage(repo *gitctx.Repository, mode commitmsg.Mode, stagedPaths []string) (agent.Result, bool, error) {
-	if mode != commitmsg.ModeNormal {
+func deterministicCommitMessage(repo *gitctx.Repository, mode commitmsg.Mode, stagedPaths []string, callerIntent string) (agent.Result, bool, error) {
+	if mode != commitmsg.ModeNormal || strings.TrimSpace(callerIntent) != "" {
 		return agent.Result{}, false, nil
 	}
 	message, ok, err := commitmsg.FormatSubmoduleOnlyCommitForRepo(repo, stagedPaths)
@@ -1779,6 +1779,12 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 		Budget:      a.budgetHandler(),
 		UsageOutput: a.stderr,
 	}
+	if mode == commitmsg.ModeNormal {
+		userPrompt = appendCommitUserPrompt(userPrompt, cfg.AppendPrompt)
+	} else {
+		// Amend retains its original-subject anchor.
+		userPrompt = appendUserPrompt(userPrompt, cfg.AppendPrompt)
+	}
 	environment := environmentContext(repo, command, string(mode), cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
 	result, err := runner.Run(ctx, agent.Request{
 		SystemPrompt:      commitmsg.SystemPrompt(mode),
@@ -1786,7 +1792,7 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 		Environment:       environment,
 		SkillInstructions: skillInstructions,
 		ProjectGuidance:   renderedGuidance,
-		UserPrompt:        appendUserPrompt(userPrompt, cfg.AppendPrompt),
+		UserPrompt:        userPrompt,
 		AllowedToolNames:  allowedTools,
 		ParallelToolCalls: true,
 		MaxSteps:          cfg.MaxSteps,
@@ -2267,7 +2273,7 @@ func registerSharedFlags(fs *flag.FlagSet, opts *config.Options) {
 	fs.StringVar(&opts.Timeout, "timeout", "", "override default request timeout")
 	fs.IntVar(&opts.MaxSteps, "max-steps", 0, "override maximum agent steps")
 	fs.StringVar(&opts.GuidanceFamily, "guidance-family", "", "force guidance family")
-	fs.StringVar(&opts.AppendPrompt, "append-prompt", "", "append a user prompt hint to the model request")
+	fs.StringVar(&opts.AppendPrompt, "hint", "", "append a user prompt hint to the model request")
 	fs.BoolVar(&opts.Debug, "debug", false, "enable debug output on stderr")
 	fs.StringVar(&opts.Pprof, "pprof", "", "serve pprof on address")
 }
@@ -2487,7 +2493,7 @@ func codeReviewUsageError(command string, fs *flag.FlagSet) error {
 	b.WriteString("  --codebase     inspect the full codebase\n\n")
 	b.WriteString("Flags:\n")
 	placeholders := map[string]string{
-		"append-prompt":    "text",
+		"hint":             "text",
 		"base-url":         "url",
 		"dry-run":          "",
 		"depth":            "fast|balanced|thorough",

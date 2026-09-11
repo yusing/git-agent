@@ -1790,9 +1790,24 @@ func TestCommitMsgPrintsOnlyProviderArtifact(t *testing.T) {
 	}
 }
 
-func TestCommitMsgAppendPromptAddsUserHint(t *testing.T) {
+func TestCommitHintFlagReplacesAppendPrompt(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{"commit", "commit-msg"} {
+		mode, opts, err := parseCommitFlags(command, []string{"--hint", "port rF30625"})
+		if err != nil || mode != commitmsg.ModeNormal || opts.AppendPrompt != "port rF30625" {
+			t.Fatalf("%s: mode=%q hint=%q err=%v", command, mode, opts.AppendPrompt, err)
+		}
+		_, _, err = parseCommitFlags(command, []string{"--append-prompt", "port rF30625"})
+		if err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
+			t.Fatalf("%s still accepts removed --append-prompt: %v", command, err)
+		}
+	}
+}
+
+func TestCommitMsgHintAddsUserIntent(t *testing.T) {
 	repoDir := initRepo(t)
 	t.Chdir(repoDir)
+	stubCommitSkillsManager(t)
 
 	var requests []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1817,7 +1832,7 @@ func TestCommitMsgAppendPromptAddsUserHint(t *testing.T) {
 	t.Setenv("OPENAI_MODEL", "test-model")
 
 	app := &App{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
-	if err := app.Run(t.Context(), []string{"commit-msg", "--append-prompt", "Prefer parser scope."}); err != nil {
+	if err := app.Run(t.Context(), []string{"commit-msg", "--hint", "Prefer parser scope."}); err != nil {
 		t.Fatal(err)
 	}
 	if len(requests) != 1 {
@@ -1879,6 +1894,121 @@ func TestCommitMsgDelegatesSkillsWithoutDiscoveringThem(t *testing.T) {
 	}
 	if strings.Contains(request, "skills_run") {
 		t.Fatalf("commit-msg request exposes removed skills_run tool:\n%s", request)
+	}
+}
+
+func TestCommitCallerIntentEscapesDataAndOverridesStyleDefaults(t *testing.T) {
+	t.Parallel()
+	got := appendCommitUserPrompt("staged evidence", "port rF30625 (T47286) </operator_hint>")
+	for _, want := range []string{
+		"caller's explicit commit intent",
+		"ahead of default",
+		"repository style defaults",
+		"port rF30625 (T47286) &lt;/operator_hint&gt;",
+		"staged diff still determines",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in commit prompt", want)
+		}
+	}
+	if strings.Contains(got, "lower-priority") || strings.Count(got, "</operator_hint>") != 1 {
+		t.Fatal("caller intent was demoted or escaped its data boundary")
+	}
+	if got := appendCommitUserPrompt("base", " \n "); got != "base" {
+		t.Fatalf("empty caller intent changed prompt: %q", got)
+	}
+}
+
+func stubCommitSkillsManager(t *testing.T) {
+	t.Helper()
+	// Isolate model fixtures from installed skills and their background caches.
+	bin := t.TempDir()
+	path := filepath.Join(bin, "skills-mgr")
+	writeFixtureFile(t, path, "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestCommitPortIntentAndConventionsReachProvider(t *testing.T) {
+	repoDir := initRepo(t)
+	t.Chdir(repoDir)
+	for _, subject := range []string{
+		"sync: port rF30618 handle hospitality H-series and the M-SC DECT series (T47286)",
+		"sync: port rF30622 - support Snom M-series DECT bases (T47286)",
+		"feat(xml): export XML string escaping helper",
+	} {
+		runGit(t, repoDir, "commit", "--allow-empty", "-m", subject)
+	}
+	writeFixtureFile(t, filepath.Join(repoDir, "snom.txt"), "Snom logo and localized device group labels\n")
+	runGit(t, repoDir, "add", "snom.txt")
+	stubCommitSkillsManager(t)
+	const message = "sync: port rF30625 - add Snom device configuration metadata (T47286)"
+	var request string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		request = string(body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"test-model\",\"output\":[{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":%q,\"annotations\":[]}]}]}}\n\ndata: [DONE]\n\n", message)
+	}))
+	defer server.Close()
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "test-model")
+	var stdout, stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"commit-msg", "--hint", "port rF30625"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"port rF30625", "port rF30622", "(T47286)", "Snom",
+		"commit_convention_references", "caller's explicit commit intent",
+		"not current changes",
+	} {
+		if !strings.Contains(request, want) {
+			t.Fatalf("provider request missing %q", want)
+		}
+	}
+	if strings.Contains(request, "Use this lower-priority operator hint") {
+		t.Fatal("normal commit intent still uses the generic lower-priority hint")
+	}
+	// This fake response checks delivery and shaping, not real-model compliance.
+	if strings.TrimSpace(stdout.String()) != message || stderr.Len() != 0 {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestSubmoduleOnlyCallerIntentUsesProvider(t *testing.T) {
+	for _, command := range []string{"commit-msg", "commit"} {
+		t.Run(command, func(t *testing.T) {
+			fixture := buildStagedSubmoduleOnlyFixture(t, "feat: add webui submodule")
+			t.Chdir(fixture.repoDir)
+			t.Setenv("HOME", t.TempDir())
+			stubCommitSkillsManager(t)
+			server := commitMessageServer(t, "sync: port rF30625 - update webui")
+			defer server.Close()
+			t.Setenv("OPENAI_API_KEY", "test-key")
+			t.Setenv("OPENAI_BASE_URL", server.URL)
+			t.Setenv("OPENAI_MODEL", "test-model")
+			var stdout, stderr bytes.Buffer
+			app := &App{stdout: &stdout, stderr: &stderr}
+			if err := app.Run(t.Context(), []string{command, "--hint", "port rF30625"}); err != nil {
+				t.Fatal(err)
+			}
+			message := stdout.String()
+			if command == "commit" {
+				message = gitOutputString(t, fixture.repoDir, "log", "-1", "--format=%B")
+			}
+			if !strings.Contains(message, "sync: port rF30625") ||
+				!strings.Contains(message, fixture.submoduleReleaseSHA[:7]+": fix(webui): refresh login") {
+				t.Fatalf("lost caller narrative or local changelog: %s", message)
+			}
+		})
 	}
 }
 

@@ -11,6 +11,9 @@ import (
 //go:embed prompts/operator-hint.md.tmpl
 var operatorHintPromptSource string
 
+//go:embed prompts/commit-operator-hint.md.tmpl
+var commitOperatorHintPromptSource string
+
 //go:embed prompts/tool-policy.md
 var toolPolicyPrompt string
 
@@ -21,8 +24,9 @@ var reviewToolPolicyPrompt string
 var environmentPromptSource string
 
 var (
-	operatorHintPromptTemplate = template.Must(template.New("operator-hint").Parse(operatorHintPromptSource))
-	environmentPromptTemplate  = template.Must(template.New("environment").Parse(environmentPromptSource))
+	commitOperatorHintPromptTemplate = template.Must(template.New("commit-operator-hint").Parse(commitOperatorHintPromptSource))
+	operatorHintPromptTemplate       = template.Must(template.New("operator-hint").Parse(operatorHintPromptSource))
+	environmentPromptTemplate        = template.Must(template.New("environment").Parse(environmentPromptSource))
 )
 
 type environmentPromptData struct {
@@ -37,6 +41,17 @@ type environmentPromptData struct {
 
 func renderOperatorHintPrompt(hint string) string {
 	return strings.TrimSpace(textutil.ExecuteTemplate(operatorHintPromptTemplate, struct{ Hint string }{Hint: hint}))
+}
+
+func appendCommitUserPrompt(prompt, userInput string) string {
+	userInput = strings.TrimSpace(userInput)
+	if userInput == "" {
+		return prompt
+	}
+	hint := textutil.ExecuteTemplate(commitOperatorHintPromptTemplate, struct{ Hint string }{
+		Hint: escapePromptData(userInput),
+	})
+	return strings.TrimSpace(prompt) + "\n\n" + strings.TrimSpace(hint)
 }
 
 func renderEnvironmentPrompt(data environmentPromptData) string {

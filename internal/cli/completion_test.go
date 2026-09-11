@@ -336,7 +336,7 @@ func fishCompletionCommands(refs, remotes, paths []string) []fishCompletionComma
 		{name: "timeout", takesValue: true, value: "30s"},
 		{name: "max-steps", takesValue: true, value: "20"},
 		{name: "guidance-family", takesValue: true, value: "auto", valueCandidates: []string{"agents", "auto", "claude", "codex", "none"}},
-		{name: "append-prompt", takesValue: true, value: "hint"},
+		{name: "hint", takesValue: true, value: "hint"},
 		{name: "debug"},
 		{name: "pprof", takesValue: true, value: "127.0.0.1:6060"},
 	}

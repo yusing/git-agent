@@ -110,7 +110,7 @@ end
 function __git_agent_command_has_option
     set -l command_name $argv[1]
     set -l option $argv[2]
-    set -l shared model fast low medium high xhigh base-url timeout max-steps guidance-family append-prompt debug pprof
+    set -l shared model fast low medium high xhigh base-url timeout max-steps guidance-family hint debug pprof
 
     switch $command_name
         case commit commit-msg
@@ -131,7 +131,7 @@ function __git_agent_command_has_option
 end
 
 function __git_agent_option_takes_value
-    contains -- "$argv[1]" model base-url timeout max-steps guidance-family append-prompt pprof wait follow-up for depth max-web-searches out rev remote scope min-score limit format embedding-model embedding-dimensions
+    contains -- "$argv[1]" model base-url timeout max-steps guidance-family hint pprof wait follow-up for depth max-web-searches out rev remote scope min-score limit format embedding-model embedding-dimensions
 end
 
 function __git_agent_option_value_is_valid
@@ -555,7 +555,7 @@ complete -c git-agent -n '__git_agent_option_available base-url commit commit-ms
 complete -c git-agent -n '__git_agent_option_available timeout commit commit-msg pr-message release-note review simplify' -l timeout -r -f -d 'Set request timeout'
 complete -c git-agent -n '__git_agent_option_available max-steps commit commit-msg pr-message release-note review simplify' -l max-steps -r -f -d 'Set maximum agent steps'
 complete -c git-agent -n '__git_agent_option_available guidance-family commit commit-msg pr-message release-note review simplify' -l guidance-family -r -f -a 'auto agents claude codex none' -d 'Force guidance family'
-complete -c git-agent -n '__git_agent_option_available append-prompt commit commit-msg pr-message release-note review simplify' -l append-prompt -r -f -d 'Append a user prompt hint to the model request'
+complete -c git-agent -n '__git_agent_option_available hint commit commit-msg pr-message release-note review simplify' -l hint -r -f -d 'Append a user prompt hint to the model request'
 complete -c git-agent -n '__git_agent_option_available debug commit commit-msg explore pr-message release-note review simplify' -l debug -d 'Enable debug output on stderr'
 complete -c git-agent -n '__git_agent_option_available pprof commit commit-msg pr-message release-note review simplify' -l pprof -r -f -d 'Serve pprof on address'
 

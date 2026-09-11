@@ -144,7 +144,7 @@ func TestWaitRejectsEveryOtherReviewInput(t *testing.T) {
 		{"--xhigh"},
 		{"--base-url", "https://example.test"},
 		{"--guidance-family", "none"},
-		{"--append-prompt", "hint"},
+		{"--hint", "hint"},
 		{"--debug"},
 		{"--pprof", "127.0.0.1:0"},
 		{"prompt"},

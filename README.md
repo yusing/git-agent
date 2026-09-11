@@ -92,15 +92,18 @@ Git configuration, hooks, and signing still apply.
 
 Commit generation reads related files and project guidance from the index,
 not from unstaged or untracked work. Stage guidance changes too if you want
-them to apply to the generated message. Normal commit messages use a locally
-inferred style hint rather than copying recent messages; amend still uses the
-original message as its anchor.
+them to apply to the generated message. Normal commit messages follow your
+explicit intent and related repository conventions; amend still uses the original message as its anchor. For example,
+`git-agent commit --hint "port rF30625"` requests a port subject retaining
+that reference, using the repository's sync/port notation. Related history can
+supply a task-ID suffix; supply the ID yourself when the association is ambiguous.
 
 For staged submodule updates, normal `commit-msg` and `commit` append a
 deterministic local changelog block after model generation. If the staged
-changes contain only submodule updates, they skip the LLM entirely and format
-the whole message locally. Locally initialized nested submodules are expanded
-recursively, using repository-relative headings such as `webui/wiki`.
+changes contain only submodule updates and no `--hint`, they skip the
+LLM entirely and format the whole message locally. Supplying a prompt uses model
+generation (and requires provider auth), while retaining the local changelog
+block. Locally initialized nested submodules are expanded recursively, using repository-relative headings such as `webui/wiki`.
 
 ## What It Provides
 
@@ -635,7 +638,7 @@ Common generation and inspection flags:
 | `--follow-up <turn-id> <prompt...>` | Review/simplify only: re-evaluate a successful provider turn |
 | `--help-agent` | Review/simplify only: show scope, depth, and reasoning help intended for coding agents |
 | `--guidance-family auto\|agents\|claude\|codex\|none` | Force guidance family |
-| `--append-prompt <text>` | Add a bounded operator hint |
+| `--hint <text>` | Add a bounded operator hint |
 | `--debug` | Print diagnostics |
 | `--pprof <addr>` | Serve Go pprof endpoints |
 
@@ -790,8 +793,10 @@ Behavior defaults:
   Review/simplify `--depth` controls inspection budget, not reasoning effort.
   Review/simplify follow-ups and child branches retain their existing
   explicit/inherited effort.
-- `--append-prompt` can steer style or emphasis only when consistent with the
-  task contract and repository evidence.
+- For normal commit generation, `--hint` supplies explicit intent and
+  formatting preferences ahead of default style guidance. It does not change
+  which staged changes are committed. Other workflows retain their task-specific
+  constraints, including amend's original-subject anchor.
 
 ## How It Works
 

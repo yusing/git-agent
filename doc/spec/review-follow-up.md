@@ -22,7 +22,7 @@ starts with `-`.
 
 `--follow-up` may be combined with `--fast`, which sends
 `service_tier=priority` for the new provider conversation. It must be mutually
-exclusive with `--wait`, scope modes, ordinary trailing focus, `--append-prompt`,
+exclusive with `--wait`, scope modes, ordinary trailing focus, `--hint`,
 orchestration artifacts, and every other explicit provider or execution
 override. The child inherits only the parent's `uncommitted`, `staged`, or
 `codebase` mode.

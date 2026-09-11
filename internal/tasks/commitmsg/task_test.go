@@ -429,8 +429,12 @@ package generated
 	if !containsAll(got, "context_pack", "generated_files", "diff_ref", "prepared_commit_context.diff", "commit_style", "go-generated-comment") {
 		t.Fatalf("prompt missing compact context pack:\n%s", got)
 	}
-	if strings.Contains(got, "chore(types): regenerate generated outputs") || strings.Contains(got, `"recent_commits"`) {
-		t.Fatal("compact prompt leaked historical message text")
+	if strings.Contains(prepared.RenderForPrompt(), "chore(types): regenerate generated outputs") ||
+		strings.Contains(got, `"recent_commits"`) {
+		t.Fatal("compact staged evidence leaked historical message text")
+	}
+	if strings.Index(got, "chore(types): regenerate generated outputs") < strings.Index(got, "<commit_convention_references>") {
+		t.Fatal("compact request lost separate convention references")
 	}
 	if strings.Contains(got, "+raw generated line") {
 		t.Fatalf("large raw diff leaked into compact prompt")
