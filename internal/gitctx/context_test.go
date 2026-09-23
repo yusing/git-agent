@@ -820,22 +820,6 @@ func gitHead(t *testing.T, dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func gitPathIgnored(t *testing.T, dir, path string) bool {
-	t.Helper()
-	cmd := exec.Command("git", "check-ignore", "--quiet", "--no-index", "--", path)
-	cmd.Dir = dir
-	err := cmd.Run()
-	if err == nil {
-		return true
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-		return false
-	}
-	t.Fatalf("git check-ignore %q failed: %v", path, err)
-	return false
-}
-
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

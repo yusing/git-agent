@@ -773,14 +773,6 @@ func (r *Repository) DiffAgainstParentStat() ([]FileStat, error) {
 	return fileStatsFromPatch(patch), nil
 }
 
-func (r *Repository) DiffAgainstParentChanges() ([]CommitFileChange, error) {
-	patch, err := r.patchHeadAgainstParent()
-	if err != nil {
-		return nil, err
-	}
-	return commitFileChangesFromPatch(patch), nil
-}
-
 func (r *Repository) AmendDelta(maxBytes, maxLines int) (string, bool, error) {
 	diff, err := r.diffIndexAgainstHead()
 	if err != nil {

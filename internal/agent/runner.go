@@ -48,17 +48,11 @@ type Result struct {
 	ToolCalls       int
 	RepairCalls     int
 	messages        []openai.Item
-	turnState       string
 }
 
 // History returns a replayable snapshot of the completed conversation.
 func (r Result) History() []openai.Item {
 	return slices.Clone(r.messages)
-}
-
-// TurnState returns the provider's opaque sticky-routing state, when present.
-func (r Result) TurnState() string {
-	return r.turnState
 }
 
 type Validator func(string) []string
@@ -96,12 +90,18 @@ type Timing struct {
 	Tool     string
 }
 
+// ToolExecutor runs admitted tools and checks whether their backing evidence remains current.
+type ToolExecutor interface {
+	Execute(context.Context, tools.Invocation) (tools.Result, error)
+	CheckSnapshot() error
+}
+
 type BudgetHandler func(context.Context, BudgetStatus) (BudgetDecision, error)
 
 type OpenAIRunner struct {
 	Config             config.Config
 	Client             openai.Client
-	Tools              *tools.Registry
+	Tools              ToolExecutor
 	ToolSpecs          []tools.Definition
 	Validator          Validator
 	Normalize          TextNormalizer
@@ -216,7 +216,6 @@ func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error)
 			}
 		}
 	}
-	result.turnState = state.turnState
 	return result, nil
 }
 

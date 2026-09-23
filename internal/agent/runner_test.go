@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -50,6 +51,49 @@ type fakeClient struct {
 	requests       []openai.Request
 	streamEvents   []openai.StreamEvent
 	retryEvents    []openai.RetryEvent
+}
+
+type testToolExecutor struct {
+	tools         map[string]tools.Tool
+	checkSnapshot func() error
+}
+
+func newTestToolExecutor() *testToolExecutor {
+	return &testToolExecutor{tools: make(map[string]tools.Tool)}
+}
+
+func (r *testToolExecutor) add(tool tools.Tool) {
+	r.tools[tool.Definition().Name] = tool
+}
+
+func (r *testToolExecutor) Definitions(names []string) []tools.Definition {
+	definitions := make([]tools.Definition, 0, len(names))
+	for _, name := range names {
+		if tool, ok := r.tools[name]; ok {
+			definitions = append(definitions, tool.Definition())
+		}
+	}
+	return definitions
+}
+
+func (r *testToolExecutor) Execute(ctx context.Context, invocation tools.Invocation) (tools.Result, error) {
+	if r.checkSnapshot != nil {
+		if err := r.checkSnapshot(); err != nil {
+			return tools.Result{}, err
+		}
+	}
+	tool, ok := r.tools[invocation.Name]
+	if !ok {
+		return tools.Result{}, fmt.Errorf("tool %q is not registered", invocation.Name)
+	}
+	return tool.Execute(ctx, invocation)
+}
+
+func (r *testToolExecutor) CheckSnapshot() error {
+	if r.checkSnapshot == nil {
+		return nil
+	}
+	return r.checkSnapshot()
 }
 
 type executionLog struct {
@@ -149,10 +193,10 @@ func TestRunnerExecutesAdmittedToolBatchConcurrently(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		started := make(chan string)
 		release := make(chan struct{})
-		registry := tools.NewRegistry(nil, nil)
+		registry := newTestToolExecutor()
 		names := []string{"first_tool", "second_tool", "third_tool"}
 		for _, name := range names {
-			registry.Register(blockingTool{name: name, started: started, release: release})
+			registry.add(blockingTool{name: name, started: started, release: release})
 		}
 		client := &fakeClient{responses: []openai.Response{
 			{ToolCalls: []openai.ToolCall{
@@ -246,15 +290,16 @@ func TestRunnerRejectsConcurrentBatchWhenSnapshotChanges(t *testing.T) {
 	started := make(chan string, 2)
 	release := make(chan struct{})
 	names := []string{"read_file", "grep"}
-	registry := tools.NewCommitRegistry(repo, nil, func() error {
+	registry := newTestToolExecutor()
+	registry.checkSnapshot = func() error {
 		fresh, err := gitctx.Open(dir)
 		if err != nil {
 			return err
 		}
 		return fresh.CheckStagedFingerprint(staged)
-	})
+	}
 	for _, name := range names {
-		registry.Register(blockingTool{name: name, started: started, release: release})
+		registry.add(blockingTool{name: name, started: started, release: release})
 	}
 	client := &fakeClient{responses: []openai.Response{{ToolCalls: []openai.ToolCall{
 		{ID: "fc_1", CallID: "call_1", Name: names[0], Arguments: `{}`},
@@ -302,9 +347,9 @@ func TestRunnerReportsProviderToolAndValidationTimings(t *testing.T) {
 	t.Parallel()
 	const toolDelay = 2 * time.Millisecond
 	names := []string{"list_files", "grep", "read_file"}
-	registry := tools.NewRegistry(nil, nil)
+	registry := newTestToolExecutor()
 	for _, name := range names {
-		registry.Register(delayedTool{name: name, delay: toolDelay, content: name + " output"})
+		registry.add(delayedTool{name: name, delay: toolDelay, content: name + " output"})
 	}
 	client := &fakeClient{responses: []openai.Response{
 		{ToolCalls: []openai.ToolCall{
@@ -363,9 +408,9 @@ func TestRunnerReportsProviderToolAndValidationTimings(t *testing.T) {
 func BenchmarkRunnerExploreToolBatch(b *testing.B) {
 	const toolDelay = 2 * time.Millisecond
 	names := []string{"list_files", "grep", "read_file"}
-	registry := tools.NewRegistry(nil, nil)
+	registry := newTestToolExecutor()
 	for _, name := range names {
-		registry.Register(delayedTool{name: name, delay: toolDelay, content: name + " output"})
+		registry.add(delayedTool{name: name, delay: toolDelay, content: name + " output"})
 	}
 	toolSpecs := registry.Definitions(names)
 	b.ReportMetric(float64(len(names)), "tools/op")
@@ -433,10 +478,10 @@ func TestRunnerRejectsInvalidToolBatchBeforeExecution(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			var executionOrder executionLog
-			registry := tools.NewRegistry(nil, nil)
+			registry := newTestToolExecutor()
 			names := []string{"first_tool", "second_tool"}
 			for _, name := range names {
-				registry.Register(recordingTool{name: name, order: &executionOrder, content: "output"})
+				registry.add(recordingTool{name: name, order: &executionOrder, content: "output"})
 			}
 			client := &fakeClient{responses: []openai.Response{{ToolCalls: test.calls}}}
 			runner := OpenAIRunner{
@@ -459,8 +504,8 @@ func TestRunnerDetectsDuplicateCallsWithinBatchBeforeExecution(t *testing.T) {
 	t.Parallel()
 
 	var executionOrder executionLog
-	registry := tools.NewRegistry(nil, nil)
-	registry.Register(recordingTool{name: "first_tool", order: &executionOrder, content: "output"})
+	registry := newTestToolExecutor()
+	registry.add(recordingTool{name: "first_tool", order: &executionOrder, content: "output"})
 	client := &fakeClient{responses: []openai.Response{
 		{ToolCalls: []openai.ToolCall{
 			{ID: "fc_1", CallID: "call_1", Name: "first_tool", Arguments: `{"value":1}`},
@@ -498,10 +543,10 @@ func TestRunnerRejectsBatchContainingCallRepeatedFromPriorStep(t *testing.T) {
 	t.Parallel()
 
 	var executionOrder executionLog
-	registry := tools.NewRegistry(nil, nil)
+	registry := newTestToolExecutor()
 	names := []string{"first_tool", "second_tool"}
 	for _, name := range names {
-		registry.Register(recordingTool{name: name, order: &executionOrder, content: "output"})
+		registry.add(recordingTool{name: name, order: &executionOrder, content: "output"})
 	}
 	client := &fakeClient{responses: []openai.Response{
 		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "first_tool", Arguments: `{"value":1}`}}},
@@ -532,8 +577,8 @@ func TestRunnerRejectsCallIDInheritedFromInputHistory(t *testing.T) {
 	t.Parallel()
 
 	var executionOrder executionLog
-	registry := tools.NewRegistry(nil, nil)
-	registry.Register(recordingTool{name: "first_tool", order: &executionOrder, content: "output"})
+	registry := newTestToolExecutor()
+	registry.add(recordingTool{name: "first_tool", order: &executionOrder, content: "output"})
 	client := &fakeClient{responses: []openai.Response{{ToolCalls: []openai.ToolCall{{
 		ID: "fc_child", CallID: "call_parent", Name: "first_tool", Arguments: `{"value":2}`,
 	}}}}}
@@ -561,8 +606,8 @@ func TestRunnerDetectsInvocationRepeatedFromInheritedHistory(t *testing.T) {
 	t.Parallel()
 
 	var executionOrder executionLog
-	registry := tools.NewRegistry(nil, nil)
-	registry.Register(recordingTool{name: "first_tool", order: &executionOrder, content: "output"})
+	registry := newTestToolExecutor()
+	registry.add(recordingTool{name: "first_tool", order: &executionOrder, content: "output"})
 	client := &fakeClient{responses: []openai.Response{
 		{ToolCalls: []openai.ToolCall{{
 			ID: "fc_new", CallID: "call_new", Name: "first_tool", Arguments: `{ "value": 1 }`,
@@ -593,11 +638,11 @@ func TestRunnerChecksContextBudgetAfterCompletingAdmittedBatch(t *testing.T) {
 	t.Parallel()
 
 	var executionOrder executionLog
-	registry := tools.NewRegistry(nil, nil)
+	registry := newTestToolExecutor()
 	names := []string{"first_tool", "second_tool", "third_tool"}
 	largeOutput := strings.Repeat("x", 5000)
 	for _, name := range names {
-		registry.Register(recordingTool{name: name, order: &executionOrder, content: largeOutput})
+		registry.add(recordingTool{name: name, order: &executionOrder, content: largeOutput})
 	}
 	client := &fakeClient{responses: []openai.Response{
 		{ToolCalls: []openai.ToolCall{
@@ -639,9 +684,9 @@ func TestRunnerCompletesBatchAfterEncodedToolFailure(t *testing.T) {
 	t.Parallel()
 
 	var executionOrder executionLog
-	registry := tools.NewRegistry(nil, nil)
-	registry.Register(recordingTool{name: "failing_tool", order: &executionOrder, err: errors.New("expected failure")})
-	registry.Register(recordingTool{name: "successful_tool", order: &executionOrder, content: "success"})
+	registry := newTestToolExecutor()
+	registry.add(recordingTool{name: "failing_tool", order: &executionOrder, err: errors.New("expected failure")})
+	registry.add(recordingTool{name: "successful_tool", order: &executionOrder, content: "success"})
 	names := []string{"failing_tool", "successful_tool"}
 	client := &fakeClient{responses: []openai.Response{
 		{ToolCalls: []openai.ToolCall{
@@ -1411,10 +1456,10 @@ func TestRunnerFinalizesWhenToolBudgetRunsOut(t *testing.T) {
 	t.Parallel()
 
 	var executionOrder executionLog
-	registry := tools.NewRegistry(nil, nil)
+	registry := newTestToolExecutor()
 	names := []string{"first_tool", "second_tool"}
 	for _, name := range names {
-		registry.Register(recordingTool{name: name, order: &executionOrder, content: "output"})
+		registry.add(recordingTool{name: name, order: &executionOrder, content: "output"})
 	}
 	client := &fakeClient{responses: []openai.Response{
 		{ToolCalls: []openai.ToolCall{

@@ -133,11 +133,6 @@ func register(registry *Registry, tools []Tool) {
 	}
 }
 
-// Register adds a task-specific tool to the registry.
-func (r *Registry) Register(tool Tool) {
-	r.tools[tool.Definition().Name] = tool
-}
-
 func (r *Registry) Definitions(names []string) []Definition {
 	defs := make([]Definition, 0, len(names))
 	for _, name := range names {
@@ -368,11 +363,6 @@ func jsonResult(tool string, value any, truncated bool) (Result, error) {
 		"data":      value,
 		"truncated": truncated,
 	}, truncated)
-}
-
-// JSONResult returns the stable successful tool-output envelope.
-func JSONResult(tool string, value any, truncated bool) (Result, error) {
-	return jsonResult(tool, value, truncated)
 }
 
 // ErrorResult returns the stable tool-output envelope used when the model can

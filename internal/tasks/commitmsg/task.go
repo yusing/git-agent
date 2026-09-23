@@ -299,17 +299,6 @@ func SystemPrompt(mode Mode) string {
 	return renderSystemPrompt(systemModeNormalPrompt)
 }
 
-func UserPrompt(mode Mode, maxSteps, maxToolCalls int) string {
-	data := userPromptData{MaxSteps: maxSteps, MaxToolCalls: maxToolCalls}
-	if mode == ModeAmend {
-		return executeUserPrompt(userAmendPromptTemplate, data)
-	}
-	if mode == ModePR {
-		return executeUserPrompt(userPRPromptTemplate, data)
-	}
-	return executeUserPrompt(userNormalPromptTemplate, data)
-}
-
 type boundedDiffResult struct {
 	Text      string
 	Truncated bool
