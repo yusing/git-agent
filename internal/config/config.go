@@ -16,7 +16,7 @@ const (
 	AuthModeChatGPT       = "chatgpt"
 	DefaultBaseURL        = "https://api.openai.com/v1"
 	DefaultChatGPTBaseURL = "https://chatgpt.com/backend-api/codex"
-	DefaultModel          = "gpt-5.6-luna"
+	DefaultModel          = "gpt-6-luna"
 	DefaultTimeout        = 2 * time.Minute
 	DefaultMaxSteps       = 30
 	DefaultMaxTools       = 24
@@ -126,12 +126,10 @@ func ResolveFromLocal(opts Options, cfg Config) (Config, error) {
 // Unlisted models keep the provider's default; explicit effort flags take precedence.
 func DefaultThinkingEffort(model string) string {
 	switch model {
-	case "gpt-5.3-codex-spark", "gpt-5.6-luna":
+	case "gpt-5.3-codex-spark", "gpt-5.6-luna", "gpt-6-luna":
 		return "xhigh"
-	case "gpt-5.6-sol":
+	case "gpt-5.6-sol", "gpt-6-sol", "gpt-6-astra":
 		return "medium"
-	case "gpt-6-astra":
-		return "low"
 	default:
 		return ""
 	}

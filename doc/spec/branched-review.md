@@ -50,9 +50,9 @@ values allowed for the current command. The initial catalog is:
 
 | Model | Suitable jobs |
 |---|---|
-| `gpt-5.6-sol` | Defect review, correctness, security, reliability, performance, concurrency, lifecycle, and invariant-heavy analysis |
-| `gpt-5.6-terra` | Behavior-preserving simplification, reuse, clarity, efficiency, overengineering, and redundant-state analysis |
-| `gpt-5.6-luna` | General or mixed inspection and inheritance when selected by current configuration |
+| `gpt-6-astra` | Defect review, correctness, security, reliability, performance, concurrency, lifecycle, and invariant-heavy analysis |
+| `gpt-6-sol` | Behavior-preserving simplification, reuse, clarity, efficiency, overengineering, and redundant-state analysis |
+| `gpt-6-luna` | General or mixed inspection and inheritance when selected by current configuration |
 
 An arbitrary model selected by `--model` or `OPENAI_MODEL` remains supported by
 inheritance. The branch agent may select `inherit` or a listed catalog model;

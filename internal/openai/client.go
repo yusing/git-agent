@@ -995,7 +995,8 @@ func (i Item) toSDKParam(explicitPromptCaching bool) (responses.ResponseInputIte
 }
 
 func supportsExplicitPromptCaching(request Request) bool {
-	if request.Model != "gpt-5.6" && !strings.HasPrefix(request.Model, "gpt-5.6-") {
+	if request.Model != "gpt-5.6" && !strings.HasPrefix(request.Model, "gpt-5.6-") &&
+		!strings.HasPrefix(request.Model, "gpt-6-") {
 		return false
 	}
 	endpoint, err := url.Parse(request.BaseURL)

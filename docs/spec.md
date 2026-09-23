@@ -384,18 +384,18 @@ new inspection, resets branch depth for that inspection, and permits each root
 to use the selected depth policy again.
 The detached review tree assigns every initial request one cache key derived
 from its task ID. Context-preserving follow-ups reuse that key; a depth reset
-creates a new key. For GPT-5.6-family models, Git-agent sends the key, marks the
-last reusable input-text block with an explicit prompt-cache breakpoint, uses
-explicit-only cache mode, and retains existing markers in forked and follow-up
-histories. These controls are best-effort: provider retention and minimum-prefix
-rules remain authoritative, and a changed model, tool catalog, structured-output
-schema, dynamic instruction prefix, or renewed branch availability can make a
-request ineligible for a hit. Git-agent does not alter branch availability or
-depth semantics to force cache eligibility. Models outside the GPT-5.6 family
-use provider-default caching, but official OpenAI requests still carry the stable
-cache key. The ChatGPT Codex endpoint receives that key without explicit
-breakpoint options and also receives it as the stable `session-id` and
-`thread-id` routing identity. Each initial inspection or detached follow-up
+creates a new key. For GPT-5.6- and GPT-6-family models, Git-agent sends the
+key, marks the last reusable input-text block with an explicit prompt-cache
+breakpoint, uses explicit-only cache mode, and retains existing markers in
+forked and follow-up histories. These controls are best-effort: provider
+retention and minimum-prefix rules remain authoritative, and a changed model,
+tool catalog, structured-output schema, dynamic instruction prefix, or renewed
+branch availability can make a request ineligible for a hit. Git-agent does not
+alter branch availability or depth semantics to force cache eligibility. Models
+outside these families use provider-default caching, but official OpenAI
+requests still carry the stable cache key. The ChatGPT Codex endpoint receives
+the key without explicit breakpoint options and uses it as the stable
+`session-id` and `thread-id` routing identity. Each initial inspection or detached follow-up
 starts with a fresh `x-codex-turn-metadata` turn identity; later provider
 requests and immediate child branches within that inspection reuse it.
 Git-agent captures the opaque `x-codex-turn-state` response header when
@@ -444,10 +444,10 @@ and the complete agent loop.
 
 Model precedence is `--model`, then `OPENAI_MODEL`, then the command default.
 Both commands request `reasoning.summary=auto` so summaries can stream as live
-agent progress. `review` defaults to `gpt-5.6-sol`; `simplify` defaults to
-`gpt-5.6-terra`. The shared model-based reasoning defaults give review `medium`
-and leave simplify's effort omitted. An explicit reasoning flag overrides the
-model default; inspection depth only changes the step budget.
+agent progress. `review` defaults to `gpt-6-astra`; `simplify` defaults to
+`gpt-6-sol`. The shared model-based reasoning defaults give both commands
+`medium`. An explicit reasoning flag overrides the model default; inspection
+depth only changes the step budget.
 
 Diff-based review and simplify calculate deterministic lower and upper model-step
 bounds after preparing the authoritative snapshot and building the concrete
@@ -804,13 +804,14 @@ key for every sibling. Every model request within one agent run keeps
 appended as developer input and persisted in replay history, so each completed
 request input is an exact prefix of the next request input. Hosted-capability
 failure notices are also appended instead of rewriting instructions. For
-GPT-5.6-family models, each appended budget message is an explicit cache
-breakpoint and requests use explicit-only cache mode. Follow-ups inherit the key
-and replayable input; a depth reset creates a new key. Official OpenAI models
-outside the GPT-5.6 family send the key while retaining provider-default caching.
-The authenticated ChatGPT Codex endpoint sends the stable key without explicit
-breakpoint options, captures the opaque `x-codex-turn-state` response header, and
-replays it on every later request in that agent run to preserve sticky routing.
+GPT-5.6- and GPT-6-family models, each appended budget message is an explicit
+cache breakpoint and requests use explicit-only cache mode. Follow-ups inherit
+the key and replayable input; a depth reset creates a new key. Official OpenAI
+models outside these families send the key while retaining provider-default
+caching. The authenticated ChatGPT Codex endpoint sends the stable key without
+explicit breakpoint options, captures the opaque `x-codex-turn-state` response
+header, and replays it on every later request in that agent run to preserve
+sticky routing.
 Custom endpoints receive no prompt-cache fields or Codex turn-state header.
 Provider prefix-length, retention, routing, and eviction rules remain
 authoritative, so a nonzero cached-token count is not guaranteed.
@@ -1723,8 +1724,8 @@ Flag behavior:
   endpoints until the command exits
 - default: omit `service_tier`; choose reasoning effort after resolving the
   command model (`--model`, then `OPENAI_MODEL`, then command default):
-  `gpt-5.3-codex-spark` and `gpt-5.6-luna` use `xhigh`;
-  `gpt-5.6-sol` uses `medium`; `gpt-6-astra` uses `low`.
+  `gpt-5.3-codex-spark`, `gpt-5.6-luna`, and `gpt-6-luna` use `xhigh`;
+  `gpt-5.6-sol`, `gpt-6-sol`, and `gpt-6-astra` use `medium`.
   Defaults match the configured model ID. Other model IDs omit `reasoning.effort` and use the provider's default.
   `reasoning.summary=auto` remains available for progress independently of effort.
   Explicit reasoning flags override these defaults in every command.
@@ -1772,7 +1773,7 @@ Supported environment variables:
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL` (overrides the default message-generation model,
-  `gpt-5.6-luna`)
+  `gpt-6-luna`)
 - `OPENAI_EMBEDDING_API_KEY`
 - `OPENAI_EMBEDDING_BASE_URL`
 - `OPENAI_EMBEDDING_MODEL`
@@ -1789,10 +1790,10 @@ Resolution order:
 3. environment variable fallback, including `OPENAI_API_KEY` auth
 4. internal default when defined by that subsystem
 
-For ChatGPT auth, message generation canonicalizes the public `gpt-5.6` alias
-to `gpt-5.6-sol` because the ChatGPT Codex endpoint accepts the canonical model
-identifier. `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` pass through
-unchanged. API-key providers retain the requested model identifier.
+For ChatGPT auth, message generation still canonicalizes an explicitly selected
+`gpt-5.6` alias to `gpt-5.6-sol` because the ChatGPT Codex endpoint accepts the
+canonical model identifier. Canonical model identifiers, including GPT-6 models,
+pass through unchanged. API-key providers retain the requested model identifier.
 
 ### stdout / stderr contract
 

@@ -178,7 +178,7 @@ The host then appends one selected function result:
   "sibling_scopes": [
     "Review CLI parsing and detached launch behavior."
   ],
-  "model": "gpt-5.6-sol",
+  "model": "gpt-6-astra",
   "reasoning_effort": "high",
   "depth": 1
 }
@@ -296,7 +296,7 @@ publication:
         "parent_id": "root",
         "depth": 1,
         "scope": "Review CLI parsing and detached launch behavior.",
-        "model": "gpt-5.6-sol",
+        "model": "gpt-6-astra",
         "reasoning_effort": "medium"
       },
       {
@@ -304,7 +304,7 @@ publication:
         "parent_id": "root",
         "depth": 1,
         "scope": "Review persistence, heartbeat, and cancellation behavior.",
-        "model": "gpt-5.6-sol",
+        "model": "gpt-6-astra",
         "reasoning_effort": "high"
       }
     ]

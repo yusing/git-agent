@@ -22,7 +22,7 @@ const (
 )
 
 var (
-	branchModels  = []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
+	branchModels  = []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}
 	branchEfforts = []string{"low", "medium", "high", "xhigh"}
 )
 
@@ -118,9 +118,9 @@ func (t branchHelpTool) Execute(_ context.Context, invocation tools.Invocation) 
 	}
 	return tools.JSONResult(BranchHelpToolName, branchHelpData{
 		Models: []branchHelpModel{
-			{Model: "gpt-5.6-sol", SuitableJobs: "Defect review, correctness, security, reliability, performance, concurrency, lifecycle, and invariant-heavy analysis."},
-			{Model: "gpt-5.6-terra", SuitableJobs: "Behavior-preserving simplification, reuse, clarity, efficiency, overengineering, and redundant-state analysis."},
-			{Model: "gpt-5.6-luna", SuitableJobs: "General or mixed inspection."},
+			{Model: "gpt-6-astra", SuitableJobs: "Defect review, correctness, security, reliability, performance, concurrency, lifecycle, and invariant-heavy analysis."},
+			{Model: "gpt-6-sol", SuitableJobs: "Behavior-preserving simplification, reuse, clarity, efficiency, overengineering, and redundant-state analysis."},
+			{Model: "gpt-6-luna", SuitableJobs: "General or mixed inspection."},
 		},
 		ReasoningEffortMapping: []branchHelpEffort{
 			{ScopeDifficulty: "Local, direct, or mechanical.", ReasoningEffort: "low"},

@@ -44,7 +44,7 @@ func (c *branchClient) CreateResponse(ctx context.Context, request openai.Reques
 			ToolCalls: []openai.ToolCall{{
 				ID: "fc_root", CallID: "call_root", Name: reviewtask.BranchToolName,
 				Arguments: `{"branches":[
-					{"scope":"Inspect the first responsibility.","path_hints":["internal/agent"],"model":"gpt-5.6-sol","reasoning_effort":"high"},
+					{"scope":"Inspect the first responsibility.","path_hints":["internal/agent"],"model":"gpt-6-astra","reasoning_effort":"high"},
 					{"scope":"Inspect the second responsibility.","path_hints":[],"model":"inherit","reasoning_effort":"inherit"}
 				]}`,
 			}},
@@ -106,7 +106,7 @@ func TestRunReviewTreeFansOutAggregatesAndPublishesOrderedBranchEvents(t *testin
 		strings.Index(result.Text, `"title": "first"`) > strings.Index(result.Text, `"title": "second"`) {
 		t.Fatalf("aggregate is not in stable leaf order:\n%s", result.Text)
 	}
-	if client.models["b1"] != "gpt-5.6-sol/high" || client.models["b2"] != "custom-parent/medium" {
+	if client.models["b1"] != "gpt-6-astra/high" || client.models["b2"] != "custom-parent/medium" {
 		t.Fatalf("effective child models = %#v", client.models)
 	}
 	if !client.parallel["root"] || !client.parallel["b1"] || !client.parallel["b2"] {
@@ -288,7 +288,7 @@ func TestRunReviewTreePreservesPromptCacheControlsAcrossForks(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := agent.OpenAIRunner{
-		Config: config.Config{Model: "gpt-5.6-terra", MaxSteps: 3, MaxToolCalls: 3},
+		Config: config.Config{Model: "gpt-6-sol", MaxSteps: 3, MaxToolCalls: 3},
 		Client: client, PromptCacheKey: "review:task-id",
 		Validator: func(text string) []string { return reviewtask.Validate(reviewtask.KindSimplify, text) },
 		Trace:     recorder,

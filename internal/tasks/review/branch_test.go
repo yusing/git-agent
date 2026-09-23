@@ -49,6 +49,15 @@ func TestBranchHelpPublishesCatalogAndKindSpecificEfforts(t *testing.T) {
 			if !envelope.OK || envelope.Tool != BranchHelpToolName || len(envelope.Data.Models) != len(branchModels) {
 				t.Fatalf("envelope = %#v", envelope)
 			}
+			wantModels := []string{"inherit", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}
+			if !slices.Equal(envelope.Data.AllowedModels, wantModels) {
+				t.Fatalf("allowed models = %#v, want %#v", envelope.Data.AllowedModels, wantModels)
+			}
+			for index, model := range envelope.Data.Models {
+				if model.Model != wantModels[index+1] {
+					t.Fatalf("catalog model %d = %q, want %q", index, model.Model, wantModels[index+1])
+				}
+			}
 			hasXHigh := slices.Contains(envelope.Data.AllowedReasoningEfforts, "xhigh")
 			if hasXHigh != test.wantXHigh {
 				t.Fatalf("allowed efforts = %#v, want xhigh=%v", envelope.Data.AllowedReasoningEfforts, test.wantXHigh)
@@ -110,7 +119,7 @@ func TestBranchDefinitionFollowsDepthPolicyAndStrictCatalog(t *testing.T) {
 
 func TestParseBranchRequestValidatesCompleteShapeBeforeFanout(t *testing.T) {
 	valid := `{"branches":[
-		{"scope":"Review lifecycle behavior.","path_hints":["internal/cli"],"model":"gpt-5.6-sol","reasoning_effort":"high"},
+		{"scope":"Review lifecycle behavior.","path_hints":["internal/cli"],"model":"gpt-6-astra","reasoning_effort":"high"},
 		{"scope":"Review aggregation behavior.","path_hints":[],"model":"inherit","reasoning_effort":"inherit"}
 	]}`
 	request, err := ParseBranchRequest(KindReview, DepthBalanced, 0, valid)
@@ -129,7 +138,7 @@ func TestParseBranchRequestValidatesCompleteShapeBeforeFanout(t *testing.T) {
 		{name: "one child", json: `{"branches":[{"scope":"one","path_hints":[],"model":"inherit","reasoning_effort":"inherit"}]}`, want: "requires 2 to 3"},
 		{name: "unknown field", json: strings.Replace(valid, `"scope":"Review lifecycle behavior."`, `"scope":"Review lifecycle behavior.","extra":true`, 1), want: jsonv2.ErrUnknownName.Error()},
 		{name: "unsafe hint", json: strings.Replace(valid, `"internal/cli"`, `"../outside"`, 1), want: "safe repository-relative"},
-		{name: "invented model", json: strings.Replace(valid, `"gpt-5.6-sol"`, `"gpt-next"`, 1), want: "model is invalid"},
+		{name: "invented model", json: strings.Replace(valid, `"gpt-6-astra"`, `"gpt-next"`, 1), want: "model is invalid"},
 		{name: "simplify xhigh", json: strings.Replace(valid, `"high"`, `"xhigh"`, 1), want: "reasoning_effort is invalid"},
 	}
 	for _, test := range tests {

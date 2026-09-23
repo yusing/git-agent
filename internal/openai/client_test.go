@@ -107,31 +107,35 @@ func TestRequestConvertsParallelToolCallPolicy(t *testing.T) {
 	}
 }
 
-func TestRequestConvertsExplicitPromptCacheControlsForGPT56(t *testing.T) {
+func TestRequestConvertsExplicitPromptCacheControlsForSupportedModels(t *testing.T) {
 	t.Parallel()
 
-	stable := NewMessage("user", "stable context")
-	stable.PromptCacheBreakpoint = true
-	params, err := Request{
-		Model: "gpt-5.6-sol", BaseURL: "https://api.openai.com/v1", PromptCacheKey: "review:task-id",
-		Input: []Item{stable, NewMessage("user", "changing suffix")},
-	}.toSDKParams()
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := json.Marshal(params)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := string(data)
-	for _, want := range []string{
-		`"prompt_cache_key":"review:task-id"`,
-		`"prompt_cache_options":{"mode":"explicit"}`,
-		`"prompt_cache_breakpoint":{"mode":"explicit"}`,
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("SDK payload missing %s: %s", want, got)
-		}
+	for _, model := range []string{"gpt-5.6-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"} {
+		t.Run(model, func(t *testing.T) {
+			stable := NewMessage("user", "stable context")
+			stable.PromptCacheBreakpoint = true
+			params, err := Request{
+				Model: model, BaseURL: "https://api.openai.com/v1", PromptCacheKey: "review:task-id",
+				Input: []Item{stable, NewMessage("user", "changing suffix")},
+			}.toSDKParams()
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := string(data)
+			for _, want := range []string{
+				`"prompt_cache_key":"review:task-id"`,
+				`"prompt_cache_options":{"mode":"explicit"}`,
+				`"prompt_cache_breakpoint":{"mode":"explicit"}`,
+			} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("SDK payload missing %s: %s", want, got)
+				}
+			}
+		})
 	}
 }
 
@@ -163,46 +167,54 @@ func TestRequestUsesStableCacheKeyWithoutExplicitControlsForOlderOpenAIModel(t *
 func TestRequestOmitsPromptCacheControlsForCustomEndpoint(t *testing.T) {
 	t.Parallel()
 
-	stable := NewMessage("user", "stable context")
-	stable.PromptCacheBreakpoint = true
-	params, err := Request{
-		Model: "gpt-5.6-sol", BaseURL: "https://provider.example/v1",
-		AuthAccountID: "account-id", PromptCacheKey: "review:task-id", Input: []Item{stable},
-	}.toSDKParams()
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := json.Marshal(params)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := string(data); strings.Contains(got, `"prompt_cache_`) {
-		t.Fatalf("custom-provider payload contains undeclared cache controls: %s", got)
+	for _, model := range []string{"gpt-5.6-sol", "gpt-6-sol"} {
+		t.Run(model, func(t *testing.T) {
+			stable := NewMessage("user", "stable context")
+			stable.PromptCacheBreakpoint = true
+			params, err := Request{
+				Model: model, BaseURL: "https://provider.example/v1",
+				AuthAccountID: "account-id", PromptCacheKey: "review:task-id", Input: []Item{stable},
+			}.toSDKParams()
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(data); strings.Contains(got, `"prompt_cache_`) {
+				t.Fatalf("custom-provider payload contains undeclared cache controls: %s", got)
+			}
+		})
 	}
 }
 
 func TestRequestUsesStableCacheKeyWithoutExplicitControlsForChatGPTEndpoint(t *testing.T) {
 	t.Parallel()
 
-	stable := NewMessage("user", "stable context")
-	stable.PromptCacheBreakpoint = true
-	params, err := Request{
-		Model: "gpt-5.6-sol", BaseURL: "https://chatgpt.com/backend-api/codex",
-		AuthAccountID: "account-id", PromptCacheKey: "review:task-id", Input: []Item{stable},
-	}.toSDKParams()
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := json.Marshal(params)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := string(data)
-	if !strings.Contains(got, `"prompt_cache_key":"review:task-id"`) {
-		t.Fatalf("ChatGPT payload omitted prompt cache key: %s", got)
-	}
-	if strings.Contains(got, `"prompt_cache_options"`) || strings.Contains(got, `"prompt_cache_breakpoint"`) {
-		t.Fatalf("ChatGPT payload contains unsupported explicit cache controls: %s", got)
+	for _, model := range []string{"gpt-5.6-sol", "gpt-6-sol"} {
+		t.Run(model, func(t *testing.T) {
+			stable := NewMessage("user", "stable context")
+			stable.PromptCacheBreakpoint = true
+			params, err := Request{
+				Model: model, BaseURL: "https://chatgpt.com/backend-api/codex",
+				AuthAccountID: "account-id", PromptCacheKey: "review:task-id", Input: []Item{stable},
+			}.toSDKParams()
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := string(data)
+			if !strings.Contains(got, `"prompt_cache_key":"review:task-id"`) {
+				t.Fatalf("ChatGPT payload omitted prompt cache key: %s", got)
+			}
+			if strings.Contains(got, `"prompt_cache_options"`) || strings.Contains(got, `"prompt_cache_breakpoint"`) {
+				t.Fatalf("ChatGPT payload contains unsupported explicit cache controls: %s", got)
+			}
+		})
 	}
 }
 

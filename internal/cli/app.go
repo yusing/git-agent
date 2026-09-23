@@ -50,8 +50,8 @@ import (
 const (
 	releaseNoteMinMaxSteps = 12
 	releaseNoteMinTimeout  = 4 * time.Minute
-	reviewDefaultModel     = "gpt-5.6-sol"
-	simplifyDefaultModel   = "gpt-5.6-terra"
+	reviewDefaultModel     = "gpt-6-astra"
+	simplifyDefaultModel   = "gpt-6-sol"
 )
 
 type App struct {

@@ -384,7 +384,7 @@ func TestResolveUsesRaisedDefaultMaxSteps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Model != "gpt-5.6-luna" {
+	if cfg.Model != "gpt-6-luna" {
 		t.Fatalf("default Model = %q", cfg.Model)
 	}
 	if cfg.MaxSteps != DefaultMaxSteps {
@@ -447,7 +447,9 @@ func TestResolveModelReasoningDefaults(t *testing.T) {
 		{"gpt-5.6-luna", "xhigh"},
 		{"gpt-5.6-sol", "medium"},
 		{"gpt-5.6", ""},
-		{"gpt-6-astra", "low"},
+		{"gpt-6-luna", "xhigh"},
+		{"gpt-6-sol", "medium"},
+		{"gpt-6-astra", "medium"},
 		{"gpt-5.6-terra", ""},
 		{"gpt-5.3-codex", ""},
 		{"custom-luna", ""},
@@ -466,7 +468,7 @@ func TestResolveModelReasoningDefaults(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.ThinkingEffort != "low" {
+			if cfg.ThinkingEffort != "medium" {
 				t.Fatalf("flag model effort = %q", cfg.ThinkingEffort)
 			}
 			for _, opts := range []Options{{Low: true}, {Medium: true}, {High: true}, {XHigh: true}} {

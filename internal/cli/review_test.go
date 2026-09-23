@@ -42,7 +42,7 @@ func TestDetachedReviewAndSimplifyPersistStrictFinalWithoutStdout(t *testing.T) 
 			output:    `{"summary":"No simplifications found","opportunities":[]}`,
 			key:       "opportunities",
 			model:     simplifyDefaultModel,
-			reasoning: "",
+			reasoning: "medium",
 			steps:     9,
 			tools:     8,
 		},
@@ -425,7 +425,7 @@ func TestDetachedSimplifyBranchesThroughExistingTaskAndPersistsMergedFinal(t *te
 			return responseWithProviderUsage(t, responseWithToolCalls("resp_branch", toolCallSpec{
 				ID: "fc_branch", CallID: "call_branch", Name: reviewtask.BranchToolName,
 				Arguments: `{"branches":[
-					{"scope":"Inspect branch setup.","path_hints":["branch.go"],"model":"gpt-5.6-sol","reasoning_effort":"medium"},
+					{"scope":"Inspect branch setup.","path_hints":["branch.go"],"model":"gpt-6-astra","reasoning_effort":"medium"},
 					{"scope":"Inspect branch cleanup.","path_hints":[],"model":"inherit","reasoning_effort":"inherit"}
 				]}`,
 			}), 20, 3)
@@ -480,7 +480,7 @@ func TestDetachedSimplifyBranchesThroughExistingTaskAndPersistsMergedFinal(t *te
 		t.Fatalf("tool_calls = %#v", calls)
 	}
 	if len(childModels) != 2 ||
-		!slices.Contains(childModels, "gpt-5.6-sol") ||
+		!slices.Contains(childModels, "gpt-6-astra") ||
 		!slices.Contains(childModels, simplifyDefaultModel) {
 		t.Fatalf("child models = %#v", childModels)
 	}
@@ -513,16 +513,13 @@ func TestDetachedSimplifyBranchesThroughExistingTaskAndPersistsMergedFinal(t *te
 		if branch["id"] == "" || branch["parent_id"] != "root" {
 			t.Fatalf("branch = %#v", branch)
 		}
-		wantEffort := ""
-		if branch["model"] == "gpt-5.6-sol" {
-			wantEffort = "medium"
-		}
+		wantEffort := "medium"
 		if branch["reasoning_effort"] != wantEffort {
 			t.Fatalf("branch effort = %#v, want %q", branch["reasoning_effort"], wantEffort)
 		}
 		usageByModel[branch["model"].(string)] = branch["usage"].(map[string]any)["input_tokens"].(float64)
 	}
-	if usageByModel["gpt-5.6-sol"] != 31 || usageByModel[simplifyDefaultModel] != 41 {
+	if usageByModel["gpt-6-astra"] != 31 || usageByModel[simplifyDefaultModel] != 41 {
 		t.Fatalf("branch usage by model = %#v", usageByModel)
 	}
 }
@@ -1037,7 +1034,7 @@ func TestReviewHelpDocumentsDefaultMode(t *testing.T) {
 		"--codebase     inspect the full codebase",
 		"--timeout <duration>",
 		"set request timeout (disabled by default)",
-		"override model (default gpt-5.6-sol)",
+		"override model (default gpt-6-astra)",
 		"--depth <fast|balanced|thorough>",
 		"select automatic inspection depth: fast, balanced, thorough (default balanced); reasoning defaults by model",
 		"--max-web-searches <n>",
@@ -1153,7 +1150,7 @@ func TestCodeReviewDefaultsByModel(t *testing.T) {
 		want  string
 	}{
 		{reviewtask.KindReview, reviewDefaultModel, "medium"},
-		{reviewtask.KindSimplify, simplifyDefaultModel, ""},
+		{reviewtask.KindSimplify, simplifyDefaultModel, "medium"},
 	} {
 		t.Run(string(tc.kind), func(t *testing.T) {
 			// Simulate the general default already resolved before selecting the

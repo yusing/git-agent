@@ -173,10 +173,9 @@ launch writes nothing to stderr. Matching `--wait <id>` forms write strict,
 evidence-located
 JSON reports to stdout. They have no request deadline by default; `--timeout
 <duration>` adds one explicitly. Without `--model` or `OPENAI_MODEL`, `review`
-uses `gpt-5.6-sol` and `simplify` uses `gpt-5.6-terra`. Reasoning defaults follow
-the model, independently of inspection depth: review therefore uses `medium`,
-while simplify leaves the effort to the provider. An explicit effort flag
-overrides the model default.
+uses `gpt-6-astra` and `simplify` uses `gpt-6-sol`. Reasoning defaults follow
+the model, independently of inspection depth: both commands use `medium`.
+An explicit effort flag overrides the model default.
 
 An eligible completed provider turn can be followed with
 `--follow-up <turn-id> <prompt...>`. The detached follow-up inherits the
@@ -213,12 +212,12 @@ and only then forks the completed conversation. Diff-mode runs revalidate their
 authoritative snapshot after the reads join, so drift aborts before outputs or
 fan-out.
 One review tree assigns a stable prompt-cache key to every request. On GPT-5.6
-models, Git-agent sends that key, marks an explicit reusable root prefix, and
-preserves the breakpoint in children. Branch-specific tools, instructions, or
-model changes can still prevent a provider cache hit. Other OpenAI models and
-the authenticated ChatGPT Codex endpoint send the same stable key while
-retaining automatic caching; custom endpoints receive no undeclared cache
-controls.
+and GPT-6 models, Git-agent sends that key, marks an explicit reusable root
+prefix, and preserves the breakpoint in children. Branch-specific tools,
+instructions, or model changes can still prevent a provider cache hit. Other
+OpenAI models and the authenticated ChatGPT Codex endpoint send the same
+stable key while retaining automatic caching; custom endpoints receive no
+undeclared cache controls.
 
 Diff-based runs calculate a bounded step range from effective changed lines,
 changed files, top-level scope dispersion, concrete repository-tool capability
@@ -357,12 +356,12 @@ An initial batch and its context-preserving follow-ups are assigned one
 prompt-cache key. Git-agent keeps agent instructions unchanged across model
 steps and appends each changing budget as replayable developer input, making
 each completed request input an exact prefix of the next request input. On
-GPT-5.6 models, each appended budget is an explicit cache breakpoint. Provider
-cache retention and minimum-prefix rules still apply. Other OpenAI models use
-provider-default caching. The authenticated ChatGPT Codex endpoint sends the
-stable key without explicit breakpoint options and replays the server's opaque
-turn-state header on later requests for sticky routing. Custom endpoints receive
-no undeclared cache or Codex routing controls.
+GPT-5.6 and GPT-6 models, each appended budget is an explicit cache breakpoint.
+Provider cache retention and minimum-prefix rules still apply. Other OpenAI
+models use provider-default caching. The authenticated ChatGPT Codex endpoint
+sends the stable key without explicit breakpoint options and replays the
+server's opaque turn-state header on later requests for sticky routing. Custom
+endpoints receive no undeclared cache or Codex routing controls.
 `--for diagnose`, `change`, `behavior`, or `owner` uses one compact,
 target-neutral system prompt and adds the selected use-case guidance as a
 developer message; omission keeps the full universal prompt. A follow-up
@@ -694,7 +693,7 @@ Usage:
     - read_file: 5
   Branches created: 2
   Branch b1 (parent: root)
-    Model: gpt-5.6-sol
+    Model: gpt-6-astra
     Reasoning effort: medium
     Input: 14000 (cached: 4000, uncached: 10000)
     Output: 1200 (reasoning: 700)
@@ -764,7 +763,7 @@ Supported environment variables:
 | --- | --- |
 | `OPENAI_API_KEY` | Message-generation fallback auth and search fallback auth |
 | `OPENAI_BASE_URL` | Message-generation fallback base URL and search fallback base URL |
-| `OPENAI_MODEL` | Message-generation model; defaults to `gpt-5.6-luna` |
+| `OPENAI_MODEL` | Message-generation model; defaults to `gpt-6-luna` |
 | `OPENAI_EMBEDDING_API_KEY` | Search embedding auth |
 | `OPENAI_EMBEDDING_BASE_URL` | Search embedding base URL |
 | `OPENAI_EMBEDDING_MODEL` | Search embedding model |
@@ -778,15 +777,16 @@ Supported environment variables:
 
 CLI flags override environment values.
 
-With ChatGPT auth, the `gpt-5.6` alias resolves to `gpt-5.6-sol`. The canonical
-`gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` identifiers pass through
+With ChatGPT auth, an explicitly selected `gpt-5.6` alias still resolves to
+`gpt-5.6-sol`. Canonical model identifiers, including GPT-6 models, pass through
 unchanged.
 
 Behavior defaults:
 
 - `service_tier` is omitted unless `--fast` is set.
-- Reasoning effort defaults to `xhigh` for `gpt-5.3-codex-spark` and
-  `gpt-5.6-luna`, `medium` for `gpt-5.6-sol`, and `low` for `gpt-6-astra`.
+- Reasoning effort defaults to `xhigh` for `gpt-5.3-codex-spark`,
+  `gpt-5.6-luna`, and `gpt-6-luna`; `medium` for `gpt-5.6-sol`,
+  `gpt-6-sol`, and `gpt-6-astra`.
   These defaults match the configured model ID; other IDs omit the effort and
   use the provider's default.
 - `--low`, `--medium`, `--high`, and `--xhigh` override the model default.
