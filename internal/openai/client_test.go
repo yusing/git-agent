@@ -14,8 +14,6 @@ import (
 	"time"
 
 	openaisdk "github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/responses"
-	"github.com/yusing/git-agent/internal/provider"
 )
 
 func TestRequestConvertsToSDKStructuredInputAndTools(t *testing.T) {
@@ -115,7 +113,7 @@ func TestRequestConvertsExplicitPromptCacheControlsForSupportedModels(t *testing
 			stable := NewMessage("user", "stable context")
 			stable.PromptCacheBreakpoint = true
 			params, err := Request{
-				Model: model, BaseURL: "https://api.openai.com/v1", PromptCacheKey: "review:task-id",
+				Model: model, BaseURL: "https://api.openai.com/v1", PromptCacheKey: "test:task-id",
 				Input: []Item{stable, NewMessage("user", "changing suffix")},
 			}.toSDKParams()
 			if err != nil {
@@ -127,7 +125,7 @@ func TestRequestConvertsExplicitPromptCacheControlsForSupportedModels(t *testing
 			}
 			got := string(data)
 			for _, want := range []string{
-				`"prompt_cache_key":"review:task-id"`,
+				`"prompt_cache_key":"test:task-id"`,
 				`"prompt_cache_options":{"mode":"explicit"}`,
 				`"prompt_cache_breakpoint":{"mode":"explicit"}`,
 			} {
@@ -146,7 +144,7 @@ func TestRequestUsesStableCacheKeyWithoutExplicitControlsForOlderOpenAIModel(t *
 	stable.PromptCacheBreakpoint = true
 	params, err := Request{
 		Model: "gpt-5.5", BaseURL: "https://api.openai.com/v1",
-		PromptCacheKey: "review:task-id", Input: []Item{stable},
+		PromptCacheKey: "test:task-id", Input: []Item{stable},
 	}.toSDKParams()
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +154,7 @@ func TestRequestUsesStableCacheKeyWithoutExplicitControlsForOlderOpenAIModel(t *
 		t.Fatal(err)
 	}
 	got := string(data)
-	if !strings.Contains(got, `"prompt_cache_key":"review:task-id"`) {
+	if !strings.Contains(got, `"prompt_cache_key":"test:task-id"`) {
 		t.Fatalf("older-model payload omitted prompt cache key: %s", got)
 	}
 	if strings.Contains(got, `"prompt_cache_options"`) || strings.Contains(got, `"prompt_cache_breakpoint"`) {
@@ -173,7 +171,7 @@ func TestRequestOmitsPromptCacheControlsForCustomEndpoint(t *testing.T) {
 			stable.PromptCacheBreakpoint = true
 			params, err := Request{
 				Model: model, BaseURL: "https://provider.example/v1",
-				AuthAccountID: "account-id", PromptCacheKey: "review:task-id", Input: []Item{stable},
+				AuthAccountID: "account-id", PromptCacheKey: "test:task-id", Input: []Item{stable},
 			}.toSDKParams()
 			if err != nil {
 				t.Fatal(err)
@@ -198,7 +196,7 @@ func TestRequestUsesStableCacheKeyWithoutExplicitControlsForChatGPTEndpoint(t *t
 			stable.PromptCacheBreakpoint = true
 			params, err := Request{
 				Model: model, BaseURL: "https://chatgpt.com/backend-api/codex",
-				AuthAccountID: "account-id", PromptCacheKey: "review:task-id", Input: []Item{stable},
+				AuthAccountID: "account-id", PromptCacheKey: "test:task-id", Input: []Item{stable},
 			}.toSDKParams()
 			if err != nil {
 				t.Fatal(err)
@@ -208,7 +206,7 @@ func TestRequestUsesStableCacheKeyWithoutExplicitControlsForChatGPTEndpoint(t *t
 				t.Fatal(err)
 			}
 			got := string(data)
-			if !strings.Contains(got, `"prompt_cache_key":"review:task-id"`) {
+			if !strings.Contains(got, `"prompt_cache_key":"test:task-id"`) {
 				t.Fatalf("ChatGPT payload omitted prompt cache key: %s", got)
 			}
 			if strings.Contains(got, `"prompt_cache_options"`) || strings.Contains(got, `"prompt_cache_breakpoint"`) {
@@ -222,8 +220,8 @@ func TestCreateResponseReplaysCodexTurnStateOnlyForChatGPT(t *testing.T) {
 	t.Parallel()
 
 	const turnState = "sticky-route"
-	const cacheKey = "review:task-id"
-	const nextCacheKey = "review:next-task"
+	const cacheKey = "test:task-id"
+	const nextCacheKey = "test:next-task"
 	const firstTurnID = "turn-1"
 	const nextTurnID = "turn-2"
 	requestCount := 0
@@ -334,7 +332,7 @@ func TestCreateResponseReturnsCodexTurnStateWithProviderError(t *testing.T) {
 		headers := make(http.Header)
 		headers.Set("Content-Type", "application/json")
 		headers.Set(codexTurnStateHeader, turnState)
-		body := `{"error":{"message":"web_search is not supported","type":"invalid_request_error","param":"tools[0].type","code":"unsupported_value"}}`
+		body := `{"error":{"message":"invalid request","type":"invalid_request_error"}}`
 		return &http.Response{
 			StatusCode: http.StatusBadRequest,
 			Header:     headers,
@@ -346,63 +344,12 @@ func TestCreateResponseReturnsCodexTurnStateWithProviderError(t *testing.T) {
 		Model: "gpt-5.6-sol", BaseURL: "https://chatgpt.com/backend-api/codex",
 		APIKey: "test-key", AuthAccountID: "account-id",
 		Input:              []Item{NewMessage("user", "task")},
-		HostedCapabilities: []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch}},
 	})
-	unsupported, ok := errors.AsType[*provider.UnsupportedCapabilityError](err)
-	if !ok || unsupported.Failure.Capability != provider.HostedCapabilityWebSearch {
-		t.Fatalf("error = %v, want hosted web-search capability rejection", err)
+	if err == nil {
+		t.Fatal("expected provider error")
 	}
 	if response.TurnState != turnState {
 		t.Fatalf("error response turn state = %q, want %q", response.TurnState, turnState)
-	}
-}
-
-func TestRequestConvertsHostedWebSearchCapability(t *testing.T) {
-	t.Parallel()
-
-	params, err := Request{
-		Model: "test-model",
-		Input: []Item{NewMessage("user", "task")},
-		HostedCapabilities: []provider.HostedCapability{{
-			Kind: provider.HostedCapabilityWebSearch, MaxCalls: 4,
-		}},
-	}.toSDKParams()
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := json.Marshal(params)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := string(data)
-	for _, want := range []string{
-		`"tools":[{"type":"web_search"}]`,
-		`"include":["web_search_call.action.sources","reasoning.encrypted_content"]`,
-		`"max_tool_calls":4`,
-		`"store":false`,
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("hosted request missing %s: %s", want, got)
-		}
-	}
-}
-
-func TestRequestOmitsHostedCallLimitWhenUncapped(t *testing.T) {
-	t.Parallel()
-
-	params, err := Request{
-		Model: "test-model", Input: []Item{NewMessage("user", "task")},
-		HostedCapabilities: []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch}},
-	}.toSDKParams()
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := json.Marshal(params)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := string(data); strings.Contains(got, `"max_tool_calls"`) {
-		t.Fatalf("uncapped request contains max_tool_calls: %s", got)
 	}
 }
 
@@ -413,7 +360,6 @@ func TestRequestReplaysRawContinuationItems(t *testing.T) {
 		Model: "test-model",
 		Input: []Item{
 			{Type: "reasoning", RawJSON: `{"id":"rs_1","type":"reasoning","summary":[],"encrypted_content":"cipher","status":"completed"}`},
-			{Type: "web_search_call", RawJSON: `{"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","queries":["Go API"]}}`},
 			{Type: "function_call", RawJSON: `{"id":"fc_1","type":"function_call","call_id":"call_1","name":"repo_summary","arguments":"{}","status":"completed"}`},
 			NewFunctionCallOutput("call_1", `{"ok":true}`),
 		},
@@ -426,117 +372,10 @@ func TestRequestReplaysRawContinuationItems(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := string(data)
-	for _, want := range []string{`"encrypted_content":"cipher"`, `"type":"web_search_call"`, `"type":"function_call"`, `"type":"function_call_output"`} {
+	for _, want := range []string{`"encrypted_content":"cipher"`, `"type":"function_call"`, `"type":"function_call_output"`} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("continuation payload missing %s: %s", want, got)
 		}
-	}
-}
-
-func TestResponsePreservesContinuationAndHostedMetadata(t *testing.T) {
-	t.Parallel()
-
-	var completed responses.Response
-	err := json.Unmarshal([]byte(`{
-		"id":"resp_1","status":"completed","future_top":true,
-		"output":[
-			{"id":"rs_1","type":"reasoning","summary":[],"encrypted_content":"cipher","status":"completed"},
-			{"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","queries":["Go 1.26 API"],"sources":[{"type":"url","url":"https://go.dev/doc/"}]}},
-			{"id":"fc_1","type":"function_call","call_id":"call_1","name":"repo_summary","arguments":"{}","status":"completed"}
-		],
-		"usage":{"input_tokens":42,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":12,"future_nested":"ok"},"output_tokens":9,"output_tokens_details":{"reasoning_tokens":7},"total_tokens":51,"future_usage":true}
-	}`), &completed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result := responseFromCompleted(&completed)
-	if len(result.Continuation) != 3 {
-		t.Fatalf("continuation = %#v", result.Continuation)
-	}
-	if got := []string{result.Continuation[0].Type, result.Continuation[1].Type, result.Continuation[2].Type}; !slices.Equal(got, []string{"reasoning", "web_search_call", "function_call"}) {
-		t.Fatalf("continuation order = %v", got)
-	}
-	if len(result.ToolCalls) != 1 || result.ToolCalls[0].CallID != "call_1" {
-		t.Fatalf("tool calls = %#v", result.ToolCalls)
-	}
-	if len(result.HostedToolCalls) != 1 || !slices.Equal(result.HostedToolCalls[0].Queries, []string{"Go 1.26 API"}) || !slices.Equal(result.HostedToolCalls[0].Sources, []string{"https://go.dev/doc/"}) {
-		t.Fatalf("hosted calls = %#v", result.HostedToolCalls)
-	}
-	if result.Usage != (Usage{InputTokens: 42, CachedInputTokens: 30, CacheWriteInputTokens: 12, OutputTokens: 9, ReasoningTokens: 7, TotalTokens: 51}) {
-		t.Fatalf("usage = %#v", result.Usage)
-	}
-}
-
-func TestHostedCapabilityFailureClassificationIsNarrow(t *testing.T) {
-	t.Parallel()
-
-	var unknownBody openaisdk.Error
-	if err := json.Unmarshal([]byte(`{"future_error":{"detail":"unknown"}}`), &unknownBody); err != nil {
-		t.Fatal(err)
-	}
-	unknownBody.StatusCode = http.StatusBadRequest
-	enabledRequest := Request{HostedCapabilities: []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch}}}
-
-	tests := []struct {
-		name    string
-		err     *openaisdk.Error
-		request Request
-		want    bool
-	}{
-		{name: "web search", err: &openaisdk.Error{StatusCode: 400, Param: "tools[0].type", Message: "web_search is not supported"}, request: enabledRequest, want: true},
-		{name: "source include", err: &openaisdk.Error{StatusCode: 422, Param: "include", Message: "web search sources unsupported"}, request: enabledRequest, want: true},
-		{name: "hosted limit", err: &openaisdk.Error{StatusCode: 400, Param: "max_tool_calls", Message: "unknown parameter"}, request: enabledRequest, want: true},
-		{name: "unrelated bad request", err: &openaisdk.Error{StatusCode: 400, Param: "text.format", Message: "invalid schema"}, request: enabledRequest},
-		{name: "unrelated web search collision", err: &openaisdk.Error{StatusCode: 400, Param: "text.format", Message: "invalid schema while web_search is enabled"}, request: enabledRequest},
-		{name: "unrelated hosted limit collision", err: &openaisdk.Error{StatusCode: 400, Param: "text.format", Message: "invalid max_tool_calls schema example"}, request: enabledRequest},
-		{name: "unknown future tool error", err: &openaisdk.Error{StatusCode: 400, Param: "tools[0].future", Message: "unsupported future field"}, request: enabledRequest},
-		{name: "auth", err: &openaisdk.Error{StatusCode: 401, Param: "tools", Message: "web_search unauthorized"}, request: enabledRequest},
-		{name: "rate limit", err: &openaisdk.Error{StatusCode: 429, Param: "max_tool_calls", Message: "rate limit"}, request: enabledRequest},
-		{name: "disabled capability", err: &openaisdk.Error{StatusCode: 400, Param: "tools[0].type", Message: "web_search is not supported"}},
-		{
-			name: "empty ChatGPT capped rejection",
-			err:  &openaisdk.Error{StatusCode: 400},
-			request: Request{
-				AuthAccountID: "workspace",
-				HostedCapabilities: []provider.HostedCapability{{
-					Kind: provider.HostedCapabilityWebSearch, MaxCalls: 1,
-				}},
-			},
-			want: true,
-		},
-		{
-			name: "empty API key capped rejection",
-			err:  &openaisdk.Error{StatusCode: 400},
-			request: Request{HostedCapabilities: []provider.HostedCapability{{
-				Kind: provider.HostedCapabilityWebSearch, MaxCalls: 1,
-			}}},
-		},
-		{
-			name: "empty ChatGPT uncapped rejection",
-			err:  &openaisdk.Error{StatusCode: 400},
-			request: Request{
-				AuthAccountID:      "workspace",
-				HostedCapabilities: []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch}},
-			},
-		},
-		{
-			name: "unknown ChatGPT error body",
-			err:  &unknownBody,
-			request: Request{
-				AuthAccountID: "workspace",
-				HostedCapabilities: []provider.HostedCapability{{
-					Kind: provider.HostedCapabilityWebSearch, MaxCalls: 1,
-				}},
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			_, got := hostedCapabilityFailure(test.err, test.request)
-			if got != test.want {
-				t.Fatalf("classified = %t, want %t", got, test.want)
-			}
-		})
 	}
 }
 
@@ -635,24 +474,6 @@ func TestCreateResponseUsesChatGPTRequestContract(t *testing.T) {
 	}
 	if resp.Text != "hello" {
 		t.Fatalf("text = %q", resp.Text)
-	}
-}
-
-func TestCreateResponseClassifiesEmptyChatGPTCappedBadRequest(t *testing.T) {
-	t.Parallel()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-	}))
-	defer server.Close()
-
-	_, err := NewHTTPClient(server.Client()).CreateResponse(t.Context(), Request{
-		Model: "test-model", BaseURL: server.URL, APIKey: "access-token", AuthAccountID: "workspace-123",
-		HostedCapabilities: []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch, MaxCalls: 1}},
-	})
-	unsupported, ok := errors.AsType[*provider.UnsupportedCapabilityError](err)
-	if !ok || unsupported.Failure.Capability != provider.HostedCapabilityWebSearch {
-		t.Fatalf("error = %v, want hosted web-search capability rejection", err)
 	}
 }
 

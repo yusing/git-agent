@@ -77,7 +77,7 @@ shortcut.
 ### Non-goals
 
 - Free-form, configured, or automatically inferred query targets.
-- A separate review target or changes to the dedicated `review` command.
+- Analytical workflows beyond repository exploration.
 - Runtime access to Codex session history or `~/.codex`.
 - Any model, reasoning, budget, cache, or search semantic attached to `--fast`.
 

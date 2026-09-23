@@ -1,7 +1,7 @@
 # git-agent
 
-Commit, PR, release, review, simplification, exploration, and repository-search
-context for AI-assisted Git work.
+Commit, PR, release, exploration, and repository-search context for AI-assisted
+Git work.
 
 When installed, [`skills-mgr`](https://github.com/yusing/skills-mgr) integrates
 skill discovery and on-demand guidance reading into message-generation
@@ -18,8 +18,7 @@ TL;DR: use `commit-msg` when you want a grounded commit message on stdout, use
 `commit` when you want the same message created as a Git commit, use
 `release-note` for release Markdown, and use `search` when an agent needs fast
 local implementation context. Use `explore` when that search needs read-tool
-inspection and context-preserving questions. Use `review` for evidence-backed
-defects and `simplify` for behavior-preserving cleanup opportunities.
+inspection and context-preserving questions.
 
 ## Quick Start
 
@@ -54,10 +53,6 @@ directory is on `PATH`.
 | Squash PR message | `git-agent pr-message` | Squash merge message on stdout |
 | Release body | `git-agent release-note <base> <release>` | Release Markdown on stdout |
 | Version bump release body | `git-agent release-note patch` | Release Markdown for latest tag to `HEAD` |
-| Uncommitted review | `git-agent review` | Detached task launch JSON |
-| Staged review | `git-agent review --staged` | Detached staged-review launch JSON |
-| Re-review a completed turn | `git-agent review [--debug] [--fast] --follow-up <turn-id> <prompt...>` | New detached task launch JSON |
-| Codebase simplification audit | `git-agent simplify --codebase` | Detached codebase-audit launch JSON |
 | Agent-ready codebase exploration | `git-agent explore [--for <target>] <question...>` | Search ID and grounded items JSON |
 | Continue an exploration | `git-agent explore --follow-up <search-id> <question...>` | New branch ID and grounded items JSON |
 | Print search project identity | `git-agent project_id` | Stable project hash on stdout |
@@ -117,193 +112,10 @@ block. Locally initialized nested submodules are expanded recursively, using rep
 | Skill delegation | Prompt skill listing plus on-demand reading through `skills-mgr` |
 | Commit execution | Optional explicit `git commit --file -` or `git commit --amend --file -` after message generation |
 | Release-note writing | Release Markdown from explicit refs or `patch`, `minor`, and `major` shortcuts |
-| Review and simplification | Strict JSON reports with repository evidence and repeatable detached `--wait` retrieval |
 | Embedding search | Local filesystem or committed-tree context search for agents and humans |
 | Debug output | Human console diagnostics with `--debug`; pprof with `--pprof <addr>` |
 
 <!-- markdownlint-enable MD013 -->
-
-## Review and Simplify
-
-See [the Codex review comparison](doc/compare-with-codex-review) for scope,
-output, and simplification differences.
-
-`review` and `simplify` are read-only Responses API workflows designed for LLM
-harnesses. Both default to all dirty changes, regardless of staging state.
-
-```sh
-# Review staged and unstaged work together
-git-agent review
-# {"command":"review","id":"...","pid":12345}
-git-agent review --wait <id-from-launch-json>
-
-# After applying fixes, re-evaluate an earlier report
-git-agent review --follow-up <id-from-launch-json> re-review the fixes
-
-# Review only the Git index
-git-agent review --staged
-
-# Choose the lower or upper end of the calculated inspection budget
-git-agent review --depth fast
-git-agent review --depth thorough
-
-# Show only the scope, depth, and reasoning options intended for coding agents
-# Agent help reserves thorough depth for security-related issues or very complex logic
-git-agent review --help-agent
-
-# Audit the full repository
-git-agent review --codebase
-
-# Find behavior-preserving cleanup opportunities in dirty changes
-git-agent simplify
-git-agent simplify --wait <id-from-launch-json>
-
-# Limit the report to a lower-priority task focus after flags
-git-agent review --staged focus on cancellation and cleanup
-
-# Exercise detached launch, rendering, and wait without provider access
-git-agent review --dry-run
-```
-
-Exactly one mode may be selected: `--codebase`, `--uncommitted`, or `--staged`.
-No mode means `--uncommitted`. Both commands always launch detached and write
-one strict launch JSON object to stdout containing only `command`, durable task
-`id`, and producer `pid`. They do not start a local event server. Successful
-launch writes nothing to stderr. Matching `--wait <id>` forms write strict,
-evidence-located
-JSON reports to stdout. They have no request deadline by default; `--timeout
-<duration>` adds one explicitly. Without `--model` or `OPENAI_MODEL`, `review`
-uses `gpt-6-astra` and `simplify` uses `gpt-6-sol`. Reasoning defaults follow
-the model, independently of inspection depth: both commands use `medium`.
-An explicit effort flag overrides the model default.
-
-An eligible completed provider turn can be followed with
-`--follow-up <turn-id> <prompt...>`. The detached follow-up inherits the
-complete provider input, complete report, scope mode, inspection depth, and
-cache identity; it also inspects current repository state. Branched parents
-continue every terminal branch and may branch again. Follow-up accepts `--debug`
-and `--fast`, rejects every other additional flag, and uses the same detached
-launch and `--wait` workflow. Three turns preserve the cache lineage before the
-next turn starts a new cache lineage while retaining the inherited input and
-report.
-The stable cache key supplies Codex's `session-id` and `thread-id` routing
-identity. Each initial inspection or detached follow-up also receives a fresh
-`x-codex-turn-metadata` turn identity that remains stable across tool calls and
-immediate child branches. An opaque Codex turn-state header, when returned,
-follows the cache lineage: child branches and context-preserving detached
-follow-ups inherit it, while a cache-lineage reset starts with new routing
-state. Follow-ups append only fresh repository diff
-context rather than repeating the initial mission and scope prompt.
-
-Without a trailing focus, review reports all actionable findings and simplify
-inspects the full authoritative scope. A trailing focus limits the report to
-relevant findings or opportunities while still allowing supporting repository
-inspection. It cannot expand the selected Git scope or relax evidence rules.
-
-When a remaining inspection is large and independently partitionable, the
-model may retire its current conversation and run bounded child inspections in
-parallel inside the same detached task. Children retain the selected Git scope,
-tool policy, cancellation, and per-conversation budgets. Git-agent merges
-validated leaf reports mechanically into the detached task's final report;
-`--wait` still returns one report.
-When a provider turn combines `branch` with ordinary read calls, Git-agent
-completes those reads concurrently, appends their outputs in provider order,
-and only then forks the completed conversation. Diff-mode runs revalidate their
-authoritative snapshot after the reads join, so drift aborts before outputs or
-fan-out.
-One review tree assigns a stable prompt-cache key to every request. On GPT-5.6
-and GPT-6 models, Git-agent sends that key, marks an explicit reusable root
-prefix, and preserves the breakpoint in children. Branch-specific tools,
-instructions, or model changes can still prevent a provider cache hit. Other
-OpenAI models and the authenticated ChatGPT Codex endpoint send the same
-stable key while retaining automatic caching; custom endpoints receive no
-undeclared cache controls.
-
-Diff-based runs calculate a bounded step range from effective changed lines,
-changed files, top-level scope dispersion, concrete repository-tool capability
-coverage. `--depth fast|balanced|thorough` selects the
-lower bound, midpoint, or upper bound; the default is `balanced`. Generated Go
-files with standard markers are discounted, not ignored. Automatic review is
-capped at 60 model steps and 48 local tool calls; simplify is capped at 45 and
-36. `--max-steps` is a mutually exclusive expert override. Codebase mode has no
-change-size input and retains the fixed command caps; use `--max-steps` for a
-smaller codebase audit. The selected range, inputs, and ceilings govern the run.
-
-Diff-based review and simplification preload a bounded current-change context
-and, when available, a previous-`HEAD` context pack for contrast. Current dirty
-or staged changes remain authoritative. Uncommitted mode includes dirty changes
-from initialized submodules recursively; staged mode remains limited to the
-current repository index. Uncommitted inspection honors `.git/info/exclude`
-and Git's configured or default global excludes file as well as per-directory
-`.gitignore` rules, without entering ignored untracked subtrees; tracked files
-remain reviewable even below ignored directories. Allowlist rules cannot
-re-include descendants through a still-ignored parent.
-Simplification also checks explicitly
-for behavior-preserving removal of overengineering such as unnecessary
-abstractions, premature generalization, needless indirection or configuration,
-redundant state or concurrency, and disproportionate architecture.
-
-Diff-mode prompts include a bounded context-pack view and bounded unified diff.
-Moved submodule pointers include locally available commit summaries. Full
-changed-path scope remains available to validation and read-only repository
-tools without duplicating every path, status, and stat in the initial request.
-The model can page through that complete inventory before requesting narrow
-path-specific diffs, and inspect bounded file outlines before selecting
-`read_file` ranges. Every review and simplification mode also exposes an
-in-process `jq` tool that retrieves one field from repository JSON through an
-RFC 6901 JSON Pointer. It follows the same worktree/index/HEAD source isolation
-as file reads and does not execute an external `jq` command or general filters.
-Requests whose initial serialized estimate reaches the configured context budget
-fail before contacting the provider.
-
-Review final reports also include built-in static-check results. For changed Go
-files, the bundled golangci-lint check analyzes each affected package with its
-complete production and test file context, while reporting diagnostics only for
-files in the selected review scope. Codebase checks apply effective Git ignore
-rules separately in each initialized repository component. They prune ignored
-untracked directories before module discovery. Tracked paths remain in scope,
-while ignored private and generated data cannot block inspection.
-
-Both commands offer provider-hosted web search on every normal model step using
-the existing OpenAI API-key or ChatGPT/Codex-plan login. API-key auth caps hosted
-searches at four per response by default; plan auth leaves provider default
-uncapped. `--max-web-searches <n>` overrides either default. No search-specific
-credential is needed. A provider that rejects hosted search is retried once
-without it, and report summary discloses lookup limitation. Wire behavior follows
-the [OpenAI web-search guide](https://developers.openai.com/api/docs/guides/tools-web-search).
-
-Installed `go`, `rustup`, and `ctx7` executables add typed `go_doc`, `rust_doc`,
-`context7_library`, and `context7_docs` tools. Missing commands are simply
-omitted. These tools run fixed documentation-only argument shapes without shell
-access or auto-installation. Context7 works logged out at lower service limits,
-as described by its [CLI documentation](https://github.com/upstash/context7/blob/master/docs/clients/cli.mdx).
-External queries must contain only public language/library questions—never
-secrets, source, diffs, credentials, personal data, or private repository
-details. Reports retain exact repository evidence and list deduplicated material
-external source URLs or local documentation locators in summary.
-
-The launch object contains only the detached command, durable task ID, and
-producer PID:
-
-```text
-{"command":"review","id":"4YH2S7M6N5QK8J3C9RTPABCD","pid":12345}
-```
-
-The detached review or simplification process persists its terminal result.
-`review --wait <id>` or `simplify --wait <id>` waits without a deadline and
-prints only the strict final report JSON. Completed reports can be retrieved
-repeatedly from any working directory because task IDs are resolved across
-project metadata stores. Failed, unknown, malformed, corrupt, dead-producer, or
-wrong-command tasks fail with empty stdout; signals cancel an active wait.
-
-Invalid tool arguments and missing evidence paths are returned to the model so
-it can correct the request instead of aborting the task; an authoritative
-repository-state change aborts immediately. Retryable HTTP/2 stream resets and
-truncated provider streams receive one equivalent streaming retry. Strict
-launch and report stdout remain unchanged.
-
-See [docs/spec.md](docs/spec.md) for exact mode, schema, tool, launch, and wait
-contracts.
 
 ## Explore
 
@@ -582,14 +394,13 @@ subcommand:
 
 ```sh
 git-agent --cwd <directory> <command> [args...]
-git-agent --cwd ../other-repo review --staged
 git-agent --cwd /srv/project search "where is configuration loaded"
 ```
 
 Relative directories are resolved from the caller's working directory;
 absolute directories are accepted directly. The selected directory applies to
-repository discovery, search scope, guidance, relative paths, and detached
-tasks. For `explore`, it is the complete search and read-tool boundary even when
+repository discovery, search scope, guidance, relative paths, and task context.
+For `explore`, it is the complete search and read-tool boundary even when
 an ancestor directory is a Git repository. Invalid directories fail before the
 subcommand runs.
 
@@ -602,16 +413,10 @@ git-agent pr-message [flags]
 git-agent project_id
 git-agent release-note [--out <file>] [flags] <base> <release>
 git-agent release-note [--out <file>] [flags] patch|minor|major
-git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]
-git-agent review --wait <id>
-git-agent review [--debug] [--fast] --follow-up <turn-id> <prompt...>
 git-agent search [flags] <query...>
 git-agent search --ls [--remote <url>] [--format text|json]
 git-agent search --ls-remotes [--format text|json|completion]
 git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]
-git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]
-git-agent simplify --wait <id>
-git-agent simplify [--debug] [--fast] --follow-up <turn-id> <prompt...>
 git-agent config index.remote [<git-url>]
 git-agent config --unset index.remote
 git-agent index sync
@@ -629,13 +434,9 @@ Common generation and inspection flags:
 | `--fast` | Request fast service tier |
 | `--low`, `--medium`, `--high`, `--xhigh` | Set reasoning effort |
 | `--base-url <url>` | Override provider base URL |
-| `--timeout <duration>` | Set request timeout; `review`/`simplify` default to none |
-| `--depth fast\|balanced\|thorough` | Review/simplify only: select calculated inspection depth; reasoning defaults by model |
-| `--max-steps <n>` | Bound agent loop steps; overrides and conflicts with `--depth` |
-| `--max-web-searches <n>` | Review/simplify only: override hosted-search cap |
-| `--dry-run` | Review/simplify only: run a deterministic inspection without provider access |
-| `--follow-up <turn-id> <prompt...>` | Review/simplify only: re-evaluate a successful provider turn |
-| `--help-agent` | Review/simplify only: show scope, depth, and reasoning help intended for coding agents |
+| `--timeout <duration>` | Set request timeout |
+| `--max-steps <n>` | Bound agent loop steps |
+| `--follow-up <search-id> <question...>` | Continue an exploration with its saved context |
 | `--guidance-family auto\|agents\|claude\|codex\|none` | Force guidance family |
 | `--hint <text>` | Add a bounded operator hint |
 | `--debug` | Print diagnostics |
@@ -653,75 +454,6 @@ Persistent settings are stored in
 global. Displayed URLs redact URL credentials; sync uses same Git transport
 and authentication behavior as search `--remote`, without invoking `git`
 executable or interactive credential prompts.
-
-Review and simplification completion hooks use the separate global file
-`~/.git-agent/settings.json`. This self-contained example formats the complete
-payload as Markdown in Go, uses the session title as the ntfy title, and enables
-ntfy Markdown rendering:
-
-```json
-{
-  "hooks": {
-    "post_inspection": [
-      "printf '%s\\n' {{shellquote (format_markdown .)}} | curl --fail --silent --show-error -H 'Markdown: yes' -H 'Content-Type: text/markdown' -H {{shellquote (printf \"Title: %s\" .Session.Title)}} --data-binary @- https://ntfy.sh/my-topic"
-    ]
-  }
-}
-```
-
-The file is trusted configuration: hook entries execute as shell programs.
-Replace `my-topic` with the destination topic. The example requires only
-`curl`; it introduces no script or JSON-formatting dependency. The
-`format_markdown` template function is implemented by git-agent and renders a
-branched review as Markdown equivalent to:
-A notification from a branched review is rendered as readable text:
-
-```text
-Title: review git-agent (uncommitted)
-
-Session ID: 5FTQATWALYB2QYPXVX4FZIBZIC
-
-Usage:
-  Input: 42000 (cached: 12000, uncached: 30000)
-  Output: 3500 (reasoning: 2100)
-  Total: 45500
-  Used skills:
-    - go
-    - security-review
-  Tool calls:
-    - jq: 3
-    - read_file: 5
-  Branches created: 2
-  Branch b1 (parent: root)
-    Model: gpt-6-astra
-    Reasoning effort: medium
-    Input: 14000 (cached: 4000, uncached: 10000)
-    Output: 1200 (reasoning: 700)
-    Total: 15200
-
-Summary: One high-severity finding.
-Recommendation: FIX
-
-Findings:
-[HIGH] Stale result is returned
-  Aspect: correctness
-  Impact: Callers can observe outdated data.
-  Evidence:
-    - internal/cache.go:42-47 — Cached value bypasses refresh
-  Fix: Invalidate the cached value before reading.
-
-Checks:
-golangci-lint: findings
-  - main.go:38:4 [gocritic] os.Exit will exit, and defer stop() will not run
-```
-
-Simplify notifications render `opportunities` instead of `findings`; empty lists
-render as `None`. Malformed optional display fields, unrelated lookalike keys,
-and unknown future report fields do not break formatting. The exact report
-remains available as JSON from `review --wait` or `simplify --wait`. Hook
-failures do not replace a successful report or change wait output.
-
-See [the specification](docs/spec.md) for the v2 payload and template contract.
 
 When `skills-mgr` is available on `PATH`, message-generation commands call
 `skills-mgr list` and inject its Markdown output verbatim as a developer prompt
@@ -790,9 +522,6 @@ Behavior defaults:
   These defaults match the configured model ID; other IDs omit the effort and
   use the provider's default.
 - `--low`, `--medium`, `--high`, and `--xhigh` override the model default.
-  Review/simplify `--depth` controls inspection budget, not reasoning effort.
-  Review/simplify follow-ups and child branches retain their existing
-  explicit/inherited effort.
 - For normal commit generation, `--hint` supplies explicit intent and
   formatting preferences ahead of default style guidance. It does not change
   which staged changes are committed. Other workflows retain their task-specific
@@ -812,56 +541,14 @@ flowchart TD
     Search --> SearchOutput["JSON or brief stdout"]
 ```
 
-`review` and `simplify` keep nonterminal trace events process-local. Detached
-runs persist only a small task record under:
-
-```text
-~/.git-agent/<project-identity-sha>/background/<task-id>.json
-```
-
-Failed task records include bounded debugging context: model/mode identity,
-launch repository fingerprint, and recent sanitized tool-call/tool-output
-summaries. They do not contain provider credentials, full requests/responses,
-or an unbounded repository trace.
-
-Git repositories with `origin` use the SHA-256 of its normalized repository
-identity, so common SSH and HTTPS URL spellings and separate clones share task
-records. Projects without `origin` use the cleaned absolute project-path SHA.
-
-Search indexes use a project identity metadata root:
-
-```text
-~/.git-agent/<project-identity-sha>/search/
-```
-
-As with background records, Git repositories with `origin` use normalized
-origin identity and otherwise fall back to the cleaned absolute path.
-
-On the next run for an existing project, legacy metadata from
-`<project>/.git-agent/` is migrated into the home metadata directory
-automatically.
-
 ## Local Development
 
 ```sh
-shadowtree build
-shadowtree test
-shadowtree install prefix=/usr/local
+shadowtree install
 ```
 
-`shadowtree install` builds and installs the binary without writing a build
-artifact into the repository. It accepts `destdir` for package-style installs.
-
-Install arguments and environment defaults:
-
-| Input | Default |
-| --- | --- |
-| `prefix` | `$HOME/.local` |
-| `destdir` | empty |
-| `fish_config_dir` | `$XDG_CONFIG_HOME/fish`, or `$HOME/.config/fish` |
-
-Fish completions install under `<fish_config_dir>/completions` when the fish
-config directory already exists.
+The install recipe builds and installs the binary and installs Fish
+completions when the configured Fish directory exists.
 
 ## Security and Privacy
 
@@ -873,18 +560,11 @@ config directory already exists.
   creating commits.
 - Message generation sends prepared repository context to the configured
   provider.
-- Review and simplify may send model-authored public documentation queries to
-  provider-hosted web search and optional Context7; prompts forbid repository
-  content and sensitive data in those queries.
 - Search sends indexed chunks and queries to the configured embedding provider.
 - API keys and bearer tokens are redacted from debug output and errors.
 - Repository tools do not follow symlinks outside the repository.
 - Metadata and indexes under `~/.git-agent/` are restricted to
   the current user on platforms with Unix-style permission bits.
-- Detached task records contain producer metadata and the exact terminal
-  `final` or `error` event. Failed records also contain bounded sanitized
-  diagnostics. Records are owner-only and retained indefinitely so a completed
-  report remains retrievable.
 
 ## Specification
 

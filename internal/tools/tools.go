@@ -20,7 +20,6 @@ import (
 	json "encoding/json/v2"
 
 	"github.com/go-git/go-git/v6/plumbing/filemode"
-	"github.com/yusing/git-agent/internal/doccmd"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/skillcmd"
 	"github.com/yusing/git-agent/internal/textutil"
@@ -53,87 +52,18 @@ type Registry struct {
 	checkState func() error
 }
 
-type reviewStateGuard struct {
-	repo        *gitctx.Repository
-	mode        ReviewMode
-	fingerprint gitctx.ChangeFingerprint
-}
-
-type ReviewMode string
+type fileMode uint8
 
 const (
-	ReviewModeCodebase    ReviewMode = "codebase"
-	ReviewModeUncommitted ReviewMode = "uncommitted"
-	ReviewModeStaged      ReviewMode = "staged"
-	commitIndexFiles      ReviewMode = "commit-index"
+	worktreeFiles fileMode = iota
+	commitIndexFiles
 )
-
-type ReviewChange struct {
-	Path     string `json:"path"`
-	Staging  string `json:"staging"`
-	Worktree string `json:"worktree,omitempty"`
-	Adds     int    `json:"adds"`
-	Deletes  int    `json:"deletes"`
-	IsBinary bool   `json:"is_binary,omitempty"`
-}
-
-type ReviewScope struct {
-	Changes []ReviewChange
-}
-
-func NewReviewScope(paths []string, status []gitctx.PathChange, stats []gitctx.FileStat) ReviewScope {
-	statusByPath := make(map[string]gitctx.PathChange, len(status))
-	for _, change := range status {
-		statusByPath[change.Path] = change
-	}
-	statsByPath := make(map[string]gitctx.FileStat, len(stats))
-	for _, stat := range stats {
-		statsByPath[stat.Path] = stat
-	}
-	changes := make([]ReviewChange, 0, len(paths))
-	for _, path := range paths {
-		status := statusByPath[path]
-		stat := statsByPath[path]
-		changes = append(changes, ReviewChange{
-			Path: path, Staging: status.Staging, Worktree: status.Worktree,
-			Adds: stat.Adds, Deletes: stat.Deletes, IsBinary: stat.IsBinary,
-		})
-	}
-	return ReviewScope{Changes: changes}
-}
-
-func NewReviewRegistry(repo *gitctx.Repository, skillManager *skillcmd.Manager, mode ReviewMode, scope ReviewScope, fingerprint gitctx.ChangeFingerprint) *Registry {
-	registry := &Registry{tools: map[string]Tool{}}
-	if repo != nil && mode != ReviewModeCodebase {
-		guard := &reviewStateGuard{repo: repo, mode: mode, fingerprint: fingerprint}
-		registry.checkState = guard.check
-	}
-	root := "."
-	if repo != nil {
-		root = repo.RootPath
-	}
-	registerCodebaseTools(registry, repo, root, mode)
-	if mode != ReviewModeCodebase {
-		register(registry, []Tool{
-			reviewChangesTool{mode: mode, scope: scope},
-			reviewDiffTool{repo: repo, mode: mode},
-			reviewDiffForPathsTool{repo: repo, mode: mode},
-		})
-	}
-	register(registry, skillTools(skillManager))
-	docRoot := "."
-	if repo != nil {
-		docRoot = repo.WorkPath
-	}
-	registerDocumentation(registry, doccmd.Discover(docRoot))
-	return registry
-}
 
 // NewExploreRegistry returns the read-only codebase tools rooted at root. Git
 // metadata and history are available when repo is non-nil.
 func NewExploreRegistry(root string, repo *gitctx.Repository) *Registry {
 	registry := &Registry{tools: map[string]Tool{}}
-	registerCodebaseTools(registry, repo, root, ReviewModeCodebase)
+	registerCodebaseTools(registry, repo, root, worktreeFiles)
 	if repo != nil {
 		register(registry, []Tool{
 			gitRecentCommitsTool{repo: repo, root: root},
@@ -143,11 +73,10 @@ func NewExploreRegistry(root string, repo *gitctx.Repository) *Registry {
 			gitLogRangeTool{repo: repo, root: root},
 		})
 	}
-	registerDocumentation(registry, doccmd.Discover(root))
 	return registry
 }
 
-func registerCodebaseTools(registry *Registry, repo *gitctx.Repository, root string, mode ReviewMode) {
+func registerCodebaseTools(registry *Registry, repo *gitctx.Repository, root string, mode fileMode) {
 	register(registry, []Tool{
 		repoSummaryTool{repo: repo, root: root},
 		listFilesTool{repo: repo, root: root, mode: mode},
@@ -209,12 +138,6 @@ func (r *Registry) Register(tool Tool) {
 	r.tools[tool.Definition().Name] = tool
 }
 
-func registerDocumentation(registry *Registry, commands *doccmd.Commands) {
-	for _, tool := range documentationTools(commands) {
-		registry.tools[tool.Definition().Name] = tool
-	}
-}
-
 func (r *Registry) Definitions(names []string) []Definition {
 	defs := make([]Definition, 0, len(names))
 	for _, name := range names {
@@ -246,17 +169,6 @@ func (r *Registry) CheckSnapshot() error {
 	return r.checkState()
 }
 
-func (g *reviewStateGuard) check() error {
-	switch g.mode {
-	case ReviewModeStaged:
-		return g.repo.CheckStagedReviewFingerprint(g.fingerprint)
-	case ReviewModeUncommitted:
-		return g.repo.CheckUncommittedFingerprint(g.fingerprint)
-	default:
-		return nil
-	}
-}
-
 func CommitMessageToolNames() []string {
 	return []string{
 		"list_files",
@@ -277,17 +189,6 @@ func AmendMessageToolNames() []string {
 		"git_final_amended_diff",
 		"git_show_file_at_rev",
 	}
-}
-
-func ReviewToolCandidates(mode ReviewMode) []string {
-	names := []string{
-		"repo_summary", "list_files", "read_file", "inspect_file", jqToolName, "grep", "find",
-		string(doccmd.GoDoc), string(doccmd.RustDoc), string(doccmd.Context7Library), string(doccmd.Context7Docs),
-	}
-	if mode != ReviewModeCodebase {
-		names = append(names, "review_changes", "review_diff", "review_diff_for_paths")
-	}
-	return names
 }
 
 func ExploreToolNames() []string {
@@ -562,34 +463,27 @@ func (t repoSummaryTool) Execute(context.Context, Invocation) (Result, error) {
 type listFilesTool struct {
 	repo *gitctx.Repository
 	root string
-	mode ReviewMode
+	mode fileMode
 }
 
 var errListFilesComplete = errors.New("list_files entry cap reached")
 
-func indexedFilePaths(repo *gitctx.Repository, mode ReviewMode, requested string, maxEntries int) ([]string, bool, error) {
+func indexedFilePaths(repo *gitctx.Repository, requested string, maxEntries int) ([]string, bool, error) {
 	root, err := cleanRepoPath(requested)
 	if err != nil {
 		return nil, false, err
 	}
+	idx, err := repo.ReadIndex()
+	if err != nil {
+		return nil, false, err
+	}
 	var files []string
-	if mode == commitIndexFiles {
-		idx, err := repo.ReadIndex()
-		if err != nil {
-			return nil, false, err
-		}
-		for _, entry := range idx.Entries {
-			if entry.Mode != filemode.Submodule {
-				files = append(files, entry.Name)
-			}
-		}
-		sort.Strings(files)
-	} else {
-		files, err = repo.StagedReviewFiles()
-		if err != nil {
-			return nil, false, err
+	for _, entry := range idx.Entries {
+		if entry.Mode != filemode.Submodule {
+			files = append(files, entry.Name)
 		}
 	}
+	sort.Strings(files)
 	prefix := ""
 	if root != "." {
 		prefix = strings.TrimSuffix(root, "/")
@@ -627,8 +521,8 @@ func (t listFilesTool) Execute(_ context.Context, invocation Invocation) (Result
 	if maxEntries <= 0 {
 		maxEntries = 200
 	}
-	if t.mode == ReviewModeStaged || t.mode == commitIndexFiles {
-		files, truncated, err := indexedFilePaths(t.repo, t.mode, args.Path, maxEntries)
+	if t.mode == commitIndexFiles {
+		files, truncated, err := indexedFilePaths(t.repo, args.Path, maxEntries)
 		if err != nil {
 			return Result{}, err
 		}
@@ -658,7 +552,7 @@ func (t listFilesTool) Execute(_ context.Context, invocation Invocation) (Result
 type readFileTool struct {
 	repo *gitctx.Repository
 	root string
-	mode ReviewMode
+	mode fileMode
 }
 
 func (t readFileTool) Definition() Definition {
@@ -673,11 +567,8 @@ func (t readFileTool) Definition() Definition {
 	}, "path"), Strict: true}
 }
 
-func fileSourceProp(mode ReviewMode) map[string]any {
+func fileSourceProp(mode fileMode) map[string]any {
 	description := "File source. Empty means worktree."
-	if mode == ReviewModeStaged {
-		description = "File source. Empty means index; worktree is unavailable in staged mode."
-	}
 	if mode == commitIndexFiles {
 		description = "File source: index (default) or head; worktree reads are unavailable for commit generation."
 		return enumStringProp(description, "", "index", "head")
@@ -720,14 +611,14 @@ func (t readFileTool) Execute(_ context.Context, invocation Invocation) (Result,
 	}, truncated)
 }
 
-func openInspectedFile(repo *gitctx.Repository, root string, mode ReviewMode, rawPath, source string) (io.ReadCloser, string, error) {
+func openInspectedFile(repo *gitctx.Repository, root string, mode fileMode, rawPath, source string) (io.ReadCloser, string, error) {
 	path, err := cleanRepoPath(rawPath)
 	if err != nil {
 		return nil, "", err
 	}
-	if mode == ReviewModeStaged || mode == commitIndexFiles {
+	if mode == commitIndexFiles {
 		if source == "worktree" {
-			return nil, "", fmt.Errorf("source worktree is unavailable in staged mode; use index or head")
+			return nil, "", fmt.Errorf("source worktree is unavailable during commit generation; use index or head")
 		}
 		if source == "" {
 			source = "index"
@@ -739,7 +630,7 @@ func openInspectedFile(repo *gitctx.Repository, root string, mode ReviewMode, ra
 		return nil, "", fmt.Errorf("source must be worktree, index, or head")
 	}
 	if repo == nil {
-		if mode != ReviewModeCodebase || source != "worktree" {
+		if mode == commitIndexFiles || source != "worktree" {
 			return nil, "", fmt.Errorf("source %s requires a Git repository", source)
 		}
 		reader, err := openWorktreeFile(root, path)
@@ -749,15 +640,7 @@ func openInspectedFile(repo *gitctx.Repository, root string, mode ReviewMode, ra
 	if err != nil {
 		return nil, "", err
 	}
-	var reader io.ReadCloser
-	switch mode {
-	case ReviewModeUncommitted:
-		reader, err = repo.OpenUncommittedReviewFile(gitctx.FileSource(source), path)
-	case ReviewModeStaged:
-		reader, err = repo.OpenStagedReviewFile(gitctx.FileSource(source), path)
-	default:
-		reader, err = repo.OpenFile(gitctx.FileSource(source), path)
-	}
+	reader, err := repo.OpenFile(gitctx.FileSource(source), path)
 	return reader, source, err
 }
 
@@ -874,7 +757,7 @@ func validUTF8Prefix(value string) string {
 type grepTool struct {
 	repo *gitctx.Repository
 	root string
-	mode ReviewMode
+	mode fileMode
 }
 
 func (t grepTool) Definition() Definition {
@@ -912,8 +795,8 @@ func (t grepTool) Execute(_ context.Context, invocation Invocation) (Result, err
 	if maxMatches <= 0 {
 		maxMatches = 100
 	}
-	if t.mode == ReviewModeStaged || t.mode == commitIndexFiles {
-		return t.executeStaged(pattern, args.Path, args.Glob, maxMatches)
+	if t.mode == commitIndexFiles {
+		return t.executeIndex(pattern, args.Path, args.Glob, maxMatches)
 	}
 	var matches []map[string]any
 	truncated := false
@@ -975,8 +858,8 @@ func (t grepTool) Execute(_ context.Context, invocation Invocation) (Result, err
 	return jsonResult("grep", map[string]any{"matches": matches}, truncated)
 }
 
-func (t grepTool) executeStaged(pattern *regexp.Regexp, requested, glob string, maxMatches int) (Result, error) {
-	paths, _, err := indexedFilePaths(t.repo, t.mode, requested, int(^uint(0)>>1))
+func (t grepTool) executeIndex(pattern *regexp.Regexp, requested, glob string, maxMatches int) (Result, error) {
+	paths, _, err := indexedFilePaths(t.repo, requested, int(^uint(0)>>1))
 	if err != nil {
 		return Result{}, err
 	}
@@ -1042,7 +925,7 @@ func limitMatchText(text string) string {
 type findTool struct {
 	repo *gitctx.Repository
 	root string
-	mode ReviewMode
+	mode fileMode
 }
 
 func (t findTool) Definition() Definition {
@@ -1073,8 +956,8 @@ func (t findTool) Execute(_ context.Context, invocation Invocation) (Result, err
 	if maxEntries <= 0 {
 		maxEntries = 200
 	}
-	if t.mode == ReviewModeStaged || t.mode == commitIndexFiles {
-		return t.executeStaged(args.Path, args.Name, args.Type, maxEntries)
+	if t.mode == commitIndexFiles {
+		return t.executeIndex(args.Path, args.Name, args.Type, maxEntries)
 	}
 	var entries []map[string]any
 	truncated := false
@@ -1105,8 +988,8 @@ func (t findTool) Execute(_ context.Context, invocation Invocation) (Result, err
 	return jsonResult("find", map[string]any{"entries": entries}, truncated)
 }
 
-func (t findTool) executeStaged(requested, name, entryType string, maxEntries int) (Result, error) {
-	files, _, err := indexedFilePaths(t.repo, t.mode, requested, int(^uint(0)>>1))
+func (t findTool) executeIndex(requested, name, entryType string, maxEntries int) (Result, error) {
+	files, _, err := indexedFilePaths(t.repo, requested, int(^uint(0)>>1))
 	if err != nil {
 		return Result{}, err
 	}
@@ -1149,121 +1032,6 @@ func (t findTool) executeStaged(requested, name, entryType string, maxEntries in
 		entries = append(entries, map[string]any{"path": path, "type": kind})
 	}
 	return jsonResult("find", map[string]any{"entries": entries}, truncated)
-}
-
-type reviewDiffTool struct {
-	repo *gitctx.Repository
-	mode ReviewMode
-}
-
-const maxReviewChangesPage = 500
-
-type reviewChangesTool struct {
-	mode  ReviewMode
-	scope ReviewScope
-}
-
-func (t reviewChangesTool) Definition() Definition {
-	return Definition{Name: "review_changes", Description: "Return one page of the authoritative changed-path inventory with status and line stats.", Schema: schema(map[string]any{
-		"offset": map[string]any{"type": "integer", "description": "Zero-based page offset.", "minimum": 0},
-		"limit":  intProp("Maximum changes to return.", 1, maxReviewChangesPage),
-	}), Strict: true}
-}
-
-func (t reviewChangesTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
-	args, err := parseArgs[struct {
-		Offset int `json:"offset"`
-		Limit  int `json:"limit"`
-	}](invocation.Arguments)
-	if err != nil {
-		return Result{}, err
-	}
-	if args.Offset < 0 {
-		return Result{}, fmt.Errorf("offset must be non-negative")
-	}
-	if args.Limit < 1 || args.Limit > maxReviewChangesPage {
-		return Result{}, fmt.Errorf("limit must be between 1 and %d", maxReviewChangesPage)
-	}
-	start := min(args.Offset, len(t.scope.Changes))
-	end := min(start+args.Limit, len(t.scope.Changes))
-	hasMore := end < len(t.scope.Changes)
-	return jsonResult("review_changes", map[string]any{
-		"mode": t.mode, "changes": t.scope.Changes[start:end], "total": len(t.scope.Changes),
-		"next_offset": end, "has_more": hasMore,
-	}, hasMore)
-}
-
-func (t reviewDiffTool) Definition() Definition {
-	return Definition{Name: "review_diff", Description: "Return the authoritative review diff with caps.", Schema: cappedSchema(), Strict: true}
-}
-
-func (t reviewDiffTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
-	args, err := parseArgs[capArgs](invocation.Arguments)
-	if err != nil {
-		return Result{}, err
-	}
-	maxBytes, maxLines := normalizeCaps(args.MaxBytes, args.MaxLines)
-	var diff string
-	var truncated bool
-	switch t.mode {
-	case ReviewModeUncommitted:
-		diff, truncated, err = t.repo.UncommittedDiff(maxBytes, maxLines)
-	case ReviewModeStaged:
-		diff, truncated, err = t.repo.StagedReviewDiffForPaths(nil, maxBytes, maxLines)
-	default:
-		return Result{}, fmt.Errorf("review_diff is unavailable in %s mode", t.mode)
-	}
-	if err != nil {
-		return Result{}, err
-	}
-	return jsonResult("review_diff", map[string]any{"mode": t.mode, "diff": diff}, truncated)
-}
-
-type reviewDiffForPathsTool struct {
-	repo *gitctx.Repository
-	mode ReviewMode
-}
-
-func (t reviewDiffForPathsTool) Definition() Definition {
-	return Definition{Name: "review_diff_for_paths", Description: "Return the authoritative review diff for selected repository-relative paths with caps.", Schema: schema(map[string]any{
-		"paths":     stringArrayProp("Repository-relative paths to include."),
-		"max_bytes": intProp("Maximum bytes to return.", 1, 65536),
-		"max_lines": intProp("Maximum lines to return.", 1, 2000),
-	}, "paths"), Strict: true}
-}
-
-func (t reviewDiffForPathsTool) Execute(_ context.Context, invocation Invocation) (Result, error) {
-	args, err := parseArgs[struct {
-		Paths    []string `json:"paths"`
-		MaxBytes int      `json:"max_bytes"`
-		MaxLines int      `json:"max_lines"`
-	}](invocation.Arguments)
-	if err != nil {
-		return Result{}, err
-	}
-	if len(args.Paths) == 0 {
-		return Result{}, fmt.Errorf("paths is required")
-	}
-	for _, path := range args.Paths {
-		if _, err := cleanRepoPath(path); err != nil {
-			return Result{}, err
-		}
-	}
-	maxBytes, maxLines := normalizeCaps(args.MaxBytes, args.MaxLines)
-	var diff string
-	var truncated bool
-	switch t.mode {
-	case ReviewModeUncommitted:
-		diff, truncated, err = t.repo.UncommittedDiffForPaths(args.Paths, maxBytes, maxLines)
-	case ReviewModeStaged:
-		diff, truncated, err = t.repo.StagedReviewDiffForPaths(args.Paths, maxBytes, maxLines)
-	default:
-		return Result{}, fmt.Errorf("review_diff_for_paths is unavailable in %s mode", t.mode)
-	}
-	if err != nil {
-		return Result{}, err
-	}
-	return jsonResult("review_diff_for_paths", map[string]any{"mode": t.mode, "paths": args.Paths, "diff": diff}, truncated)
 }
 
 type gitStagedPathsTool repoTool

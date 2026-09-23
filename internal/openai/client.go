@@ -19,7 +19,6 @@ import (
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
-	"github.com/yusing/git-agent/internal/provider"
 	"github.com/yusing/git-agent/internal/trace"
 )
 
@@ -46,7 +45,6 @@ type Request struct {
 	ParallelToolCalls  bool                        `json:"parallel_tool_calls"`
 	Input              []Item                      `json:"input"`
 	Tools              []ToolSpec                  `json:"tools,omitempty"`
-	HostedCapabilities []provider.HostedCapability `json:"hosted_capabilities,omitempty"`
 	TextFormat         *TextFormat                 `json:"text_format,omitempty"`
 	OnStreamEvent      func(StreamEvent) error     `json:"-"`
 	OnRetry            func(RetryEvent) error      `json:"-"`
@@ -115,22 +113,6 @@ type Item struct {
 	RawJSON               string `json:"raw_json,omitempty"`
 }
 
-// PortableItems returns conversation items that can be replayed by another
-// model. Provider-specific opaque items are omitted; ordinary messages and
-// local function exchanges remain exact.
-func PortableItems(items []Item) []Item {
-	portable := make([]Item, 0, len(items))
-	for _, item := range items {
-		switch item.Type {
-		case "reasoning", "web_search_call":
-			continue
-		default:
-			portable = append(portable, item)
-		}
-	}
-	return portable
-}
-
 type ToolSpec struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description,omitempty"`
@@ -143,7 +125,6 @@ type Response struct {
 	Text            string           `json:"text,omitempty"`
 	ToolCalls       []ToolCall       `json:"tool_calls,omitempty"`
 	Continuation    []Item           `json:"continuation,omitempty"`
-	HostedToolCalls []HostedToolCall `json:"hosted_tool_calls,omitempty"`
 	FinishKind      string           `json:"finish_kind,omitempty"`
 	TurnState       string           `json:"-"`
 	Usage           Usage            `json:"usage"`
@@ -165,15 +146,6 @@ func (u *Usage) Add(other Usage) {
 	u.OutputTokens += other.OutputTokens
 	u.ReasoningTokens += other.ReasoningTokens
 	u.TotalTokens += other.TotalTokens
-}
-
-type HostedToolCall struct {
-	ID      string   `json:"id"`
-	Type    string   `json:"type"`
-	Status  string   `json:"status"`
-	Action  string   `json:"action,omitempty"`
-	Queries []string `json:"queries,omitempty"`
-	Sources []string `json:"sources,omitempty"`
 }
 
 type ToolCall struct {
@@ -267,10 +239,10 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 	}
 	reason, retry := streamRetryReason(streamErr)
 	if !retry {
-		return response, responseError(streamErr, request)
+		return response, upstreamError(streamErr)
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return response, responseError(errors.Join(streamErr, ctxErr), request)
+		return response, upstreamError(errors.Join(streamErr, ctxErr))
 	}
 	if request.OnRetry != nil {
 		if err := request.OnRetry(RetryEvent{Attempt: 1, MaxAttempts: maxStreamRetryAttempts, Reason: reason}); err != nil {
@@ -278,11 +250,11 @@ func (c *SDKClient) CreateResponse(ctx context.Context, request Request) (Respon
 		}
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return response, responseError(errors.Join(streamErr, ctxErr), request)
+		return response, upstreamError(errors.Join(streamErr, ctxErr))
 	}
 	retried, retryErr := createStreamingResponse(ctx, client, params, 2, codexTurnStateEnabled, turnState, request.OnStreamEvent)
 	if retryErr != nil {
-		return retried, responseError(errors.Join(streamErr, retryErr), request)
+		return retried, upstreamError(errors.Join(streamErr, retryErr))
 	}
 	return retried, nil
 }
@@ -475,84 +447,6 @@ func upstreamError(err error) error {
 	return fmt.Errorf("upstream request failed: %w", err)
 }
 
-func responseError(err error, request Request) error {
-	if failure, ok := hostedCapabilityFailure(err, request); ok {
-		return &provider.UnsupportedCapabilityError{Failure: failure}
-	}
-	return upstreamError(err)
-}
-
-func hostedCapabilityFailure(err error, request Request) (provider.CapabilityFailure, bool) {
-	apiErr, ok := errors.AsType[*openaisdk.Error](err)
-	if !ok || apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden || apiErr.StatusCode == http.StatusTooManyRequests {
-		return provider.CapabilityFailure{}, false
-	}
-	if apiErr.StatusCode < 400 || apiErr.StatusCode >= 500 {
-		return provider.CapabilityFailure{}, false
-	}
-	webSearch, enabled := findHostedCapability(request.HostedCapabilities, provider.HostedCapabilityWebSearch)
-	if !enabled {
-		return provider.CapabilityFailure{}, false
-	}
-
-	param := strings.ToLower(apiErr.Param)
-	code := strings.ToLower(apiErr.Code)
-	message := strings.ToLower(apiErr.Message)
-	switch {
-	case strings.Contains(param, "web_search") || strings.Contains(code, "web_search") || isWebSearchToolRejection(param, message):
-		return provider.CapabilityFailure{Capability: provider.HostedCapabilityWebSearch, Reason: "web_search rejected"}, true
-	case isHostedIncludeRejection(param, code, message):
-		return provider.CapabilityFailure{Capability: provider.HostedCapabilityWebSearch, Reason: "web_search metadata include rejected"}, true
-	case param == "max_tool_calls" || strings.Contains(code, "max_tool_calls") || (param == "" && isExplicitRejection(message, "max_tool_calls")):
-		return provider.CapabilityFailure{Capability: provider.HostedCapabilityWebSearch, Reason: "hosted tool call limit rejected"}, true
-	case apiErr.StatusCode == http.StatusBadRequest && request.AuthAccountID != "" && webSearch.MaxCalls > 0 && strings.TrimSpace(apiErr.RawJSON()) == "":
-		return provider.CapabilityFailure{Capability: provider.HostedCapabilityWebSearch, Reason: "hosted tool call limit rejected"}, true
-	default:
-		return provider.CapabilityFailure{}, false
-	}
-}
-
-func findHostedCapability(capabilities []provider.HostedCapability, kind provider.HostedCapabilityKind) (provider.HostedCapability, bool) {
-	for _, capability := range capabilities {
-		if capability.Kind == kind {
-			return capability, true
-		}
-	}
-	return provider.HostedCapability{}, false
-}
-
-func isWebSearchToolRejection(param, message string) bool {
-	if param != "tools" && !strings.HasSuffix(param, "].type") && !strings.HasSuffix(param, ".type") {
-		return false
-	}
-	return isExplicitRejection(message, "web_search") || isExplicitRejection(message, "web search")
-}
-
-func isHostedIncludeRejection(param, code, message string) bool {
-	if strings.Contains(param, "web_search_call.action.sources") || strings.Contains(param, "reasoning.encrypted_content") ||
-		strings.Contains(code, "web_search_call.action.sources") || strings.Contains(code, "reasoning.encrypted_content") {
-		return true
-	}
-	if param != "include" && !strings.HasPrefix(param, "include[") && !strings.HasPrefix(param, "include.") {
-		return false
-	}
-	return isExplicitRejection(message, "web_search_call.action.sources") ||
-		isExplicitRejection(message, "reasoning.encrypted_content") ||
-		isExplicitRejection(message, "web search sources")
-}
-
-func isExplicitRejection(message, subject string) bool {
-	if !strings.Contains(message, subject) {
-		return false
-	}
-	for _, marker := range []string{"unsupported", "not supported", "unknown", "unrecognized", "invalid", "rejected", "not allowed", "unavailable"} {
-		if strings.Contains(message, marker) {
-			return true
-		}
-	}
-	return false
-}
-
 type streamAccumulator struct {
 	callsByID  map[string]*ToolCall
 	callsByIdx map[int64]*ToolCall
@@ -715,7 +609,7 @@ func responseFromCompleted(final *responses.Response) Response {
 	}
 	for _, item := range final.Output {
 		switch item.Type {
-		case "reasoning", "web_search_call", "message", "function_call":
+		case "reasoning", "message", "function_call":
 			result.Continuation = append(result.Continuation, Item{Type: item.Type, ID: item.ID, RawJSON: item.RawJSON()})
 		}
 		switch item.Type {
@@ -727,32 +621,7 @@ func responseFromCompleted(final *responses.Response) Response {
 				Name:      call.Name,
 				Arguments: call.Arguments,
 			})
-		case "web_search_call":
-			result.HostedToolCalls = append(result.HostedToolCalls, hostedToolCall(item.AsWebSearchCall()))
 		}
-	}
-	return result
-}
-
-func hostedToolCall(call responses.ResponseFunctionWebSearch) HostedToolCall {
-	result := HostedToolCall{
-		ID:     call.ID,
-		Type:   "web_search",
-		Status: string(call.Status),
-		Action: call.Action.Type,
-	}
-	result.Queries = append(result.Queries, call.Action.Queries...)
-	if call.Action.Query != "" {
-		result.Queries = append(result.Queries, call.Action.Query)
-	}
-	if call.Action.Pattern != "" {
-		result.Queries = append(result.Queries, call.Action.Pattern)
-	}
-	for _, source := range call.Action.Sources {
-		result.Sources = append(result.Sources, source.URL)
-	}
-	if call.Action.URL != "" {
-		result.Sources = append(result.Sources, call.Action.URL)
 	}
 	return result
 }
@@ -857,7 +726,7 @@ func mergeToolCalls(primary, streamed []ToolCall) []ToolCall {
 }
 
 func (r Request) toSDKParams() (responses.ResponseNewParams, error) {
-	tools := make([]responses.ToolUnionParam, 0, len(r.Tools)+len(r.HostedCapabilities))
+	tools := make([]responses.ToolUnionParam, 0, len(r.Tools))
 	for _, spec := range r.Tools {
 		tools = append(tools, responses.ToolUnionParam{
 			OfFunction: &responses.FunctionToolParam{
@@ -867,16 +736,6 @@ func (r Request) toSDKParams() (responses.ResponseNewParams, error) {
 				Strict:      openaisdk.Bool(spec.Strict),
 			},
 		})
-	}
-	var maxHostedCalls int
-	for _, capability := range r.HostedCapabilities {
-		switch capability.Kind {
-		case provider.HostedCapabilityWebSearch:
-			tools = append(tools, responses.ToolParamOfWebSearch(responses.WebSearchToolTypeWebSearch))
-			maxHostedCalls = max(maxHostedCalls, capability.MaxCalls)
-		default:
-			return responses.ResponseNewParams{}, fmt.Errorf("unsupported hosted capability %q", capability.Kind)
-		}
 	}
 
 	input := make(responses.ResponseInputParam, 0, len(r.Input))
@@ -903,15 +762,7 @@ func (r Request) toSDKParams() (responses.ResponseNewParams, error) {
 	if explicitPromptCaching {
 		params.PromptCacheOptions = responses.ResponseNewParamsPromptCacheOptions{Mode: "explicit"}
 	}
-	if len(r.HostedCapabilities) > 0 {
-		params.Include = []responses.ResponseIncludable{
-			responses.ResponseIncludableWebSearchCallActionSources,
-			responses.ResponseIncludableReasoningEncryptedContent,
-		}
-	}
-	if maxHostedCalls > 0 {
-		params.MaxToolCalls = openaisdk.Int(int64(maxHostedCalls))
-	}
+
 	if r.TextFormat != nil {
 		params.Text = responses.ResponseTextConfigParam{
 			Format: responses.ResponseFormatTextConfigParamOfJSONSchema(r.TextFormat.Name, r.TextFormat.Schema),

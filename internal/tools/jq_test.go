@@ -6,27 +6,21 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
 	"github.com/yusing/git-agent/internal/gitctx"
 )
 
-func TestJQRegistersOnlyForReviewAndSimplify(t *testing.T) {
+func TestJQRegisteredForExploreAndOmittedFromGeneration(t *testing.T) {
 	t.Parallel()
 
-	for _, mode := range []ReviewMode{ReviewModeCodebase, ReviewModeUncommitted, ReviewModeStaged} {
-		if !slices.Contains(ReviewToolCandidates(mode), jqToolName) {
-			t.Fatalf("%s review candidates omit %s", mode, jqToolName)
-		}
-		definitions := NewReviewRegistry(nil, nil, mode, ReviewScope{}, gitctx.ChangeFingerprint{}).Definitions([]string{jqToolName})
-		if len(definitions) != 1 || !definitions[0].Strict || definitions[0].Schema["additionalProperties"] != false {
-			t.Fatalf("%s jq definition = %#v", mode, definitions)
-		}
+	definitions := NewExploreRegistry(".", nil).Definitions([]string{jqToolName})
+	if len(definitions) != 1 || !definitions[0].Strict || definitions[0].Schema["additionalProperties"] != false {
+		t.Fatalf("explore jq definition = %#v", definitions)
 	}
 	if definitions := NewRegistry(nil, nil).Definitions([]string{jqToolName}); len(definitions) != 0 {
-		t.Fatalf("non-review registry exposes jq: %#v", definitions)
+		t.Fatalf("generation registry exposes jq: %#v", definitions)
 	}
 }
 
@@ -40,7 +34,7 @@ func TestJQRetrievesJSONPointerValuesWithoutRoundingNumbers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewReviewRegistry(repo, nil, ReviewModeCodebase, ReviewScope{}, gitctx.ChangeFingerprint{})
+	registry := NewExploreRegistry(dir, repo)
 
 	tests := []struct {
 		name    string
@@ -68,7 +62,7 @@ func TestJQRetrievesJSONPointerValuesWithoutRoundingNumbers(t *testing.T) {
 	}
 }
 
-func TestJQUsesStagedSourcePolicy(t *testing.T) {
+func TestJQUsesCommitIndexSourcePolicy(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -86,20 +80,16 @@ func TestJQUsesStagedSourcePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fingerprint, err := repo.StagedFingerprint()
-	if err != nil {
-		t.Fatal(err)
-	}
-	registry := NewReviewRegistry(repo, nil, ReviewModeStaged, ReviewScope{}, fingerprint)
+	registry := NewCommitRegistry(repo, nil, nil)
 	result, err := registry.Execute(t.Context(), Invocation{Name: jqToolName, Arguments: `{"path":"config.json","pointer":"/value"}`})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(result.Content, `"source": "index"`) || !strings.Contains(result.Content, `"value": "staged"`) || strings.Contains(result.Content, "unstaged-secret") {
-		t.Fatalf("staged jq leaked worktree content: %s", result.Content)
+		t.Fatalf("commit-index jq leaked worktree content: %s", result.Content)
 	}
 	if _, err := registry.Execute(t.Context(), Invocation{Name: jqToolName, Arguments: `{"path":"config.json","source":"worktree","pointer":"/value"}`}); err == nil {
-		t.Fatal("jq accepted worktree source in staged mode")
+		t.Fatal("jq accepted worktree source during commit generation")
 	}
 }
 
@@ -144,7 +134,7 @@ func TestJQMarksOversizedSelectedValuesTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewReviewRegistry(repo, nil, ReviewModeCodebase, ReviewScope{}, gitctx.ChangeFingerprint{})
+	registry := NewExploreRegistry(dir, repo)
 	result, err := registry.Execute(t.Context(), Invocation{Name: jqToolName, Arguments: `{"path":"large.json","pointer":"/large","max_bytes":32,"max_lines":10}`})
 	if err != nil {
 		t.Fatal(err)

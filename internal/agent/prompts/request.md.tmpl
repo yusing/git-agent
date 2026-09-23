@@ -1,11 +1,9 @@
 # Available tools
-{{range .Tools}}{{if .Hosted}}- web_search (provider-hosted): Search the public web for current language or library documentation. Never send repository content or sensitive data.
-{{else}}- {{.Name}}: {{.Description}}
-{{end}}{{end}}
+{{range .Tools}}- {{.Name}}: {{.Description}}
+{{end}}
 # Agent loop
 You are in a bounded agent loop.
-Use only the listed local tools and provider-hosted capabilities.
-Provider-hosted calls do not consume the local function-call budget.
+Use only the listed local tools.
 Call tools only when they reduce material uncertainty; do not call tools just to repeat provided context.
 When a tool output has ok=false, correct the invocation or use different evidence and continue.
 {{if .ReadFileAvailable}}Use read_file only with a repository path copied verbatim from prepared context or prior repository-tool output. Discover paths with available inventory or search tools first. Package import paths, package names, types, and symbols do not imply filenames.

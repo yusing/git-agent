@@ -17,9 +17,6 @@ var commitOperatorHintPromptSource string
 //go:embed prompts/tool-policy.md
 var toolPolicyPrompt string
 
-//go:embed prompts/review-tool-policy.md
-var reviewToolPolicyPrompt string
-
 //go:embed prompts/environment.md.tmpl
 var environmentPromptSource string
 

@@ -17,7 +17,7 @@
 - `internal/tools/`: curated read-only model tool registry and tool envelopes.
 - `internal/jsonx/`: encoding/json/v2 helpers for number preservation and extra-value detection.
 - `internal/textutil/`: text normalization and output shaping helpers.
-- `internal/trace/`: in-memory event recording and human console trace rendering.
+- `internal/trace/`: human console trace recording and rendering.
 - `docs/spec.md`: behavioral specification and execution-flow diagrams.
 - `README.md`: user-facing command, configuration, build, and debug
   documentation. DO NOT REPEAT CONTRACT FROM SPEC TO README.
@@ -36,9 +36,8 @@
   `internal/cli/app.go` help text and related tests, and
   `completions/git-agent.*` when completion candidates change.
 - Keep Git inspection in typed Go code. Outside tests, `exec.Command*` is limited
-  to native commit execution in `internal/cli`, fixed skill/documentation commands
-  in `internal/skillcmd` and `internal/doccmd`, and explicitly configured hooks
-  in `internal/hooks`. New subprocess capabilities require user authorization.
+  to native commit execution in `internal/cli` and fixed skill commands in
+  `internal/skillcmd`. New subprocess capabilities require user authorization.
 - Do not add write-capable model tools, arbitrary shell tools, or generic
   "run any git command" tools unless the user explicitly asks for that design
   change.

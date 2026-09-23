@@ -20,9 +20,6 @@ var budgetStatusPromptSource string
 //go:embed prompts/budget-exhausted.md.tmpl
 var budgetExhaustedPromptSource string
 
-//go:embed prompts/hosted-capability-failure.md
-var hostedCapabilityFailurePrompt string
-
 //go:embed prompts/forced-finalization.md
 var forcedFinalizationPrompt string
 
@@ -45,7 +42,6 @@ var (
 type requestPromptTool struct {
 	Name        string
 	Description string
-	Hosted      bool
 }
 
 type requestPromptData struct {

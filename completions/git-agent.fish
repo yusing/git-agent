@@ -121,8 +121,6 @@ function __git_agent_command_has_option
             contains -- "$option" debug fast for follow-up
         case release-note
             contains -- "$option" out $shared
-        case review simplify
-            contains -- "$option" codebase uncommitted staged wait follow-up depth max-web-searches dry-run help $shared
         case search
             contains -- "$option" rev remote scope min-score limit format index reindex code no-tests agent ls ls-remotes ls-files embedding-model embedding-dimensions base-url timeout debug pprof
         case '*'
@@ -131,7 +129,7 @@ function __git_agent_command_has_option
 end
 
 function __git_agent_option_takes_value
-    contains -- "$argv[1]" model base-url timeout max-steps guidance-family hint pprof wait follow-up for depth max-web-searches out rev remote scope min-score limit format embedding-model embedding-dimensions
+    contains -- "$argv[1]" model base-url timeout max-steps guidance-family hint pprof follow-up for out rev remote scope min-score limit format embedding-model embedding-dimensions
 end
 
 function __git_agent_option_value_is_valid
@@ -142,8 +140,6 @@ function __git_agent_option_value_is_valid
     switch $option
         case for
             test "$command_name" = explore; and contains -- "$value" diagnose change behavior owner
-        case depth
-            contains -- "$command_name" review simplify; and contains -- "$value" fast balanced thorough
         case guidance-family
             contains -- "$value" auto agents claude codex none
         case format
@@ -213,27 +209,6 @@ function __git_agent_option_state_is_valid
     test (count $efforts) -le 1; or return 1
 
     switch $command_name
-        case review simplify
-            if contains -- help $seen_options
-                test (count $seen_options) -eq 1; or return 1
-            end
-            set -l modes
-            for mode in codebase uncommitted staged
-                contains -- $mode $enabled_options; and set -a modes $mode
-            end
-            test (count $modes) -le 1; or return 1
-            if contains -- wait $seen_options
-                test (count $seen_options) -eq 1; or return 1
-            end
-            if contains -- follow-up $seen_options
-                for option in $seen_options
-                    contains -- "$option" follow-up fast debug; or return 1
-                end
-            end
-            if contains -- depth $seen_options; and contains -- max-steps $seen_options
-                return 1
-            end
-            return 0
         case search
             set -l list_modes
             for mode in ls ls-remotes ls-files
@@ -269,38 +244,6 @@ function __git_agent_option_is_compatible
     end
 
     switch $command_name
-        case review simplify
-            contains -- help $seen_options; and return 1
-            if test "$candidate" = help
-                test (count $seen_options) -eq 0
-                return
-            end
-            contains -- wait $seen_options; and return 1
-            if test "$candidate" = wait
-                test (count $seen_options) -eq 0
-                return
-            end
-            if contains -- follow-up $seen_options
-                contains -- "$candidate" fast debug
-                return
-            end
-            if test "$candidate" = follow-up
-                for option in $seen_options
-                    contains -- "$option" fast debug; or return 1
-                end
-                return 0
-            end
-            if contains -- "$candidate" codebase uncommitted staged
-                for mode in codebase uncommitted staged
-                    contains -- $mode $enabled_options; and return 1
-                end
-            end
-            if test "$candidate" = depth; and contains -- max-steps $seen_options
-                return 1
-            end
-            if test "$candidate" = max-steps; and contains -- depth $seen_options
-                return 1
-            end
         case search
             set -l list_modes
             for mode in ls ls-remotes ls-files
@@ -512,9 +455,7 @@ complete -c git-agent -n '__git_agent_no_subcommand' -a commit-msg -d 'Generate 
 complete -c git-agent -n '__git_agent_no_subcommand' -a pr-message -d 'Generate a pull request message from branch changes'
 complete -c git-agent -n '__git_agent_no_subcommand' -a project_id -d 'Print the current search project identifier'
 complete -c git-agent -n '__git_agent_no_subcommand' -a release-note -d 'Generate a release note for a range or version bump'
-complete -c git-agent -n '__git_agent_no_subcommand' -a review -d 'Review code with structured findings and streamed agent events'
 complete -c git-agent -n '__git_agent_no_subcommand' -a search -d 'Search repository context with embeddings'
-complete -c git-agent -n '__git_agent_no_subcommand' -a simplify -d 'Find behavior-preserving code simplifications'
 complete -c git-agent -n '__git_agent_no_subcommand' -a help -d 'Show usage'
 
 complete -c git-agent -n '__git_agent_config_needs_key' -a index.remote -d 'Dedicated Git remote for synchronized revision indexes'
@@ -532,32 +473,22 @@ complete -c git-agent -n '__git_agent_index_gc_can_complete dry-run' -a '--dry-r
 complete -c git-agent -n '__git_agent_option_available amend commit' -l amend -d 'Generate an amended commit message and amend HEAD'
 complete -c git-agent -n '__git_agent_option_available amend commit-msg' -l amend -d 'Generate an amended commit message'
 
-complete -c git-agent -n '__git_agent_option_available codebase review simplify' -l codebase -d 'Inspect the full codebase'
-complete -c git-agent -n '__git_agent_option_available uncommitted review simplify' -l uncommitted -d 'Inspect all dirty worktree changes'
-complete -c git-agent -n '__git_agent_option_available staged review simplify' -l staged -d 'Inspect staged changes only'
-complete -c git-agent -n '__git_agent_option_available wait review simplify' -l wait -r -f -d 'Wait for a detached task ID and print its report'
-complete -c git-agent -n '__git_agent_option_available follow-up review simplify' -l follow-up -r -f -d 'Re-evaluate a successful provider turn ID'
 complete -c git-agent -n '__git_agent_option_available follow-up explore' -l follow-up -r -f -d 'Fork a completed explore search ID'
 complete -c git-agent -n '__git_agent_option_available for explore' -l for -r -f -a 'diagnose change behavior owner' -d 'Select exploration query target'
-complete -c git-agent -n '__git_agent_option_available depth review' -l depth -r -f -a 'fast balanced thorough' -d 'Select inspection depth; reasoning defaults by model'
-complete -c git-agent -n '__git_agent_option_available depth simplify' -l depth -r -f -a 'fast balanced thorough' -d 'Select inspection depth; reasoning defaults by model'
-complete -c git-agent -n '__git_agent_option_available max-web-searches review simplify' -l max-web-searches -r -f -d 'Cap provider-hosted web searches'
-complete -c git-agent -n '__git_agent_option_available dry-run review simplify' -l dry-run -d 'Emit deterministic provider events without a provider request'
-complete -c git-agent -n '__git_agent_option_available help review simplify' -l help -d 'Show command help'
 
-complete -c git-agent -n '__git_agent_option_available model commit commit-msg pr-message release-note review simplify' -l model -r -f -d 'Set generation model'
-complete -c git-agent -n '__git_agent_option_available fast commit commit-msg explore pr-message release-note review simplify' -l fast -d 'Use priority service tier'
-complete -c git-agent -n '__git_agent_option_available low commit commit-msg pr-message release-note review simplify' -l low -d 'Use low reasoning effort'
-complete -c git-agent -n '__git_agent_option_available medium commit commit-msg pr-message release-note review simplify' -l medium -d 'Use medium reasoning effort'
-complete -c git-agent -n '__git_agent_option_available high commit commit-msg pr-message release-note review simplify' -l high -d 'Use high reasoning effort'
-complete -c git-agent -n '__git_agent_option_available xhigh commit commit-msg pr-message release-note review simplify' -l xhigh -d 'Use xhigh reasoning effort'
-complete -c git-agent -n '__git_agent_option_available base-url commit commit-msg pr-message release-note review simplify' -l base-url -r -f -d 'Override provider base URL'
-complete -c git-agent -n '__git_agent_option_available timeout commit commit-msg pr-message release-note review simplify' -l timeout -r -f -d 'Set request timeout'
-complete -c git-agent -n '__git_agent_option_available max-steps commit commit-msg pr-message release-note review simplify' -l max-steps -r -f -d 'Set maximum agent steps'
-complete -c git-agent -n '__git_agent_option_available guidance-family commit commit-msg pr-message release-note review simplify' -l guidance-family -r -f -a 'auto agents claude codex none' -d 'Force guidance family'
-complete -c git-agent -n '__git_agent_option_available hint commit commit-msg pr-message release-note review simplify' -l hint -r -f -d 'Append a user prompt hint to the model request'
-complete -c git-agent -n '__git_agent_option_available debug commit commit-msg explore pr-message release-note review simplify' -l debug -d 'Enable debug output on stderr'
-complete -c git-agent -n '__git_agent_option_available pprof commit commit-msg pr-message release-note review simplify' -l pprof -r -f -d 'Serve pprof on address'
+complete -c git-agent -n '__git_agent_option_available model commit commit-msg pr-message release-note' -l model -r -f -d 'Set generation model'
+complete -c git-agent -n '__git_agent_option_available fast commit commit-msg explore pr-message release-note' -l fast -d 'Use priority service tier'
+complete -c git-agent -n '__git_agent_option_available low commit commit-msg pr-message release-note' -l low -d 'Use low reasoning effort'
+complete -c git-agent -n '__git_agent_option_available medium commit commit-msg pr-message release-note' -l medium -d 'Use medium reasoning effort'
+complete -c git-agent -n '__git_agent_option_available high commit commit-msg pr-message release-note' -l high -d 'Use high reasoning effort'
+complete -c git-agent -n '__git_agent_option_available xhigh commit commit-msg pr-message release-note' -l xhigh -d 'Use xhigh reasoning effort'
+complete -c git-agent -n '__git_agent_option_available base-url commit commit-msg pr-message release-note' -l base-url -r -f -d 'Override provider base URL'
+complete -c git-agent -n '__git_agent_option_available timeout commit commit-msg pr-message release-note' -l timeout -r -f -d 'Set request timeout'
+complete -c git-agent -n '__git_agent_option_available max-steps commit commit-msg pr-message release-note' -l max-steps -r -f -d 'Set maximum agent steps'
+complete -c git-agent -n '__git_agent_option_available guidance-family commit commit-msg pr-message release-note' -l guidance-family -r -f -a 'auto agents claude codex none' -d 'Force guidance family'
+complete -c git-agent -n '__git_agent_option_available hint commit commit-msg pr-message release-note' -l hint -r -f -d 'Append a user prompt hint to the model request'
+complete -c git-agent -n '__git_agent_option_available debug commit commit-msg explore pr-message release-note' -l debug -d 'Enable debug output on stderr'
+complete -c git-agent -n '__git_agent_option_available pprof commit commit-msg pr-message release-note' -l pprof -r -f -d 'Serve pprof on address'
 
 complete -c git-agent -n '__git_agent_option_available out release-note' -l out -r -d 'Write release note markdown to file'
 complete -c git-agent -n '__git_agent_release_note_can_complete bump' -a 'patch minor major' -d 'Infer release version from latest semver tag'

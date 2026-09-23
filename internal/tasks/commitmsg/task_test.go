@@ -645,11 +645,11 @@ Verify configured providers before persisting the response.
 func TestShapeWrapsLongBodyListsBeforeValidation(t *testing.T) {
 	t.Parallel()
 
-	output := `feat(review): add previous HEAD context to diff prompts
+	output := `feat(commit): preserve readable generated body lists
 
-- Include a best-effort HEAD-versus-parent context pack for diff-mode reviews while keeping current changes authoritative.
-- Broaden simplify guidance to audit confirmed overengineering and remove the five-source limit from external lookup summaries.
-- Align patch statistics with file changes, bound diff reads, and add coverage for previous-HEAD context and simplification prompts.`
+- Shape long model-generated body lists without requiring a provider repair.
+- Keep each item readable while preserving the generated message meaning.
+- Verify the final commit message passes the normal commit validator.`
 
 	got := Shape(output)
 	if errs := Validate(ModeNormal, got); len(errs) > 0 {

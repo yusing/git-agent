@@ -166,7 +166,7 @@ func fishCompletionCases(refs, remotes, paths []string) []fishCompletionCase {
 		cases = append(cases, fishCompletionCase{name: name, line: line, want: slices.Clone(want)})
 	}
 
-	root := []string{"commit", "commit-msg", "config", "explore", "help", "index", "pr-message", "project_id", "release-note", "review", "search", "simplify"}
+	root := []string{"commit", "commit-msg", "config", "explore", "help", "index", "pr-message", "project_id", "release-note", "search"}
 	add("root commands", "git-agent ", root)
 	for _, candidate := range root {
 		add("root partial "+candidate, "git-agent "+candidate, candidatesWithPrefix(root, candidate))
@@ -272,18 +272,9 @@ func fishCompletionCases(refs, remotes, paths []string) []fishCompletionCase {
 		}
 	}
 
-	add("review prompt stops flags", "git-agent review inspect-this --", nil)
-	add("simplify prompt stops flags", "git-agent simplify simplify-this --", nil)
-	for _, command := range []string{"review", "simplify"} {
-		add(command+" user help is discoverable", "git-agent "+command+" --he", []string{"--help"})
-		add(command+" user help is terminal", "git-agent "+command+" --help ", nil)
-		add(command+" agent help is hidden", "git-agent "+command+" --help-", nil)
-		add(command+" explicit agent help is terminal", "git-agent "+command+" --help-agent ", nil)
-	}
 	add("commit rejects positional flag continuation", "git-agent commit unexpected --", nil)
 	add("pr message rejects positional flag continuation", "git-agent pr-message unexpected --", nil)
 	add("invalid guidance value", "git-agent commit --guidance-family future --", nil)
-	add("invalid review depth", "git-agent review --depth exhaustive --", nil)
 	add("unknown command option", "git-agent commit --future value --", nil)
 
 	searchCommand := completionCommandNamed(commands, "search")
@@ -317,9 +308,8 @@ func fishCompletionCases(refs, remotes, paths []string) []fishCompletionCase {
 	add("search list modes conflict", "git-agent search --ls --ls-files --", nil)
 
 	add("unrelated command collision", "git-agent help search --", nil)
-	add("unrelated review collision", "git-agent help review --he", nil)
-	add("unknown nested collision", "git-agent future review --", nil)
-	add("unknown command help collision", "git-agent future review --he", nil)
+	add("removed review command", "git-agent review --", nil)
+	add("removed simplify command", "git-agent simplify --", nil)
 
 	return cases
 }
@@ -344,17 +334,6 @@ func fishCompletionCommands(refs, remotes, paths []string) []fishCompletionComma
 		return append(slices.Clone(specific), shared...)
 	}
 
-	review := withShared(
-		fishCompletionOption{name: "codebase"},
-		fishCompletionOption{name: "uncommitted"},
-		fishCompletionOption{name: "staged"},
-		fishCompletionOption{name: "wait", takesValue: true, value: "task-123"},
-		fishCompletionOption{name: "follow-up", takesValue: true, value: "task-123"},
-		fishCompletionOption{name: "depth", takesValue: true, value: "balanced", valueCandidates: []string{"balanced", "fast", "thorough"}},
-		fishCompletionOption{name: "max-web-searches", takesValue: true, value: "4"},
-		fishCompletionOption{name: "dry-run"},
-		fishCompletionOption{name: "help"},
-	)
 	search := []fishCompletionOption{
 		{name: "rev", takesValue: true, value: "main", valueCandidates: slices.Clone(refs)},
 		{name: "remote", takesValue: true, value: "https://example.test/acme/repo.git", valueCandidates: slices.Clone(remotes)},
@@ -384,8 +363,6 @@ func fishCompletionCommands(refs, remotes, paths []string) []fishCompletionComma
 		{name: "explore", options: []fishCompletionOption{{name: "debug"}, {name: "fast"}, {name: "for", takesValue: true, value: "diagnose", valueCandidates: []string{"behavior", "change", "diagnose", "owner"}}, {name: "follow-up", takesValue: true, value: "AAAAAAAAAAAAAAAAAAAAAAAAAA"}}},
 		{name: "pr-message", options: slices.Clone(shared)},
 		{name: "release-note", options: withShared(fishCompletionOption{name: "out", takesValue: true, value: "notes.md", valueCandidates: slices.Clone(paths)})},
-		{name: "review", options: slices.Clone(review)},
-		{name: "simplify", options: slices.Clone(review)},
 		{name: "search", options: search},
 	}
 }
@@ -402,29 +379,7 @@ func expectedOptionCandidates(command fishCompletionCommand, used []fishCompleti
 	if countEnabledOptions(seen, "low", "medium", "high", "xhigh") > 1 {
 		return nil
 	}
-	if command.name == "review" || command.name == "simplify" {
-		if _, help := seen["help"]; help && len(seen) != 1 {
-			return nil
-		}
-		if countEnabledOptions(seen, "codebase", "uncommitted", "staged") > 1 {
-			return nil
-		}
-		if _, wait := seen["wait"]; wait && len(seen) != 1 {
-			return nil
-		}
-		if _, followUp := seen["follow-up"]; followUp {
-			for option := range seen {
-				if option != "follow-up" && option != "fast" && option != "debug" {
-					return nil
-				}
-			}
-		}
-		if _, depth := seen["depth"]; depth {
-			if _, maxSteps := seen["max-steps"]; maxSteps {
-				return nil
-			}
-		}
-	}
+
 	if command.name == "search" && !validSearchCompletionState(seen) {
 		return nil
 	}
@@ -446,42 +401,7 @@ func completionOptionCompatible(command, candidate string, seen map[string]fishC
 	if slices.Contains([]string{"low", "medium", "high", "xhigh"}, candidate) && countEnabledOptions(seen, "low", "medium", "high", "xhigh") > 0 {
 		return false
 	}
-	if command == "review" || command == "simplify" {
-		if _, help := seen["help"]; help {
-			return false
-		}
-		if candidate == "help" {
-			return len(seen) == 0
-		}
-		if _, wait := seen["wait"]; wait {
-			return false
-		}
-		if candidate == "wait" {
-			return len(seen) == 0
-		}
-		if _, followUp := seen["follow-up"]; followUp {
-			return candidate == "fast" || candidate == "debug"
-		}
-		if candidate == "follow-up" {
-			for option := range seen {
-				if option != "fast" && option != "debug" {
-					return false
-				}
-			}
-			return true
-		}
-		if slices.Contains([]string{"codebase", "uncommitted", "staged"}, candidate) {
-			return countEnabledOptions(seen, "codebase", "uncommitted", "staged") == 0
-		}
-		if candidate == "depth" {
-			_, incompatible := seen["max-steps"]
-			return !incompatible
-		}
-		if candidate == "max-steps" {
-			_, incompatible := seen["depth"]
-			return !incompatible
-		}
-	}
+
 	if command == "search" {
 		return searchCompletionOptionCompatible(candidate, seen)
 	}

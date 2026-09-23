@@ -29,7 +29,7 @@ var jsonPointerEscaper = strings.NewReplacer("~", "~0", "/", "~1")
 type inspectFileTool struct {
 	repo *gitctx.Repository
 	root string
-	mode ReviewMode
+	mode fileMode
 }
 
 type fileOutlineEntry struct {

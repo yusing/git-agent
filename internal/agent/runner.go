@@ -11,14 +11,12 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	json "encoding/json/v2"
 
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/openai"
-	"github.com/yusing/git-agent/internal/provider"
 	"github.com/yusing/git-agent/internal/tools"
 	"github.com/yusing/git-agent/internal/trace"
 )
@@ -41,7 +39,6 @@ type Request struct {
 	MaxSteps              int
 	RepairOnValidator     bool
 	Input                 []openai.Item
-	ControlTool           *tools.Definition
 	TurnState             string
 	TurnID                string
 }
@@ -50,8 +47,6 @@ type Result struct {
 	Text            string
 	ToolCalls       int
 	RepairCalls     int
-	ToolCallsByName map[string]int
-	UsedSkills      []string
 	messages        []openai.Item
 	turnState       string
 }
@@ -64,32 +59,6 @@ func (r Result) History() []openai.Item {
 // TurnState returns the provider's opaque sticky-routing state, when present.
 func (r Result) TurnState() string {
 	return r.turnState
-}
-
-type NodeResult struct {
-	Final  *Result
-	Branch *BranchRequest
-}
-
-type BranchRequest struct {
-	CallID          string
-	Arguments       string
-	ToolCalls       int
-	RepairCalls     int
-	ToolCallsByName map[string]int
-	UsedSkills      []string
-	TurnState       string
-	TurnID          string
-	messages        []openai.Item
-}
-
-func (b BranchRequest) ForkInput(output string, sameModel bool) []openai.Item {
-	messages := slices.Clone(b.messages)
-	if !sameModel {
-		messages = openai.PortableItems(messages)
-	}
-	messages = append(messages, openai.NewFunctionCallOutput(b.CallID, output))
-	return messages
 }
 
 type Validator func(string) []string
@@ -134,41 +103,24 @@ type OpenAIRunner struct {
 	Client             openai.Client
 	Tools              *tools.Registry
 	ToolSpecs          []tools.Definition
-	HostedCapabilities []provider.HostedCapability
 	Validator          Validator
 	Normalize          TextNormalizer
 	Trace              *trace.Recorder
 	Budget             BudgetHandler
 	ReasoningSummary   string
 	PromptCacheKey     string
-	ObserveUsage       func(openai.Usage)
 	UsageOutput        io.Writer
 	Timing             func(Timing)
 }
 
 type runState struct {
-	hostedCapabilities []provider.HostedCapability
 	turnState          string
 	turnID             string
 }
 
 func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error) {
-	outcome, err := r.RunNode(ctx, request)
-	if err != nil {
-		return Result{}, err
-	}
-	if outcome.Branch != nil {
-		return Result{}, errors.New("branch outcome requires a tree coordinator")
-	}
-	if outcome.Final == nil {
-		return Result{}, errors.New("agent returned no node outcome")
-	}
-	return *outcome.Final, nil
-}
-
-func (r *OpenAIRunner) RunNode(ctx context.Context, request Request) (NodeResult, error) {
 	if r.Client == nil {
-		return NodeResult{}, errors.New("openai client is required")
+		return Result{}, errors.New("openai client is required")
 	}
 	if request.MaxSteps <= 0 {
 		request.MaxSteps = r.Config.MaxSteps
@@ -194,22 +146,15 @@ func (r *OpenAIRunner) RunNode(ctx context.Context, request Request) (NodeResult
 		messages = append(messages, openai.NewMessage("user", request.UserPrompt))
 	}
 
-	toolSpecs := make([]openai.ToolSpec, 0, len(r.ToolSpecs)+1)
+	toolSpecs := make([]openai.ToolSpec, 0, len(r.ToolSpecs))
 	for _, def := range r.ToolSpecs {
 		if len(request.AllowedToolNames) > 0 && !slices.Contains(request.AllowedToolNames, def.Name) {
 			continue
 		}
 		toolSpecs = append(toolSpecs, openai.ToolSpec{Name: def.Name, Description: def.Description, Schema: def.Schema, Strict: def.Strict})
 	}
-	controlToolName := ""
-	if request.ControlTool != nil {
-		def := request.ControlTool
-		controlToolName = def.Name
-		toolSpecs = append(toolSpecs, openai.ToolSpec{Name: def.Name, Description: def.Description, Schema: def.Schema, Strict: def.Strict})
-	}
 
 	state := &runState{
-		hostedCapabilities: slices.Clone(r.HostedCapabilities),
 		turnState:          request.TurnState,
 		turnID:             request.TurnID,
 	}
@@ -217,18 +162,12 @@ func (r *OpenAIRunner) RunNode(ctx context.Context, request Request) (NodeResult
 		state.turnID = rand.Text()
 	}
 	parallelToolCalls := request.ParallelToolCalls
-	stableInstructions := requestInstructions(request.SystemPrompt, toolSpecs, state.hostedCapabilities)
-	runResult, err := r.runUntilOutcome(ctx, stableInstructions, messages, toolSpecs, request.TextFormat, request.MaxSteps, state, controlToolName, parallelToolCalls)
+	stableInstructions := requestInstructions(request.SystemPrompt, toolSpecs)
+	runResult, err := r.runUntilOutcome(ctx, stableInstructions, messages, toolSpecs, request.TextFormat, request.MaxSteps, state, parallelToolCalls)
 	if err != nil {
-		return NodeResult{}, err
+		return Result{}, err
 	}
-	if runResult.Branch != nil {
-		return runResult, nil
-	}
-	if runResult.Final == nil {
-		return NodeResult{}, errors.New("agent returned no node outcome")
-	}
-	result := *runResult.Final
+	result := runResult
 	r.normalizeResult(&result)
 
 	if r.Validator != nil {
@@ -242,7 +181,7 @@ func (r *OpenAIRunner) RunNode(ctx context.Context, request Request) (NodeResult
 		}
 		if len(errs) > 0 {
 			if !request.RepairOnValidator {
-				return NodeResult{}, fmt.Errorf("validation failed: %v", errs)
+				return Result{}, fmt.Errorf("validation failed: %v", errs)
 			}
 			repairMessages := slices.Clone(result.messages)
 			if len(repairMessages) == 0 {
@@ -253,20 +192,14 @@ func (r *OpenAIRunner) RunNode(ctx context.Context, request Request) (NodeResult
 			if r.Timing != nil {
 				repairStarted = time.Now()
 			}
-			repairedOutcome, err := r.runUntilOutcome(ctx, stableInstructions, repairMessages, nil, request.TextFormat, 1, state, "", false)
+			repairedOutcome, err := r.runUntilOutcome(ctx, stableInstructions, repairMessages, nil, request.TextFormat, 1, state, false)
 			if r.Timing != nil {
 				r.Timing(Timing{Phase: "repair", Duration: time.Since(repairStarted)})
 			}
 			if err != nil {
-				return NodeResult{}, err
+				return Result{}, err
 			}
-			if repairedOutcome.Branch != nil {
-				return NodeResult{}, errors.New("provider branched during schema repair")
-			}
-			if repairedOutcome.Final == nil {
-				return NodeResult{}, errors.New("schema repair returned no outcome")
-			}
-			repaired := *repairedOutcome.Final
+			repaired := repairedOutcome
 			result.RepairCalls++
 			result.Text = repaired.Text
 			result.messages = slices.Clone(repaired.messages)
@@ -279,12 +212,12 @@ func (r *OpenAIRunner) RunNode(ctx context.Context, request Request) (NodeResult
 				r.Timing(Timing{Phase: "validation", Duration: time.Since(validationStarted)})
 			}
 			if len(errs) > 0 {
-				return NodeResult{}, fmt.Errorf("validation failed after repair: %v", errs)
+				return Result{}, fmt.Errorf("validation failed after repair: %v", errs)
 			}
 		}
 	}
 	result.turnState = state.turnState
-	return NodeResult{Final: &result}, nil
+	return result, nil
 }
 
 func (r *OpenAIRunner) normalizeResult(result *Result) {
@@ -293,7 +226,7 @@ func (r *OpenAIRunner) normalizeResult(result *Result) {
 	}
 }
 
-func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, stableInstructions string, messages []openai.Item, toolSpecs []openai.ToolSpec, textFormat *openai.TextFormat, maxSteps int, state *runState, controlToolName string, parallelToolCalls bool) (NodeResult, error) {
+func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, stableInstructions string, messages []openai.Item, toolSpecs []openai.ToolSpec, textFormat *openai.TextFormat, maxSteps int, state *runState, parallelToolCalls bool) (Result, error) {
 	var result Result
 	maxToolCalls := r.Config.MaxToolCalls
 	started := time.Now()
@@ -305,10 +238,10 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, stableInstructions s
 		}
 		callID, name, arguments, err := functionCallIdentity(item)
 		if err != nil {
-			return NodeResult{}, fmt.Errorf("input item %d: %w", index, err)
+			return Result{}, fmt.Errorf("input item %d: %w", index, err)
 		}
 		if _, duplicate := seenCallIDs[callID]; duplicate {
-			return NodeResult{}, fmt.Errorf("input item %d: duplicate function call ID %q", index, callID)
+			return Result{}, fmt.Errorf("input item %d: duplicate function call ID %q", index, callID)
 		}
 		seenCallIDs[callID] = struct{}{}
 		seenCalls[toolCallSignature(openai.ToolCall{Name: name, Arguments: arguments})] = struct{}{}
@@ -321,7 +254,6 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, stableInstructions s
 			stableInstructions,
 			requestMessages,
 			toolSpecs,
-			state.hostedCapabilities,
 			textFormat,
 			parallelToolCalls,
 		)
@@ -330,21 +262,20 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, stableInstructions s
 		estimatedTokens := estimateRequestTokens(req)
 		r.attachRetryStatus(&req, step+1, maxSteps, result.ToolCalls, maxToolCalls, estimatedTokens, started)
 		if err := r.writeRuntimeStatus("requesting", step+1, maxSteps, result.ToolCalls, maxToolCalls, estimatedTokens, 0, started); err != nil {
-			return NodeResult{}, err
+			return Result{}, err
 		}
 		if step == 0 && r.Config.ContextTokens > 0 && estimatedTokens >= r.Config.ContextTokens {
 			if err := r.Trace.Write("budget", map[string]any{
 				"kind": BudgetKindContext, "decision": "reject", "reason": "initial_context_budget_exhausted",
 				"step": step + 1, "used": estimatedTokens, "limit": r.Config.ContextTokens,
 			}); err != nil {
-				return NodeResult{}, err
+				return Result{}, err
 			}
-			return NodeResult{}, fmt.Errorf("initial request estimated at %d tokens meets or exceeds context budget %d", estimatedTokens, r.Config.ContextTokens)
+			return Result{}, fmt.Errorf("initial request estimated at %d tokens meets or exceeds context budget %d", estimatedTokens, r.Config.ContextTokens)
 		}
-		// Local function calls stay under the runner's budget. Any outbound
-		// max_tool_calls value belongs only to provider-hosted capabilities.
+		// Local function calls stay under the runner's budget.
 		if err := writeTraceRequest(r.Trace, req); err != nil {
-			return NodeResult{}, err
+			return Result{}, err
 		}
 		timing := r.Timing
 		var providerStarted time.Time
@@ -359,58 +290,39 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, stableInstructions s
 			state.turnState = response.TurnState
 		}
 		if err != nil {
-			failure, ok := unsupportedEnabledCapability(err, state.hostedCapabilities)
-			if ok {
-				if err := r.traceCapabilityFailure(failure); err != nil {
-					return NodeResult{}, err
-				}
-				state.hostedCapabilities = removeHostedCapability(state.hostedCapabilities, failure.Capability)
-				messages = append(requestMessages, openai.NewMessage("developer", strings.TrimSpace(hostedCapabilityFailurePrompt)))
-				step--
-				continue
-			}
-			return NodeResult{}, err
+			return Result{}, err
 		}
 		messages = requestMessages
 		usage := response.Usage
-		r.observeUsage(usage)
 		r.writeUsageMetrics(step+1, usage)
 		if err := writeTraceResponse(r.Trace, response); err != nil {
-			return NodeResult{}, err
-		}
-		if err := r.traceHostedToolCalls(response.HostedToolCalls); err != nil {
-			return NodeResult{}, err
+			return Result{}, err
 		}
 		inputTokens := int(usage.InputTokens)
 		if err := r.writeRuntimeStatus("response_received", step+1, maxSteps, result.ToolCalls, maxToolCalls, estimatedTokens, inputTokens, started); err != nil {
-			return NodeResult{}, err
+			return Result{}, err
 		}
 		if r.Config.ContextTokens > 0 && inputTokens >= r.Config.ContextTokens && len(response.ToolCalls) > 0 {
 			final, err := r.finalizeForGuard(ctx, stableInstructions, messages, result, textFormat, state, BudgetStatus{
 				Kind: BudgetKindContext, Used: inputTokens, Step: step + 1,
 				Limit: r.Config.ContextTokens, MaxSteps: maxSteps, MaxToolCalls: maxToolCalls,
 			}, "context_budget_exhausted", started)
-			return NodeResult{Final: &final}, err
+			return final, err
 		}
 		if len(response.ToolCalls) == 0 {
 			if response.Text == "" {
-				return NodeResult{}, errors.New("provider returned no text and no tool calls")
+				return Result{}, errors.New("provider returned no text and no tool calls")
 			}
 			result.Text = response.Text
 			result.messages = appendResponseMessages(messages, response)
-			return NodeResult{Final: &result}, nil
+			return result, nil
 		}
-		batch, err := validateToolCallBatch(response.ToolCalls, toolSpecs, controlToolName, seenCalls, seenCallIDs)
+		batch, err := validateToolCallBatch(response.ToolCalls, toolSpecs, seenCalls, seenCallIDs)
 		if err != nil {
-			if r.Tools == nil && !slices.ContainsFunc(response.ToolCalls, func(call openai.ToolCall) bool {
-				return controlToolName != "" && call.Name == controlToolName
-			}) {
-				return NodeResult{}, errors.New("provider requested tools but no registry is configured")
-			}
-			return NodeResult{}, err
+			return Result{}, err
 		}
-		if r.Tools == nil && (!batch.control || len(batch.calls) > 1) {
-			return NodeResult{}, errors.New("provider requested tools but no registry is configured")
+		if r.Tools == nil {
+			return Result{}, errors.New("provider requested tools but no registry is configured")
 		}
 		batchMessages := appendToolCallBatch(messages, response, batch.calls)
 		if batch.duplicateTool != "" {
@@ -418,7 +330,7 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, stableInstructions s
 				Kind: BudgetKindNoProgress, Used: result.ToolCalls, Step: step + 1,
 				MaxSteps: maxSteps, MaxToolCalls: maxToolCalls, RequestedTool: batch.duplicateTool,
 			}, "repeated_tool_call", started)
-			return NodeResult{Final: &final}, err
+			return final, err
 		}
 		for maxToolCalls > 0 && result.ToolCalls+len(batch.calls) > maxToolCalls {
 			remaining := max(0, maxToolCalls-result.ToolCalls)
@@ -433,10 +345,10 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, stableInstructions s
 				RequestedTool: requestedTool,
 			}, started)
 			if err != nil {
-				return NodeResult{}, err
+				return Result{}, err
 			}
 			if recovered.Text != "" {
-				return NodeResult{Final: &recovered}, nil
+				return recovered, nil
 			}
 			maxSteps = updatedSteps
 			maxToolCalls = updatedTools
@@ -448,18 +360,10 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, stableInstructions s
 		for _, call := range batch.calls {
 			seenCallIDs[call.CallID] = struct{}{}
 		}
-		localCalls := make([]openai.ToolCall, 0, len(batch.calls))
-		var controlCall openai.ToolCall
-		for _, call := range batch.calls {
-			if controlToolName != "" && call.Name == controlToolName {
-				controlCall = call
-				continue
-			}
-			localCalls = append(localCalls, call)
-		}
+		localCalls := batch.calls
 		for _, call := range localCalls {
 			if err := r.Trace.Write("tool-call", call); err != nil {
-				return NodeResult{}, err
+				return Result{}, err
 			}
 		}
 		timing = r.Timing
@@ -476,23 +380,22 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, stableInstructions s
 		}
 		if len(localCalls) > 0 {
 			if err := r.Tools.CheckSnapshot(); err != nil {
-				return NodeResult{}, err
+				return Result{}, err
 			}
 		}
 		for index, call := range localCalls {
 			toolResult := executions[index].result
 			err := executions[index].err
-			toolSucceeded := err == nil
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return NodeResult{}, fmt.Errorf("tool %s canceled: %w", call.Name, ctxErr)
+				return Result{}, fmt.Errorf("tool %s canceled: %w", call.Name, ctxErr)
 			}
 			if err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, gitctx.ErrChangeSnapshotStale) {
-					return NodeResult{}, fmt.Errorf("tool %s failed: %w", call.Name, err)
+					return Result{}, fmt.Errorf("tool %s failed: %w", call.Name, err)
 				}
 				toolResult, err = tools.ErrorResult(call.Name, err)
 				if err != nil {
-					return NodeResult{}, fmt.Errorf("encode tool %s error: %w", call.Name, err)
+					return Result{}, fmt.Errorf("encode tool %s error: %w", call.Name, err)
 				}
 			}
 			if err := r.Trace.Write("tool-output", map[string]any{
@@ -501,35 +404,19 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, stableInstructions s
 				"content":   toolResult.Content,
 				"truncated": toolResult.Truncated,
 			}); err != nil {
-				return NodeResult{}, err
+				return Result{}, err
 			}
 			result.ToolCalls++
-			result.ToolCallsByName = addToolCall(result.ToolCallsByName, call.Name)
-			if skill, ok := tools.UsedSkill(tools.Invocation{Name: call.Name, Arguments: call.Arguments}); toolSucceeded && ok && !slices.Contains(result.UsedSkills, skill) {
-				result.UsedSkills = append(result.UsedSkills, skill)
-			}
 			messages = append(messages, openai.NewFunctionCallOutput(call.CallID, toolResult.Content))
 		}
-		if batch.control {
-			result.ToolCalls++
-			result.ToolCallsByName = addToolCall(result.ToolCallsByName, controlCall.Name)
-			return NodeResult{Branch: &BranchRequest{
-				CallID: controlCall.CallID, Arguments: controlCall.Arguments,
-				ToolCalls: result.ToolCalls, RepairCalls: result.RepairCalls,
-				ToolCallsByName: result.ToolCallsByName,
-				TurnState:       state.turnState,
-				TurnID:          state.turnID,
-				UsedSkills:      slices.Clone(result.UsedSkills), messages: messages,
-			}}, nil
-		}
-		nextRequest := r.providerRequest(stableInstructions, requestInputWithBudget(messages, step+2, maxSteps, result.ToolCalls, maxToolCalls, r.PromptCacheKey != ""), toolSpecs, state.hostedCapabilities, textFormat, parallelToolCalls)
+		nextRequest := r.providerRequest(stableInstructions, requestInputWithBudget(messages, step+2, maxSteps, result.ToolCalls, maxToolCalls, r.PromptCacheKey != ""), toolSpecs, textFormat, parallelToolCalls)
 		nextTokens := estimateRequestTokens(nextRequest)
 		if r.Config.ContextTokens > 0 && nextTokens >= r.Config.ContextTokens {
 			final, err := r.finalizeForGuard(ctx, stableInstructions, messages, result, textFormat, state, BudgetStatus{
 				Kind: BudgetKindContext, Used: nextTokens, Step: step + 1,
 				Limit: r.Config.ContextTokens, MaxSteps: maxSteps, MaxToolCalls: maxToolCalls,
 			}, "context_budget_exhausted", started)
-			return NodeResult{Final: &final}, err
+			return final, err
 		}
 		if step == maxSteps-1 {
 			recovered, updatedSteps, updatedTools, err := r.resolveBudgetExhaustion(ctx, stableInstructions, messages, result, textFormat, state, BudgetStatus{
@@ -541,16 +428,16 @@ func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, stableInstructions s
 				MaxToolCalls: maxToolCalls,
 			}, started)
 			if err != nil {
-				return NodeResult{}, err
+				return Result{}, err
 			}
 			if recovered.Text != "" {
-				return NodeResult{Final: &recovered}, nil
+				return recovered, nil
 			}
 			maxSteps = updatedSteps
 			maxToolCalls = updatedTools
 		}
 	}
-	return NodeResult{}, fmt.Errorf("agent exceeded maximum model steps (%d)", maxSteps)
+	return Result{}, fmt.Errorf("agent exceeded maximum model steps (%d)", maxSteps)
 }
 
 func (r *OpenAIRunner) finalizeForGuard(ctx context.Context, instructions string, messages []openai.Item, current Result, textFormat *openai.TextFormat, state *runState, status BudgetStatus, reason string, started time.Time) (Result, error) {
@@ -606,17 +493,10 @@ func estimateRequestTokens(request openai.Request) int {
 		Instructions       string                      `json:"instructions"`
 		Input              []openai.Item               `json:"input"`
 		Tools              []openai.ToolSpec           `json:"tools"`
-		HostedCapabilities []provider.HostedCapability `json:"hosted_capabilities"`
 		TextFormat         *openai.TextFormat          `json:"text_format"`
 		ParallelToolCalls  bool                        `json:"parallel_tool_calls"`
-	}{request.Instructions, request.Input, request.Tools, request.HostedCapabilities, request.TextFormat, request.ParallelToolCalls})
+	}{request.Instructions, request.Input, request.Tools, request.TextFormat, request.ParallelToolCalls})
 	return (len(data) + 3) / 4
-}
-
-func (r *OpenAIRunner) observeUsage(usage openai.Usage) {
-	if r.ObserveUsage != nil {
-		r.ObserveUsage(usage)
-	}
 }
 
 func (r *OpenAIRunner) writeUsageMetrics(step int, usage openai.Usage) {
@@ -646,7 +526,6 @@ func toolCallSignature(call openai.ToolCall) string {
 type toolCallBatch struct {
 	calls         []openai.ToolCall
 	signatures    map[string]struct{}
-	control       bool
 	duplicateTool string
 }
 
@@ -680,24 +559,12 @@ func (r *OpenAIRunner) executeToolCalls(ctx context.Context, calls []openai.Tool
 func validateToolCallBatch(
 	calls []openai.ToolCall,
 	toolSpecs []openai.ToolSpec,
-	controlToolName string,
 	seenCalls map[string]struct{},
 	seenCallIDs map[string]struct{},
 ) (toolCallBatch, error) {
-	controlCalls := 0
-	for _, call := range calls {
-		if controlToolName != "" && call.Name == controlToolName {
-			controlCalls++
-		}
-	}
-	if controlCalls > 1 {
-		return toolCallBatch{}, fmt.Errorf("%s may be called at most once in a provider response", controlToolName)
-	}
-
 	batch := toolCallBatch{
 		calls:      make([]openai.ToolCall, 0, len(calls)),
 		signatures: make(map[string]struct{}, len(calls)),
-		control:    controlCalls == 1,
 	}
 	batchCallIDs := make(map[string]struct{}, len(calls))
 	for _, call := range calls {
@@ -797,19 +664,9 @@ func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions
 	return finalized, status.MaxSteps, status.MaxToolCalls, nil
 }
 
-func addToolCall(counts map[string]int, name string) map[string]int {
-	if counts == nil {
-		counts = map[string]int{}
-	}
-	counts[name]++
-	return counts
-}
-
 func (r *Result) copyActivity(source Result) {
 	r.ToolCalls = source.ToolCalls
 	r.RepairCalls = source.RepairCalls
-	r.ToolCallsByName = source.ToolCallsByName
-	r.UsedSkills = source.UsedSkills
 }
 
 type conversationFunctionCall struct {
@@ -919,7 +776,7 @@ func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions st
 	finalMessage := openai.NewMessage("developer", finalizationNotice(status)+"\n\n"+strings.TrimSpace(forcedFinalizationPrompt))
 	finalMessage.PromptCacheBreakpoint = r.PromptCacheKey != ""
 	finalMessages := append(completedMessages, finalMessage)
-	req := r.providerRequest(instructions, finalMessages, nil, nil, textFormat, false)
+	req := r.providerRequest(instructions, finalMessages, nil, textFormat, false)
 	req.TurnState = state.turnState
 	req.TurnID = state.turnID
 	r.attachRetryStatus(&req, status.Step, status.MaxSteps, toolCalls, status.MaxToolCalls, estimateRequestTokens(req), started)
@@ -942,7 +799,6 @@ func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions st
 		state.turnState = response.TurnState
 	}
 	usage := response.Usage
-	r.observeUsage(usage)
 	r.writeUsageMetrics(status.Step, usage)
 	if err := writeTraceResponse(r.Trace, response); err != nil {
 		return Result{}, err
@@ -965,7 +821,7 @@ func appendResponseMessages(messages []openai.Item, response openai.Response) []
 	return result
 }
 
-func (r *OpenAIRunner) providerRequest(instructions string, input []openai.Item, toolSpecs []openai.ToolSpec, hostedCapabilities []provider.HostedCapability, textFormat *openai.TextFormat, parallelToolCalls bool) openai.Request {
+func (r *OpenAIRunner) providerRequest(instructions string, input []openai.Item, toolSpecs []openai.ToolSpec, textFormat *openai.TextFormat, parallelToolCalls bool) openai.Request {
 	request := openai.Request{
 		Model:              r.Config.Model,
 		ServiceTier:        r.Config.ServiceTier,
@@ -979,12 +835,11 @@ func (r *OpenAIRunner) providerRequest(instructions string, input []openai.Item,
 		ParallelToolCalls:  parallelToolCalls,
 		Input:              input,
 		Tools:              toolSpecs,
-		HostedCapabilities: hostedCapabilities,
 		TextFormat:         textFormat,
 	}
 	if r.Trace != nil {
 		request.OnStreamEvent = func(event openai.StreamEvent) error {
-			return r.Trace.WriteExact(event.Kind, event)
+			return r.Trace.Write(event.Kind, event)
 		}
 	}
 	return request
@@ -1013,73 +868,6 @@ func toolAllowed(name string, toolSpecs []openai.ToolSpec) bool {
 	})
 }
 
-func unsupportedEnabledCapability(err error, capabilities []provider.HostedCapability) (provider.CapabilityFailure, bool) {
-	unsupported, ok := errors.AsType[*provider.UnsupportedCapabilityError](err)
-	if !ok || !slices.ContainsFunc(capabilities, func(capability provider.HostedCapability) bool {
-		return capability.Kind == unsupported.Failure.Capability
-	}) {
-		return provider.CapabilityFailure{}, false
-	}
-	return unsupported.Failure, true
-}
-
-func removeHostedCapability(capabilities []provider.HostedCapability, kind provider.HostedCapabilityKind) []provider.HostedCapability {
-	return slices.DeleteFunc(capabilities, func(capability provider.HostedCapability) bool {
-		return capability.Kind == kind
-	})
-}
-
-func (r *OpenAIRunner) traceCapabilityFailure(failure provider.CapabilityFailure) error {
-	if r.Trace == nil {
-		return nil
-	}
-	return r.Trace.Write("hosted-capability", map[string]any{
-		"kind":   failure.Capability,
-		"status": "disabled",
-		"reason": "provider_rejected_capability",
-	})
-}
-
-func (r *OpenAIRunner) traceHostedToolCalls(calls []openai.HostedToolCall) error {
-	if r.Trace == nil {
-		return nil
-	}
-	for _, call := range calls {
-		if err := r.Trace.Write("hosted-tool-call", map[string]any{
-			"id":      boundedTraceText(call.ID, 256),
-			"type":    boundedTraceText(call.Type, 64),
-			"status":  boundedTraceText(call.Status, 64),
-			"action":  boundedTraceText(call.Action, 64),
-			"queries": boundedTraceList(call.Queries, 8, 512),
-			"sources": boundedTraceList(call.Sources, 20, 2048),
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func boundedTraceList(values []string, maxItems, maxBytes int) []string {
-	values = values[:min(len(values), maxItems)]
-	result := make([]string, len(values))
-	for index, value := range values {
-		result[index] = boundedTraceText(value, maxBytes)
-	}
-	return result
-}
-
-func boundedTraceText(value string, maxBytes int) string {
-	value = strings.ToValidUTF8(value, "")
-	if len(value) <= maxBytes {
-		return value
-	}
-	value = value[:maxBytes]
-	for !utf8.ValidString(value) {
-		value = value[:len(value)-1]
-	}
-	return value
-}
-
 func writeTraceRequest(recorder *trace.Recorder, request openai.Request) error {
 	if recorder == nil {
 		return nil
@@ -1103,7 +891,6 @@ func writeTraceResponse(recorder *trace.Recorder, response openai.Response) erro
 		"id":                  response.ID,
 		"text":                response.Text,
 		"tool_calls":          response.ToolCalls,
-		"hosted_tool_calls":   len(response.HostedToolCalls),
 		"continuation_types":  continuationTypes,
 		"finish_kind":         response.FinishKind,
 		"input_tokens":        response.Usage.InputTokens,
@@ -1111,20 +898,15 @@ func writeTraceResponse(recorder *trace.Recorder, response openai.Response) erro
 	})
 }
 
-func requestInstructions(taskInstructions string, toolSpecs []openai.ToolSpec, hostedCapabilities []provider.HostedCapability) string {
+func requestInstructions(taskInstructions string, toolSpecs []openai.ToolSpec) string {
 	prefix := taskInstructions
 	if prefix != "" {
 		prefix += "\n\n"
 	}
-	if len(toolSpecs) == 0 && len(hostedCapabilities) == 0 {
+	if len(toolSpecs) == 0 {
 		return prefix + strings.TrimSpace(noToolsPrompt)
 	}
-	promptTools := make([]requestPromptTool, 0, len(hostedCapabilities)+len(toolSpecs))
-	for _, capability := range hostedCapabilities {
-		if capability.Kind == provider.HostedCapabilityWebSearch {
-			promptTools = append(promptTools, requestPromptTool{Hosted: true})
-		}
-	}
+	promptTools := make([]requestPromptTool, 0, len(toolSpecs))
 	for _, spec := range toolSpecs {
 		promptTools = append(promptTools, requestPromptTool{Name: spec.Name, Description: spec.Description})
 	}

@@ -9,39 +9,27 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 
 	"github.com/yusing/git-agent/internal/agent"
-	backgroundtask "github.com/yusing/git-agent/internal/background"
-	"github.com/yusing/git-agent/internal/checks"
-	checkbuiltin "github.com/yusing/git-agent/internal/checks/builtin"
 	"github.com/yusing/git-agent/internal/config"
-	"github.com/yusing/git-agent/internal/followup"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/giturl"
 	"github.com/yusing/git-agent/internal/guidance"
-	"github.com/yusing/git-agent/internal/hooks"
-	"github.com/yusing/git-agent/internal/jsonx"
 	"github.com/yusing/git-agent/internal/metadata"
 	"github.com/yusing/git-agent/internal/openai"
-	"github.com/yusing/git-agent/internal/projectidentity"
-	"github.com/yusing/git-agent/internal/provider"
 	"github.com/yusing/git-agent/internal/skillcmd"
 	"github.com/yusing/git-agent/internal/tasks/commitmsg"
 	"github.com/yusing/git-agent/internal/tasks/releasenote"
-	reviewtask "github.com/yusing/git-agent/internal/tasks/review"
 	searchtask "github.com/yusing/git-agent/internal/tasks/search"
 	"github.com/yusing/git-agent/internal/tools"
 	"github.com/yusing/git-agent/internal/trace"
@@ -50,8 +38,7 @@ import (
 const (
 	releaseNoteMinMaxSteps = 12
 	releaseNoteMinTimeout  = 4 * time.Minute
-	reviewDefaultModel     = "gpt-6-astra"
-	simplifyDefaultModel   = "gpt-6-sol"
+	indexUsage             = "usage: git-agent index sync\n       git-agent index migrate --to v2 [--dry-run]\n       git-agent index gc [--dry-run]"
 )
 
 type App struct {
@@ -97,12 +84,6 @@ func (a *App) Run(ctx context.Context, args []string) (returnErr error) {
 	}
 
 	switch args[0] {
-	case checks.PrivateCommand:
-		set, err := checkbuiltin.New()
-		if err != nil {
-			return fmt.Errorf("construct bundled checker set: %w", err)
-		}
-		return set.DispatchHelper(args[1:])
 	case "config":
 		return a.runConfig(args[1:])
 	case "explore":
@@ -119,632 +100,14 @@ func (a *App) Run(ctx context.Context, args []string) (returnErr error) {
 		return a.runProjectID(args[1:])
 	case "release-note":
 		return a.runReleaseNote(ctx, args[1:])
-	case "review":
-		return a.runCodeReview(ctx, reviewtask.KindReview, args[1:])
 	case "search":
 		return a.runSearch(ctx, args[1:])
-	case "simplify":
-		return a.runCodeReview(ctx, reviewtask.KindSimplify, args[1:])
 	case "-h", "--help", "help":
 		return usageError("")
 	default:
 		return usageError(fmt.Sprintf("unknown command %q", args[0]))
 	}
 }
-
-func (a *App) runCodeReview(ctx context.Context, kind reviewtask.Kind, args []string) (returnErr error) {
-	command := string(kind)
-	fs := flag.NewFlagSet(command, flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-
-	var opts config.Options
-	var codebase bool
-	var uncommitted bool
-	var staged bool
-	var waitID string
-	var followUpID string
-	var depthValue string
-	var dryRun bool
-	var helpAgent bool
-	fs.BoolVar(&codebase, "codebase", false, "inspect the full codebase")
-	fs.BoolVar(&uncommitted, "uncommitted", false, "inspect all dirty worktree changes")
-	fs.BoolVar(&staged, "staged", false, "inspect staged changes only")
-	fs.StringVar(&waitID, "wait", "", "wait for a detached task and print its report")
-	fs.StringVar(&followUpID, "follow-up", "", "re-review a successful provider turn with a required prompt")
-	fs.StringVar(&depthValue, "depth", "", "select automatic inspection depth: fast, balanced, thorough (default balanced); reasoning defaults by model")
-	fs.BoolVar(&dryRun, "dry-run", false, "emit deterministic provider events without a provider request")
-	fs.BoolVar(&helpAgent, "help-agent", false, "show help limited to agent-facing flags")
-	registerSharedFlags(fs, &opts)
-	fs.IntVar(&opts.MaxWebSearches, "max-web-searches", 0, "cap provider-hosted web searches (API-key default 4; ChatGPT auth uncapped)")
-	fs.Lookup("timeout").Usage = "set request timeout (disabled by default)"
-	fs.Lookup("model").Usage = fmt.Sprintf("override model (default %s)", codeReviewDefaultModel(kind))
-	defaultSteps := reviewtask.ReviewMaxSteps
-	if kind == reviewtask.KindSimplify {
-		defaultSteps = reviewtask.SimplifyMaxSteps
-	}
-	fs.Lookup("max-steps").Usage = fmt.Sprintf("override automatic inspection depth (codebase default %d)", defaultSteps)
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return codeReviewUsageError(command, fs)
-		}
-		return err
-	}
-	if helpAgent {
-		return codeReviewAgentUsageError(command, fs)
-	}
-	waitRequested := false
-	waitConflict := false
-	followUpRequested := false
-	followUpConflict := false
-	followUpPrompt := ""
-	maxWebSearchesSet := false
-	depthSet := false
-	maxStepsSet := false
-	fs.Visit(func(flag *flag.Flag) {
-		if flag.Name == "wait" {
-			waitRequested = true
-		}
-		if flag.Name == "follow-up" {
-			followUpRequested = true
-		}
-		if flag.Name != "follow-up" && flag.Name != "fast" && flag.Name != "debug" {
-			followUpConflict = true
-		}
-		if flag.Name == "max-web-searches" {
-			maxWebSearchesSet = true
-		}
-		if flag.Name == "depth" {
-			depthSet = true
-		}
-		if flag.Name == "max-steps" {
-			maxStepsSet = true
-		}
-		if flag.Name != "wait" {
-			waitConflict = true
-		}
-	})
-	if followUpRequested {
-		if followUpConflict {
-			return errors.New("--follow-up cannot be combined with modes or flags other than --fast and --debug")
-		}
-		if strings.TrimSpace(followUpID) == "" {
-			return errors.New("--follow-up requires a parent turn ID")
-		}
-		followUpPrompt = strings.Join(fs.Args(), " ")
-		if strings.TrimSpace(followUpPrompt) == "" {
-			return errors.New("--follow-up requires a nonempty re-review prompt")
-		}
-		if len(followUpPrompt) > maxFollowUpPromptBytes {
-			return fmt.Errorf("--follow-up prompt exceeds %d bytes", maxFollowUpPromptBytes)
-		}
-		if !isDetachedChild() {
-			parent, err := loadFollowUpParent(kind, followUpID)
-			if err != nil {
-				return err
-			}
-			if _, err := reviewtask.FollowUpPrompt(kind, parent.Report, followUpPrompt); err != nil {
-				return err
-			}
-			return startDetachedTask(command, args, a.stdout)
-		}
-	}
-	if maxWebSearchesSet && opts.MaxWebSearches < 1 {
-		return errors.New("--max-web-searches must be positive")
-	}
-	depth, err := reviewtask.ParseDepth(depthValue)
-	if err != nil {
-		return err
-	}
-	if depthSet && maxStepsSet {
-		return errors.New("--depth and --max-steps are mutually exclusive")
-	}
-	if waitRequested {
-		if waitConflict || len(fs.Args()) > 0 {
-			return fmt.Errorf("--wait cannot be combined with modes, prompts, or other flags")
-		}
-		return a.waitForDetachedTask(ctx, command, waitID)
-	}
-	if !isDetachedChild() {
-		return startDetachedTask(command, args, a.stdout)
-	}
-	taskID := detachedTaskID()
-	var mode reviewtask.Mode
-	if !followUpRequested {
-		mode, err = reviewtask.ParseMode(codebase, uncommitted, staged)
-		if err != nil {
-			return err
-		}
-	}
-	if !followUpRequested {
-		extraPrompt := strings.TrimSpace(strings.Join(fs.Args(), " "))
-		if opts.AppendPrompt != "" && extraPrompt != "" {
-			opts.AppendPrompt = strings.TrimSpace(opts.AppendPrompt) + "\n" + extraPrompt
-		} else if extraPrompt != "" {
-			opts.AppendPrompt = extraPrompt
-		}
-	}
-	settings, err := config.LoadSettings()
-	if err != nil {
-		return err
-	}
-
-	localCfg, err := config.ResolveLocal(opts)
-	if err != nil {
-		return err
-	}
-	if err := a.maybeStartPprof(ctx, opts); err != nil {
-		return err
-	}
-	reviewTimeout := time.Duration(0)
-	if opts.Timeout != "" {
-		reviewTimeout = localCfg.Timeout
-	}
-	taskCtx, cancel := contextWithOptionalTimeout(ctx, reviewTimeout)
-	defer cancel()
-
-	repo, err := gitctx.Open(".")
-	if err != nil {
-		return err
-	}
-	identity := projectidentity.FromRepository(repo)
-	metadataDir, err := identity.Dir()
-	if err != nil {
-		return err
-	}
-	backgroundStore, err := backgroundtask.NewStore(metadataDir)
-	if err != nil {
-		return err
-	}
-	var parent *reviewFollowUpParent
-	if followUpRequested {
-		loadedParent, readErr := readFollowUpParent(backgroundStore, kind, followUpID, repo.WorkPath)
-		if readErr != nil {
-			return readErr
-		}
-		parent = &loadedParent
-		mode = parent.Mode
-		depth, err = reviewtask.ParseDepth(parent.Turn.ReviewDepth)
-		if err != nil {
-			return err
-		}
-	}
-	var parentLineage *followup.Lineage
-	if parent != nil {
-		lineage := followup.Lineage{
-			ID: followUpID, ParentID: parent.Turn.ParentID, Depth: parent.Turn.Depth,
-			PromptCacheKey: parent.Turn.PromptCacheKey,
-		}
-		parentLineage = &lineage
-	}
-	lineage := followup.Next(parentLineage, taskID, "review:"+taskID)
-	turnMetadata := backgroundtask.TurnMetadata{
-		ParentID: lineage.ParentID, Mode: string(mode), Workspace: repo.WorkPath,
-		ReviewDepth: string(depth), Depth: lineage.Depth, PromptCacheKey: lineage.PromptCacheKey,
-	}
-	inspectionStarted := time.Now().UTC()
-	if err := backgroundStore.Create(taskID, command, os.Getpid(), inspectionStarted); err != nil {
-		return err
-	}
-	failureDiagnostic := &backgroundtask.FailureDiagnostic{Mode: string(mode)}
-	recordCompleted := false
-	defer func() {
-		if returnErr == nil || recordCompleted {
-			return
-		}
-		now := time.Now().UTC()
-		terminal := trace.Event{At: now, Kind: "error", Value: map[string]any{"message": returnErr.Error()}}
-		returnErr = errors.Join(returnErr, backgroundStore.Complete(taskID, terminal, failureDiagnostic, now))
-	}()
-	if !dryRun {
-		if err := backgroundStore.AttachTurn(taskID, turnMetadata); err != nil {
-			return err
-		}
-	}
-	heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
-	heartbeatDone := make(chan error, 1)
-	go func() {
-		err := backgroundStore.Heartbeat(heartbeatCtx, taskID)
-		if err != nil {
-			cancel()
-		}
-		heartbeatDone <- err
-	}()
-	heartbeatFinished := false
-	finishHeartbeat := func() error {
-		if heartbeatFinished {
-			return nil
-		}
-		heartbeatFinished = true
-		stopHeartbeat()
-		return <-heartbeatDone
-	}
-	defer func() {
-		returnErr = errors.Join(returnErr, finishHeartbeat())
-	}()
-	var prepared reviewtask.PreparedContext
-	if followUpRequested {
-		prepared, err = reviewtask.PrepareFollowUp(repo, mode)
-	} else {
-		prepared, err = reviewtask.Prepare(repo, mode)
-	}
-	if err != nil {
-		return err
-	}
-	if mode != reviewtask.ModeCodebase {
-		fingerprint := prepared.Fingerprint
-		failureDiagnostic.RepositoryFingerprint = &fingerprint
-	}
-	renderedGuidance, err := resolveReviewGuidance(repo, localCfg.GuidanceFamily, prepared.Paths, mode)
-	if err != nil {
-		return err
-	}
-	skillManager := skillcmd.Discover(repo.WorkPath)
-	skillInstructions, err := resolveSkillInstructions(taskCtx, skillManager)
-	if err != nil {
-		return err
-	}
-	toolCandidates := append(tools.ReviewToolCandidates(mode.ToolMode()), tools.SkillToolNames()...)
-	registry := tools.NewReviewRegistry(repo, skillManager, mode.ToolMode(), tools.NewReviewScope(prepared.Paths, prepared.Status, prepared.Stats), prepared.Fingerprint)
-	registry.Register(reviewtask.BranchHelp(kind))
-	toolCandidates = append(toolCandidates, reviewtask.BranchHelpToolName)
-	toolSpecs := registry.Definitions(toolCandidates)
-	allowedTools := toolDefinitionNames(toolSpecs)
-	budgetPlan, err := reviewtask.PlanBudget(reviewtask.BudgetInput{
-		Kind:             kind,
-		Prepared:         prepared,
-		ToolNames:        allowedTools,
-		Depth:            depth,
-		ExplicitMaxSteps: opts.MaxSteps,
-	})
-	if err != nil {
-		return fmt.Errorf("plan %s budget: %w", command, err)
-	}
-	if err := advertiseDetachedLaunch(a.stderr, detachedLaunch{
-		Command: command,
-		ID:      taskID,
-		PID:     os.Getpid(),
-	}); err != nil {
-		return err
-	}
-	eventSink := func(event trace.Event) error {
-		failureDiagnostic.RecordToolEvent(event)
-		var recordErr error
-		if event.Kind == "final" || event.Kind == "error" {
-			var diagnostic *backgroundtask.FailureDiagnostic
-			if event.Kind == "error" {
-				diagnostic = failureDiagnostic
-			}
-			recordErr = backgroundStore.Complete(taskID, event, diagnostic, time.Now())
-			if recordErr == nil {
-				recordCompleted = true
-			}
-		}
-		return recordErr
-	}
-	recorder, err := trace.NewEventStream(command, eventSink)
-	if err != nil {
-		return err
-	}
-	session := map[string]any{
-		"command":      command,
-		"mode":         mode,
-		"repo":         repo.Summary(),
-		"event_schema": "git-agent.events/v2",
-		"root_node_id": "root",
-	}
-	if mode != reviewtask.ModeCodebase {
-		session["prepared_change_context"] = prepared
-	}
-	session["inspection_budget"] = budgetPlan
-	if turnMetadata.ParentID != "" {
-		session["parent"] = turnMetadata.ParentID
-	}
-	if err := recorder.Write("session", session); err != nil {
-		return err
-	}
-	if dryRun {
-		var checkResults []checks.Result
-		if kind == reviewtask.KindReview {
-			checkSession, err := newReviewCheckSession(repo, mode, prepared)
-			if err != nil {
-				return err
-			}
-			defer checkSession.Close()
-			checkResults, err = checkSession.SyntheticResults()
-			if err != nil {
-				return err
-			}
-		}
-		events, err := dryRunEvents(kind, checkResults)
-		if err != nil {
-			return err
-		}
-		for _, event := range events {
-			if err := waitDryRunEvent(taskCtx, dryRunEventDelay()); err != nil {
-				return err
-			}
-			if err := recorder.WriteExact(event.Kind, event.Value); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	cfg, err := config.ResolveFromLocal(opts, localCfg)
-	if err != nil {
-		return err
-	}
-	cfg.Timeout = reviewTimeout
-	applyCodeReviewDefaults(kind, opts, &cfg)
-	cfg.MaxSteps = budgetPlan.SelectedSteps
-	cfg.MaxToolCalls = budgetPlan.MaxToolCalls
-	failureDiagnostic.Model = cfg.Model
-	failureDiagnostic.MaxSteps = cfg.MaxSteps
-	failureDiagnostic.MaxToolCalls = cfg.MaxToolCalls
-	userPrompt := appendUserPrompt(
-		reviewtask.UserPrompt(kind, prepared),
-		opts.AppendPrompt,
-	)
-	followUpContext := ""
-	followUpMessage := ""
-	if parent != nil {
-		followUpContext, err = reviewtask.FollowUpContextPrompt(prepared)
-		if err != nil {
-			return err
-		}
-		followUpMessage, err = reviewtask.FollowUpPrompt(kind, parent.Report, followUpPrompt)
-		if err != nil {
-			return err
-		}
-	}
-
-	responseClient := a.responseClient
-	if responseClient == nil {
-		responseClient = openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout})
-	}
-	runner := agent.OpenAIRunner{
-		Config:             cfg,
-		Client:             responseClient,
-		Tools:              registry,
-		ToolSpecs:          toolSpecs,
-		HostedCapabilities: []provider.HostedCapability{{Kind: provider.HostedCapabilityWebSearch, MaxCalls: cfg.MaxWebSearches}},
-		ReasoningSummary:   openai.ReasoningSummaryAuto,
-		PromptCacheKey:     turnMetadata.PromptCacheKey,
-		Validator: func(text string) []string {
-			return reviewtask.ValidateRepository(kind, text, repo, mode, prepared.Paths, prepared.Fingerprint)
-		},
-		Normalize: func(text string) string { return reviewtask.Shape(kind, text) },
-		Trace:     recorder,
-	}
-	var providerUsage usageAccumulator
-	runner.ObserveUsage = providerUsage.add
-	baseRequest := agent.Request{
-		SystemPrompt:      reviewtask.SystemPrompt(kind),
-		ToolPolicy:        reviewToolPolicy(),
-		Environment:       environmentContext(repo, command, string(mode), cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls),
-		SkillInstructions: skillInstructions,
-		ProjectGuidance:   renderedGuidance,
-		UserPrompt:        userPrompt,
-		TextFormat:        reviewtask.TextFormat(kind),
-		AllowedToolNames:  allowedTools,
-		ParallelToolCalls: true,
-		MaxSteps:          cfg.MaxSteps,
-		RepairOnValidator: true,
-	}
-	var result reviewTreeResult
-	if parent == nil {
-		result, err = runReviewTree(taskCtx, kind, depth, runner, baseRequest, recorder)
-	} else {
-		parentLeaves := parent.Turn.Expanded()
-		roots := make([]reviewTreeRoot, len(parentLeaves))
-		for index, leaf := range parentLeaves {
-			input := slices.Clone(leaf.Input)
-			input = append(input,
-				openai.NewMessage("user", followUpContext),
-				openai.NewMessage("user", followUpMessage),
-			)
-			turnState := leaf.TurnState
-			if turnMetadata.ParentID == "" {
-				turnState = ""
-			}
-			roots[index] = reviewTreeRoot{
-				reviewContinuation: reviewContinuation{
-					Scope: leaf.Scope, Model: leaf.Model, ReasoningEffort: leaf.ReasoningEffort,
-					TurnState: turnState, Input: input,
-				},
-				Request: baseRequest,
-			}
-		}
-		result, err = runReviewForest(taskCtx, kind, depth, runner, roots, recorder)
-	}
-	if err != nil {
-		traceErr := recorder.WriteExact("error", map[string]any{"message": err.Error()})
-		return errors.Join(err, traceErr)
-	}
-	var report any
-	if kind == reviewtask.KindReview {
-		checkSession, err := newReviewCheckSession(repo, mode, prepared)
-		if err != nil {
-			traceErr := recorder.WriteExact("error", map[string]any{"message": err.Error()})
-			return errors.Join(err, traceErr)
-		}
-		defer checkSession.Close()
-		executable, err := os.Executable()
-		if err != nil {
-			return fmt.Errorf("locate git-agent executable for static checks: %w", err)
-		}
-		checkResults, err := checkSession.Run(taskCtx, executable, func(name string) error {
-			return recorder.WriteExact("runtime.status", map[string]any{
-				"phase": "running_static_checks",
-				"check": name,
-			})
-		})
-		if err != nil {
-			traceErr := recorder.WriteExact("error", map[string]any{"message": err.Error()})
-			return errors.Join(err, traceErr)
-		}
-		report, err = reviewtask.BuildFinalReviewReport(result.Text, checkResults)
-		if err != nil {
-			return err
-		}
-	} else {
-		var simplifyReport map[string]any
-		if err := json.Unmarshal([]byte(result.Text), &simplifyReport, jsonx.UseNumber); err != nil {
-			return fmt.Errorf("decode validated simplify report: %w", err)
-		}
-		report = simplifyReport
-	}
-	if count := len(settings.Hooks.PostInspection); count > 0 {
-		completedAt := time.Now().UTC()
-		usage := providerUsage.snapshot()
-		branchMetrics := make([]hooks.BranchMetric, len(result.Branches))
-		for index, branch := range result.Branches {
-			branchMetrics[index] = hooks.BranchMetric{
-				ID: branch.ID, ParentID: branch.ParentID, Model: branch.Model,
-				ReasoningEffort: branch.ReasoningEffort, Usage: hookUsage(branch.Usage),
-			}
-		}
-		hookPayload := hooks.PostInspection{
-			SchemaVersion: hooks.SchemaVersion,
-			Session: hooks.InspectionSession{
-				ID: taskID, Title: inspectionTitle(command, mode, repo.WorkPath),
-				Command: command, Mode: string(mode), Model: cfg.Model, ReasoningEffort: cfg.ThinkingEffort,
-				StartedAt: inspectionStarted, CompletedAt: completedAt,
-				ElapsedMS: completedAt.Sub(inspectionStarted).Milliseconds(),
-				ToolCalls: result.ToolCalls, RepairCalls: result.RepairCalls,
-				Repository: repo.Summary(),
-			},
-			Metrics: hooks.InspectionMetrics{
-				Usage: hookUsage(usage), UsedSkills: append([]string{}, result.UsedSkills...),
-				ToolCalls:       hookToolCalls(result.ToolCallsByName),
-				BranchesCreated: len(branchMetrics), Branches: branchMetrics,
-			},
-			Report: report,
-		}
-		if err := recorder.WriteExact("runtime.status", map[string]any{
-			"phase": "running_post_inspection_hooks", "hook_count": count,
-		}); err != nil {
-			return err
-		}
-		if err := hooks.RunPostInspection(taskCtx, settings.Hooks.PostInspection, hookPayload); err != nil {
-			_ = recorder.WriteExact("runtime.status", map[string]any{
-				"phase": "post_inspection_hook_failed", "message": err.Error(),
-			})
-		}
-	}
-	if !dryRun {
-		leaves := make([]followup.Leaf, len(result.Continuations))
-		for index, continuation := range result.Continuations {
-			leaves[index] = followup.Leaf{
-				Scope: continuation.Scope, Model: continuation.Model,
-				ReasoningEffort: continuation.ReasoningEffort, TurnState: continuation.TurnState,
-				Input: continuation.Input,
-			}
-		}
-		turnMetadata.Tree = followup.Compact(leaves)
-		if err := backgroundStore.UpdateTurn(taskID, turnMetadata); err != nil {
-			return err
-		}
-	}
-	if err := recorder.WriteExact("final", map[string]any{
-		"text":         report,
-		"tool_calls":   result.ToolCalls,
-		"repair_calls": result.RepairCalls,
-	}); err != nil {
-		return err
-	}
-	return nil
-}
-
-type usageAccumulator struct {
-	mu    sync.Mutex
-	usage openai.Usage
-}
-
-func (a *usageAccumulator) add(value openai.Usage) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.usage.Add(value)
-}
-
-func (a *usageAccumulator) snapshot() openai.Usage {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.usage
-}
-
-func hookUsage(usage openai.Usage) hooks.Usage {
-	return hooks.Usage{
-		InputTokens: usage.InputTokens, CachedInputTokens: usage.CachedInputTokens,
-		CacheWriteInputTokens: usage.CacheWriteInputTokens,
-		UncachedInputTokens:   max(0, usage.InputTokens-usage.CachedInputTokens),
-		OutputTokens:          usage.OutputTokens, ReasoningTokens: usage.ReasoningTokens,
-		TotalTokens: usage.TotalTokens,
-	}
-}
-
-func hookToolCalls(counts map[string]int) []hooks.ToolCallMetric {
-	names := slices.Sorted(maps.Keys(counts))
-	metrics := make([]hooks.ToolCallMetric, 0, len(names))
-	for _, name := range names {
-		metrics = append(metrics, hooks.ToolCallMetric{Name: name, Count: counts[name]})
-	}
-	return metrics
-}
-
-func inspectionTitle(command string, mode reviewtask.Mode, workPath string) string {
-	name := filepath.Base(filepath.Clean(workPath))
-	return fmt.Sprintf("%s %s (%s)", command, name, mode)
-}
-
-func (a *App) waitForDetachedTask(ctx context.Context, command, id string) error {
-	metadataRoot, err := metadata.Root()
-	if err != nil {
-		return err
-	}
-	store, err := backgroundtask.FindStore(metadataRoot, id)
-	if err != nil {
-		return err
-	}
-	report, err := store.Wait(ctx, id, command)
-	if err != nil {
-		return err
-	}
-	data, err := json.Marshal(report)
-	if err != nil {
-		return fmt.Errorf("encode background task %s report: %w", id, err)
-	}
-	data = append(data, '\n')
-	_, err = a.stdout.Write(data)
-	return err
-}
-
-func contextWithOptionalTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	if timeout > 0 {
-		return context.WithTimeout(ctx, timeout)
-	}
-	return context.WithCancel(ctx)
-}
-
-func codeReviewDefaultModel(kind reviewtask.Kind) string {
-	if kind == reviewtask.KindSimplify {
-		return simplifyDefaultModel
-	}
-	return reviewDefaultModel
-}
-
-func applyCodeReviewDefaults(kind reviewtask.Kind, opts config.Options, cfg *config.Config) {
-	if opts.Model == "" && os.Getenv("OPENAI_MODEL") == "" {
-		cfg.Model = codeReviewDefaultModel(kind)
-	}
-	// ResolveFromLocal may have applied the general model's default before the
-	// command selected its own model. Recompute only when no effort was explicit.
-	if !opts.Low && !opts.Medium && !opts.High && !opts.XHigh {
-		cfg.ThinkingEffort = config.DefaultThinkingEffort(cfg.Model)
-	}
-}
-
-const indexUsage = "usage: git-agent index sync\n       git-agent index migrate --to v2 [--dry-run]\n       git-agent index gc [--dry-run]"
 
 func (a *App) runIndex(ctx context.Context, args []string) error {
 	mode := ""
@@ -2298,6 +1661,18 @@ func resolveGuidanceForPaths(repo *gitctx.Repository, requestedFamily string, pa
 	return resolveGuidanceForRoot(repo.RootPath, requestedFamily, paths)
 }
 
+func resolveIndexGuidance(repo *gitctx.Repository, requestedFamily string, paths []string) (string, error) {
+	family, err := guidance.ParseFamily(requestedFamily)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := guidance.ResolveForRepoPaths(repo.RootPath, paths, family, repo.IndexFile)
+	if err != nil {
+		return "", err
+	}
+	return resolved.Rendered, nil
+}
+
 func resolveGuidanceForRoot(root, requestedFamily string, paths []string) (string, error) {
 	family, err := guidance.ParseFamily(requestedFamily)
 	if err != nil {
@@ -2311,25 +1686,6 @@ func resolveGuidanceForRoot(root, requestedFamily string, paths []string) (strin
 		}
 	}
 	resolved, err := guidance.ResolveForTargets(root, targets, family)
-	if err != nil {
-		return "", err
-	}
-	return resolved.Rendered, nil
-}
-
-func resolveReviewGuidance(repo *gitctx.Repository, requestedFamily string, paths []string, mode reviewtask.Mode) (string, error) {
-	if mode != reviewtask.ModeStaged {
-		return resolveGuidanceForPaths(repo, requestedFamily, paths)
-	}
-	return resolveIndexGuidance(repo, requestedFamily, paths)
-}
-
-func resolveIndexGuidance(repo *gitctx.Repository, requestedFamily string, paths []string) (string, error) {
-	family, err := guidance.ParseFamily(requestedFamily)
-	if err != nil {
-		return "", err
-	}
-	resolved, err := guidance.ResolveForRepoPaths(repo.RootPath, paths, family, repo.IndexFile)
 	if err != nil {
 		return "", err
 	}
@@ -2361,10 +1717,6 @@ func toolDefinitionNames(definitions []tools.Definition) []string {
 
 func toolPolicy() string {
 	return strings.TrimSpace(toolPolicyPrompt)
-}
-
-func reviewToolPolicy() string {
-	return strings.TrimSpace(reviewToolPolicyPrompt)
 }
 
 func environmentContext(repo *gitctx.Repository, command, mode, guidanceFamily string, maxSteps, maxToolCalls int) string {
@@ -2466,77 +1818,12 @@ func usageError(prefix string) error {
 	b.WriteString("  git-agent project_id\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] <base> <release>\n")
 	b.WriteString("  git-agent release-note [--out <file>] [flags] patch|minor|major\n")
-	b.WriteString("  git-agent review [--codebase|--uncommitted|--staged] [flags] [prompt...]\n")
-	b.WriteString("  git-agent review --wait <id>\n")
-	b.WriteString("  git-agent review [--debug] [--fast] --follow-up <turn-id> <prompt...>\n")
 	b.WriteString("  git-agent search [flags] <query...>\n")
 	b.WriteString("  git-agent search --ls [--remote <url>] [--format text|json]\n")
 	b.WriteString("  git-agent search --ls-remotes [--format text|json|completion]\n")
 	b.WriteString("  git-agent search --ls-files [--format tree|json] [--remote <url>] [--rev <rev>] [--scope <paths>] [--no-tests]\n")
-	b.WriteString("  git-agent simplify [--codebase|--uncommitted|--staged] [flags] [prompt...]\n")
-	b.WriteString("  git-agent simplify --wait <id>\n")
-	b.WriteString("  git-agent simplify [--debug] [--fast] --follow-up <turn-id> <prompt...>\n")
 	b.WriteString("\nRun `git-agent explore --help` for exploration usage.\n")
 	b.WriteString("Run `git-agent search --help` for search flags.\n")
-	b.WriteString("Run `git-agent review --help` or `git-agent simplify --help` for inspection flags.\n")
-	return errors.New(b.String())
-}
-
-func codeReviewUsageError(command string, fs *flag.FlagSet) error {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Usage: git-agent %s [--codebase|--uncommitted|--staged] [flags] [prompt...]\n\n", command)
-	fmt.Fprintf(&b, "       git-agent %s --wait <id>\n\n", command)
-	fmt.Fprintf(&b, "       git-agent %s [--debug] [--fast] --follow-up <turn-id> <prompt...>\n\n", command)
-	b.WriteString("Modes:\n")
-	b.WriteString("  --uncommitted  inspect all dirty changes (default)\n")
-	b.WriteString("  --staged       inspect staged changes only\n")
-	b.WriteString("  --codebase     inspect the full codebase\n\n")
-	b.WriteString("Flags:\n")
-	placeholders := map[string]string{
-		"hint":             "text",
-		"base-url":         "url",
-		"dry-run":          "",
-		"depth":            "fast|balanced|thorough",
-		"follow-up":        "turn-id",
-		"guidance-family":  "family",
-		"help-agent":       "",
-		"max-web-searches": "n",
-		"max-steps":        "n",
-		"model":            "model",
-		"pprof":            "addr",
-		"timeout":          "duration",
-		"wait":             "id",
-	}
-	fs.VisitAll(func(f *flag.Flag) {
-		if f.Name == "codebase" || f.Name == "uncommitted" || f.Name == "staged" {
-			return
-		}
-		fmt.Fprintf(&b, "  --%s", f.Name)
-		if placeholder := placeholders[f.Name]; placeholder != "" {
-			fmt.Fprintf(&b, " <%s>", placeholder)
-		}
-		fmt.Fprintf(&b, "\n      %s\n", f.Usage)
-	})
-	return errors.New(b.String())
-}
-
-func codeReviewAgentUsageError(command string, fs *flag.FlagSet) error {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Usage: git-agent %s [--codebase|--uncommitted|--staged] [--depth fast|balanced|thorough] [prompt...]\n\n", command)
-	fmt.Fprintf(&b, "       git-agent %s [--debug] [--fast] --follow-up <turn-id> <prompt...>\n\n", command)
-	b.WriteString("Modes:\n")
-	b.WriteString("  --uncommitted  inspect all dirty changes (default)\n")
-	b.WriteString("  --staged       inspect staged changes only\n")
-	b.WriteString("  --codebase     inspect the full codebase\n\n")
-	b.WriteString("Flags:\n")
-	depth := fs.Lookup("depth")
-	b.WriteString("  --depth <fast|balanced|thorough>\n")
-	fmt.Fprintf(&b, "      %s\n", depth.Usage)
-	b.WriteString("      use thorough only for security-related issues or very complex logic; otherwise use fast or balanced\n")
-	b.WriteString("  --low | --medium | --high | --xhigh\n")
-	b.WriteString("      set reasoning effort (mutually exclusive)\n")
-	b.WriteString("  [--debug] [--fast] --follow-up <turn-id> <prompt...>\n")
-	b.WriteString("      re-evaluate a successful provider turn against current repository state\n")
 	return errors.New(b.String())
 }
 

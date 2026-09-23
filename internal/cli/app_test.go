@@ -366,6 +366,24 @@ func (cliListFakeEmbedder) CreateEmbeddings(_ context.Context, request openai.Em
 	return openai.EmbeddingResponse{Model: request.Model, Vectors: vectors, Dimensions: 3}, nil
 }
 
+func TestRemovedReviewCommandsAreUnknown(t *testing.T) {
+	t.Parallel()
+
+	for _, command := range []string{"review", "simplify"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout bytes.Buffer
+			app := &App{stdout: &stdout, stderr: io.Discard}
+			err := app.Run(t.Context(), []string{command})
+			if err == nil || !strings.Contains(err.Error(), `unknown command "`+command+`"`) {
+				t.Fatalf("error = %v, want unknown command", err)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+		})
+	}
+}
+
 func TestSearchHelpReturnsUsage(t *testing.T) {
 	t.Setenv(config.EnvEmbeddingDimensions, "invalid")
 
@@ -2163,11 +2181,11 @@ func TestCommitStreamsTraceThenPrintsGitSummary(t *testing.T) {
 func TestCommitShapesLongBodyListsWithoutProviderRepair(t *testing.T) {
 	repoDir := initRepo(t)
 	t.Chdir(repoDir)
-	message := `feat(review): add previous HEAD context to diff prompts
+	message := `feat(commit): preserve readable generated body lists
 
-- Include a best-effort HEAD-versus-parent context pack for diff-mode reviews while keeping current changes authoritative.
-- Broaden simplify guidance to audit confirmed overengineering and remove the five-source limit from external lookup summaries.
-- Align patch statistics with file changes, bound diff reads, and add coverage for previous-HEAD context and simplification prompts.`
+- Shape long model-generated body lists without requiring a provider repair.
+- Keep each item readable while preserving the generated message meaning.
+- Verify the final commit message passes the normal commit validator.`
 	server := commitMessageServer(t, message)
 	defer server.Close()
 

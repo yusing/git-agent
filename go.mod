@@ -5,11 +5,9 @@ go 1.27.0
 require (
 	github.com/go-git/go-billy/v6 v6.0.0-alpha.2
 	github.com/go-git/go-git/v6 v6.0.0-alpha.5
-	github.com/golangci/golangci-lint/v2 v2.13.1
 	github.com/openai/openai-go/v3 v3.52.0
 	github.com/yusing/goutils v0.0.0-20260713173753-e8944db5b4e1
 	golang.org/x/crypto v0.55.0
-	golang.org/x/net v0.58.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/sys v0.47.0
 )
@@ -97,17 +95,6 @@ require (
 	github.com/gobwas/glob v0.2.3 // indirect
 	github.com/godoc-lint/godoc-lint v0.11.2 // indirect
 	github.com/gofrs/flock v0.13.0 // indirect
-	github.com/golangci/asciicheck v0.5.0 // indirect
-	github.com/golangci/dupl v0.0.0-20260401084720-c99c5cf5c202 // indirect
-	github.com/golangci/go-printf-func-name v0.1.1 // indirect
-	github.com/golangci/gofmt v0.0.0-20260820135601-e84e05053792 // indirect
-	github.com/golangci/golines v0.15.0 // indirect
-	github.com/golangci/misspell v0.8.0 // indirect
-	github.com/golangci/plugin-module-register v0.1.2 // indirect
-	github.com/golangci/revgrep v0.8.0 // indirect
-	github.com/golangci/rowserrcheck v0.0.0-20260801150524-d2031e3af752 // indirect
-	github.com/golangci/swaggoswag v0.0.0-20250504205917-77f2aca3143e // indirect
-	github.com/golangci/unconvert v0.0.0-20250410112200-a129a6e6413e // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/gordonklaus/ineffassign v0.2.0 // indirect
 	github.com/gostaticanalysis/analysisutil v0.7.1 // indirect
@@ -223,6 +210,7 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20260820142414-ca536658362e // indirect
 	golang.org/x/mod v0.40.0 // indirect
+	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/tools v0.49.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect

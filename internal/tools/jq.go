@@ -27,7 +27,7 @@ const (
 type jqTool struct {
 	repo *gitctx.Repository
 	root string
-	mode ReviewMode
+	mode fileMode
 }
 
 func (t jqTool) Definition() Definition {

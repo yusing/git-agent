@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"maps"
 	"os"
@@ -89,21 +87,9 @@ type FileStat struct {
 	IsBinary bool   `json:"is_binary,omitempty"`
 }
 
-type ChangeSnapshot struct {
-	Paths         []string
-	Components    []string
-	Status        []PathChange
-	Stats         []FileStat
-	Diff          string
-	DiffTruncated bool
-	Fingerprint   ChangeFingerprint
-}
-
 type ChangeFingerprint struct {
-	BaseTree           string `json:"base_tree"`
-	TargetTree         string `json:"target_tree"`
-	DirtySubmodules    string `json:"dirty_submodules,omitempty"`
-	NestedRepositories string `json:"nested_repositories,omitempty"`
+	BaseTree   string `json:"base_tree"`
+	TargetTree string `json:"target_tree"`
 }
 
 var (
@@ -134,11 +120,9 @@ const (
 )
 
 type SubmoduleChange struct {
-	Path       string `json:"path"`
-	Old        string `json:"old,omitempty"`
-	New        string `json:"new,omitempty"`
-	Dirty      bool   `json:"dirty,omitempty"`
-	dirtyState string
+	Path string `json:"path"`
+	Old  string `json:"old,omitempty"`
+	New  string `json:"new,omitempty"`
 }
 
 const PullRequestBaseRef = "origin/HEAD"
@@ -245,55 +229,12 @@ func (r *Repository) StagedDiffForPaths(paths []string, maxBytes, maxLines int) 
 	return r.limitedTreeDiffForPaths(diff, paths, maxBytes, maxLines)
 }
 
-func (r *Repository) UncommittedDiff(maxBytes, maxLines int) (string, bool, error) {
-	workspace, err := r.uncommittedWorkspace(true)
-	if err != nil {
-		return "", false, err
-	}
-	return workspace.diff(nil, maxBytes, maxLines)
-}
-
-func (r *Repository) UncommittedDiffForPaths(paths []string, maxBytes, maxLines int) (string, bool, error) {
-	if len(paths) == 0 {
-		return "", false, nil
-	}
-	workspace, err := r.uncommittedWorkspace(true)
-	if err != nil {
-		return "", false, err
-	}
-	return workspace.diff(paths, maxBytes, maxLines)
-}
-
 func (r *Repository) StagedStat() ([]FileStat, error) {
 	diff, err := r.stagedTreeDiff()
 	if err != nil {
 		return nil, err
 	}
 	return diff.Stats(), nil
-}
-
-func (r *Repository) StagedSnapshot(maxBytes, maxLines int) (ChangeSnapshot, error) {
-	baseTree, targetTree, diff, err := r.stagedChangeState()
-	if err != nil {
-		return ChangeSnapshot{}, err
-	}
-	diffText, truncated := textutil.Limit(r.diffText(diff, nil), maxBytes, maxLines)
-	return ChangeSnapshot{
-		Paths:         diff.Paths(),
-		Status:        diff.Status(),
-		Stats:         diff.Stats(),
-		Diff:          diffText,
-		DiffTruncated: truncated,
-		Fingerprint:   changeFingerprint(baseTree, targetTree, diff.submodules),
-	}, nil
-}
-
-func (r *Repository) UncommittedSnapshot(maxBytes, maxLines int) (ChangeSnapshot, error) {
-	workspace, err := r.uncommittedWorkspace(true)
-	if err != nil {
-		return ChangeSnapshot{}, err
-	}
-	return workspace.snapshot(maxBytes, maxLines)
 }
 
 func (r *Repository) StagedFingerprint() (ChangeFingerprint, error) {
@@ -305,24 +246,11 @@ func (r *Repository) StagedFingerprint() (ChangeFingerprint, error) {
 	if err != nil {
 		return ChangeFingerprint{}, err
 	}
-	return changeFingerprint(baseTree, targetTree, nil), nil
-}
-
-func (r *Repository) UncommittedFingerprint() (ChangeFingerprint, error) {
-	workspace, err := r.uncommittedWorkspace(false)
-	if err != nil {
-		return ChangeFingerprint{}, err
-	}
-	return workspace.fingerprint(), nil
+	return changeFingerprint(baseTree, targetTree), nil
 }
 
 func (r *Repository) CheckStagedFingerprint(want ChangeFingerprint) error {
 	got, err := r.StagedFingerprint()
-	return checkChangeFingerprint(want, got, err)
-}
-
-func (r *Repository) CheckUncommittedFingerprint(want ChangeFingerprint) error {
-	got, err := r.UncommittedFingerprint()
 	return checkChangeFingerprint(want, got, err)
 }
 
@@ -336,27 +264,11 @@ func checkChangeFingerprint(want, got ChangeFingerprint, err error) error {
 	return nil
 }
 
-func changeFingerprint(baseTree, targetTree *object.Tree, submodules []SubmoduleChange) ChangeFingerprint {
-	fingerprint := ChangeFingerprint{
+func changeFingerprint(baseTree, targetTree *object.Tree) ChangeFingerprint {
+	return ChangeFingerprint{
 		BaseTree:   treeHash(baseTree),
 		TargetTree: treeHash(targetTree),
 	}
-	hasher := sha256.New()
-	dirty := 0
-	for _, change := range submodules {
-		if !change.Dirty {
-			continue
-		}
-		dirty++
-		writeHashField(hasher, change.Path)
-		writeHashField(hasher, change.Old)
-		writeHashField(hasher, change.New)
-		writeHashField(hasher, change.dirtyState)
-	}
-	if dirty > 0 {
-		fingerprint.DirtySubmodules = fmt.Sprintf("%x", hasher.Sum(nil))
-	}
-	return fingerprint
 }
 
 func treeHash(tree *object.Tree) string {
@@ -364,11 +276,6 @@ func treeHash(tree *object.Tree) string {
 		return plumbing.ZeroHash.String()
 	}
 	return tree.Hash.String()
-}
-
-func writeHashField(hasher hash.Hash, value string) {
-	_, _ = fmt.Fprintf(hasher, "%d:", len(value))
-	_, _ = io.WriteString(hasher, value)
 }
 
 func (r *Repository) StagedSubmoduleChanges() ([]SubmoduleChange, error) {
@@ -534,19 +441,11 @@ func submoduleDiffText(changes []SubmoduleChange) string {
 		fmt.Fprintf(&b, "diff --git %q %q\nindex %.7s..%.7s 160000\n--- %s\n+++ %s\n", "a/"+change.Path, "b/"+change.Path, oldHash, newHash, oldPath, newPath)
 		switch {
 		case change.Old == "":
-			newCommit := change.New
-			if change.Dirty {
-				newCommit += "-dirty"
-			}
-			fmt.Fprintf(&b, "@@ -0,0 +1 @@\n+Subproject commit %s\n", newCommit)
+			fmt.Fprintf(&b, "@@ -0,0 +1 @@\n+Subproject commit %s\n", change.New)
 		case change.New == "":
 			fmt.Fprintf(&b, "@@ -1 +0,0 @@\n-Subproject commit %s\n", change.Old)
 		default:
-			newCommit := change.New
-			if change.Dirty {
-				newCommit += "-dirty"
-			}
-			fmt.Fprintf(&b, "@@ -1 +1 @@\n-Subproject commit %s\n+Subproject commit %s\n", change.Old, newCommit)
+			fmt.Fprintf(&b, "@@ -1 +1 @@\n-Subproject commit %s\n+Subproject commit %s\n", change.Old, change.New)
 		}
 	}
 	return b.String()
@@ -1494,325 +1393,6 @@ func (r *Repository) stagedChangeState() (*object.Tree, *object.Tree, *treeDiff,
 	}
 	diff, err := newTreeDiff(headTree, indexTree)
 	return headTree, indexTree, diff, err
-}
-
-func mergeDirtySubmodules(diff *treeDiff, dirtySubmodules []SubmoduleChange) {
-	byPath := make(map[string]int, len(diff.submodules))
-	for i, change := range diff.submodules {
-		byPath[change.Path] = i
-	}
-	for _, change := range dirtySubmodules {
-		if index, ok := byPath[change.Path]; ok {
-			diff.submodules[index].Dirty = true
-			diff.submodules[index].dirtyState = change.dirtyState
-			continue
-		}
-		diff.submodules = append(diff.submodules, change)
-	}
-	slices.SortFunc(diff.submodules, func(a, b SubmoduleChange) int { return cmp.Compare(a.Path, b.Path) })
-}
-
-func (r *Repository) dirtySubmoduleChanges(headTree *object.Tree) ([]SubmoduleChange, error) {
-	worktree, err := r.Repo.Worktree()
-	if err != nil {
-		return nil, err
-	}
-	submodules, err := worktree.Submodules()
-	if err != nil {
-		return nil, err
-	}
-	baseHashes, err := collectSubmoduleEntries(headTree, "")
-	if err != nil {
-		return nil, err
-	}
-	rootPath, err := filepath.EvalSymlinks(r.RootPath)
-	if err != nil {
-		return nil, err
-	}
-	dirtySubmodules := make([]SubmoduleChange, 0, len(submodules))
-	for _, submodule := range submodules {
-		path := filepath.ToSlash(submodule.Config().Path)
-		nativePath := filepath.FromSlash(path)
-		if !filepath.IsLocal(nativePath) || slices.ContainsFunc(strings.Split(path, "/"), func(part string) bool {
-			return strings.EqualFold(part, ".git")
-		}) {
-			continue
-		}
-		subRoot, err := filepath.EvalSymlinks(filepath.Join(rootPath, nativePath))
-		if err != nil {
-			continue
-		}
-		rel, err := filepath.Rel(rootPath, subRoot)
-		if err != nil || rel == "." || !filepath.IsLocal(rel) {
-			continue
-		}
-		subRepo, err := git.PlainOpen(subRoot)
-		if err != nil {
-			continue
-		}
-		subStatus, statusErr := (&Repository{RootPath: subRoot, WorkPath: subRoot, Repo: subRepo}).status()
-		head, headErr := subRepo.Head()
-		dirtyState := ""
-		if statusErr == nil && !subStatus.IsClean() {
-			dirtyState, err = worktreeStatusFingerprint(subRoot, subStatus)
-		}
-		closeErr := subRepo.Close()
-		if err != nil {
-			return nil, fmt.Errorf("fingerprint dirty submodule %q: %w", path, err)
-		}
-		if err := errors.Join(statusErr, headErr, closeErr); err != nil {
-			return nil, fmt.Errorf("inspect dirty submodule %q: %w", path, err)
-		}
-		if subStatus.IsClean() {
-			continue
-		}
-		change := SubmoduleChange{Path: path, Old: baseHashes[path], New: head.Hash().String(), Dirty: true, dirtyState: dirtyState}
-		dirtySubmodules = append(dirtySubmodules, change)
-	}
-	slices.SortFunc(dirtySubmodules, func(a, b SubmoduleChange) int { return cmp.Compare(a.Path, b.Path) })
-	return dirtySubmodules, nil
-}
-
-func worktreeStatusFingerprint(rootPath string, status git.Status) (string, error) {
-	root, err := os.OpenRoot(rootPath)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = root.Close() }()
-
-	paths := slices.Sorted(maps.Keys(status))
-	hasher := sha256.New()
-	for _, path := range paths {
-		file := status[path]
-		writeHashField(hasher, filepath.ToSlash(path))
-		writeHashField(hasher, string(file.Staging))
-		writeHashField(hasher, string(file.Worktree))
-		if file.Worktree == git.Deleted {
-			writeHashField(hasher, "deleted")
-			continue
-		}
-		if err := hashWorktreePath(hasher, root, path); err != nil {
-			return "", err
-		}
-	}
-	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
-}
-
-func hashWorktreePath(hasher hash.Hash, root *os.Root, path string) error {
-	info, err := root.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			writeHashField(hasher, "missing")
-			return nil
-		}
-		return fmt.Errorf("stat path %q: %w", path, err)
-	}
-	writeHashField(hasher, info.Mode().String())
-	switch {
-	case info.Mode()&os.ModeSymlink != 0:
-		target, err := root.Readlink(path)
-		if err != nil {
-			return fmt.Errorf("read symlink %q: %w", path, err)
-		}
-		writeHashField(hasher, target)
-	case info.Mode().IsRegular():
-		writeHashField(hasher, strconv.FormatInt(info.Size(), 10))
-		file, err := root.Open(path)
-		if err != nil {
-			return fmt.Errorf("open path %q: %w", path, err)
-		}
-		_, copyErr := io.Copy(hasher, file)
-		closeErr := file.Close()
-		if err := errors.Join(copyErr, closeErr); err != nil {
-			return fmt.Errorf("hash path %q: %w", path, err)
-		}
-	}
-	return nil
-}
-
-func (r *Repository) worktreeTree(status git.Status) (*object.Tree, error) {
-	idx, err := r.ReadIndex()
-	if err != nil {
-		return nil, err
-	}
-	worktreeIndex := cloneIndex(idx)
-	submoduleHashes, err := r.worktreeSubmoduleHashes()
-	if err != nil {
-		return nil, err
-	}
-	st := newOverlayObjectStorer(r.Repo.Storer)
-	root, err := os.OpenRoot(r.RootPath)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = root.Close() }()
-
-	const maxFileBytes = 8 * 1024 * 1024
-	const maxSnapshotBytes = 64 * 1024 * 1024
-	loadedBytes := int64(0)
-	for path, file := range status {
-		if file.Worktree == git.Unmodified {
-			continue
-		}
-		path = filepath.ToSlash(path)
-		if file.Worktree == git.Deleted {
-			_, _ = worktreeIndex.Remove(path)
-			continue
-		}
-
-		entry, entryErr := worktreeIndex.Entry(path)
-		if entryErr == nil && entry.Mode == filemode.Submodule {
-			if hash := submoduleHashes[path]; !hash.IsZero() {
-				entry.Hash = hash
-			}
-			continue
-		}
-		info, err := root.Lstat(path)
-		if err != nil {
-			return nil, fmt.Errorf("stat worktree path %q: %w", path, err)
-		}
-		var content []byte
-		mode := filemode.Regular
-		switch {
-		case info.Mode()&os.ModeSymlink != 0:
-			target, err := root.Readlink(path)
-			if err != nil {
-				return nil, fmt.Errorf("read worktree symlink %q: %w", path, err)
-			}
-			content = []byte(target)
-			mode = filemode.Symlink
-		case info.Mode().IsRegular():
-			remaining := int64(maxSnapshotBytes) - loadedBytes
-			limit := min(int64(maxFileBytes), remaining)
-			if limit <= 0 || info.Size() > limit {
-				digest, err := fileSHA256(root, path)
-				if err != nil {
-					return nil, err
-				}
-				content = omittedWorktreeContent(info.Size(), limit, digest)
-			} else {
-				file, err := root.Open(path)
-				if err != nil {
-					return nil, fmt.Errorf("open worktree path %q: %w", path, err)
-				}
-				content, err = io.ReadAll(io.LimitReader(file, limit+1))
-				closeErr := file.Close()
-				if err != nil || closeErr != nil {
-					return nil, fmt.Errorf("read worktree path %q: %w", path, errors.Join(err, closeErr))
-				}
-				if int64(len(content)) > limit {
-					digest, err := fileSHA256(root, path)
-					if err != nil {
-						return nil, err
-					}
-					content = omittedWorktreeContent(info.Size(), limit, digest)
-				} else {
-					loadedBytes += int64(len(content))
-				}
-			}
-			if info.Mode().Perm()&0o111 != 0 {
-				mode = filemode.Executable
-			}
-		default:
-			continue
-		}
-
-		hash, err := storeBlob(st, content)
-		if err != nil {
-			return nil, fmt.Errorf("store worktree path %q: %w", path, err)
-		}
-		if entryErr != nil {
-			entry, err = worktreeIndex.Add(path)
-			if err != nil {
-				return nil, err
-			}
-		}
-		entry.Hash = hash
-		entry.Mode = mode
-		entry.Size = uint32(min(int64(len(content)), int64(^uint32(0))))
-	}
-
-	hash, err := buildIndexTree(st, worktreeIndex)
-	if err != nil {
-		return nil, err
-	}
-	if hash.IsZero() {
-		return nil, nil
-	}
-	return object.GetTree(st, hash)
-}
-
-func (r *Repository) worktreeSubmoduleHashes() (map[string]plumbing.Hash, error) {
-	worktree, err := r.Repo.Worktree()
-	if err != nil {
-		return nil, err
-	}
-	submodules, err := worktree.Submodules()
-	if err != nil {
-		return nil, err
-	}
-	statuses, err := submodules.Status()
-	if err != nil {
-		return nil, err
-	}
-	hashes := make(map[string]plumbing.Hash, len(statuses))
-	for _, status := range statuses {
-		hash := status.Current
-		if hash.IsZero() {
-			hash = status.Expected
-		}
-		hashes[filepath.ToSlash(status.Path)] = hash
-	}
-	return hashes, nil
-}
-
-func fileSHA256(root *os.Root, path string) (string, error) {
-	file, err := root.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("open worktree path %q for fingerprint: %w", path, err)
-	}
-	hasher := sha256.New()
-	_, copyErr := io.Copy(hasher, file)
-	closeErr := file.Close()
-	if err := errors.Join(copyErr, closeErr); err != nil {
-		return "", fmt.Errorf("hash worktree path %q: %w", path, err)
-	}
-	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
-}
-
-func omittedWorktreeContent(size, limit int64, digest string) []byte {
-	return fmt.Appendf(nil, "[git-agent: worktree file omitted; size=%d bytes exceeds %d-byte review cap; sha256=%s]\n", size, max(0, limit), digest)
-}
-
-func cloneIndex(src *index.Index) *index.Index {
-	if src == nil {
-		return &index.Index{Version: 2}
-	}
-	dst := *src
-	dst.Entries = make([]*index.Entry, len(src.Entries))
-	for i, entry := range src.Entries {
-		cloned := *entry
-		dst.Entries[i] = &cloned
-	}
-	dst.Cache = nil
-	return &dst
-}
-
-func storeBlob(st storer.EncodedObjectStorer, content []byte) (plumbing.Hash, error) {
-	obj := st.NewEncodedObject()
-	obj.SetType(plumbing.BlobObject)
-	writer, err := obj.Writer()
-	if err != nil {
-		return plumbing.ZeroHash, err
-	}
-	if _, err := writer.Write(content); err != nil {
-		_ = writer.Close()
-		return plumbing.ZeroHash, err
-	}
-	if err := writer.Close(); err != nil {
-		return plumbing.ZeroHash, err
-	}
-	return st.SetEncodedObject(obj)
 }
 
 func (r *Repository) patchHeadAgainstParent() (*object.Patch, error) {
