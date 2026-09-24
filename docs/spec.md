@@ -68,6 +68,13 @@ not interpret those redirects. Errors name the variable without printing its
 value. Native Git is bound to the inspected worktree; ordinary Git configuration
 and signing overrides remain available.
 
+Staged inspection builds the tree Git would commit from the index. Intent-to-add
+entries (`git add -N`) are not staged content. An index with unmerged entries is
+rejected with an error naming the conflicted paths. Split and sparse indexes are
+unsupported and fail with a hint to disable `core.splitIndex` or `index.sparse`.
+Tree entries that Git accepts, such as names with control characters or a
+symlinked `.gitignore`, are inspected rather than rejected.
+
 The command precomputes staged paths, status, stats, a locally inferred style hint, and
 the bounded staged diff before generation so the authoritative staged scope is
 visible before any optional follow-up tool calls. For generated-heavy staged
@@ -113,6 +120,13 @@ diagnostics, recent style commits, and the bounded final amended diff versus
 HEAD's first parent. This gives the model enough latest-commit context before
 any optional follow-up tool calls.
 
+When HEAD's first parent and the final amended tree differ in submodule
+gitlinks, amend replaces the caller-owned submodule changelog block locally.
+Blocks rendered for HEAD's or the final submodule paths are removed from the
+original message before it is shown to the model and from the model output, and a block for the
+final parent-to-amended range is appended. A later submodule bump therefore
+refreshes the changelog, and reverting the bump removes it.
+
 #### `git-agent commit`
 
 Generate a commit message from staged changes using the same prompt,
@@ -132,7 +146,10 @@ commit manually.
 
 The state check is immediately before Git handoff, not an atomic lock across
 native Git execution. Hooks and concurrent edits after that check retain normal
-Git behavior; the harness does not disable hooks or roll back commits.
+Git behavior; the harness does not disable hooks or roll back commits. The task
+timeout bounds preparation and generation only; `git commit` runs until it
+exits or the caller interrupts the command, so slow hooks and signing prompts
+are not killed.
 
 For normal submodule-only staged changes without a nonblank `--hint`,
 `commit` uses the same deterministic local formatter as `commit-msg`, skips
@@ -1176,7 +1193,8 @@ with the shared service-tier behavior, and its command-specific
 - `--embedding-model <model>`: default `text-embedding-3-small`
 - `--embedding-dimensions <n>`: default `1024`, valid positive integer
 - `--base-url <url>`: override provider base URL
-- `--timeout <duration>`: override default request timeout
+- `--timeout <duration>`: override default request timeout; for `commit`, it
+  does not bound the delegated `git commit`
 - `--debug`: enable diagnostics on stderr
 - `--pprof <addr>`: serve Go pprof endpoints on the requested address
 
@@ -1537,8 +1555,9 @@ flowchart TD
     Valid -- no --> Repair[Run one repair pass]
     Repair --> Reshape[Shape repaired output]
     Reshape --> Revalidate[Revalidate shaped repaired output]
-    Revalidate --> FinalValidate
-    Valid -- yes --> FinalValidate[Reject explicit amend-process narration]
+    Revalidate --> Trailer
+    Valid -- yes --> Trailer[Replace submodule trailer with final amended range]
+    Trailer --> FinalValidate[Reject explicit amend-process narration]
     FinalValidate --> Stdout([Print artifact only to stdout])
 ```
 
@@ -1574,7 +1593,7 @@ flowchart TD
     RecordTools --> Continue[Append function call and output items]
     Continue --> Model
     ToolDecision -- no --> Validate[Validate and shape commit message]
-    Validate --> Trailer[For normal mode, append prepared submodule trailer locally]
+    Validate --> Trailer[Append normal staged or amend final submodule trailer locally]
     Trailer --> FinalTrace[Record final artifact]
     FinalTrace --> Commit{Amend?}
     Commit -- no --> GitCommit[Run git commit --file]
@@ -1878,9 +1897,10 @@ diagnostics, and the bounded final amended diff. It exposes:
 - `git_show_file_at_rev`
 
 Staged inventory, recent-commit, full staged-diff, HEAD-show, parent-diff, and
-amend-delta tools are not exposed. Normal mode supplies at most ten recent
+amend-delta tools are not exposed. Both modes supply at most ten recent
 subjects, each capped at 300 bytes plus a truncation marker, in a separate
-convention-reference block outside authoritative staged context. It does not
+convention-reference block outside authoritative prepared context; amend omits
+the commit being amended from that block. Normal mode does not
 preload historical patches; amend already includes its HEAD and delta evidence.
 `git_staged_diff_for_paths` inspects omitted or high-churn staged clusters.
 `git_final_amended_diff` is for narrower follow-up when the prepared final diff
@@ -2062,8 +2082,11 @@ Behavior:
 - precompute prepared amend context before generation, including original HEAD
   message, latest HEAD commit metadata, HEAD-vs-parent paths/stats/diff,
   staged paths/status/stats/diff diagnostics, submodule diagnostics when
-  present, recent style commits, and final amended paths/stats/diff versus
-  HEAD's first parent
+  present, and final amended paths/stats/diff versus HEAD's first parent;
+  recent style subjects stay in a separate convention-reference block
+- replace the caller-owned submodule changelog block locally from the final
+  parent-to-amended submodule range; the prepared original HEAD message omits
+  the block rendered for HEAD's range
 - expose the latest HEAD commit context in the initial request so the model
   does not have to infer the commit being amended from an empty prompt or from
   staged-delta tools alone
@@ -2086,7 +2109,9 @@ Behavior:
 Output rules:
 
 - one narrative only
-- the original HEAD subject must be preserved by validation
+- the original HEAD subject must be preserved by validation; both subjects are
+  compared after output shaping, so an original whose first paragraph wraps
+  onto a continuation line is anchored to its shaped subject
 - describe final behavior rather than the act of amending; ordinary factual
   uses of “also” or “in addition” are allowed, including in the preserved subject
 - preserve the original subject's task IDs and scope markers as part of the

@@ -65,9 +65,9 @@ type PreparedCommitContext struct {
 
 type PreparedAmendContext struct {
 	Mode                Mode                    `json:"mode"`
-	OriginalHeadMessage string                  `json:"original_head_message"`
+	OriginalHeadMessage string                  `json:"original_head_message"` // Shaped, without the caller-owned submodule changelog.
 	Head                gitctx.CommitInfo       `json:"head"`
-	RecentCommits       []gitctx.CommitInfo     `json:"recent_commits"`
+	RecentCommits       []gitctx.CommitInfo     `json:"-"` // Kept outside amend evidence; summaries supply separate convention references.
 	FinalPaths          []string                `json:"final_paths"`
 	FinalStats          []gitctx.FileStat       `json:"final_stats"`
 	FinalContextPack    contextpack.ContextPack `json:"final_context_pack"`
@@ -78,11 +78,13 @@ type PreparedAmendContext struct {
 	HeadContextPack     contextpack.ContextPack `json:"head_context_pack"`
 	HeadDiff            string                  `json:"head_diff"`
 	HeadDiffTruncated   bool                    `json:"head_diff_truncated"`
+	HeadSubmodules      []PreparedSubmodule     `json:"head_submodules,omitempty"`
 	StagedPaths         []string                `json:"staged_paths"`
 	StagedStatus        []gitctx.PathChange     `json:"staged_status"`
 	StagedStats         []gitctx.FileStat       `json:"staged_stats"`
 	StagedSubmodules    []PreparedSubmodule     `json:"staged_submodules,omitempty"`
 	StagedContextPack   contextpack.ContextPack `json:"staged_context_pack"`
+	FinalSubmodules     []PreparedSubmodule     `json:"final_submodules,omitempty"`
 	AmendDelta          string                  `json:"amend_delta"`
 	AmendDeltaTruncated bool                    `json:"amend_delta_truncated"`
 }
@@ -127,6 +129,54 @@ func AppendSubmoduleTrailer(message string, stagedSubmodules []PreparedSubmodule
 		return Shape(message)
 	}
 	return Shape(strings.TrimSpace(message) + "\n\n" + body)
+}
+
+// ReplaceAmendSubmoduleTrailer drops changelog paragraphs rendered for HEAD's
+// submodule range and appends the changelog for the final amended range.
+func ReplaceAmendSubmoduleTrailer(message string, prepared PreparedAmendContext) string {
+	message = stripSubmoduleTrailer(message, prepared.HeadSubmodules, prepared.FinalSubmodules)
+	return AppendSubmoduleTrailer(message, prepared.FinalSubmodules)
+}
+
+// stripSubmoduleTrailer removes paragraphs shaped like formatSubmoduleBody
+// output for the given submodules. The subject paragraph is always kept.
+func stripSubmoduleTrailer(message string, submoduleSets ...[]PreparedSubmodule) string {
+	paths := map[string]bool{}
+	for _, submodules := range submoduleSets {
+		for _, submodule := range submodules {
+			if submodule.Path != "" {
+				paths[submodule.Path] = true
+			}
+		}
+	}
+	if len(paths) == 0 {
+		return message
+	}
+	paragraphs := strings.Split(strings.TrimSpace(message), "\n\n")
+	kept := []string{paragraphs[0]}
+	for _, paragraph := range paragraphs[1:] {
+		if !isSubmoduleTrailerParagraph(paragraph, paths) {
+			kept = append(kept, paragraph)
+		}
+	}
+	if len(kept) == len(paragraphs) {
+		return message
+	}
+	return strings.Join(kept, "\n\n")
+}
+
+func isSubmoduleTrailerParagraph(paragraph string, paths map[string]bool) bool {
+	lines := strings.Split(strings.Trim(paragraph, "\n"), "\n")
+	if len(lines) < 2 || !paths[strings.TrimSpace(lines[0])] {
+		return false
+	}
+	for _, line := range lines[1:] {
+		// Entries are "  - sha: summary"; shaping indents wrapped lines by four.
+		if !strings.HasPrefix(line, "  - ") && !strings.HasPrefix(line, "    ") {
+			return false
+		}
+	}
+	return true
 }
 
 func sortedSubmodules(submodules []PreparedSubmodule) []PreparedSubmodule {
@@ -415,6 +465,12 @@ func PrepareAmendContext(repo *gitctx.Repository) (PreparedAmendContext, error) 
 	stagedStatus := collectWithRepo(&wg, root, (*gitctx.Repository).StagedStatus)
 	stagedStats := collectWithRepo(&wg, root, (*gitctx.Repository).StagedStat)
 	stagedSubmodules := collectWithRepo(&wg, root, prepareStagedSubmodules)
+	headSubmodules := collectWithRepo(&wg, root, func(taskRepo *gitctx.Repository) ([]PreparedSubmodule, error) {
+		return prepareSubmoduleChanges(taskRepo, taskRepo.HeadSubmoduleChanges)
+	})
+	finalSubmodules := collectWithRepo(&wg, root, func(taskRepo *gitctx.Repository) ([]PreparedSubmodule, error) {
+		return prepareSubmoduleChanges(taskRepo, taskRepo.FinalAmendedSubmoduleChanges)
+	})
 	finalPaths := collectWithRepo(&wg, root, (*gitctx.Repository).FinalAmendedPaths)
 	finalStats := collectWithRepo(&wg, root, (*gitctx.Repository).FinalAmendedStat)
 	finalDiff := collectWithRepo(&wg, root, func(taskRepo *gitctx.Repository) (boundedDiffResult, error) {
@@ -453,6 +509,12 @@ func PrepareAmendContext(repo *gitctx.Repository) (PreparedAmendContext, error) 
 	}
 	if stagedSubmodules.err != nil {
 		return PreparedAmendContext{}, stagedSubmodules.err
+	}
+	if headSubmodules.err != nil {
+		return PreparedAmendContext{}, headSubmodules.err
+	}
+	if finalSubmodules.err != nil {
+		return PreparedAmendContext{}, finalSubmodules.err
 	}
 	if finalPaths.err != nil {
 		return PreparedAmendContext{}, finalPaths.err
@@ -498,7 +560,7 @@ func PrepareAmendContext(repo *gitctx.Repository) (PreparedAmendContext, error) 
 
 	return PreparedAmendContext{
 		Mode:                ModeAmend,
-		OriginalHeadMessage: strings.TrimSpace(originalMessage.value),
+		OriginalHeadMessage: Shape(stripSubmoduleTrailer(originalMessage.value, headSubmodules.value, finalSubmodules.value)),
 		Head:                head.value,
 		RecentCommits:       recentCommits.value,
 		FinalPaths:          finalPaths.value,
@@ -511,11 +573,13 @@ func PrepareAmendContext(repo *gitctx.Repository) (PreparedAmendContext, error) 
 		HeadContextPack:     headContextPack.value,
 		HeadDiff:            headDiff.value.Text,
 		HeadDiffTruncated:   headDiff.value.Truncated,
+		HeadSubmodules:      headSubmodules.value,
 		StagedPaths:         stagedPaths.value,
 		StagedStatus:        stagedStatus.value,
 		StagedStats:         stagedStats.value,
 		StagedSubmodules:    stagedSubmodules.value,
 		StagedContextPack:   stagedContextPack.value,
+		FinalSubmodules:     finalSubmodules.value,
 		AmendDelta:          amendDelta.value.Text,
 		AmendDeltaTruncated: amendDelta.value.Truncated,
 	}, nil
@@ -701,10 +765,26 @@ func (c PreparedCommitContext) compactCurrentForPrompt() bool {
 }
 
 func UserPromptWithPreparedCommitContext(prepared PreparedCommitContext, maxSteps, maxToolCalls int) string {
-	// History can establish formatting and related task metadata, never changes
-	// to describe. Keep bounded subjects outside the authoritative staged object.
+	return executeUserPrompt(userPreparedCommitPromptTemplate, userPromptData{
+		MaxSteps:        maxSteps,
+		MaxToolCalls:    maxToolCalls,
+		PreparedContext: prepared.RenderForPrompt(),
+		StyleReferences: conventionReferences(prepared.RecentCommits, ""),
+	})
+}
+
+// conventionReferences renders at most ten bounded recent subjects, skipping
+// excludeSHA. History can establish formatting and related task metadata,
+// never changes to describe, so callers keep it outside authoritative context.
+func conventionReferences(commits []gitctx.CommitInfo, excludeSHA string) string {
 	var summaries []string
-	for _, commit := range prepared.RecentCommits[:min(10, len(prepared.RecentCommits))] {
+	for _, commit := range commits {
+		if len(summaries) == 10 {
+			break
+		}
+		if excludeSHA != "" && commit.SHA == excludeSHA {
+			continue
+		}
 		summary, _, _ := strings.Cut(commit.Summary, "\n")
 		summary, _ = textutil.Limit(strings.ToValidUTF8(summary, ""), 300, 0)
 		if summary = strings.TrimSpace(summary); summary != "" {
@@ -715,12 +795,7 @@ func UserPromptWithPreparedCommitContext(prepared PreparedCommitContext, maxStep
 	if err != nil {
 		panic("marshal commit convention summaries: " + err.Error())
 	}
-	return executeUserPrompt(userPreparedCommitPromptTemplate, userPromptData{
-		MaxSteps:        maxSteps,
-		MaxToolCalls:    maxToolCalls,
-		PreparedContext: prepared.RenderForPrompt(),
-		StyleReferences: string(references),
-	})
+	return string(references)
 }
 
 func UserPromptWithPreparedAmendContext(prepared PreparedAmendContext, maxSteps, maxToolCalls int) string {
@@ -728,6 +803,7 @@ func UserPromptWithPreparedAmendContext(prepared PreparedAmendContext, maxSteps,
 		MaxSteps:        maxSteps,
 		MaxToolCalls:    maxToolCalls,
 		PreparedContext: prepared.RenderForPrompt(),
+		StyleReferences: conventionReferences(prepared.RecentCommits, prepared.Head.SHA),
 	})
 }
 
@@ -833,7 +909,11 @@ func summarizeFileSet(paths []string, stats []gitctx.FileStat) map[string]any {
 }
 
 func prepareStagedSubmodules(repo *gitctx.Repository) ([]PreparedSubmodule, error) {
-	changes, err := repo.StagedSubmoduleChanges()
+	return prepareSubmoduleChanges(repo, repo.StagedSubmoduleChanges)
+}
+
+func prepareSubmoduleChanges(repo *gitctx.Repository, list func() ([]gitctx.SubmoduleChange, error)) ([]PreparedSubmodule, error) {
+	changes, err := list()
 	if err != nil {
 		return nil, err
 	}
@@ -983,7 +1063,9 @@ func Validate(mode Mode, output string) []string {
 
 func ValidateAmendAgainstOriginal(originalMessage, output string) []string {
 	errs := Validate(ModeAmend, output)
-	originalSubject := firstSubjectLine(originalMessage)
+	// Compare shaped subjects: shaping joins a subject continuation line, so
+	// an unchanged original would otherwise fail its own anchor.
+	originalSubject := firstSubjectLine(Shape(originalMessage))
 	if originalSubject == "" {
 		return errs
 	}

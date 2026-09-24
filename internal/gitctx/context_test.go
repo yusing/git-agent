@@ -839,3 +839,175 @@ func writeBinaryFile(t *testing.T, path string, content []byte) {
 		t.Fatal(err)
 	}
 }
+
+func TestStagedInspectionAcceptsTreesGitCommits(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "a\tb.txt"), "tab\n")
+	writeFile(t, filepath.Join(repoDir, "shared-ignore"), "*.log\n")
+	if err := os.Symlink("shared-ignore", filepath.Join(repoDir, ".gitignore")); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-m", "Initial commit")
+	writeFile(t, filepath.Join(repoDir, "c.txt"), "new\n")
+	runGit(t, repoDir, "add", "c.txt")
+
+	assertStagedMatchesGit(t, repoDir, []string{"c.txt"})
+}
+
+func TestStagedInspectionIgnoresIntentToAddEntries(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "a.txt"), "old\n")
+	runGit(t, repoDir, "add", "a.txt")
+	runGit(t, repoDir, "commit", "-m", "Initial commit")
+	writeFile(t, filepath.Join(repoDir, "a.txt"), "new\n")
+	runGit(t, repoDir, "add", "a.txt")
+	writeFile(t, filepath.Join(repoDir, "b.txt"), "pending\n")
+	runGit(t, repoDir, "add", "-N", "b.txt")
+
+	repo := assertStagedMatchesGit(t, repoDir, []string{"a.txt"})
+	finalPaths, err := repo.FinalAmendedPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(finalPaths, []string{"a.txt"}) {
+		t.Fatalf("final amended paths = %#v, want [a.txt]", finalPaths)
+	}
+}
+
+func TestStagedInspectionRejectsUnmergedIndex(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "a.txt"), "base\n")
+	runGit(t, repoDir, "add", "a.txt")
+	runGit(t, repoDir, "commit", "-m", "Initial commit")
+	runGit(t, repoDir, "checkout", "-b", "other")
+	writeFile(t, filepath.Join(repoDir, "a.txt"), "other\n")
+	runGit(t, repoDir, "commit", "-am", "Other change")
+	runGit(t, repoDir, "checkout", "-")
+	writeFile(t, filepath.Join(repoDir, "a.txt"), "main\n")
+	runGit(t, repoDir, "commit", "-am", "Main change")
+	cmd := exec.Command("git", "merge", "other")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("merge unexpectedly succeeded:\n%s", out)
+	}
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = repo.StagedPaths()
+	if !errors.Is(err, ErrUnmergedIndex) || !strings.Contains(err.Error(), "a.txt") {
+		t.Fatalf("StagedPaths error = %v, want ErrUnmergedIndex naming a.txt", err)
+	}
+}
+
+func TestStagedDiffTreatsEmptyFilesAsText(t *testing.T) {
+	t.Parallel()
+
+	repoDir := initTempRepo(t)
+	writeFile(t, filepath.Join(repoDir, "pkg", "__init__.py"), "")
+	runGit(t, repoDir, "add", ".")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diff, _, err := repo.StagedDiff(16*1024, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(diff, "Binary files") || !strings.Contains(diff, "new file mode 100644") {
+		t.Fatalf("empty file diff should be a plain new-file header:\n%s", diff)
+	}
+	stats, err := repo.StagedStat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []FileStat{{Path: "pkg/__init__.py"}}; !slices.Equal(stats, want) {
+		t.Fatalf("empty file stats = %#v, want %#v", stats, want)
+	}
+}
+
+func TestAmendSubmoduleChangesSpanFirstParent(t *testing.T) {
+	t.Parallel()
+
+	subDir := filepath.Join(t.TempDir(), "webui")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, subDir, "init")
+	runGit(t, subDir, "config", "user.name", "Test User")
+	runGit(t, subDir, "config", "user.email", "test@example.com")
+	var shas []string
+	for _, version := range []string{"v1", "v2", "v3"} {
+		writeFile(t, filepath.Join(subDir, "ui.txt"), version+"\n")
+		runGit(t, subDir, "add", "ui.txt")
+		runGit(t, subDir, "commit", "-m", "feat(webui): "+version)
+		shas = append(shas, gitHead(t, subDir))
+	}
+
+	repoDir := initTempRepo(t)
+	runGit(t, repoDir, "-c", "protocol.file.allow=always", "submodule", "add", subDir, "webui")
+	runGit(t, filepath.Join(repoDir, "webui"), "checkout", shas[0])
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-m", "feat: add webui submodule")
+	runGit(t, filepath.Join(repoDir, "webui"), "checkout", shas[1])
+	runGit(t, repoDir, "commit", "-am", "chore: update webui")
+	runGit(t, filepath.Join(repoDir, "webui"), "checkout", shas[2])
+	runGit(t, repoDir, "add", "webui")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := repo.HeadSubmoduleChanges()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []SubmoduleChange{{Path: "webui", Old: shas[0], New: shas[1]}}; !slices.Equal(head, want) {
+		t.Fatalf("head submodule changes = %#v, want %#v", head, want)
+	}
+	final, err := repo.FinalAmendedSubmoduleChanges()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []SubmoduleChange{{Path: "webui", Old: shas[0], New: shas[2]}}; !slices.Equal(final, want) {
+		t.Fatalf("final submodule changes = %#v, want %#v", final, want)
+	}
+}
+
+func assertStagedMatchesGit(t *testing.T, repoDir string, wantPaths []string) *Repository {
+	t.Helper()
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := repo.StagedPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(paths, wantPaths) {
+		t.Fatalf("staged paths = %#v, want %#v", paths, wantPaths)
+	}
+	fingerprint, err := repo.StagedFingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "write-tree")
+	cmd.Dir = repoDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git write-tree failed: %v\n%s", err, out)
+	}
+	if want := strings.TrimSpace(string(out)); fingerprint.TargetTree != want {
+		t.Fatalf("index tree = %s, want git write-tree %s", fingerprint.TargetTree, want)
+	}
+	return repo
+}

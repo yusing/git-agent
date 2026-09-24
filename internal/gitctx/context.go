@@ -95,6 +95,7 @@ type ChangeFingerprint struct {
 var (
 	ErrChangeSnapshotStale = errors.New("authoritative repository state changed since launch; rerun command")
 	ErrNotRepository       = errors.New("not inside a git repository")
+	ErrUnmergedIndex       = errors.New("index has unmerged paths")
 )
 
 type CommitFile struct {
@@ -173,7 +174,11 @@ func repositoryFromHead(root, workPath string, repo *git.Repository) (*Repositor
 func (r *Repository) ReadIndex() (*index.Index, error) {
 	r.indexMu.Lock()
 	defer r.indexMu.Unlock()
-	return r.Repo.Storer.Index()
+	idx, err := r.Repo.Storer.Index()
+	if errors.Is(err, index.ErrUnknownExtension) {
+		return nil, fmt.Errorf("read Git index: %w (split and sparse indexes are unsupported; disable core.splitIndex and index.sparse, then rerun)", err)
+	}
+	return idx, err
 }
 
 func (r *Repository) Summary() map[string]any {
@@ -311,7 +316,7 @@ func (d *treeDiff) String() string {
 	if d == nil {
 		return ""
 	}
-	base := d.patch.String()
+	base := patchString(d.patch)
 	supplement := submoduleDiffText(d.unrepresentedSubmodules(nil))
 	if base == "" || supplement == "" {
 		return base + supplement
@@ -494,7 +499,59 @@ func (r *Repository) SubmoduleCommits(path, base, head string, limit int) ([]Com
 }
 
 func (p filePatchSet) FilePatches() []fdiff.FilePatch {
-	return p.patches
+	patches := make([]fdiff.FilePatch, len(p.patches))
+	for i, filePatch := range p.patches {
+		if isEmptyBlobPatch(filePatch) {
+			filePatch = emptyBlobFilePatch{filePatch}
+		}
+		patches[i] = filePatch
+	}
+	return patches
+}
+
+// emptyBlobHash is the object ID of Git's empty blob.
+var emptyBlobHash = plumbing.NewHash("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
+
+// emptyBlobFilePatch reports a chunkless patch between empty files as text.
+// go-git treats every chunkless text patch as binary, but Git renders new,
+// deleted, or mode-changed empty files as plain headers.
+type emptyBlobFilePatch struct {
+	fdiff.FilePatch
+}
+
+func (emptyBlobFilePatch) IsBinary() bool {
+	return false
+}
+
+func isEmptyBlobPatch(filePatch fdiff.FilePatch) bool {
+	if len(filePatch.Chunks()) != 0 {
+		return false
+	}
+	from, to := filePatch.Files()
+	if from == nil && to == nil {
+		return false
+	}
+	for _, file := range []fdiff.File{from, to} {
+		if file != nil && (file.Hash() != emptyBlobHash || !file.Mode().IsFile()) {
+			return false
+		}
+	}
+	return true
+}
+
+func isBinaryFilePatch(filePatch fdiff.FilePatch) bool {
+	return filePatch.IsBinary() && !isEmptyBlobPatch(filePatch)
+}
+
+func patchString(patch *object.Patch) string {
+	if patch == nil {
+		return ""
+	}
+	var b bytes.Buffer
+	if err := fdiff.NewUnifiedEncoder(&b, fdiff.DefaultContextLines).Encode(filePatchSet{patches: patch.FilePatches()}); err != nil {
+		return fmt.Sprintf("malformed patch: %s", err)
+	}
+	return b.String()
 }
 
 func (p filePatchSet) Message() string {
@@ -700,7 +757,7 @@ func (r *Repository) HeadShow(maxBytes, maxLines int) (string, bool, error) {
 		if err != nil {
 			return "", false, err
 		}
-		text += "\n" + patch.String()
+		text += "\n" + patchString(patch)
 	}
 	limited, truncated := textutil.Limit(text, maxBytes, maxLines)
 	return limited, truncated, nil
@@ -715,7 +772,7 @@ func (r *Repository) HeadShowForPath(path string, maxBytes, maxLines int) (strin
 	if err != nil {
 		return "", false, err
 	}
-	patchText := patch.String()
+	patchText := patchString(patch)
 	if path != "" && path != "." && patchText == "" {
 		return "", false, nil
 	}
@@ -740,7 +797,7 @@ func (r *Repository) DiffAgainstParent(maxBytes, maxLines int) (string, bool, er
 	if err != nil {
 		return "", false, err
 	}
-	limited, truncated := textutil.Limit(patch.String(), maxBytes, maxLines)
+	limited, truncated := textutil.Limit(patchString(patch), maxBytes, maxLines)
 	return limited, truncated, nil
 }
 
@@ -753,7 +810,7 @@ func (r *Repository) DiffAgainstParentForPath(path string, maxBytes, maxLines in
 	if err != nil {
 		return "", false, err
 	}
-	limited, truncated := textutil.Limit(patch.String(), maxBytes, maxLines)
+	limited, truncated := textutil.Limit(patchString(patch), maxBytes, maxLines)
 	return limited, truncated, nil
 }
 
@@ -787,7 +844,7 @@ func (r *Repository) FinalAmendedDiff(maxBytes, maxLines int) (string, bool, err
 	if err != nil {
 		return "", false, err
 	}
-	limited, truncated := textutil.Limit(patch.String(), maxBytes, maxLines)
+	limited, truncated := textutil.Limit(patchString(patch), maxBytes, maxLines)
 	return limited, truncated, nil
 }
 
@@ -807,6 +864,43 @@ func (r *Repository) FinalAmendedStat() ([]FileStat, error) {
 	return fileStatsFromPatch(patch), nil
 }
 
+// HeadSubmoduleChanges reports gitlink changes from HEAD's first parent to HEAD.
+func (r *Repository) HeadSubmoduleChanges() ([]SubmoduleChange, error) {
+	head, err := r.headCommit()
+	if err != nil {
+		return nil, err
+	}
+	headTree, err := head.Tree()
+	if err != nil {
+		return nil, err
+	}
+	var parentTree *object.Tree
+	if head.NumParents() > 0 {
+		parent, err := head.Parent(0)
+		if err != nil {
+			return nil, err
+		}
+		if parentTree, err = parent.Tree(); err != nil {
+			return nil, err
+		}
+	}
+	return submoduleChangesBetweenTrees(parentTree, headTree)
+}
+
+// FinalAmendedSubmoduleChanges reports gitlink changes from HEAD's first
+// parent to the staged index that an amend would commit.
+func (r *Repository) FinalAmendedSubmoduleChanges() ([]SubmoduleChange, error) {
+	head, err := r.headCommit()
+	if err != nil {
+		return nil, err
+	}
+	parentTree, finalTree, err := r.finalAmendedTrees(head)
+	if err != nil {
+		return nil, err
+	}
+	return submoduleChangesBetweenTrees(parentTree, finalTree)
+}
+
 func (r *Repository) ShowCommit(rev string, maxBytes, maxLines int) (string, bool, error) {
 	return r.ShowCommitForPaths(rev, nil, maxBytes, maxLines)
 }
@@ -821,7 +915,7 @@ func (r *Repository) ShowCommitForPaths(rev string, paths []string, maxBytes, ma
 	if err != nil {
 		return "", false, err
 	}
-	patchText := patch.String()
+	patchText := patchString(patch)
 	if len(paths) > 0 {
 		patchText, err = patchForPaths(patch, paths)
 		if err != nil {
@@ -1098,7 +1192,7 @@ func (r *Repository) PullRequestDiff(maxBytes, maxLines int) (string, bool, erro
 	if err != nil {
 		return "", false, err
 	}
-	limited, truncated := textutil.Limit(patch.String(), maxBytes, maxLines)
+	limited, truncated := textutil.Limit(patchString(patch), maxBytes, maxLines)
 	return limited, truncated, nil
 }
 
@@ -1597,11 +1691,25 @@ func buildIndexTree(st storer.EncodedObjectStorer, idx *index.Index) (plumbing.H
 	trees := map[string]*object.Tree{
 		root: {Hash: plumbing.ZeroHash},
 	}
+	var unmerged []string
 	for _, entry := range idx.Entries {
-		if entry.Hash.IsZero() {
+		// go-git's index.Merged constant is 1, but decoded merged entries use
+		// Git's on-disk stage 0.
+		if entry.Stage != 0 {
+			if !slices.Contains(unmerged, entry.Name) {
+				unmerged = append(unmerged, entry.Name)
+			}
+			continue
+		}
+		// Intent-to-add entries carry the empty-blob hash but are not part
+		// of the tree Git would commit.
+		if entry.Hash.IsZero() || entry.IntentToAdd {
 			continue
 		}
 		buildIndexTreeEntry(trees, entry)
+	}
+	if len(unmerged) > 0 {
+		return plumbing.ZeroHash, fmt.Errorf("%w: %s; resolve conflicts and rerun", ErrUnmergedIndex, strings.Join(unmerged, ", "))
 	}
 	return persistTreeRecursive(st, trees, root)
 }
@@ -1658,7 +1766,7 @@ func persistTreeRecursive(st storer.EncodedObjectStorer, trees map[string]*objec
 		return plumbing.ZeroHash, nil
 	}
 	obj := st.NewEncodedObject()
-	if err := tree.Encode(obj); err != nil {
+	if err := encodeTree(obj, tree.Entries); err != nil {
 		return plumbing.ZeroHash, err
 	}
 	hash, err := st.SetEncodedObject(obj)
@@ -1667,6 +1775,27 @@ func persistTreeRecursive(st storer.EncodedObjectStorer, trees map[string]*objec
 	}
 	tree.Hash = hash
 	return hash, nil
+}
+
+// encodeTree writes entries without go-git's fsck-style Tree.Validate, which
+// rejects trees Git itself commits, such as names containing control
+// characters or a symlinked .gitignore. Entries must already be sorted.
+func encodeTree(obj plumbing.EncodedObject, entries []object.TreeEntry) (err error) {
+	obj.SetType(plumbing.TreeObject)
+	w, err := obj.Writer()
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, w.Close()) }()
+	for _, entry := range entries {
+		if _, err := fmt.Fprintf(w, "%o %s\x00", entry.Mode, entry.Name); err != nil {
+			return err
+		}
+		if _, err := entry.Hash.WriteTo(w); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type overlayObjectStorer struct {
@@ -1740,10 +1869,10 @@ func fileStatsFromPatch(patch *object.Patch) []FileStat {
 	out := make([]FileStat, 0, len(filePatches))
 	statsIndex := 0
 	for _, filePatch := range filePatches {
-		binary := filePatch.IsBinary()
+		binary := isBinaryFilePatch(filePatch)
 		// go-git Patch.Stats omits empty-chunk patches, including binary
 		// files and submodule pointer updates, while FilePatches retains them.
-		if len(filePatch.Chunks()) == 0 && !binary {
+		if len(filePatch.Chunks()) == 0 && !binary && !isEmptyBlobPatch(filePatch) {
 			continue
 		}
 		from, to := filePatch.Files()
@@ -1870,19 +1999,25 @@ func commitFileChangesFromPatch(patch *object.Patch) []CommitFileChange {
 	filePatches := patch.FilePatches()
 	stats := patch.Stats()
 	changes := make([]CommitFileChange, 0, len(filePatches))
-	for index, filePatch := range filePatches {
+	statsIndex := 0
+	for _, filePatch := range filePatches {
 		from, to := filePatch.Files()
 		path, oldPath := patchPath(from, to)
 		change := CommitFileChange{
 			Path:      path,
 			OldPath:   oldPath,
 			Status:    patchStatus(from, to),
-			Binary:    filePatch.IsBinary(),
+			Binary:    isBinaryFilePatch(filePatch),
 			Submodule: patchHasSubmoduleMode(from, to),
 		}
-		if index < len(stats) {
-			change.Additions = stats[index].Addition
-			change.Deletions = stats[index].Deletion
+		// Patch.Stats omits chunkless patches, so advance only past patches
+		// that contribute a stats entry.
+		if len(filePatch.Chunks()) > 0 {
+			if statsIndex < len(stats) {
+				change.Additions = stats[statsIndex].Addition
+				change.Deletions = stats[statsIndex].Deletion
+			}
+			statsIndex++
 		}
 		changes = append(changes, change)
 	}
@@ -1940,7 +2075,7 @@ func commitPatchExcerpt(patch *object.Patch, maxBytes, maxLines int) string {
 	files := 0
 	lines := 0
 	for _, filePatch := range patch.FilePatches() {
-		if filePatch.IsBinary() {
+		if isBinaryFilePatch(filePatch) {
 			continue
 		}
 		from, to := filePatch.Files()

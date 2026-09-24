@@ -2260,6 +2260,31 @@ func TestCommitAmendAmendsHead(t *testing.T) {
 	}
 }
 
+func TestCommitGitHandoffIsNotBoundByGenerationTimeout(t *testing.T) {
+	repoDir := initRepo(t)
+	hook := filepath.Join(repoDir, ".git", "hooks", "pre-commit")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nsleep 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repoDir)
+	server := commitMessageServer(t, "feat: add app")
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "test-model")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"commit", "--timeout", "1s"}); err != nil {
+		t.Fatalf("commit with slow hook failed: %v\nstderr: %s", err, stderr.String())
+	}
+	if got := strings.TrimSpace(gitOutputString(t, repoDir, "log", "-1", "--pretty=%s")); got != "feat: add app" {
+		t.Fatalf("commit subject = %q", got)
+	}
+}
+
 func TestCommitAmendRepairsMessageThatDropsOriginalSubject(t *testing.T) {
 	repoDir := initRepo(t)
 	runGit(t, repoDir, "commit", "-m", "feat(cli): add commit command", "-m", "Add commit creation after message generation.")

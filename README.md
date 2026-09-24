@@ -99,6 +99,8 @@ changes contain only submodule updates and no `--hint`, they skip the
 LLM entirely and format the whole message locally. Supplying a prompt uses model
 generation (and requires provider auth), while retaining the local changelog
 block. Locally initialized nested submodules are expanded recursively, using repository-relative headings such as `webui/wiki`.
+With `--amend`, the block is rebuilt from the amended commit's parent, so a
+later submodule bump replaces the changelog left by the original commit.
 
 ## What It Provides
 
@@ -434,7 +436,7 @@ Common generation and inspection flags:
 | `--fast` | Request fast service tier |
 | `--low`, `--medium`, `--high`, `--xhigh` | Set reasoning effort |
 | `--base-url <url>` | Override provider base URL |
-| `--timeout <duration>` | Set request timeout |
+| `--timeout <duration>` | Set request timeout; `commit` does not apply it to the final `git commit` |
 | `--max-steps <n>` | Bound agent loop steps |
 | `--follow-up <search-id> <question...>` | Continue an exploration with its saved context |
 | `--guidance-family auto\|agents\|claude\|codex\|none` | Force guidance family |

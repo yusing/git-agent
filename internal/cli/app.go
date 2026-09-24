@@ -971,7 +971,7 @@ func (a *App) runCommit(ctx context.Context, args []string) error {
 		if localCfg.Debug {
 			a.writeDebugEvent("agent_summary", slog.Int("tool_calls", deterministicResult.ToolCalls), slog.Int("repair_calls", deterministicResult.RepairCalls))
 		}
-		commitOutput, err := gitCommit(taskCtx, repo, deterministicResult.Text, mode == commitmsg.ModeAmend)
+		commitOutput, err := gitCommit(ctx, repo, deterministicResult.Text, mode == commitmsg.ModeAmend)
 		if err != nil {
 			return commitFailureError(deterministicResult.Text, err)
 		}
@@ -1003,7 +1003,9 @@ func (a *App) runCommit(ctx context.Context, args []string) error {
 	if err := state.check(repo.RootPath); err != nil {
 		return err
 	}
-	commitOutput, err := gitCommit(taskCtx, repo, result.Text, mode == commitmsg.ModeAmend)
+	// The generation timeout does not bound Git: hooks and signing prompts
+	// keep native behavior, while caller cancellation still applies.
+	commitOutput, err := gitCommit(ctx, repo, result.Text, mode == commitmsg.ModeAmend)
 	if err != nil {
 		if writeErr := recorder.Write("error", map[string]any{
 			"message":                  err.Error(),
@@ -1166,6 +1168,9 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 	}
 	if preparedCommit != nil {
 		result.Text = commitmsg.AppendSubmoduleTrailer(result.Text, preparedCommit.StagedSubmodules)
+	}
+	if preparedAmend != nil {
+		result.Text = commitmsg.ReplaceAmendSubmoduleTrailer(result.Text, *preparedAmend)
 	}
 	if errs := validator(result.Text); len(errs) > 0 {
 		return agent.Result{}, fmt.Errorf("validation failed after shaping: %v", errs)

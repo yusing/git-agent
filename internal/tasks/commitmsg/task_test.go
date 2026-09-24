@@ -945,3 +945,114 @@ func TestValidateBodyWidthAllowsOnlyUnbreakableContent(t *testing.T) {
 		t.Fatal(errs)
 	}
 }
+
+func TestValidateAmendAgainstOriginalAcceptsShapedContinuationSubject(t *testing.T) {
+	t.Parallel()
+
+	for _, original := range []string{
+		"fix(cli): keep staged scope for amend and\nnormal commit paths\n\nBody text.",
+		"feat(search): add remote index synchronization for shared caches\nwith progress reporting",
+	} {
+		if errs := ValidateAmendAgainstOriginal(original, Shape(original)); len(errs) != 0 {
+			t.Fatalf("unchanged shaped original %q failed validation: %v", original, errs)
+		}
+	}
+}
+
+func TestReplaceAmendSubmoduleTrailerRefreshesFinalRange(t *testing.T) {
+	t.Parallel()
+
+	head := []PreparedSubmodule{{
+		Path:    "webui",
+		Commits: []gitctx.CommitInfo{{SHA: "2222222222222222222222222222222222222222", Summary: "feat(webui): v2"}},
+	}}
+	final := []PreparedSubmodule{{
+		Path: "webui",
+		Commits: []gitctx.CommitInfo{
+			{SHA: "3333333333333333333333333333333333333333", Summary: "feat(webui): v3"},
+			{SHA: "2222222222222222222222222222222222222222", Summary: "feat(webui): v2"},
+		},
+	}}
+	message := "chore: update webui\n\nRefresh the login screen.\n\nwebui\n  - 2222222: feat(webui): v2"
+
+	got := ReplaceAmendSubmoduleTrailer(message, PreparedAmendContext{HeadSubmodules: head, FinalSubmodules: final})
+	want := "chore: update webui\n\nRefresh the login screen.\n\nwebui\n  - 3333333: feat(webui): v3\n  - 2222222: feat(webui): v2"
+	if got != want {
+		t.Fatalf("refreshed trailer =\n%s\nwant\n%s", got, want)
+	}
+
+	got = ReplaceAmendSubmoduleTrailer(message, PreparedAmendContext{HeadSubmodules: head})
+	if want := "chore: update webui\n\nRefresh the login screen."; got != want {
+		t.Fatalf("reverted submodule trailer =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestPrepareAmendContextOmitsHeadSubmoduleTrailer(t *testing.T) {
+	t.Parallel()
+
+	subDir := filepath.Join(t.TempDir(), "webui")
+	initGitRepo(t, subDir)
+	var shas []string
+	for _, version := range []string{"v1", "v2", "v3"} {
+		writeFile(t, filepath.Join(subDir, "ui.txt"), version+"\n")
+		runGit(t, subDir, "add", "ui.txt")
+		runGit(t, subDir, "commit", "-m", "feat(webui): "+version)
+		shas = append(shas, gitHead(t, subDir))
+	}
+
+	repoDir := filepath.Join(t.TempDir(), "parent")
+	initGitRepo(t, repoDir)
+	runGit(t, repoDir, "-c", "protocol.file.allow=always", "submodule", "add", subDir, "webui")
+	runGit(t, filepath.Join(repoDir, "webui"), "checkout", shas[0])
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-m", "feat: add webui submodule")
+	runGit(t, filepath.Join(repoDir, "webui"), "checkout", shas[1])
+	runGit(t, repoDir, "commit", "-a", "-m", "chore(deps): update webui submodule", "-m", "webui\n  - "+shortSHA(shas[1])+": feat(webui): v2")
+	runGit(t, filepath.Join(repoDir, "webui"), "checkout", shas[2])
+	runGit(t, repoDir, "add", "webui")
+
+	repo, err := gitctx.Open(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareAmendContext(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.OriginalHeadMessage != "chore(deps): update webui submodule" {
+		t.Fatalf("original head message = %q, want caller-owned trailer removed", prepared.OriginalHeadMessage)
+	}
+	if len(prepared.FinalSubmodules) != 1 || prepared.FinalSubmodules[0].OldSHA != shas[0] || prepared.FinalSubmodules[0].NewSHA != shas[2] {
+		t.Fatalf("final submodules = %#v", prepared.FinalSubmodules)
+	}
+	got := ReplaceAmendSubmoduleTrailer(prepared.OriginalHeadMessage, prepared)
+	want := "chore(deps): update webui submodule\n\nwebui\n  - " + shortSHA(shas[2]) + ": feat(webui): v3\n  - " + shortSHA(shas[1]) + ": feat(webui): v2"
+	if got != want {
+		t.Fatalf("amended message =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestPreparedAmendPromptKeepsRecentSubjectsOutsideEvidence(t *testing.T) {
+	t.Parallel()
+
+	prepared := PreparedAmendContext{
+		Mode:                ModeAmend,
+		OriginalHeadMessage: "fix(agent): persist verified providers",
+		Head:                gitctx.CommitInfo{SHA: "head", Summary: "fix(agent): persist verified providers"},
+		RecentCommits: []gitctx.CommitInfo{
+			{SHA: "head", Summary: "fix(agent): persist verified providers"},
+			{SHA: "older", Summary: "feat(other): unrelated prior capability"},
+		},
+	}
+	got := UserPromptWithPreparedAmendContext(prepared, 30, 24)
+	evidence, references, ok := strings.Cut(got, "</prepared_amend_context>")
+	if !ok {
+		t.Fatalf("prompt missing prepared context block:\n%s", got)
+	}
+	if strings.Contains(evidence, "recent_commits") || strings.Contains(evidence, "unrelated prior capability") {
+		t.Fatalf("recent subjects leaked into authoritative amend evidence:\n%s", evidence)
+	}
+	if !strings.Contains(references, `["feat(other): unrelated prior capability"]`) {
+		t.Fatalf("convention references should list only non-HEAD subjects:\n%s", references)
+	}
+}
