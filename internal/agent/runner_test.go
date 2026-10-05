@@ -1414,10 +1414,10 @@ func TestRunnerFinalizesWhenStepBudgetRunsOut(t *testing.T) {
 	}}
 	registry := tools.NewRegistry(repo, nil)
 	runner := OpenAIRunner{
-		Config:             config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1, MaxToolCalls: 2},
-		Client:             client,
-		Tools:              registry,
-		ToolSpecs:          registry.Definitions([]string{"repo_summary"}),
+		Config:    config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1, MaxToolCalls: 2},
+		Client:    client,
+		Tools:     registry,
+		ToolSpecs: registry.Definitions([]string{"repo_summary"}),
 	}
 
 	result, err := runner.Run(context.Background(), Request{

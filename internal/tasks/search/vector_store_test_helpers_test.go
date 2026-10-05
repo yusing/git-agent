@@ -26,4 +26,3 @@ func (store vectorStore) put(ctx context.Context, records []vectorRecord, forceK
 	defer func() { err = errors.Join(err, lock.Unlock()) }()
 	return store.putLocked(records, forceKeys)
 }
-

@@ -31,23 +31,23 @@ type EmbeddingClient interface {
 }
 
 type Request struct {
-	Model              string                      `json:"model"`
-	ServiceTier        string                      `json:"service_tier,omitempty"`
-	ThinkingMode       string                      `json:"thinking_mode,omitempty"`
-	ReasoningSummary   string                      `json:"reasoning_summary,omitempty"`
-	BaseURL            string                      `json:"-"`
-	APIKey             string                      `json:"-"`
-	AuthAccountID      string                      `json:"-"`
-	Instructions       string                      `json:"instructions,omitempty"`
-	PromptCacheKey     string                      `json:"prompt_cache_key,omitempty"`
-	TurnState          string                      `json:"-"`
-	TurnID             string                      `json:"-"`
-	ParallelToolCalls  bool                        `json:"parallel_tool_calls"`
-	Input              []Item                      `json:"input"`
-	Tools              []ToolSpec                  `json:"tools,omitempty"`
-	TextFormat         *TextFormat                 `json:"text_format,omitempty"`
-	OnStreamEvent      func(StreamEvent) error     `json:"-"`
-	OnRetry            func(RetryEvent) error      `json:"-"`
+	Model             string                  `json:"model"`
+	ServiceTier       string                  `json:"service_tier,omitempty"`
+	ThinkingMode      string                  `json:"thinking_mode,omitempty"`
+	ReasoningSummary  string                  `json:"reasoning_summary,omitempty"`
+	BaseURL           string                  `json:"-"`
+	APIKey            string                  `json:"-"`
+	AuthAccountID     string                  `json:"-"`
+	Instructions      string                  `json:"instructions,omitempty"`
+	PromptCacheKey    string                  `json:"prompt_cache_key,omitempty"`
+	TurnState         string                  `json:"-"`
+	TurnID            string                  `json:"-"`
+	ParallelToolCalls bool                    `json:"parallel_tool_calls"`
+	Input             []Item                  `json:"input"`
+	Tools             []ToolSpec              `json:"tools,omitempty"`
+	TextFormat        *TextFormat             `json:"text_format,omitempty"`
+	OnStreamEvent     func(StreamEvent) error `json:"-"`
+	OnRetry           func(RetryEvent) error  `json:"-"`
 }
 
 const ReasoningSummaryAuto = "auto"
@@ -121,13 +121,13 @@ type ToolSpec struct {
 }
 
 type Response struct {
-	ID              string           `json:"id,omitempty"`
-	Text            string           `json:"text,omitempty"`
-	ToolCalls       []ToolCall       `json:"tool_calls,omitempty"`
-	Continuation    []Item           `json:"continuation,omitempty"`
-	FinishKind      string           `json:"finish_kind,omitempty"`
-	TurnState       string           `json:"-"`
-	Usage           Usage            `json:"usage"`
+	ID           string     `json:"id,omitempty"`
+	Text         string     `json:"text,omitempty"`
+	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
+	Continuation []Item     `json:"continuation,omitempty"`
+	FinishKind   string     `json:"finish_kind,omitempty"`
+	TurnState    string     `json:"-"`
+	Usage        Usage      `json:"usage"`
 }
 
 type Usage struct {

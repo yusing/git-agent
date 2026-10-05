@@ -343,7 +343,7 @@ func TestCreateResponseReturnsCodexTurnStateWithProviderError(t *testing.T) {
 	response, err := NewHTTPClient(httpClient).CreateResponse(t.Context(), Request{
 		Model: "gpt-5.6-sol", BaseURL: "https://chatgpt.com/backend-api/codex",
 		APIKey: "test-key", AuthAccountID: "account-id",
-		Input:              []Item{NewMessage("user", "task")},
+		Input: []Item{NewMessage("user", "task")},
 	})
 	if err == nil {
 		t.Fatal("expected provider error")

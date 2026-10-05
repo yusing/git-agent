@@ -44,10 +44,10 @@ type Request struct {
 }
 
 type Result struct {
-	Text            string
-	ToolCalls       int
-	RepairCalls     int
-	messages        []openai.Item
+	Text        string
+	ToolCalls   int
+	RepairCalls int
+	messages    []openai.Item
 }
 
 // History returns a replayable snapshot of the completed conversation.
@@ -99,23 +99,23 @@ type ToolExecutor interface {
 type BudgetHandler func(context.Context, BudgetStatus) (BudgetDecision, error)
 
 type OpenAIRunner struct {
-	Config             config.Config
-	Client             openai.Client
-	Tools              ToolExecutor
-	ToolSpecs          []tools.Definition
-	Validator          Validator
-	Normalize          TextNormalizer
-	Trace              *trace.Recorder
-	Budget             BudgetHandler
-	ReasoningSummary   string
-	PromptCacheKey     string
-	UsageOutput        io.Writer
-	Timing             func(Timing)
+	Config           config.Config
+	Client           openai.Client
+	Tools            ToolExecutor
+	ToolSpecs        []tools.Definition
+	Validator        Validator
+	Normalize        TextNormalizer
+	Trace            *trace.Recorder
+	Budget           BudgetHandler
+	ReasoningSummary string
+	PromptCacheKey   string
+	UsageOutput      io.Writer
+	Timing           func(Timing)
 }
 
 type runState struct {
-	turnState          string
-	turnID             string
+	turnState string
+	turnID    string
 }
 
 func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error) {
@@ -155,8 +155,8 @@ func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error)
 	}
 
 	state := &runState{
-		turnState:          request.TurnState,
-		turnID:             request.TurnID,
+		turnState: request.TurnState,
+		turnID:    request.TurnID,
 	}
 	if state.turnID == "" {
 		state.turnID = rand.Text()
@@ -489,11 +489,11 @@ func (r *OpenAIRunner) runtimeStatusValue(phase string, step, maxSteps, toolCall
 
 func estimateRequestTokens(request openai.Request) int {
 	data, _ := json.Marshal(struct {
-		Instructions       string                      `json:"instructions"`
-		Input              []openai.Item               `json:"input"`
-		Tools              []openai.ToolSpec           `json:"tools"`
-		TextFormat         *openai.TextFormat          `json:"text_format"`
-		ParallelToolCalls  bool                        `json:"parallel_tool_calls"`
+		Instructions      string             `json:"instructions"`
+		Input             []openai.Item      `json:"input"`
+		Tools             []openai.ToolSpec  `json:"tools"`
+		TextFormat        *openai.TextFormat `json:"text_format"`
+		ParallelToolCalls bool               `json:"parallel_tool_calls"`
 	}{request.Instructions, request.Input, request.Tools, request.TextFormat, request.ParallelToolCalls})
 	return (len(data) + 3) / 4
 }
@@ -822,19 +822,19 @@ func appendResponseMessages(messages []openai.Item, response openai.Response) []
 
 func (r *OpenAIRunner) providerRequest(instructions string, input []openai.Item, toolSpecs []openai.ToolSpec, textFormat *openai.TextFormat, parallelToolCalls bool) openai.Request {
 	request := openai.Request{
-		Model:              r.Config.Model,
-		ServiceTier:        r.Config.ServiceTier,
-		ThinkingMode:       r.Config.ThinkingEffort,
-		ReasoningSummary:   r.ReasoningSummary,
-		BaseURL:            r.Config.BaseURL,
-		APIKey:             r.Config.APIKey,
-		AuthAccountID:      r.Config.AuthAccountID,
-		Instructions:       instructions,
-		PromptCacheKey:     r.PromptCacheKey,
-		ParallelToolCalls:  parallelToolCalls,
-		Input:              input,
-		Tools:              toolSpecs,
-		TextFormat:         textFormat,
+		Model:             r.Config.Model,
+		ServiceTier:       r.Config.ServiceTier,
+		ThinkingMode:      r.Config.ThinkingEffort,
+		ReasoningSummary:  r.ReasoningSummary,
+		BaseURL:           r.Config.BaseURL,
+		APIKey:            r.Config.APIKey,
+		AuthAccountID:     r.Config.AuthAccountID,
+		Instructions:      instructions,
+		PromptCacheKey:    r.PromptCacheKey,
+		ParallelToolCalls: parallelToolCalls,
+		Input:             input,
+		Tools:             toolSpecs,
+		TextFormat:        textFormat,
 	}
 	if r.Trace != nil {
 		request.OnStreamEvent = func(event openai.StreamEvent) error {
