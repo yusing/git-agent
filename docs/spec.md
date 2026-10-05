@@ -1372,6 +1372,12 @@ Defaults:
 - `internal/textutil`: shared normalization and output shaping helpers
 - `internal/trace`: console trace recording
 
+Repository inspection reads both ordinary `pack-<hash>.pack` files and Git
+maintenance's `loose-<hash>.pack` files, with their indexes and optional reverse
+indexes. This applies to worktrees, Git directories, bare repositories, linked
+worktrees, and initialized submodules. Inspection leaves the object store
+unchanged.
+
 System, user, and developer instruction prompts owned by the agent, CLI, and
 task packages are maintained as package-local embedded Markdown. Static prompts
 use `.md` sources; prompts with runtime values use `.md.tmpl` sources rendered

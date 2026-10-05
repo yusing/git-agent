@@ -133,7 +133,7 @@ func Open(start string) (*Repository, error) {
 	if err != nil {
 		return nil, err
 	}
-	repo, err := git.PlainOpenWithOptions(root, &git.PlainOpenOptions{DetectDotGit: true})
+	repo, err := openRepository(root, true)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +145,7 @@ func OpenGitDir(path string) (*Repository, error) {
 	if err != nil {
 		return nil, err
 	}
-	repo, err := git.PlainOpen(root)
+	repo, err := openRepository(root, false)
 	if err != nil {
 		return nil, err
 	}
@@ -953,7 +953,7 @@ func (r *Repository) OpenSubmodule(path string) (*Repository, error) {
 		}
 		return nil, err
 	}
-	repo, err := git.PlainOpen(subRoot.Name())
+	repo, err := openRepository(subRoot.Name(), false)
 	if err != nil {
 		return nil, err
 	}

@@ -89,4 +89,3 @@ func TestLiveCommitIntent(t *testing.T) {
 		})
 	}
 }
-
