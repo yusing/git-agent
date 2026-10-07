@@ -81,6 +81,21 @@ func UserPrompt(prepared PreparedContext, maxSteps, maxToolCalls int) string {
 	})
 }
 
+// UserPromptWithinBudget reduces optional evidence until the complete request fits.
+// If even the minimum inventory does not fit, the runner retains its rejection guard.
+func UserPromptWithinBudget(prepared PreparedContext, maxSteps, maxToolCalls int, fits func(string) bool) string {
+	prompt := UserPrompt(prepared, maxSteps, maxToolCalls)
+	if fits(prompt) {
+		return prompt
+	}
+	for files, text := 16, 2048; ; files, text = files/2, text/2 {
+		prompt = UserPrompt(prepared.compactEvidence(files, text), maxSteps, maxToolCalls)
+		if fits(prompt) || text == 0 {
+			return prompt
+		}
+	}
+}
+
 func TextFormat() *openai.TextFormat {
 	return &openai.TextFormat{
 		Name:        "release_note",

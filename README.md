@@ -447,7 +447,9 @@ Common generation and inspection flags:
 <!-- markdownlint-enable MD013 -->
 
 `release-note --out <file>` writes the rendered Markdown to the file and streams
-a human console trace to stdout.
+a human console trace to stdout. Large release ranges automatically use a
+compact initial evidence package; the model can read additional commit details
+on demand. The locally rendered changelog retains all prepared entries.
 
 ## Configuration
 

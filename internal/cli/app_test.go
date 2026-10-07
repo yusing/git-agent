@@ -2707,6 +2707,67 @@ func TestReleaseNoteRaisesStepAndTimeoutFloor(t *testing.T) {
 	}
 }
 
+func TestReleaseNoteCompactsOversizedInitialContext(t *testing.T) {
+	repoDir := initRepo(t)
+	t.Chdir(repoDir)
+	runGit(t, repoDir, "commit", "-m", "base")
+	runGit(t, repoDir, "tag", "v1.0.0")
+	var summaries []string
+	for i := range 24 {
+		summary := fmt.Sprintf("feat: operator change %02d", i)
+		summaries = append(summaries, summary)
+		runGit(t, repoDir, "commit", "--allow-empty", "-m", summary+"\n\n"+strings.Repeat(`operator-configuration-"quoted"-detail `, 1000))
+	}
+	var requestBytes int
+	server := newScriptedResponsesServer(t, []func(string) string{func(body string) string {
+		requestBytes = len(body)
+		if requestBytes/4 >= config.DefaultContextTokens*3/4 {
+			t.Fatalf("request has %d bytes, exceeds reserved context budget", requestBytes)
+		}
+		var payload struct {
+			Input []struct {
+				Role    string `json:"role"`
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"input"`
+		}
+		if err := json.Unmarshal([]byte(body), &payload); err != nil {
+			t.Fatal(err)
+		}
+		var userPrompt string
+		for _, item := range payload.Input {
+			if item.Role == "user" {
+				userPrompt = item.Content[0].Text
+			}
+		}
+		for _, want := range append(summaries, `"evidence_compacted": true`, "keep upgrade guidance") {
+			if !strings.Contains(userPrompt, want) {
+				t.Fatalf("compacted user prompt missing %q", want)
+			}
+		}
+		return responseWithText("resp_compact", `{"sections":[]}`)
+	}})
+	defer server.Close()
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", server.URL)
+	t.Setenv("OPENAI_MODEL", "test-model")
+	var stdout, stderr bytes.Buffer
+	app := &App{stdout: &stdout, stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"release-note", "--hint", "keep upgrade guidance", "v1.0.0", "HEAD"}); err != nil {
+		t.Fatal(err)
+	}
+	if requestBytes == 0 {
+		t.Fatal("no provider request")
+	}
+	for _, summary := range summaries {
+		if !strings.Contains(stdout.String(), summary) {
+			t.Fatalf("full changelog missing %q", summary)
+		}
+	}
+	t.Logf("first request: %d bytes, about %d tokens", requestBytes, requestBytes/4)
+}
+
 func TestReleaseNoteVersionBumpShortcutInfersRange(t *testing.T) {
 	repoDir := initRepo(t)
 	t.Chdir(repoDir)

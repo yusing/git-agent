@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -26,6 +27,7 @@ const (
 )
 
 type PreparedContext struct {
+	EvidenceCompacted       bool                `json:"evidence_compacted,omitzero"`
 	Range                   string              `json:"range"`
 	BaseRef                 string              `json:"base_ref"`
 	BaseSHA                 string              `json:"base_sha"`
@@ -42,6 +44,7 @@ type PreparedContext struct {
 }
 
 type PreparedCommit struct {
+	OmittedFiles    int                   `json:"omitted_files,omitzero"`
 	SHA             string                `json:"sha"`
 	Summary         string                `json:"summary"`
 	Message         string                `json:"message,omitempty"`
@@ -195,7 +198,49 @@ func (c PreparedContext) Render() string {
 }
 
 func (c PreparedContext) RenderForPrompt() string {
-	return c.Render()
+	// Candidates reference commit records; repeating their evidence inflates every
+	// request without adding facts. Work on copies to preserve local rendering.
+	c.CandidateItems = slices.Clone(c.CandidateItems)
+	for i := range c.CandidateItems {
+		c.CandidateItems[i].Evidence = nil
+	}
+	data, err := json.Marshal(&c, jsontext.SpaceAfterColon(true), jsontext.SpaceAfterComma(true))
+	if err != nil {
+		return fmt.Sprintf(`{"range":%q}`, c.Range)
+	}
+	return string(data)
+}
+
+// compactEvidence preserves the entire commit inventory and local source data.
+func (c PreparedContext) compactEvidence(fileLimit, textLimit int) PreparedContext {
+	c.EvidenceCompacted = true
+	compactCommits := func(commits []PreparedCommit) []PreparedCommit {
+		result := slices.Clone(commits)
+		for i := range result {
+			commit := &result[i]
+			commit.OmittedFiles = max(0, len(commit.Files)-fileLimit)
+			commit.Files = commit.Files[:min(len(commit.Files), fileLimit)]
+			commit.Message, _ = textutil.Limit(commit.Message, textLimit, 0)
+			commit.PatchExcerpt, _ = textutil.Limit(commit.PatchExcerpt, textLimit, 0)
+			if textLimit == 0 {
+				commit.Message, commit.PatchExcerpt = "", ""
+			}
+		}
+		return result
+	}
+	c.ParentCommits = compactCommits(c.ParentCommits)
+	c.Submodules = slices.Clone(c.Submodules)
+	for i := range c.Submodules {
+		c.Submodules[i].Commits = compactCommits(c.Submodules[i].Commits)
+	}
+	c.CandidateItems = slices.Clone(c.CandidateItems)
+	for i := range c.CandidateItems {
+		c.CandidateItems[i].DraftFact, _ = textutil.Limit(c.CandidateItems[i].DraftFact, textLimit, 0)
+		if textLimit == 0 {
+			c.CandidateItems[i].DraftFact = ""
+		}
+	}
+	return c
 }
 
 func preparedCommits(commits []gitctx.CommitMessageInfo, repoURL string) []PreparedCommit {

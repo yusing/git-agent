@@ -1432,19 +1432,24 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 		UsageOutput: a.stderr,
 	}
 	environment := environmentContext(repo, "release-note", rangeArgs.BaseRef+".."+rangeArgs.ReleaseRef, cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
-	result, err := runner.Run(taskCtx, agent.Request{
+	request := agent.Request{
 		SystemPrompt:      releasenote.SystemPrompt(),
 		ToolPolicy:        toolPolicy(),
 		Environment:       environment,
 		SkillInstructions: skillInstructions,
 		ProjectGuidance:   renderedGuidance,
-		UserPrompt:        appendUserPrompt(releasenote.UserPrompt(prepared, cfg.MaxSteps, cfg.MaxToolCalls), cfg.AppendPrompt),
 		TextFormat:        releasenote.TextFormat(),
 		AllowedToolNames:  allowedTools,
 		ParallelToolCalls: true,
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
+	}
+	request.UserPrompt = releasenote.UserPromptWithinBudget(prepared, cfg.MaxSteps, cfg.MaxToolCalls, func(prompt string) bool {
+		request.UserPrompt = appendUserPrompt(prompt, cfg.AppendPrompt)
+		return cfg.ContextTokens <= 0 || runner.EstimateInitialRequestTokens(request) < cfg.ContextTokens*3/4
 	})
+	request.UserPrompt = appendUserPrompt(request.UserPrompt, cfg.AppendPrompt)
+	result, err := runner.Run(taskCtx, request)
 	if err != nil {
 		return err
 	}

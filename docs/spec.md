@@ -2153,14 +2153,22 @@ Behavior:
 
 - peel and validate both refs
 - generate a parent-repository commit log for the selected range
-- include each release-note commit's full message content in prepared context,
-  clamped independently to 10 lines and 1000 words
+- prepare each release-note commit's full message content, clamped independently
+  to 10 lines and 1000 words
 - include per-commit changed paths, diffstat, and bounded patch excerpts so
   release-note bullets can be grounded in concrete commit evidence instead of
   commit summaries alone
 - classify changed paths into operator-facing signals such as runtime, config
   schema, API, CLI, docs, generated, tests, dependency-only, and submodule-only
   changes
+- size the complete initial request against the configured context budget
+  and reserve headroom for follow-up evidence and output
+- when needed, progressively shorten changed-file lists, messages, candidate
+  draft facts, and patch excerpts; retain every prepared commit SHA and summary,
+  range metadata, submodule ownership, and the complete local changelog data
+- mark shortened evidence so the model can retrieve details with existing
+  read-only tools; reject before provider work if fixed instructions or the
+  minimum commit inventory still exceeds the context budget
 - precompute candidate release-note items with draft facts, recommended sections,
   confidence, refs, and evidence; the model should polish these candidates rather
   than inventing new behavior

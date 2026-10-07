@@ -31,7 +31,8 @@ Rules:
 - fold follow-up fixes, fixups, reverts, and completions of earlier same-range work into that work; include every supporting ref and do not describe superseded intermediate behavior
 - classify an item as "Bug Fixes" only when the evidence establishes that the defect existed at the base revision or in an earlier released state; a fix prefix alone is not proof
 - omit chores and other maintenance-only work unless the final release has a concrete operator-visible effect, then classify the effect rather than the commit type
-- use each candidate's evidence plus its referenced commit's changed paths, diffstat, operator_signals, and patch_excerpt to verify wording before writing a bullet
+- use each referenced commit's changed paths, diffstat, operator_signals, and patch_excerpt to verify candidate wording before writing a bullet
+- when evidence_compacted is true, messages, draft facts, patches, and file lists may be shortened; omitted_files counts paths not included for that commit; retrieve missing details with git_show_commit using the commit SHA and submodule path before making claims that need them
 - do not invent behavior beyond draft_fact and evidence; narrow or omit low-confidence candidates instead
 - use each commit's clamped "message" content, not just "summary", before inferring operator impact
 - use git_show_commit, git_show_file_at_rev, or repository read tools when a patch excerpt, candidate, or submodule commit is not enough to judge operator impact
