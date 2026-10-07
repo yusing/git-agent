@@ -126,33 +126,7 @@ func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error)
 		request.MaxSteps = r.Config.MaxSteps
 	}
 
-	messages := slices.Clone(request.Input)
-	if request.Input == nil {
-		if request.ToolPolicy != "" {
-			messages = append(messages, openai.NewMessage("developer", request.ToolPolicy))
-		}
-		if request.Environment != "" {
-			messages = append(messages, openai.NewMessage("developer", request.Environment))
-		}
-		if request.SkillInstructions != "" {
-			messages = append(messages, openai.NewMessage("developer", request.SkillInstructions))
-		}
-		if request.ProjectGuidance != "" {
-			messages = append(messages, openai.NewMessage("developer", request.ProjectGuidance))
-		}
-		if request.DeveloperInstructions != "" {
-			messages = append(messages, openai.NewMessage("developer", request.DeveloperInstructions))
-		}
-		messages = append(messages, openai.NewMessage("user", request.UserPrompt))
-	}
-
-	toolSpecs := make([]openai.ToolSpec, 0, len(r.ToolSpecs))
-	for _, def := range r.ToolSpecs {
-		if len(request.AllowedToolNames) > 0 && !slices.Contains(request.AllowedToolNames, def.Name) {
-			continue
-		}
-		toolSpecs = append(toolSpecs, openai.ToolSpec{Name: def.Name, Description: def.Description, Schema: def.Schema, Strict: def.Strict})
-	}
+	messages, toolSpecs, stableInstructions := r.requestContext(request)
 
 	state := &runState{
 		turnState: request.TurnState,
@@ -162,7 +136,6 @@ func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error)
 		state.turnID = rand.Text()
 	}
 	parallelToolCalls := request.ParallelToolCalls
-	stableInstructions := requestInstructions(request.SystemPrompt, toolSpecs)
 	runResult, err := r.runUntilOutcome(ctx, stableInstructions, messages, toolSpecs, request.TextFormat, request.MaxSteps, state, parallelToolCalls)
 	if err != nil {
 		return Result{}, err
@@ -217,6 +190,49 @@ func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error)
 		}
 	}
 	return result, nil
+}
+
+// EstimateInitialRequestTokens uses the same request layers and estimator as Run.
+func (r *OpenAIRunner) EstimateInitialRequestTokens(request Request) int {
+	messages, toolSpecs, instructions := r.requestContext(request)
+	maxSteps := request.MaxSteps
+	if maxSteps <= 0 {
+		maxSteps = r.Config.MaxSteps
+	}
+	input := requestInputWithBudget(messages, 1, maxSteps, 0, r.Config.MaxToolCalls, r.PromptCacheKey != "")
+	return estimateRequestTokens(r.providerRequest(instructions, input, toolSpecs, request.TextFormat, request.ParallelToolCalls))
+}
+
+func (r *OpenAIRunner) requestContext(request Request) ([]openai.Item, []openai.ToolSpec, string) {
+	messages := slices.Clone(request.Input)
+	if request.Input == nil {
+		if request.ToolPolicy != "" {
+			messages = append(messages, openai.NewMessage("developer", request.ToolPolicy))
+		}
+		if request.Environment != "" {
+			messages = append(messages, openai.NewMessage("developer", request.Environment))
+		}
+		if request.SkillInstructions != "" {
+			messages = append(messages, openai.NewMessage("developer", request.SkillInstructions))
+		}
+		if request.ProjectGuidance != "" {
+			messages = append(messages, openai.NewMessage("developer", request.ProjectGuidance))
+		}
+		if request.DeveloperInstructions != "" {
+			messages = append(messages, openai.NewMessage("developer", request.DeveloperInstructions))
+		}
+		messages = append(messages, openai.NewMessage("user", request.UserPrompt))
+	}
+
+	toolSpecs := make([]openai.ToolSpec, 0, len(r.ToolSpecs))
+	for _, def := range r.ToolSpecs {
+		if len(request.AllowedToolNames) > 0 && !slices.Contains(request.AllowedToolNames, def.Name) {
+			continue
+		}
+		toolSpecs = append(toolSpecs, openai.ToolSpec{Name: def.Name, Description: def.Description, Schema: def.Schema, Strict: def.Strict})
+	}
+
+	return messages, toolSpecs, requestInstructions(request.SystemPrompt, toolSpecs)
 }
 
 func (r *OpenAIRunner) normalizeResult(result *Result) {
