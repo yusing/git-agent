@@ -168,8 +168,7 @@ and query target become independent sibling branches. Three follow-ups preserve
 context; the next invocation succeeds as a fresh search with a reset allowance.
 An initial batch and its context-preserving follow-ups are assigned one
 prompt-cache key. Git-agent keeps agent instructions unchanged across model
-steps and appends each changing budget as replayable developer input, making
-each completed request input an exact prefix of the next request input. On
+steps and appends each changing budget as replayable developer input. On
 GPT-5.6 and GPT-6 models, each appended budget is an explicit cache breakpoint.
 Provider cache retention and minimum-prefix rules still apply. Other OpenAI
 models use provider-default caching. The authenticated ChatGPT Codex endpoint

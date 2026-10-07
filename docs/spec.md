@@ -306,7 +306,9 @@ An initial batch derives one key from its first sorted item ID and persists that
 key for every sibling. Every model request within one agent run keeps
 `instructions` byte-stable. Changing model-step and remaining-tool budgets are
 appended as developer input and persisted in replay history, so each completed
-request input is an exact prefix of the next request input. For
+request input is an exact prefix of the next request input, except when a
+validation repair must shorten an over-budget transcript as described in
+[Repair strategy](#repair-strategy). For
 GPT-5.6- and GPT-6-family models, each appended budget message is an explicit
 cache breakpoint and requests use explicit-only cache mode. Follow-ups inherit
 the key and replayable input; a depth reset creates a new key. Official OpenAI
@@ -2255,7 +2257,12 @@ Release note validator checks at minimum:
 If validation fails:
 
 1. summarize the validation errors
-2. run one repair pass through the model
+2. run one repair pass through the model; normally preserve the gathered
+   transcript, but if the repair request would exceed the context budget,
+   retain the initial task input, final draft, and validation errors instead of
+   replaying this run's tool and reasoning transcript. Keep stable instructions,
+   caller intent, output schema, and the initial-request budget guard. Persist
+   the shortened input actually used for repair when keeping session history
 3. revalidate
 4. return an error if still invalid
 

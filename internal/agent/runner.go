@@ -160,7 +160,19 @@ func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error)
 			if len(repairMessages) == 0 {
 				repairMessages = append(slices.Clone(messages), openai.NewMessage("assistant", result.Text))
 			}
-			repairMessages = append(repairMessages, openai.NewMessage("user", renderRepairPrompt(errs)))
+			repairPrompt := openai.NewMessage("user", renderRepairPrompt(errs))
+			repairMessages = append(repairMessages, repairPrompt)
+			repairInput := requestInputWithBudget(repairMessages, 1, 1, 0, r.Config.MaxToolCalls, r.PromptCacheKey != "")
+			repairTokens := estimateRequestTokens(r.providerRequest(stableInstructions, repairInput, nil, request.TextFormat, false))
+			if r.Config.ContextTokens > 0 && repairTokens >= r.Config.ContextTokens {
+				repairMessages = append(slices.Clone(messages), openai.NewMessage("assistant", result.Text), repairPrompt)
+				if err := r.Trace.Write("budget", map[string]any{
+					"kind": BudgetKindContext, "decision": "compact", "reason": "repair_history_compacted",
+					"used": repairTokens, "limit": r.Config.ContextTokens,
+				}); err != nil {
+					return Result{}, err
+				}
+			}
 			var repairStarted time.Time
 			if r.Timing != nil {
 				repairStarted = time.Now()
