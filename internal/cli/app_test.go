@@ -2650,8 +2650,8 @@ func TestPRMessageRejectsToolCallWhenNoToolsAreAvailable(t *testing.T) {
 
 	app := &App{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
 	err := app.Run(t.Context(), []string{"pr-message"})
-	if err == nil || !strings.Contains(err.Error(), "provider requested tools but no registry is configured") {
-		t.Fatalf("expected no-registry tool call error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "tool repo_summary is not allowed for this request") {
+		t.Fatalf("expected disallowed tool call error, got %v", err)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(request, &payload); err != nil {

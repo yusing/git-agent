@@ -330,6 +330,7 @@ func TestRunnerRejectsConcurrentBatchWhenSnapshotChanges(t *testing.T) {
 	close(release)
 	outcome := <-finished
 	slices.Sort(startedNames)
+	slices.Sort(names)
 	if !slices.Equal(startedNames, names) {
 		t.Fatalf("started tools = %v, want %v", startedNames, names)
 	}
