@@ -3328,7 +3328,9 @@ func TestRemoteSearchCanResolveParentAfterShallowHeadCache(t *testing.T) {
 	writeFile(t, remote, "remote.txt", "remote alpha content\n")
 	firstRev := commitSearchRepo(t, remote)
 	writeFile(t, remote, "remote.txt", "remote beta content\n")
-	_ = commitSearchRepoChange(t, remote, "second")
+	secondRev := commitSearchRepoChange(t, remote, "second")
+	writeFile(t, remote, "remote.txt", "remote gamma content\n")
+	_ = commitSearchRepoChange(t, remote, "third")
 	root := t.TempDir()
 	baseOpts := Options{
 		Root:                root,
@@ -3338,17 +3340,25 @@ func TestRemoteSearchCanResolveParentAfterShallowHeadCache(t *testing.T) {
 		EmbeddingModel:      "test-model",
 		EmbeddingDimensions: 3,
 	}
-	if _, err := Run(t.Context(), fakeEmbedder{}, baseOpts, "remote beta"); err != nil {
+	if _, err := Run(t.Context(), fakeEmbedder{}, baseOpts, "remote gamma"); err != nil {
 		t.Fatal(err)
 	}
 
-	baseOpts.Rev = "HEAD~1"
-	out, err := Run(t.Context(), fakeEmbedder{}, baseOpts, "remote alpha")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.Source.ResolvedRev != firstRev {
-		t.Fatalf("resolved rev = %q, want parent %q", out.Source.ResolvedRev, firstRev)
+	for _, rev := range []struct{ ref, sha, content string }{
+		{"HEAD~1", secondRev, "remote beta content"},
+		{"HEAD~2", firstRev, "remote alpha content"},
+	} {
+		baseOpts.Rev = rev.ref
+		out, err := Run(t.Context(), fakeEmbedder{}, baseOpts, rev.content)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.Source.ResolvedRev != rev.sha {
+			t.Fatalf("resolved %s = %q, want %q", rev.ref, out.Source.ResolvedRev, rev.sha)
+		}
+		if len(out.Results) == 0 || !strings.Contains(out.Results[0].Excerpt, rev.content) {
+			t.Fatalf("results for %s = %#v, want ancestor content", rev.ref, out.Results)
+		}
 	}
 }
 

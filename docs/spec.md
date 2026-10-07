@@ -434,7 +434,8 @@ written to manifests, output, debug logs, or completion metadata.
 Remote repositories are fetched on first use, when the last successful fetch is
 at least 15 minutes old, or whenever `--reindex` is set. Fresh cache hits do not
 touch the network. If a requested revision cannot be resolved from the cached
-repository, the command fetches and retries before failing. Fetch failures fail
+repository, the command fetches and retries before failing. This includes
+missing ancestors after a shallow HEAD fetch. Fetch failures fail
 the command clearly rather than silently using stale data.
 
 When a remote fetch is required, search resolves direct revisions from the

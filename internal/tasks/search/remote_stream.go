@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -485,6 +486,20 @@ func (s *remoteStreamState) fetch() error {
 }
 
 func (s *remoteStreamState) fetchAttempt(filter packp.Filter) error {
+	depth := 0
+	if s.shallow {
+		depth = 1
+	} else {
+		shallows, err := s.repo.Storer.Shallow()
+		if err != nil {
+			return err
+		}
+		if len(shallows) > 0 {
+			// A zero-depth fetch treats existing tips as complete history.
+			// Request the protocol's unlimited depth to retrieve missing parents.
+			depth = math.MaxInt32
+		}
+	}
 	reader, writer := io.Pipe()
 	parseDone := make(chan error, 1)
 	go func() {
@@ -497,10 +512,7 @@ func (s *remoteStreamState) fetchAttempt(filter packp.Filter) error {
 		URLs:  []string{s.remoteURL},
 		Fetch: remoteFetchRefSpecs(),
 	})
-	depth := 0
-	if s.shallow {
-		depth = 1
-	}
+
 	progress := newRemoteProgressWriter(s.progressLog, s.remoteURL, ProgressStatusFetching)
 	fetchErr := remote.FetchContext(s.ctx, &git.FetchOptions{
 		RemoteName:    "origin",
