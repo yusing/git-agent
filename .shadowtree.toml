@@ -2,6 +2,7 @@ profile = "go"
 shell = "bash"
 
 [recipes.install]
+pre = ["npm run build"]
 help = "Build and install git-agent and optional fish completion"
 sandboxed = false
 cmd = '''
@@ -22,3 +23,18 @@ fi
 help = "Fish config directory; empty uses $XDG_CONFIG_HOME/fish"
 type = "path"
 default = ""
+
+[recipes.build]
+pre = ["npm run build"]
+
+[recipes.test]
+pre = ["npm run build"]
+
+[recipes.test-race]
+pre = ["npm run build"]
+
+[recipes.vet]
+pre = ["npm run build"]
+
+[recipes.check]
+pre = ["npm run check", "npm test"]

@@ -3,1526 +3,310 @@ package agent
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"slices"
+	"net/http"
+	"net/http/httptest"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/gitctx"
 	"github.com/yusing/git-agent/internal/openai"
 	"github.com/yusing/git-agent/internal/tools"
-	"github.com/yusing/git-agent/internal/trace"
 )
 
-func newTraceBuffer(t *testing.T, command string) (*trace.Recorder, *bytes.Buffer) {
+func responseServer(t *testing.T, next func(map[string]jsontext.Value) []any) *httptest.Server {
 	t.Helper()
-	var output bytes.Buffer
-	recorder, err := trace.NewStream(command, &output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return recorder, &output
-}
-
-func traceEventKinds(output string) []string {
-	var kinds []string
-	for _, line := range strings.Split(output, "\n") {
-		for _, kind := range []string{"tool-call", "tool-output"} {
-			if strings.Contains(line, " INF "+kind+" ") {
-				kinds = append(kinds, kind)
-			}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input map[string]jsontext.Value
+		if err := json.UnmarshalRead(r.Body, &input); err != nil {
+			t.Error(err)
+			http.Error(w, "bad request", 400)
+			return
 		}
-	}
-	return kinds
-}
-
-type fakeClient struct {
-	responses      []openai.Response
-	responseErrors []error
-	requests       []openai.Request
-	streamEvents   []openai.StreamEvent
-	retryEvents    []openai.RetryEvent
-}
-
-type testToolExecutor struct {
-	tools         map[string]tools.Tool
-	checkSnapshot func() error
-}
-
-func newTestToolExecutor() *testToolExecutor {
-	return &testToolExecutor{tools: make(map[string]tools.Tool)}
-}
-
-func (r *testToolExecutor) add(tool tools.Tool) {
-	r.tools[tool.Definition().Name] = tool
-}
-
-func (r *testToolExecutor) Definitions(names []string) []tools.Definition {
-	definitions := make([]tools.Definition, 0, len(names))
-	for _, name := range names {
-		if tool, ok := r.tools[name]; ok {
-			definitions = append(definitions, tool.Definition())
-		}
-	}
-	return definitions
-}
-
-func (r *testToolExecutor) Execute(ctx context.Context, invocation tools.Invocation) (tools.Result, error) {
-	if r.checkSnapshot != nil {
-		if err := r.checkSnapshot(); err != nil {
-			return tools.Result{}, err
-		}
-	}
-	tool, ok := r.tools[invocation.Name]
-	if !ok {
-		return tools.Result{}, fmt.Errorf("tool %q is not registered", invocation.Name)
-	}
-	return tool.Execute(ctx, invocation)
-}
-
-func (r *testToolExecutor) CheckSnapshot() error {
-	if r.checkSnapshot == nil {
-		return nil
-	}
-	return r.checkSnapshot()
-}
-
-type executionLog struct {
-	mu    sync.Mutex
-	order []string
-}
-
-func (l *executionLog) add(name string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.order = append(l.order, name)
-}
-
-func (l *executionLog) snapshot() []string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return slices.Clone(l.order)
-}
-
-type recordingTool struct {
-	name    string
-	order   *executionLog
-	content string
-	err     error
-}
-
-type delayedTool struct {
-	name    string
-	delay   time.Duration
-	content string
-}
-
-func testToolDefinition(name string) tools.Definition {
-	return tools.Definition{
-		Name: name, Strict: true,
-		Schema: map[string]any{"type": "object", "additionalProperties": true},
-	}
-}
-
-func (t delayedTool) Definition() tools.Definition { return testToolDefinition(t.name) }
-
-func (t delayedTool) Execute(ctx context.Context, _ tools.Invocation) (tools.Result, error) {
-	timer := time.NewTimer(t.delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return tools.Result{}, ctx.Err()
-	case <-timer.C:
-		return tools.Result{Content: t.content}, nil
-	}
-}
-
-func (t recordingTool) Definition() tools.Definition { return testToolDefinition(t.name) }
-
-func (t recordingTool) Execute(_ context.Context, invocation tools.Invocation) (tools.Result, error) {
-	t.order.add(invocation.Name)
-	if t.err != nil {
-		return tools.Result{}, t.err
-	}
-	return tools.Result{Content: t.content}, nil
-}
-
-type blockingTool struct {
-	name    string
-	started chan<- string
-	release <-chan struct{}
-}
-
-func (t blockingTool) Definition() tools.Definition { return testToolDefinition(t.name) }
-
-func (t blockingTool) Execute(ctx context.Context, _ tools.Invocation) (tools.Result, error) {
-	select {
-	case t.started <- t.name:
-	case <-ctx.Done():
-		return tools.Result{}, ctx.Err()
-	}
-	select {
-	case <-t.release:
-		return tools.Result{Content: t.name + " output"}, nil
-	case <-ctx.Done():
-		return tools.Result{}, ctx.Err()
-	}
-}
-
-func TestResultHistoryReturnsClone(t *testing.T) {
-	result := Result{messages: []openai.Item{openai.NewMessage("assistant", "answer")}}
-	history := result.History()
-	history[0].Content = "changed"
-	if got := result.History()[0].Content; got != "answer" {
-		t.Fatalf("stored history = %q, want answer", got)
-	}
-}
-
-func TestRunnerExecutesAdmittedToolBatchConcurrently(t *testing.T) {
-	t.Parallel()
-
-	synctest.Test(t, func(t *testing.T) {
-		started := make(chan string)
-		release := make(chan struct{})
-		registry := newTestToolExecutor()
-		names := []string{"first_tool", "second_tool", "third_tool"}
-		for _, name := range names {
-			registry.add(blockingTool{name: name, started: started, release: release})
-		}
-		client := &fakeClient{responses: []openai.Response{
-			{ToolCalls: []openai.ToolCall{
-				{ID: "fc_1", CallID: "call_1", Name: names[0], Arguments: `{"value":1}`},
-				{ID: "fc_2", CallID: "call_2", Name: names[1], Arguments: `{"value":2}`},
-				{ID: "fc_3", CallID: "call_3", Name: names[2], Arguments: `{"value":3}`},
-			}},
-			{Text: "done"},
-		}}
-		recorder, traceOutput := newTraceBuffer(t, "explore")
-		runner := OpenAIRunner{
-			Config: config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 3},
-			Client: client, Tools: registry, ToolSpecs: registry.Definitions(names), Trace: recorder,
-		}
-		result := make(chan Result, 1)
-		errResult := make(chan error, 1)
-		go func() {
-			got, err := runner.Run(t.Context(), Request{
-				UserPrompt: "inspect", MaxSteps: 3, ParallelToolCalls: true,
-			})
-			result <- got
-			errResult <- err
-		}()
-
-		startedNames := make([]string, 0, len(names))
-		for range names {
-			startedNames = append(startedNames, <-started)
-		}
-		close(release)
-		got := <-result
-		if err := <-errResult; err != nil {
-			t.Fatal(err)
-		}
-		slices.Sort(startedNames)
-		wantStarted := slices.Clone(names)
-		slices.Sort(wantStarted)
-		if !slices.Equal(startedNames, wantStarted) {
-			t.Fatalf("started tools = %v, want %v", startedNames, wantStarted)
-		}
-		if got.Text != "done" || got.ToolCalls != 3 || len(client.requests) != 2 {
-			t.Fatalf("result = %#v, requests = %d", got, len(client.requests))
-		}
-		if !client.requests[0].ParallelToolCalls || !client.requests[1].ParallelToolCalls {
-			t.Fatalf("parallel policy was not preserved across requests: %#v", client.requests)
-		}
-		var outputCallIDs []string
-		for _, item := range client.requests[1].Input {
-			if item.Type == "function_call_output" {
-				outputCallIDs = append(outputCallIDs, item.CallID)
-			}
-		}
-		if !slices.Equal(outputCallIDs, []string{"call_1", "call_2", "call_3"}) {
-			t.Fatalf("output call IDs = %v", outputCallIDs)
-		}
-		toolEvents := traceEventKinds(traceOutput.String())
-		if !slices.Equal(toolEvents, []string{
-			"tool-call", "tool-call", "tool-call",
-			"tool-output", "tool-output", "tool-output",
-		}) {
-			t.Fatalf("tool event order = %v\ntrace:\n%s", toolEvents, traceOutput.String())
-		}
-	})
-}
-
-func TestRunnerRejectsConcurrentBatchWhenSnapshotChanges(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	runGit(t, dir, "init")
-	runGit(t, dir, "config", "user.name", "Test User")
-	runGit(t, dir, "config", "user.email", "test@example.com")
-	path := filepath.Join(dir, "app.txt")
-	if err := os.WriteFile(path, []byte("base\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGit(t, dir, "add", "app.txt")
-	runGit(t, dir, "commit", "-m", "base")
-	if err := os.WriteFile(path, []byte("launch\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGit(t, dir, "add", "app.txt")
-	repo, err := gitctx.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	staged, err := repo.StagedFingerprint()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	started := make(chan string, 2)
-	release := make(chan struct{})
-	names := []string{"read_file", "grep"}
-	registry := newTestToolExecutor()
-	registry.checkSnapshot = func() error {
-		fresh, err := gitctx.Open(dir)
-		if err != nil {
-			return err
-		}
-		return fresh.CheckStagedFingerprint(staged)
-	}
-	for _, name := range names {
-		registry.add(blockingTool{name: name, started: started, release: release})
-	}
-	client := &fakeClient{responses: []openai.Response{{ToolCalls: []openai.ToolCall{
-		{ID: "fc_1", CallID: "call_1", Name: names[0], Arguments: `{}`},
-		{ID: "fc_2", CallID: "call_2", Name: names[1], Arguments: `{}`},
-	}}}}
-	recorder, traceOutput := newTraceBuffer(t, "commit-msg")
-	runner := OpenAIRunner{
-		Config: config.Config{MaxSteps: 2, MaxToolCalls: 2}, Client: client,
-		Tools: registry, ToolSpecs: registry.Definitions(names), Trace: recorder,
-	}
-	type runResult struct {
-		result Result
-		err    error
-	}
-	finished := make(chan runResult, 1)
-	go func() {
-		result, err := runner.Run(t.Context(), Request{
-			UserPrompt: "inspect", MaxSteps: 2, ParallelToolCalls: true,
-		})
-		finished <- runResult{result: result, err: err}
-	}()
-
-	startedNames := []string{<-started, <-started}
-	if err := os.WriteFile(path, []byte("changed\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGit(t, dir, "add", "app.txt")
-	close(release)
-	outcome := <-finished
-	slices.Sort(startedNames)
-	slices.Sort(names)
-	if !slices.Equal(startedNames, names) {
-		t.Fatalf("started tools = %v, want %v", startedNames, names)
-	}
-	if !errors.Is(outcome.err, gitctx.ErrChangeSnapshotStale) {
-		t.Fatalf("error = %v, want stale snapshot", outcome.err)
-	}
-	if outcome.result.Text != "" || outcome.result.ToolCalls != 0 {
-		t.Fatalf("stale batch produced result = %#v", outcome.result)
-	}
-	if strings.Contains(traceOutput.String(), " INF tool-output ") {
-		t.Fatalf("stale batch traced tool output:\n%s", traceOutput.String())
-	}
-}
-func TestRunnerReportsProviderToolAndValidationTimings(t *testing.T) {
-	t.Parallel()
-	const toolDelay = 2 * time.Millisecond
-	names := []string{"list_files", "grep", "read_file"}
-	registry := newTestToolExecutor()
-	for _, name := range names {
-		registry.add(delayedTool{name: name, delay: toolDelay, content: name + " output"})
-	}
-	client := &fakeClient{responses: []openai.Response{
-		{ToolCalls: []openai.ToolCall{
-			{ID: "fc_1", CallID: "call_1", Name: names[0], Arguments: `{}`},
-			{ID: "fc_2", CallID: "call_2", Name: names[1], Arguments: `{}`},
-			{ID: "fc_3", CallID: "call_3", Name: names[2], Arguments: `{}`},
-		}},
-		{Text: "done"},
-	}}
-	var timings []Timing
-	runner := OpenAIRunner{
-		Config:    config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 3},
-		Client:    client,
-		Tools:     registry,
-		ToolSpecs: registry.Definitions(names),
-		Validator: func(string) []string { return nil },
-		Timing:    func(timing Timing) { timings = append(timings, timing) },
-	}
-	if _, err := runner.Run(t.Context(), Request{
-		UserPrompt: "explore", MaxSteps: 3, ParallelToolCalls: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	phaseCounts := map[string]int{}
-	toolNames := map[string]bool{}
-	for _, timing := range timings {
-		phaseCounts[timing.Phase]++
-		if timing.Duration < 0 {
-			t.Fatalf("negative timing: %#v", timing)
-		}
-		if timing.Phase == "tool" {
-			toolNames[timing.Tool] = true
-			if timing.Step != 1 || timing.Duration < toolDelay {
-				t.Errorf("tool timing = %#v, want step 1 and duration >= %s", timing, toolDelay)
-			}
-		}
-	}
-	for phase, want := range map[string]int{
-		"provider_request": 2,
-		"tool":             len(names),
-		"tool_batch":       1,
-		"validation":       1,
-	} {
-		if got := phaseCounts[phase]; got != want {
-			t.Errorf("%s timing count = %d, want %d: %#v", phase, got, want, timings)
-		}
-	}
-	for _, name := range names {
-		if !toolNames[name] {
-			t.Errorf("missing timing for tool %s: %#v", name, timings)
-		}
-	}
-}
-
-func BenchmarkRunnerExploreToolBatch(b *testing.B) {
-	const toolDelay = 2 * time.Millisecond
-	names := []string{"list_files", "grep", "read_file"}
-	registry := newTestToolExecutor()
-	for _, name := range names {
-		registry.add(delayedTool{name: name, delay: toolDelay, content: name + " output"})
-	}
-	toolSpecs := registry.Definitions(names)
-	b.ReportMetric(float64(len(names)), "tools/op")
-	b.ResetTimer()
-
-	for b.Loop() {
-		client := &fakeClient{responses: []openai.Response{
-			{ToolCalls: []openai.ToolCall{
-				{ID: "fc_1", CallID: "call_1", Name: names[0], Arguments: `{}`},
-				{ID: "fc_2", CallID: "call_2", Name: names[1], Arguments: `{}`},
-				{ID: "fc_3", CallID: "call_3", Name: names[2], Arguments: `{}`},
-			}},
-			{Text: "done"},
-		}}
-		runner := OpenAIRunner{
-			Config: config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 3},
-			Client: client, Tools: registry, ToolSpecs: toolSpecs,
-		}
-		result, err := runner.Run(b.Context(), Request{
-			UserPrompt: "explore", MaxSteps: 3, ParallelToolCalls: true,
-		})
-		if err != nil {
-			b.Fatal(err)
-		}
-		if result.Text != "done" || result.ToolCalls != len(names) {
-			b.Fatalf("result = %#v", result)
-		}
-	}
-}
-
-func TestRunnerRejectsInvalidToolBatchBeforeExecution(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		calls   []openai.ToolCall
-		wantErr string
-	}{
-		{
-			name: "disallowed call",
-			calls: []openai.ToolCall{
-				{ID: "fc_1", CallID: "call_1", Name: "first_tool", Arguments: `{}`},
-				{ID: "fc_2", CallID: "call_2", Name: "not_allowed", Arguments: `{}`},
-			},
-			wantErr: "not allowed",
-		},
-		{
-			name: "missing call ID",
-			calls: []openai.ToolCall{
-				{ID: "fc_1", CallID: "call_1", Name: "first_tool", Arguments: `{}`},
-				{Name: "second_tool", Arguments: `{}`},
-			},
-			wantErr: "call ID is required",
-		},
-		{
-			name: "duplicate call ID",
-			calls: []openai.ToolCall{
-				{ID: "fc_1", CallID: "call_same", Name: "first_tool", Arguments: `{}`},
-				{ID: "fc_2", CallID: "call_same", Name: "second_tool", Arguments: `{}`},
-			},
-			wantErr: "duplicate function call ID",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			var executionOrder executionLog
-			registry := newTestToolExecutor()
-			names := []string{"first_tool", "second_tool"}
-			for _, name := range names {
-				registry.add(recordingTool{name: name, order: &executionOrder, content: "output"})
-			}
-			client := &fakeClient{responses: []openai.Response{{ToolCalls: test.calls}}}
-			runner := OpenAIRunner{
-				Config: config.Config{Model: "test", MaxSteps: 2, MaxToolCalls: 4},
-				Client: client, Tools: registry, ToolSpecs: registry.Definitions(names),
-			}
-
-			_, err := runner.Run(t.Context(), Request{UserPrompt: "inspect", MaxSteps: 2, ParallelToolCalls: true})
-			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
-				t.Fatalf("error = %v, want %q", err, test.wantErr)
-			}
-			if len(executionOrder.snapshot()) != 0 {
-				t.Fatalf("executed invalid batch members: %v", executionOrder.snapshot())
-			}
-		})
-	}
-}
-
-func TestRunnerDetectsDuplicateCallsWithinBatchBeforeExecution(t *testing.T) {
-	t.Parallel()
-
-	var executionOrder executionLog
-	registry := newTestToolExecutor()
-	registry.add(recordingTool{name: "first_tool", order: &executionOrder, content: "output"})
-	client := &fakeClient{responses: []openai.Response{
-		{ToolCalls: []openai.ToolCall{
-			{ID: "fc_1", CallID: "call_1", Name: "first_tool", Arguments: `{"value":1}`},
-			{ID: "fc_2", CallID: "call_2", Name: "first_tool", Arguments: `{ "value": 1 }`},
-		}},
-		{Text: "finalized"},
-	}}
-	runner := OpenAIRunner{
-		Config: config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 3},
-		Client: client, Tools: registry, ToolSpecs: registry.Definitions([]string{"first_tool"}),
-	}
-
-	result, err := runner.Run(t.Context(), Request{UserPrompt: "inspect", MaxSteps: 3, ParallelToolCalls: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Text != "finalized" || result.ToolCalls != 0 || len(executionOrder.snapshot()) != 0 {
-		t.Fatalf("result = %#v, execution order = %v", result, executionOrder.snapshot())
-	}
-	if len(client.requests) != 2 || client.requests[1].ParallelToolCalls {
-		t.Fatalf("forced-finalization requests = %#v", client.requests)
-	}
-	var outputCallIDs []string
-	for _, item := range client.requests[1].Input {
-		if item.Type == "function_call_output" {
-			outputCallIDs = append(outputCallIDs, item.CallID)
-		}
-	}
-	if !slices.Equal(outputCallIDs, []string{"call_1", "call_2"}) {
-		t.Fatalf("forced-finalization output call IDs = %v", outputCallIDs)
-	}
-}
-
-func TestRunnerRejectsBatchContainingCallRepeatedFromPriorStep(t *testing.T) {
-	t.Parallel()
-
-	var executionOrder executionLog
-	registry := newTestToolExecutor()
-	names := []string{"first_tool", "second_tool"}
-	for _, name := range names {
-		registry.add(recordingTool{name: name, order: &executionOrder, content: "output"})
-	}
-	client := &fakeClient{responses: []openai.Response{
-		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "first_tool", Arguments: `{"value":1}`}}},
-		{ToolCalls: []openai.ToolCall{
-			{ID: "fc_2", CallID: "call_2", Name: "second_tool", Arguments: `{"value":2}`},
-			{ID: "fc_3", CallID: "call_3", Name: "first_tool", Arguments: `{ "value": 1 }`},
-		}},
-		{Text: "finalized"},
-	}}
-	runner := OpenAIRunner{
-		Config: config.Config{Model: "test", MaxSteps: 4, MaxToolCalls: 4},
-		Client: client, Tools: registry, ToolSpecs: registry.Definitions(names),
-	}
-
-	result, err := runner.Run(t.Context(), Request{UserPrompt: "inspect", MaxSteps: 4, ParallelToolCalls: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Text != "finalized" || result.ToolCalls != 1 {
-		t.Fatalf("result = %#v", result)
-	}
-	if !slices.Equal(executionOrder.snapshot(), []string{"first_tool"}) {
-		t.Fatalf("execution order = %v, want only the prior admitted call", executionOrder.snapshot())
-	}
-}
-
-func TestRunnerRejectsCallIDInheritedFromInputHistory(t *testing.T) {
-	t.Parallel()
-
-	var executionOrder executionLog
-	registry := newTestToolExecutor()
-	registry.add(recordingTool{name: "first_tool", order: &executionOrder, content: "output"})
-	client := &fakeClient{responses: []openai.Response{{ToolCalls: []openai.ToolCall{{
-		ID: "fc_child", CallID: "call_parent", Name: "first_tool", Arguments: `{"value":2}`,
-	}}}}}
-	runner := OpenAIRunner{
-		Config: config.Config{Model: "test", MaxSteps: 2, MaxToolCalls: 2},
-		Client: client, Tools: registry, ToolSpecs: registry.Definitions([]string{"first_tool"}),
-	}
-	input := []openai.Item{
-		{Type: "function_call", RawJSON: `{"id":"fc_parent","type":"function_call","call_id":"call_parent","name":"branch","arguments":"{\"branches\":[]}"}`},
-		openai.NewFunctionCallOutput("call_parent", `{"branch_id":"b1"}`),
-	}
-
-	_, err := runner.Run(t.Context(), Request{
-		Input: input, MaxSteps: 2, ParallelToolCalls: true,
-	})
-	if err == nil || !strings.Contains(err.Error(), `duplicate function call ID "call_parent"`) {
-		t.Fatalf("error = %v, want inherited call-ID rejection", err)
-	}
-	if len(executionOrder.snapshot()) != 0 {
-		t.Fatalf("executed call with inherited ID: %v", executionOrder.snapshot())
-	}
-}
-
-func TestRunnerDetectsInvocationRepeatedFromInheritedHistory(t *testing.T) {
-	t.Parallel()
-
-	var executionOrder executionLog
-	registry := newTestToolExecutor()
-	registry.add(recordingTool{name: "first_tool", order: &executionOrder, content: "output"})
-	client := &fakeClient{responses: []openai.Response{
-		{ToolCalls: []openai.ToolCall{{
-			ID: "fc_new", CallID: "call_new", Name: "first_tool", Arguments: `{ "value": 1 }`,
-		}}},
-		{Text: "finalized"},
-	}}
-	runner := OpenAIRunner{
-		Config: config.Config{Model: "test", MaxSteps: 2, MaxToolCalls: 2},
-		Client: client, Tools: registry, ToolSpecs: registry.Definitions([]string{"first_tool"}),
-	}
-	input := []openai.Item{
-		openai.NewFunctionCall(openai.ToolCall{ID: "fc_old", CallID: "call_old", Name: "first_tool", Arguments: `{"value":1}`}),
-		openai.NewFunctionCallOutput("call_old", "prior output"),
-	}
-
-	result, err := runner.Run(t.Context(), Request{
-		Input: input, MaxSteps: 2, ParallelToolCalls: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Text != "finalized" || result.ToolCalls != 0 || len(executionOrder.snapshot()) != 0 {
-		t.Fatalf("result = %#v, execution order = %v", result, executionOrder.snapshot())
-	}
-}
-
-func TestRunnerChecksContextBudgetAfterCompletingAdmittedBatch(t *testing.T) {
-	t.Parallel()
-
-	var executionOrder executionLog
-	registry := newTestToolExecutor()
-	names := []string{"first_tool", "second_tool", "third_tool"}
-	largeOutput := strings.Repeat("x", 5000)
-	for _, name := range names {
-		registry.add(recordingTool{name: name, order: &executionOrder, content: largeOutput})
-	}
-	client := &fakeClient{responses: []openai.Response{
-		{ToolCalls: []openai.ToolCall{
-			{ID: "fc_1", CallID: "call_1", Name: names[0], Arguments: `{}`},
-			{ID: "fc_2", CallID: "call_2", Name: names[1], Arguments: `{}`},
-			{ID: "fc_3", CallID: "call_3", Name: names[2], Arguments: `{}`},
-		}},
-		{Text: "context final"},
-	}}
-	runner := OpenAIRunner{
-		Config: config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 3, ContextTokens: 2000},
-		Client: client, Tools: registry, ToolSpecs: registry.Definitions(names),
-	}
-
-	result, err := runner.Run(t.Context(), Request{UserPrompt: "inspect", MaxSteps: 3, ParallelToolCalls: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	executed := executionOrder.snapshot()
-	slices.Sort(executed)
-	if result.Text != "context final" || result.ToolCalls != 3 || !slices.Equal(executed, names) {
-		t.Fatalf("result = %#v, executed tools = %v", result, executed)
-	}
-	if len(client.requests) != 2 || len(client.requests[1].Tools) != 0 {
-		t.Fatalf("context finalization requests = %#v", client.requests)
-	}
-	var outputCallIDs []string
-	for _, item := range client.requests[1].Input {
-		if item.Type == "function_call_output" {
-			outputCallIDs = append(outputCallIDs, item.CallID)
-		}
-	}
-	if !slices.Equal(outputCallIDs, []string{"call_1", "call_2", "call_3"}) {
-		t.Fatalf("context-finalization output call IDs = %v", outputCallIDs)
-	}
-}
-
-func TestRunnerCompletesBatchAfterEncodedToolFailure(t *testing.T) {
-	t.Parallel()
-
-	var executionOrder executionLog
-	registry := newTestToolExecutor()
-	registry.add(recordingTool{name: "failing_tool", order: &executionOrder, err: errors.New("expected failure")})
-	registry.add(recordingTool{name: "successful_tool", order: &executionOrder, content: "success"})
-	names := []string{"failing_tool", "successful_tool"}
-	client := &fakeClient{responses: []openai.Response{
-		{ToolCalls: []openai.ToolCall{
-			{ID: "fc_1", CallID: "call_1", Name: names[0], Arguments: `{}`},
-			{ID: "fc_2", CallID: "call_2", Name: names[1], Arguments: `{}`},
-		}},
-		{Text: "recovered"},
-	}}
-	runner := OpenAIRunner{
-		Config: config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 2},
-		Client: client, Tools: registry, ToolSpecs: registry.Definitions(names),
-	}
-
-	result, err := runner.Run(t.Context(), Request{UserPrompt: "inspect", MaxSteps: 3, ParallelToolCalls: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	executed := executionOrder.snapshot()
-	slices.Sort(executed)
-	if result.Text != "recovered" || result.ToolCalls != 2 || !slices.Equal(executed, names) {
-		t.Fatalf("result = %#v, executed tools = %v", result, executed)
-	}
-	var outputs []openai.Item
-	for _, item := range client.requests[1].Input {
-		if item.Type == "function_call_output" {
-			outputs = append(outputs, item)
-		}
-	}
-	if len(outputs) != 2 || outputs[0].CallID != "call_1" || outputs[1].CallID != "call_2" {
-		t.Fatalf("outputs = %#v", outputs)
-	}
-	if !strings.Contains(outputs[0].Output, "expected failure") || outputs[1].Output != "success" {
-		t.Fatalf("encoded failure/success outputs = %#v", outputs)
-	}
-}
-
-func TestCompletePendingFunctionCallsValidatesConversationHistory(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		input       []openai.Item
-		wantErr     string
-		wantAddedID string
-		wantTool    string
-	}{
-		{
-			name: "positive complete pair",
-			input: []openai.Item{
-				openai.NewFunctionCall(openai.ToolCall{ID: "fc_done", CallID: "call_done", Name: "read_file", Arguments: `{}`}),
-				openai.NewFunctionCallOutput("call_done", `{"ok":true}`),
-			},
-		},
-		{
-			name: "negative missing output",
-			input: []openai.Item{
-				{Type: "function_call", RawJSON: `{"id":"fc_pending","type":"function_call","call_id":"call_pending","name":"grep","arguments":"{}"}`},
-			},
-			wantAddedID: "call_pending",
-			wantTool:    "grep",
-		},
-		{
-			name: "malformed raw call",
-			input: []openai.Item{
-				{Type: "function_call", RawJSON: `{"type":"function_call","call_id":`},
-			},
-			wantErr: "decode function call",
-		},
-		{
-			name: "orphan output",
-			input: []openai.Item{
-				openai.NewFunctionCallOutput("call_missing", `{"ok":false}`),
-			},
-			wantErr: "has no preceding call",
-		},
-		{
-			name: "unrelated text collision",
-			input: []openai.Item{
-				openai.NewMessage("user", `the text says "type":"function_call" and call_pending`),
-			},
-		},
-		{
-			name: "unknown future item",
-			input: []openai.Item{
-				{Type: "future_tool_exchange", RawJSON: `{"type":"future_tool_exchange","call_id":"call_future"}`},
-			},
-		},
-		{
-			name: "unknown future tool",
-			input: []openai.Item{
-				openai.NewFunctionCall(openai.ToolCall{ID: "fc_future", CallID: "call_future", Name: "future_tool", Arguments: `{}`}),
-			},
-			wantAddedID: "call_future",
-			wantTool:    "future_tool",
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			completed, err := completePendingFunctionCalls(test.input)
-			if test.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
-					t.Fatalf("error = %v, want containing %q", err, test.wantErr)
-				}
+		output := next(input)
+		w.Header().Set("Content-Type", "text/event-stream")
+		event := func(value any) {
+			data, err := json.Marshal(value)
+			if err != nil {
+				t.Error(err)
 				return
 			}
+			fmt.Fprintf(w, "data: %s\n\n", data)
+		}
+		for index, item := range output {
+			event(map[string]any{"type": "response.output_item.added", "output_index": index, "item": item})
+			event(map[string]any{"type": "response.output_item.done", "output_index": index, "item": item})
+		}
+		event(map[string]any{"type": "response.completed", "response": map[string]any{"id": "resp_test", "status": "completed", "output": output, "usage": map[string]any{"input_tokens": 10, "output_tokens": 2, "total_tokens": 12, "input_tokens_details": map[string]any{"cached_tokens": 3}}}})
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+func textOutput(text string) []any {
+	return []any{map[string]any{"type": "message", "id": "msg_test", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}}}}
+}
+func execOutput(code string) []any {
+	args, _ := json.Marshal(map[string]any{"code": code})
+	return []any{map[string]any{"type": "function_call", "id": "fc_test", "call_id": "call_test", "name": "exec", "arguments": string(args)}}
+}
+func runnerConfig(server *httptest.Server) config.Config {
+	return config.Config{APIKey: "synthetic-key", BaseURL: server.URL + "/v1", Model: "test-model", MaxSteps: 5}
+}
+
+type testExecutor struct {
+	execute  func(context.Context, tools.Invocation) (tools.Result, error)
+	snapshot func() error
+}
+
+func (e testExecutor) Execute(ctx context.Context, in tools.Invocation) (tools.Result, error) {
+	return e.execute(ctx, in)
+}
+func (e testExecutor) CheckSnapshot() error {
+	if e.snapshot != nil {
+		return e.snapshot()
+	}
+	return nil
+}
+func echoSpec() []tools.Definition {
+	return []tools.Definition{{Name: "echo", Description: "Echo arguments", Schema: map[string]any{"type": "object"}}}
+}
+
+func TestRunnerSDKJavaScriptParallelToolsAndHistory(t *testing.T) {
+	var requests, active, peak atomic.Int32
+	server := responseServer(t, func(input map[string]jsontext.Value) []any {
+		if requests.Add(1) == 1 {
+			if !bytes.Contains(input["tools"], []byte(`"name":"exec"`)) {
+				t.Errorf("missing exec tool: %s", input["tools"])
+			}
+			return execOutput(`text(await Promise.all([tools.echo({n:1}),tools.echo({n:2})]));`)
+		}
+		if !bytes.Contains(input["input"], []byte(`function_call_output`)) {
+			t.Error("missing replayed tool output")
+		}
+		return textOutput("done")
+	})
+	var usage bytes.Buffer
+	runner := OpenAIRunner{Config: runnerConfig(server), ToolSpecs: echoSpec(), UsageOutput: &usage, Tools: testExecutor{execute: func(ctx context.Context, in tools.Invocation) (tools.Result, error) {
+		count := active.Add(1)
+		if count > peak.Load() {
+			peak.Store(count)
+		}
+		select {
+		case <-time.After(30 * time.Millisecond):
+		case <-ctx.Done():
+			return tools.Result{}, ctx.Err()
+		}
+		active.Add(-1)
+		return tools.Result{Content: `{"ok":true,"data":` + in.Arguments + `}`}, nil
+	}}}
+	result, err := runner.Run(t.Context(), Request{UserPrompt: "Inspect", Environment: "test environment"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "done" || result.ToolCalls != 2 || peak.Load() != 2 {
+		t.Fatalf("result=%+v peak=%d", result, peak.Load())
+	}
+	if !strings.Contains(usage.String(), "cached_input_tokens=3") {
+		t.Fatalf("usage=%s", usage.String())
+	}
+	history := result.History()
+	history[0].Type = "changed"
+	if result.History()[0].Type == "changed" {
+		t.Fatal("history aliases result")
+	}
+	followup, err := runner.Run(t.Context(), Request{Input: append(result.History(), openai.NewMessage("user", "Recall"))})
+	if err != nil || followup.Text != "done" {
+		t.Fatalf("followup=%+v err=%v", followup, err)
+	}
+}
+func TestRunnerRepairsAndNormalizesOnce(t *testing.T) {
+	var requests atomic.Int32
+	server := responseServer(t, func(input map[string]jsontext.Value) []any {
+		if requests.Add(1) == 1 {
+			return textOutput("bad")
+		}
+		if string(input["tools"]) != "[]" {
+			t.Errorf("repair exposed tools: %s", input["tools"])
+		}
+		return textOutput(" good ")
+	})
+	runner := OpenAIRunner{Config: runnerConfig(server), Normalize: strings.TrimSpace, Validator: func(text string) []string {
+		if text != "good" {
+			return []string{"expected good"}
+		}
+		return nil
+	}}
+	result, err := runner.Run(t.Context(), Request{UserPrompt: "Generate", RepairOnValidator: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "good" || result.RepairCalls != 1 || requests.Load() != 2 {
+		t.Fatalf("result=%+v requests=%d", result, requests.Load())
+	}
+}
+func TestRunnerToolFailureAndSnapshotDrift(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		t.Run(fmt.Sprint(stale), func(t *testing.T) {
+			var requests atomic.Int32
+			server := responseServer(t, func(input map[string]jsontext.Value) []any {
+				if requests.Add(1) == 1 {
+					return execOutput(`text(await tools.echo({}));`)
+				}
+				if !bytes.Contains(input["input"], []byte("missing evidence")) {
+					t.Errorf("missing error envelope: %s", input["input"])
+				}
+				return textOutput("recovered")
+			})
+			runner := OpenAIRunner{Config: runnerConfig(server), ToolSpecs: echoSpec(), Tools: testExecutor{execute: func(context.Context, tools.Invocation) (tools.Result, error) {
+				return tools.Result{}, errors.New("missing evidence")
+			}, snapshot: func() error {
+				if stale {
+					return gitctx.ErrChangeSnapshotStale
+				}
+				return nil
+			}}}
+			result, err := runner.Run(t.Context(), Request{UserPrompt: "Inspect"})
+			if stale {
+				if !errors.Is(err, gitctx.ErrChangeSnapshotStale) {
+					t.Fatalf("err=%v", err)
+				}
+				if requests.Load() != 1 {
+					t.Fatal("continued after snapshot drift")
+				}
+			} else if err != nil || result.Text != "recovered" {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+		})
+	}
+}
+func TestRunnerSandboxErrorDiagnostics(t *testing.T) {
+	for _, tc := range []struct{ name, code, diagnostic string }{
+		{"output", `text('x'.repeat(65536));`, "JavaScript output limit exceeded; emit a smaller result"},
+		{"redaction", `throw new Error('synthetic-key synthetic-account');`, "[REDACTED] [REDACTED]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := responseServer(t, func(input map[string]jsontext.Value) []any {
+				if requests.Add(1) == 1 {
+					return execOutput(tc.code)
+				}
+				var items []struct {
+					Type   string `json:"type"`
+					Output string `json:"output"`
+				}
+				if err := json.Unmarshal(input["input"], &items); err != nil {
+					t.Error(err)
+					return textOutput("invalid input")
+				}
+				var output string
+				for _, item := range items {
+					if item.Type == "function_call_output" {
+						output = item.Output
+					}
+				}
+				if !strings.Contains(output, tc.diagnostic) || strings.Contains(output, "synthetic-") {
+					t.Errorf("tool diagnostic = %q, want %q with credentials redacted", output, tc.diagnostic)
+				}
+				return textOutput("recovered")
+			})
+			cfg := runnerConfig(server)
+			cfg.AuthAccountID = "synthetic-account"
+			runner := OpenAIRunner{Config: cfg, ToolSpecs: echoSpec()}
+			result, err := runner.Run(t.Context(), Request{UserPrompt: "Inspect"})
+			if err != nil || result.Text != "recovered" || requests.Load() != 2 {
+				t.Fatalf("result=%+v requests=%d err=%v", result, requests.Load(), err)
+			}
+		})
+	}
+}
+
+func TestRunnerCancels(t *testing.T) {
+	var requests atomic.Int32
+	server := responseServer(t, func(map[string]jsontext.Value) []any { requests.Add(1); return textOutput("done") })
+	runner := OpenAIRunner{Config: runnerConfig(server)}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := runner.Run(ctx, Request{UserPrompt: "cancel"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRunnerStepBudgetFinalizationAndExtension(t *testing.T) {
+	for _, extend := range []bool{false, true} {
+		t.Run(fmt.Sprint(extend), func(t *testing.T) {
+			var requests atomic.Int32
+			server := responseServer(t, func(input map[string]jsontext.Value) []any {
+				if requests.Add(1) == 1 {
+					return execOutput(`text(await tools.echo({}));`)
+				}
+				if !bytes.Contains(input["input"], []byte("budget-evidence")) {
+					t.Error("budget transition lost tool evidence")
+				}
+				if !extend && string(input["tools"]) != "[]" {
+					t.Errorf("finalization has tools: %s", input["tools"])
+				}
+				return textOutput("done")
+			})
+			var usage bytes.Buffer
+			budgets := 0
+			runner := OpenAIRunner{Config: runnerConfig(server), ToolSpecs: echoSpec(), UsageOutput: &usage,
+				Tools: testExecutor{execute: func(context.Context, tools.Invocation) (tools.Result, error) {
+					return tools.Result{Content: `{"ok":true,"data":"budget-evidence"}`}, nil
+				}}, Budget: func(context.Context, BudgetStatus) (BudgetDecision, error) {
+					budgets++
+					if extend {
+						return BudgetDecision{ExtendSteps: 2}, nil
+					}
+					return BudgetDecision{}, nil
+				}}
+			result, err := runner.Run(t.Context(), Request{UserPrompt: "Inspect", MaxSteps: 1})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if test.wantAddedID == "" {
-				if !slices.Equal(completed, test.input) {
-					t.Fatalf("completed history changed:\n got: %#v\nwant: %#v", completed, test.input)
-				}
-				return
+			if result.Text != "done" || budgets != 1 || requests.Load() != 2 || strings.Count(usage.String(), "llm.usage") != 2 {
+				t.Fatalf("result=%+v budgets=%d requests=%d usage=%s", result, budgets, requests.Load(), usage.String())
 			}
-			if len(completed) != len(test.input)+1 {
-				t.Fatalf("completed history = %#v", completed)
-			}
-			output := completed[len(completed)-1]
-			if output.Type != "function_call_output" || output.CallID != test.wantAddedID {
-				t.Fatalf("completed output = %#v", output)
-			}
-			var envelope struct {
-				OK   bool   `json:"ok"`
-				Tool string `json:"tool"`
-			}
-			if err := json.Unmarshal([]byte(output.Output), &envelope); err != nil {
-				t.Fatal(err)
-			}
-			if envelope.OK || envelope.Tool != test.wantTool {
-				t.Fatalf("completed output envelope = %#v", envelope)
+			history, _ := json.Marshal(result.History())
+			if !bytes.Contains(history, []byte("budget-evidence")) {
+				t.Fatal("history lost tool evidence")
 			}
 		})
 	}
 }
 
-func TestRequestInstructionsRequireReadFilePathProvenance(t *testing.T) {
-	t.Parallel()
-
-	instructions := requestInstructions("", []openai.ToolSpec{{Name: "read_file"}})
-	if !containsAll(instructions,
-		"path copied verbatim from prepared context or prior repository-tool output",
-		"Discover paths with available inventory or search tools first",
-		"Package import paths, package names, types, and symbols do not imply filenames",
-	) {
-		t.Fatalf("read_file instructions missing path provenance contract: %s", instructions)
-	}
-
-	withoutReadFile := requestInstructions("", []openai.ToolSpec{{Name: "repo_summary"}})
-	if strings.Contains(withoutReadFile, "do not imply filenames") {
-		t.Fatalf("instructions mention read_file contract without read_file: %s", withoutReadFile)
-	}
-
-}
-
-func (f *fakeClient) CreateResponse(_ context.Context, request openai.Request) (openai.Response, error) {
-	f.requests = append(f.requests, request)
-	for _, event := range f.streamEvents {
-		if request.OnStreamEvent != nil {
-			if err := request.OnStreamEvent(event); err != nil {
-				return openai.Response{}, err
+func TestRunnerReplaysLegacyResponsesHistory(t *testing.T) {
+	server := responseServer(t, func(input map[string]jsontext.Value) []any {
+		for _, want := range []string{"developer", "legacy policy", "encrypted_content", "legacy answer", "legacy-tool"} {
+			if !bytes.Contains(input["input"], []byte(want)) {
+				t.Errorf("missing %s: %s", want, input["input"])
 			}
 		}
+		return textOutput("continued")
+	})
+	runner := OpenAIRunner{Config: runnerConfig(server)}
+	_, err := runner.Run(t.Context(), Request{Input: []openai.Item{
+		openai.NewMessage("developer", "legacy policy"),
+		{Type: "reasoning", RawJSON: `{"type":"reasoning","id":"r","encrypted_content":"opaque","summary":[]}`},
+		{Type: "function_call", CallID: "legacy", Name: "read_file", Arguments: `{}`},
+		{Type: "function_call_output", CallID: "legacy", Output: "legacy-tool"},
+		openai.NewMessage("assistant", "legacy answer"),
+		openai.NewMessage("user", "continue"),
+	}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, event := range f.retryEvents {
-		if request.OnRetry != nil {
-			if err := request.OnRetry(event); err != nil {
-				return openai.Response{}, err
-			}
+}
+func TestRequestInstructionsExposeSchemasAndPathPolicy(t *testing.T) {
+	text := requestInstructions("task", []tools.Definition{{Name: "read_file", Description: "Read a file", Schema: map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}}}}})
+	for _, want := range []string{"tools.read_file", "Promise.all", "text(value)", `"path"`, "copied verbatim"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q", want)
 		}
 	}
-	var resp openai.Response
-	if len(f.responses) > 0 {
-		resp = f.responses[0]
-		f.responses = f.responses[1:]
-	}
-	if len(f.responseErrors) > 0 {
-		err := f.responseErrors[0]
-		f.responseErrors = f.responseErrors[1:]
-		if err != nil {
-			return resp, err
-		}
-	}
-	return resp, nil
-}
-
-func TestRunnerReturnsProviderErrorsWithoutRetry(t *testing.T) {
-	t.Parallel()
-
-	upstream := errors.New("rate limited")
-	client := &fakeClient{responseErrors: []error{upstream}}
-	runner := OpenAIRunner{
-		Config: config.Config{Model: "test", MaxSteps: 2}, Client: client,
-	}
-	_, err := runner.Run(t.Context(), Request{UserPrompt: "inspect", MaxSteps: 2})
-	if !errors.Is(err, upstream) || len(client.requests) != 1 {
-		t.Fatalf("error=%v requests=%d", err, len(client.requests))
-	}
-}
-
-func TestRunnerPublishesReasoningSummaryEvents(t *testing.T) {
-	t.Parallel()
-
-	client := &fakeClient{
-		responses: []openai.Response{{Text: "done"}},
-		streamEvents: []openai.StreamEvent{
-			{Kind: "reasoning_summary.delta", ProviderAttempt: 1, ItemID: "rs_1", Delta: "Inspecting "},
-			{Kind: "reasoning_summary.done", ProviderAttempt: 1, ItemID: "rs_1", Text: "Inspecting changed files"},
-		},
-	}
-	recorder, traceOutput := newTraceBuffer(t, "explore")
-	runner := OpenAIRunner{
-		Config:           config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1},
-		Client:           client,
-		Trace:            recorder,
-		ReasoningSummary: openai.ReasoningSummaryAuto,
-	}
-
-	if _, err := runner.Run(t.Context(), Request{SystemPrompt: "system", UserPrompt: "user"}); err != nil {
-		t.Fatal(err)
-	}
-	output := traceOutput.String()
-	for _, want := range []string{"reasoning_summary.delta", "Inspecting", "reasoning_summary.done", "Inspecting changed files", "provider_attempt=1"} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("trace missing %q:\n%s", want, output)
-		}
-	}
-}
-
-func TestRunnerPublishesProviderRetryRuntimeStatus(t *testing.T) {
-	t.Parallel()
-
-	client := &fakeClient{
-		responses:   []openai.Response{{Text: "done"}},
-		retryEvents: []openai.RetryEvent{{Attempt: 1, MaxAttempts: 1, Reason: openai.RetryReasonPeerStreamReset}},
-	}
-	recorder, traceOutput := newTraceBuffer(t, "explore")
-	runner := OpenAIRunner{
-		Config: config.Config{Model: "test", MaxSteps: 1, MaxToolCalls: 2, ContextTokens: 217600},
-		Client: client,
-		Trace:  recorder,
-	}
-
-	if _, err := runner.Run(t.Context(), Request{UserPrompt: "inspect", MaxSteps: 1}); err != nil {
-		t.Fatal(err)
-	}
-	output := traceOutput.String()
-	for _, want := range []string{
-		"retrying_provider", "step=1", "max_steps=1", "tool_calls=0", "max_tool_calls=2",
-		"retry_attempt=1", "max_retry_attempts=1", "abandoned_provider_attempt=1",
-		"provider_attempt=2", "retry_reason=peer_stream_reset",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("trace missing retry status field %q:\n%s", want, output)
-		}
-	}
-}
-
-func TestRunnerRepairsInvalidOutputOnce(t *testing.T) {
-	t.Parallel()
-
-	client := &fakeClient{responses: []openai.Response{
-		{Text: "```bad```"},
-		{Text: "Add parser"},
-	}}
-	runner := OpenAIRunner{
-		Config: config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 2},
-		Client: client,
-		Validator: func(text string) []string {
-			if text == "Add parser" {
-				return nil
-			}
-			return []string{"bad"}
-		},
-	}
-
-	result, err := runner.Run(context.Background(), Request{
-		SystemPrompt:      "system",
-		UserPrompt:        "user",
-		RepairOnValidator: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Text != "Add parser" || result.RepairCalls != 1 {
-		t.Fatalf("result = %#v", result)
-	}
-	if len(client.requests) != 2 {
-		t.Fatalf("requests = %d, want 2", len(client.requests))
-	}
-	history := result.History()
-	if len(history) == 0 || history[len(history)-1].Content != "Add parser" {
-		t.Fatalf("history ends with %#v, want repaired assistant response", history)
-	}
-}
-
-func TestRunnerNormalizesBeforeValidationAndReturn(t *testing.T) {
-	t.Parallel()
-
-	client := &fakeClient{responses: []openai.Response{
-		{Text: "Add parser\n\nbody line"},
-	}}
-	runner := OpenAIRunner{
-		Config: config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1},
-		Client: client,
-		Normalize: func(text string) string {
-			return strings.ReplaceAll(text, "\n", " ")
-		},
-		Validator: func(text string) []string {
-			if strings.Contains(text, "\n") {
-				return []string{"not normalized"}
-			}
-			return nil
-		},
-	}
-
-	result, err := runner.Run(context.Background(), Request{
-		SystemPrompt:      "system",
-		UserPrompt:        "user",
-		RepairOnValidator: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Text != "Add parser  body line" {
-		t.Fatalf("result text = %q", result.Text)
-	}
-	if result.RepairCalls != 0 {
-		t.Fatalf("repair calls = %d, want 0", result.RepairCalls)
-	}
-}
-
-func TestRunnerForwardsTextFormat(t *testing.T) {
-	t.Parallel()
-
-	client := &fakeClient{responses: []openai.Response{
-		{Text: `{"sections":[]}`},
-	}}
-	runner := OpenAIRunner{
-		Config: config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1},
-		Client: client,
-	}
-
-	_, err := runner.Run(context.Background(), Request{
-		SystemPrompt: "system",
-		UserPrompt:   "user",
-		TextFormat: &openai.TextFormat{
-			Name:   "release_note",
-			Schema: map[string]any{"type": "object"},
-			Strict: true,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(client.requests) != 1 {
-		t.Fatalf("requests = %d, want 1", len(client.requests))
-	}
-	if client.requests[0].TextFormat == nil || client.requests[0].TextFormat.Name != "release_note" {
-		t.Fatalf("text format = %#v", client.requests[0].TextFormat)
-	}
-}
-
-func TestRunnerExecutesToolCallRoundTrip(t *testing.T) {
-	t.Parallel()
-
-	repoDir := t.TempDir()
-	runGit(t, repoDir, "init")
-	repo, err := gitctx.Open(repoDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeClient{responses: []openai.Response{
-		{TurnState: "sticky-route", ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: "{}"}}},
-		{Text: "Add parser"},
-	}}
-	registry := tools.NewRegistry(repo, nil)
-	runner := OpenAIRunner{
-		Config:         config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 3, MaxToolCalls: 2},
-		Client:         client,
-		Tools:          registry,
-		ToolSpecs:      registry.Definitions([]string{"repo_summary"}),
-		PromptCacheKey: "test:stable-instructions",
-	}
-
-	result, err := runner.Run(context.Background(), Request{
-		SystemPrompt: "system",
-		UserPrompt:   "user",
-		MaxSteps:     3,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.ToolCalls != 1 || result.Text != "Add parser" {
-		t.Fatalf("result = %#v", result)
-	}
-	if !slices.ContainsFunc(client.requests[1].Input, func(item openai.Item) bool {
-		return item.Type == "function_call_output" && item.CallID == "call_1"
-	}) {
-		t.Fatalf("missing tool output input: %#v", client.requests[1].Input)
-	}
-	if client.requests[0].TurnState != "" || client.requests[1].TurnState != "sticky-route" {
-		t.Fatalf("request turn states = %q, %q", client.requests[0].TurnState, client.requests[1].TurnState)
-	}
-	if client.requests[0].TurnID == "" || client.requests[1].TurnID != client.requests[0].TurnID {
-		t.Fatalf("request turn IDs = %q, %q", client.requests[0].TurnID, client.requests[1].TurnID)
-	}
-	if client.requests[0].Instructions != client.requests[1].Instructions {
-		t.Fatalf("instructions changed between cacheable requests")
-	}
-	if instructions := client.requests[0].Instructions; !containsAll(instructions, "bounded agent loop", "reduce material uncertainty", "do not call tools just to repeat provided context", "Do not ask the user for more evidence") {
-		t.Fatalf("request instructions missing stable tool guidance: %s", instructions)
-	}
-	if strings.Contains(client.requests[0].Instructions, "model step") {
-		t.Fatalf("request instructions contain dynamic budget state: %s", client.requests[0].Instructions)
-	}
-	for index, request := range client.requests {
-		if len(request.Input) == 0 {
-			t.Fatalf("request %d has no input", index)
-		}
-		budget := request.Input[len(request.Input)-1]
-		if !budget.PromptCacheBreakpoint || !strings.Contains(budget.Content, "model_step:") {
-			t.Fatalf("request %d missing appended cacheable budget: %#v", index, budget)
-		}
-	}
-	if !slices.Equal(client.requests[0].Input, client.requests[1].Input[:len(client.requests[0].Input)]) {
-		t.Fatalf("second request does not preserve the first request input as an exact prefix")
-	}
-}
-
-func TestRunnerContinuesAfterDistinctCallsReturnEqualOutputs(t *testing.T) {
-	t.Parallel()
-
-	repoDir := t.TempDir()
-	runGit(t, repoDir, "init")
-	repo, err := gitctx.Open(repoDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeClient{responses: []openai.Response{
-		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "grep", Arguments: `{"pattern":"first-missing-pattern"}`}}},
-		{ToolCalls: []openai.ToolCall{{ID: "fc_2", CallID: "call_2", Name: "grep", Arguments: `{"pattern":"second-missing-pattern"}`}}},
-		{Text: "done"},
-	}}
-	registry := tools.NewExploreRegistry(repoDir, repo)
-	runner := OpenAIRunner{
-		Config:    config.Config{Model: "test", MaxSteps: 4, MaxToolCalls: 3},
-		Client:    client,
-		Tools:     registry,
-		ToolSpecs: registry.Definitions([]string{"grep"}),
-	}
-
-	result, err := runner.Run(t.Context(), Request{UserPrompt: "inspect", MaxSteps: 4})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Text != "done" || result.ToolCalls != 2 || len(client.requests) != 3 {
-		t.Fatalf("result = %#v, requests = %d", result, len(client.requests))
-	}
-	var outputCallIDs []string
-	for _, item := range client.requests[2].Input {
-		if item.Type == "function_call_output" {
-			outputCallIDs = append(outputCallIDs, item.CallID)
-		}
-	}
-	if !slices.Equal(outputCallIDs, []string{"call_1", "call_2"}) {
-		t.Fatalf("final request output call IDs = %v", outputCallIDs)
-	}
-}
-
-func TestRunnerReturnsToolErrorsToModelForRecovery(t *testing.T) {
-	t.Parallel()
-
-	repoDir := t.TempDir()
-	runGit(t, repoDir, "init")
-	if err := os.WriteFile(filepath.Join(repoDir, "actual.go"), []byte("package actual\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	repo, err := gitctx.Open(repoDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeClient{responses: []openai.Response{
-		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "read_file", Arguments: `{"path":"missing.go"}`}}},
-		{ToolCalls: []openai.ToolCall{{ID: "fc_2", CallID: "call_2", Name: "read_file", Arguments: `{"path":"actual.go"}`}}},
-		{Text: "recovered"},
-	}}
-	registry := tools.NewExploreRegistry(repoDir, repo)
-	recorder, traceOutput := newTraceBuffer(t, "explore")
-	runner := OpenAIRunner{
-		Config:    config.Config{Model: "test", MaxSteps: 4, MaxToolCalls: 3},
-		Client:    client,
-		Tools:     registry,
-		ToolSpecs: registry.Definitions([]string{"read_file"}),
-		Trace:     recorder,
-	}
-
-	result, err := runner.Run(t.Context(), Request{UserPrompt: "inspect", MaxSteps: 4})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Text != "recovered" || result.ToolCalls != 2 || len(client.requests) != 3 {
-		t.Fatalf("result = %#v, requests = %d", result, len(client.requests))
-	}
-	outputIndex := slices.IndexFunc(client.requests[1].Input, func(item openai.Item) bool {
-		return item.Type == "function_call_output" && item.CallID == "call_1"
-	})
-	if outputIndex < 0 {
-		t.Fatalf("tool error output missing from %#v", client.requests[1].Input)
-	}
-	output := client.requests[1].Input[outputIndex]
-	var envelope struct {
-		OK    bool   `json:"ok"`
-		Tool  string `json:"tool"`
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal([]byte(output.Output), &envelope); err != nil {
-		t.Fatalf("tool error output is not JSON: %v\n%s", err, output.Output)
-	}
-	if envelope.OK || envelope.Tool != "read_file" || !strings.Contains(envelope.Error, "missing.go") {
-		t.Fatalf("tool error envelope = %#v", envelope)
-	}
-	correctedIndex := slices.IndexFunc(client.requests[2].Input, func(item openai.Item) bool {
-		return item.Type == "function_call_output" && item.CallID == "call_2"
-	})
-	if correctedIndex < 0 || !strings.Contains(client.requests[2].Input[correctedIndex].Output, "package actual") {
-		t.Fatalf("corrected tool output missing from %#v", client.requests[2].Input)
-	}
-	traceText := traceOutput.String()
-	for _, want := range []string{"tool-output", "read_file", "missing.go", "ok=false"} {
-		if !strings.Contains(traceText, want) {
-			t.Fatalf("trace missing %q:\n%s", want, traceText)
-		}
-	}
-}
-
-func TestRunnerDoesNotRecoverToolErrorsAfterCancellation(t *testing.T) {
-	t.Parallel()
-
-	repoDir := t.TempDir()
-	runGit(t, repoDir, "init")
-	repo, err := gitctx.Open(repoDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeClient{responses: []openai.Response{
-		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "read_file", Arguments: `{"path":"missing.go"}`}}},
-		{Text: "must not recover"},
-	}}
-	registry := tools.NewExploreRegistry(repoDir, repo)
-	runner := OpenAIRunner{
-		Config:    config.Config{Model: "test", MaxSteps: 3, MaxToolCalls: 2},
-		Client:    client,
-		Tools:     registry,
-		ToolSpecs: registry.Definitions([]string{"read_file"}),
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-
-	_, err = runner.Run(ctx, Request{UserPrompt: "inspect", MaxSteps: 3})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("error = %v, want context cancellation", err)
-	}
-	if len(client.requests) != 1 {
-		t.Fatalf("requests = %d, want no recovery request", len(client.requests))
-	}
-}
-
-func TestRunnerFinalizesOnRepeatedCanonicalToolCall(t *testing.T) {
-	t.Parallel()
-
-	repoDir := t.TempDir()
-	runGit(t, repoDir, "init")
-	repo, err := gitctx.Open(repoDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeClient{responses: []openai.Response{
-		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: `{}`}}},
-		{ToolCalls: []openai.ToolCall{{ID: "fc_2", CallID: "call_2", Name: "repo_summary", Arguments: `{ }`}}},
-		{Text: "done"},
-	}}
-	registry := tools.NewRegistry(repo, nil)
-	recorder, traceOutput := newTraceBuffer(t, "explore")
-	runner := OpenAIRunner{
-		Config: config.Config{Model: "test", MaxSteps: 10, MaxToolCalls: 10},
-		Client: client, Tools: registry,
-		ToolSpecs: registry.Definitions([]string{"repo_summary"}), Trace: recorder,
-	}
-
-	result, err := runner.Run(t.Context(), Request{UserPrompt: "inspect", MaxSteps: 10})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Text != "done" || result.ToolCalls != 1 || len(client.requests) != 3 {
-		t.Fatalf("result = %#v, requests = %d", result, len(client.requests))
-	}
-	traceText := traceOutput.String()
-	if !strings.Contains(traceText, "budget") || !strings.Contains(traceText, "repeated_tool_call") {
-		t.Fatalf("trace missing repeated-tool guard:\n%s", traceText)
-	}
-}
-
-func TestRunnerRejectsInitialRequestAtEstimatedContextThreshold(t *testing.T) {
-	t.Parallel()
-
-	client := &fakeClient{responses: []openai.Response{{Text: "unexpected provider call"}}}
-	recorder, traceOutput := newTraceBuffer(t, "explore")
-	runner := OpenAIRunner{
-		Config: config.Config{Model: "test", MaxSteps: 10, MaxToolCalls: 10, ContextTokens: 1},
-		Client: client, Trace: recorder,
-	}
-
-	_, err := runner.Run(t.Context(), Request{UserPrompt: "inspect", MaxSteps: 10})
-	if err == nil || !strings.Contains(err.Error(), "initial request") {
-		t.Fatalf("error = %v, want initial-request context-budget error", err)
-	}
-	if len(client.requests) != 0 {
-		t.Fatalf("provider requests = %d, want 0", len(client.requests))
-	}
-	traceText := traceOutput.String()
-	if !strings.Contains(traceText, "runtime.status") || !strings.Contains(traceText, "estimated_context_tokens") ||
-		!strings.Contains(traceText, "initial_context_budget_exhausted") {
-		t.Fatalf("runtime status/budget missing:\n%s", traceText)
-	}
-}
-
-func TestRunnerFinalizesImmediatelyAtReportedContextThreshold(t *testing.T) {
-	t.Parallel()
-
-	repoDir := t.TempDir()
-	runGit(t, repoDir, "init")
-	repo, err := gitctx.Open(repoDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeClient{responses: []openai.Response{
-		{
-			ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: `{}`}},
-			Usage:     openai.Usage{InputTokens: 217600},
-		},
-		{Text: "all findings"},
-	}}
-	registry := tools.NewRegistry(repo, nil)
-	runner := OpenAIRunner{
-		Config: config.Config{Model: "test", MaxSteps: 10, MaxToolCalls: 10, ContextTokens: 217600},
-		Client: client, Tools: registry,
-		ToolSpecs: registry.Definitions([]string{"repo_summary"}),
-	}
-
-	result, err := runner.Run(t.Context(), Request{UserPrompt: "inspect", MaxSteps: 10})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Text != "all findings" || result.ToolCalls != 0 {
-		t.Fatalf("result = %#v, want immediate finalization before tool execution", result)
-	}
-}
-
-func TestRunnerRejectsToolCallsOutsideAllowedSet(t *testing.T) {
-	t.Parallel()
-
-	client := &fakeClient{responses: []openai.Response{
-		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: "{}"}}},
-	}}
-	repoDir := t.TempDir()
-	runGit(t, repoDir, "init")
-	repo, err := gitctx.Open(repoDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runner := OpenAIRunner{
-		Config: config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1},
-		Client: client,
-		Tools:  tools.NewRegistry(repo, nil),
-	}
-
-	_, err = runner.Run(t.Context(), Request{
-		SystemPrompt:     "system",
-		UserPrompt:       "user",
-		AllowedToolNames: []string{"read_file"},
-		MaxSteps:         1,
-	})
-	if err == nil || !strings.Contains(err.Error(), "not allowed") {
-		t.Fatalf("expected disallowed tool error, got %v", err)
-	}
-}
-
-func TestRunnerRejectsAllowedNameWithoutExposedDefinition(t *testing.T) {
-	t.Parallel()
-
-	client := &fakeClient{responses: []openai.Response{
-		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "go_doc", Arguments: `{"target":"strings","symbol":"","flags":[]}`}}},
-	}}
-	runner := OpenAIRunner{
-		Config: config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1},
-		Client: client,
-		Tools:  tools.NewRegistry(nil, nil),
-	}
-
-	_, err := runner.Run(t.Context(), Request{
-		SystemPrompt:     "system",
-		UserPrompt:       "user",
-		AllowedToolNames: []string{"go_doc"},
-		MaxSteps:         1,
-	})
-	if err == nil || !strings.Contains(err.Error(), "not allowed") {
-		t.Fatalf("expected unavailable tool rejection, got %v", err)
-	}
-}
-
-func TestRunnerFinalizesWhenStepBudgetRunsOut(t *testing.T) {
-	t.Parallel()
-
-	repoDir := t.TempDir()
-	runGit(t, repoDir, "init")
-	repo, err := gitctx.Open(repoDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeClient{responses: []openai.Response{
-		{ToolCalls: []openai.ToolCall{{ID: "fc_1", CallID: "call_1", Name: "repo_summary", Arguments: "{}"}}},
-		{Text: "Add parser"},
-	}}
-	registry := tools.NewRegistry(repo, nil)
-	runner := OpenAIRunner{
-		Config:    config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 1, MaxToolCalls: 2},
-		Client:    client,
-		Tools:     registry,
-		ToolSpecs: registry.Definitions([]string{"repo_summary"}),
-	}
-
-	result, err := runner.Run(context.Background(), Request{
-		SystemPrompt: "system",
-		UserPrompt:   "user",
-		TextFormat: &openai.TextFormat{
-			Name: "artifact",
-			Schema: map[string]any{
-				"type":                 "object",
-				"properties":           map[string]any{"summary": map[string]any{"type": "string"}},
-				"required":             []string{"summary"},
-				"additionalProperties": false,
-			},
-			Strict: true,
-		},
-		MaxSteps: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Text != "Add parser" || result.ToolCalls != 1 {
-		t.Fatalf("result = %#v", result)
-	}
-	if len(client.requests) != 2 {
-		t.Fatalf("requests = %d, want 2", len(client.requests))
-	}
-	if len(client.requests[1].Tools) != 0 {
-		t.Fatalf("expected forced finalization without tools, got %#v", client.requests[1].Tools)
-	}
-	if client.requests[1].TextFormat == nil || client.requests[1].TextFormat.Name != "artifact" {
-		t.Fatalf("forced finalization dropped text format: %#v", client.requests[1].TextFormat)
-	}
-}
-
-func TestRunnerFinalizesWhenToolBudgetRunsOut(t *testing.T) {
-	t.Parallel()
-
-	var executionOrder executionLog
-	registry := newTestToolExecutor()
-	names := []string{"first_tool", "second_tool"}
-	for _, name := range names {
-		registry.add(recordingTool{name: name, order: &executionOrder, content: "output"})
-	}
-	client := &fakeClient{responses: []openai.Response{
-		{ToolCalls: []openai.ToolCall{
-			{ID: "fc_1", CallID: "call_1", Name: names[0], Arguments: "{}"},
-			{ID: "fc_2", CallID: "call_2", Name: names[1], Arguments: "{}"},
-		}},
-		{Text: "Add parser"},
-	}}
-	runner := OpenAIRunner{
-		Config:    config.Config{Model: "test", BaseURL: "http://example", APIKey: "key", MaxSteps: 3, MaxToolCalls: 1},
-		Client:    client,
-		Tools:     registry,
-		ToolSpecs: registry.Definitions(names),
-	}
-
-	result, err := runner.Run(context.Background(), Request{
-		SystemPrompt: "system",
-		UserPrompt:   "user",
-		MaxSteps:     3,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Text != "Add parser" || result.ToolCalls != 0 {
-		t.Fatalf("result = %#v", result)
-	}
-	if len(executionOrder.snapshot()) != 0 {
-		t.Fatalf("executed over-budget batch members: %v", executionOrder.snapshot())
-	}
-	if len(client.requests) != 2 {
-		t.Fatalf("requests = %d, want 2", len(client.requests))
-	}
-	if len(client.requests[1].Tools) != 0 {
-		t.Fatalf("expected forced finalization without tools, got %#v", client.requests[1].Tools)
-	}
-	var outputCallIDs []string
-	for _, item := range client.requests[1].Input {
-		if item.Type == "function_call_output" {
-			outputCallIDs = append(outputCallIDs, item.CallID)
-		}
-	}
-	if !slices.Equal(outputCallIDs, []string{"call_1", "call_2"}) {
-		t.Fatalf("forced-finalization output call IDs = %v", outputCallIDs)
-	}
-}
-
-func runGit(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	gitArgs := append([]string{"-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false", "-c", "tag.forceSignAnnotated=false"}, args...)
-	cmd := exec.Command("git", gitArgs...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v failed: %v\n%s", args, err, out)
-	}
-}
-
-func containsAll(text string, needles ...string) bool {
-	for _, needle := range needles {
-		if !strings.Contains(text, needle) {
-			return false
-		}
-	}
-	return true
 }

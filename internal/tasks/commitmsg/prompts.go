@@ -43,7 +43,6 @@ func renderSystemPrompt(modeInstructions string) string {
 
 type userPromptData struct {
 	MaxSteps        int
-	MaxToolCalls    int
 	StyleReferences string
 	PreparedContext string
 }

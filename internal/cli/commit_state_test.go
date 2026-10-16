@@ -150,9 +150,15 @@ func TestCommitProviderReceivesOnlyIndexEvidence(t *testing.T) {
 				requestCount++
 				w.Header().Set("Content-Type", "text/event-stream")
 				if requestCount == 1 {
-					fmt.Fprint(w, `data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"app.go\"}"},{"type":"function_call","id":"fc_2","call_id":"call_2","name":"inspect_file","arguments":"{\"path\":\"app.go\"}"},{"type":"function_call","id":"fc_3","call_id":"call_3","name":"grep","arguments":"{\"pattern\":\"StagedEvidence|PRIVATE\"}"},{"type":"function_call","id":"fc_4","call_id":"call_4","name":"list_files","arguments":"{}"},{"type":"function_call","id":"fc_5","call_id":"call_5","name":"read_file","arguments":"{\"path\":\"app.go\",\"source\":\"worktree\"}"}]}}`)
+					fmt.Fprintf(w, "data: %s", streamCompletedEvent(responseWithToolCalls("resp_1",
+						toolCallSpec{Name: "read_file", Arguments: `{"path":"app.go"}`},
+						toolCallSpec{Name: "inspect_file", Arguments: `{"path":"app.go"}`},
+						toolCallSpec{Name: "grep", Arguments: `{"pattern":"StagedEvidence|PRIVATE"}`},
+						toolCallSpec{Name: "list_files", Arguments: `{}`},
+						toolCallSpec{Name: "read_file", Arguments: `{"path":"app.go","source":"worktree"}`},
+					)))
 				} else {
-					fmt.Fprint(w, `data: {"type":"response.completed","response":{"id":"resp_2","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"base"}]}]}}`)
+					fmt.Fprintf(w, "data: %s", streamCompletedEvent(responseWithText("resp_2", "base")))
 				}
 				fmt.Fprint(w, "\n\ndata: [DONE]\n\n")
 			}))

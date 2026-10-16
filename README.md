@@ -7,12 +7,12 @@ When installed, [`skills-mgr`](https://github.com/yusing/skills-mgr) integrates
 skill discovery and on-demand guidance reading into message-generation
 workflows.
 
-`git-agent` gathers Git evidence with typed Go code, runs a bounded
-OpenAI-compatible tool-calling loop, and keeps model tools read-only. The
+`git-agent` gathers Git evidence with typed Go code and uses the OpenAI Agents
+SDK for agent execution. A sandboxed JavaScript tool composes bounded, read-only
+repository operations, including concurrent calls with `Promise.all`. The
 `commit` command is the only workflow that writes to Git, and it does that after
-message generation by handing the final message to `git commit`. Independent
-read-only tool calls in one provider turn execute concurrently, while their
-outputs return to the conversation in provider order for deterministic replay.
+message generation by handing the final message to `git commit`. The SDK manages
+model requests and conversation history; Git inspection and local search stay in Go.
 
 TL;DR: use `commit-msg` when you want a grounded commit message on stdout, use
 `commit` when you want the same message created as a Git commit, use
@@ -23,8 +23,9 @@ inspection and context-preserving questions.
 ## Quick Start
 
 ```sh
-# 1. Install the binary
-go install github.com/yusing/git-agent/cmd/git-agent@latest
+# 1. From a source checkout, install dependencies and build
+npm ci
+shadowtree install
 
 # 2. Generate a commit message from staged changes
 git-agent commit-msg
@@ -37,8 +38,10 @@ By default, message-generation commands use ChatGPT/Codex auth from
 `~/.codex/auth.json`. `OPENAI_API_KEY` is the fallback for OpenAI-compatible
 provider auth when that file is absent.
 
-`go install` writes to `$(go env GOPATH)/bin` by default; make sure that
-directory is on `PATH`.
+Builds require Go 1.27+, Node.js 22.12+ and npm. Generation and exploration
+require Node.js on `PATH`; the built binary embeds its JavaScript runtime.
+Local Git and search operations remain in Go. Installation writes to
+`$(go env GOPATH)/bin` by default; make sure that directory is on `PATH`.
 
 ## Everyday Workflows
 
@@ -167,14 +170,9 @@ automatically. Concurrent follow-ups naming the same parent ID, service tier,
 and query target become independent sibling branches. Three follow-ups preserve
 context; the next invocation succeeds as a fresh search with a reset allowance.
 An initial batch and its context-preserving follow-ups are assigned one
-prompt-cache key. Git-agent keeps agent instructions unchanged across model
-steps and appends each changing budget as replayable developer input. On
-GPT-5.6 and GPT-6 models, each appended budget is an explicit cache breakpoint.
-Provider cache retention and minimum-prefix rules still apply. Other OpenAI
-models use provider-default caching. The authenticated ChatGPT Codex endpoint
-sends the stable key without explicit breakpoint options and replays the
-server's opaque turn-state header on later requests for sticky routing. Custom
-endpoints receive no undeclared cache or Codex routing controls.
+prompt-cache key. The SDK manages transport, conversation history, and compaction.
+ChatGPT/Codex authentication uses its Responses compaction protocol. Custom endpoints must
+support the Responses API; compaction support depends on the provider.
 `--for diagnose`, `change`, `behavior`, or `owner` uses one compact,
 target-neutral system prompt and adds the selected use-case guidance as a
 developer message; omission keeps the full universal prompt. A follow-up
@@ -446,8 +444,7 @@ Common generation and inspection flags:
 <!-- markdownlint-enable MD013 -->
 
 `release-note --out <file>` writes the rendered Markdown to the file and streams
-a human console trace to stdout. Large release ranges automatically use a
-compact initial evidence package; the model can read additional commit details
+a human console trace to stdout. The model can read additional commit details
 on demand. The locally rendered changelog retains all prepared entries.
 
 ## Configuration
@@ -547,6 +544,7 @@ flowchart TD
 ## Local Development
 
 ```sh
+npm ci
 shadowtree install
 ```
 
@@ -556,7 +554,9 @@ completions when the configured Fish directory exists.
 ## Security and Privacy
 
 - Model tools are read-only and bounded.
-- No arbitrary shell command tool is exposed to the model.
+- Model-generated JavaScript runs in an isolated interpreter with no Node.js,
+  filesystem, network, imports, or subprocess access. Only registered read-only
+  repository operations are exposed.
 - `commit` and `commit --amend` are explicit Git write commands, run only after
   message generation.
 - Normal Git config, hooks, signing, and `gpg-agent` behavior apply when

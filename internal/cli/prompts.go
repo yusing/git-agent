@@ -33,7 +33,6 @@ type environmentPromptData struct {
 	Mode           string
 	GuidanceFamily string
 	MaxSteps       int
-	MaxToolCalls   int
 }
 
 func renderOperatorHintPrompt(hint string) string {

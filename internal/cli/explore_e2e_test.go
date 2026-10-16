@@ -306,7 +306,7 @@ func newExploreE2EResponsesServer(t *testing.T) (*httptest.Server, *exploreE2ERe
 		var response string
 		if needsRead {
 			response = responseWithToolCalls("resp_explore_read", toolCallSpec{
-				ID: "fc_explore_read", CallID: "call_explore_read", Name: "read_file",
+				Name:      "read_file",
 				Arguments: `{"path":"main.go","start_line":1,"end_line":3}`,
 			})
 		} else {

@@ -17,7 +17,6 @@ var userPromptTemplate = template.Must(template.New("release-note-user").Parse(u
 
 type userPromptData struct {
 	MaxSteps        int
-	MaxToolCalls    int
 	Range           string
 	PreparedContext string
 }

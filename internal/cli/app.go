@@ -45,7 +45,6 @@ type App struct {
 	stdin           io.Reader
 	stdout          io.Writer
 	stderr          io.Writer
-	responseClient  openai.Client
 	embeddingClient openai.EmbeddingClient
 }
 
@@ -1071,7 +1070,7 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 			return agent.Result{}, err
 		}
 		preparedCommit = &prepared
-		userPrompt = commitmsg.UserPromptWithPreparedCommitContext(prepared, cfg.MaxSteps, cfg.MaxToolCalls)
+		userPrompt = commitmsg.UserPromptWithPreparedCommitContext(prepared, cfg.MaxSteps)
 	case commitmsg.ModeAmend:
 		prepared, err := commitmsg.PrepareAmendContext(repo)
 		if err != nil {
@@ -1079,7 +1078,7 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 		}
 		preparedAmend = &prepared
 		originalAmendMessage = prepared.OriginalHeadMessage
-		userPrompt = commitmsg.UserPromptWithPreparedAmendContext(prepared, cfg.MaxSteps, cfg.MaxToolCalls)
+		userPrompt = commitmsg.UserPromptWithPreparedAmendContext(prepared, cfg.MaxSteps)
 		if len(prepared.FinalPaths) > 0 {
 			guidancePaths = prepared.FinalPaths
 		}
@@ -1132,10 +1131,8 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 	toolCandidates := append(toolNames, tools.SkillToolNames()...)
 	registry := tools.NewCommitRegistry(repo, skillManager, func() error { return state.check(repo.RootPath) })
 	toolSpecs := registry.Definitions(toolCandidates)
-	allowedTools := toolDefinitionNames(toolSpecs)
 	runner := agent.OpenAIRunner{
 		Config:      cfg,
-		Client:      openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
 		Tools:       registry,
 		ToolSpecs:   toolSpecs,
 		Validator:   validator,
@@ -1150,7 +1147,7 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 		// Amend retains its original-subject anchor.
 		userPrompt = appendUserPrompt(userPrompt, cfg.AppendPrompt)
 	}
-	environment := environmentContext(repo, command, string(mode), cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
+	environment := environmentContext(repo, command, string(mode), cfg.GuidanceFamily, cfg.MaxSteps)
 	result, err := runner.Run(ctx, agent.Request{
 		SystemPrompt:      commitmsg.SystemPrompt(mode),
 		ToolPolicy:        toolPolicy(),
@@ -1158,8 +1155,6 @@ func (a *App) generateCommitMessage(ctx context.Context, cfg config.Config, repo
 		SkillInstructions: skillInstructions,
 		ProjectGuidance:   renderedGuidance,
 		UserPrompt:        userPrompt,
-		AllowedToolNames:  allowedTools,
-		ParallelToolCalls: true,
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
 	})
@@ -1291,7 +1286,6 @@ func (a *App) runPRMessage(ctx context.Context, args []string) error {
 	}
 	runner := agent.OpenAIRunner{
 		Config:      cfg,
-		Client:      openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
 		Validator:   func(text string) []string { return commitmsg.Validate(commitmsg.ModePR, text) },
 		Normalize:   commitmsg.Shape,
 		Trace:       nil,
@@ -1300,21 +1294,18 @@ func (a *App) runPRMessage(ctx context.Context, args []string) error {
 	}
 	registry := tools.NewRegistry(repo, skillManager)
 	toolSpecs := registry.Definitions(tools.SkillToolNames())
-	allowedTools := toolDefinitionNames(toolSpecs)
 	if len(toolSpecs) > 0 {
 		runner.Tools = registry
 		runner.ToolSpecs = toolSpecs
 	}
-	environment := environmentContext(repo, "pr-message", gitctx.PullRequestBaseRef+"..HEAD", cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
+	environment := environmentContext(repo, "pr-message", gitctx.PullRequestBaseRef+"..HEAD", cfg.GuidanceFamily, cfg.MaxSteps)
 	result, err := runner.Run(taskCtx, agent.Request{
 		SystemPrompt:      commitmsg.SystemPrompt(commitmsg.ModePR),
 		ToolPolicy:        toolPolicy(),
 		Environment:       environment,
 		SkillInstructions: skillInstructions,
 		ProjectGuidance:   renderedGuidance,
-		UserPrompt:        appendUserPrompt(commitmsg.UserPromptWithPreparedPRContext(prepared, cfg.MaxSteps, cfg.MaxToolCalls), cfg.AppendPrompt),
-		AllowedToolNames:  allowedTools,
-		ParallelToolCalls: true,
+		UserPrompt:        appendUserPrompt(commitmsg.UserPromptWithPreparedPRContext(prepared, cfg.MaxSteps), cfg.AppendPrompt),
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
 	})
@@ -1420,10 +1411,8 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 	}
 	toolCandidates := append(tools.ReleaseNoteToolNames(), tools.SkillToolNames()...)
 	toolSpecs := registry.Definitions(toolCandidates)
-	allowedTools := toolDefinitionNames(toolSpecs)
 	runner := agent.OpenAIRunner{
 		Config:      cfg,
-		Client:      openai.NewHTTPClient(&http.Client{Timeout: cfg.Timeout}),
 		Tools:       registry,
 		ToolSpecs:   toolSpecs,
 		Validator:   releasenote.Validate,
@@ -1431,7 +1420,7 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 		Budget:      a.budgetHandler(),
 		UsageOutput: a.stderr,
 	}
-	environment := environmentContext(repo, "release-note", rangeArgs.BaseRef+".."+rangeArgs.ReleaseRef, cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
+	environment := environmentContext(repo, "release-note", rangeArgs.BaseRef+".."+rangeArgs.ReleaseRef, cfg.GuidanceFamily, cfg.MaxSteps)
 	request := agent.Request{
 		SystemPrompt:      releasenote.SystemPrompt(),
 		ToolPolicy:        toolPolicy(),
@@ -1439,16 +1428,10 @@ func (a *App) runReleaseNote(ctx context.Context, args []string) error {
 		SkillInstructions: skillInstructions,
 		ProjectGuidance:   renderedGuidance,
 		TextFormat:        releasenote.TextFormat(),
-		AllowedToolNames:  allowedTools,
-		ParallelToolCalls: true,
 		MaxSteps:          cfg.MaxSteps,
 		RepairOnValidator: true,
 	}
-	request.UserPrompt = releasenote.UserPromptWithinBudget(prepared, cfg.MaxSteps, cfg.MaxToolCalls, func(prompt string) bool {
-		request.UserPrompt = appendUserPrompt(prompt, cfg.AppendPrompt)
-		return cfg.ContextTokens <= 0 || runner.EstimateInitialRequestTokens(request) < cfg.ContextTokens*3/4
-	})
-	request.UserPrompt = appendUserPrompt(request.UserPrompt, cfg.AppendPrompt)
+	request.UserPrompt = appendUserPrompt(releasenote.UserPrompt(prepared, cfg.MaxSteps), cfg.AppendPrompt)
 	result, err := runner.Run(taskCtx, request)
 	if err != nil {
 		return err
@@ -1717,23 +1700,15 @@ func resolveSkillInstructions(ctx context.Context, manager *skillcmd.Manager) (s
 	return list, nil
 }
 
-func toolDefinitionNames(definitions []tools.Definition) []string {
-	names := make([]string, 0, len(definitions))
-	for _, definition := range definitions {
-		names = append(names, definition.Name)
-	}
-	return names
-}
-
 func toolPolicy() string {
 	return strings.TrimSpace(toolPolicyPrompt)
 }
 
-func environmentContext(repo *gitctx.Repository, command, mode, guidanceFamily string, maxSteps, maxToolCalls int) string {
-	return environmentContextForRoot(repo.WorkPath, repo.RootPath, command, mode, guidanceFamily, maxSteps, maxToolCalls)
+func environmentContext(repo *gitctx.Repository, command, mode, guidanceFamily string, maxSteps int) string {
+	return environmentContextForRoot(repo.WorkPath, repo.RootPath, command, mode, guidanceFamily, maxSteps)
 }
 
-func environmentContextForRoot(workPath, rootPath, command, mode, guidanceFamily string, maxSteps, maxToolCalls int) string {
+func environmentContextForRoot(workPath, rootPath, command, mode, guidanceFamily string, maxSteps int) string {
 	return renderEnvironmentPrompt(environmentPromptData{
 		WorkPath:       workPath,
 		RootPath:       rootPath,
@@ -1741,7 +1716,6 @@ func environmentContextForRoot(workPath, rootPath, command, mode, guidanceFamily
 		Mode:           mode,
 		GuidanceFamily: guidanceFamily,
 		MaxSteps:       maxSteps,
-		MaxToolCalls:   maxToolCalls,
 	})
 }
 
@@ -1751,24 +1725,8 @@ func (a *App) budgetHandler() agent.BudgetHandler {
 	}
 	return func(_ context.Context, status agent.BudgetStatus) (agent.BudgetDecision, error) {
 		stepBump := max(8, status.MaxSteps/2)
-		toolBump := max(8, status.MaxToolCalls/2)
-		if toolBump == 8 && status.MaxToolCalls > 0 {
-			toolBump = max(4, status.MaxToolCalls/2)
-		}
 		nextSteps := status.MaxSteps + stepBump
-		nextTools := status.MaxToolCalls
-		if nextTools > 0 {
-			nextTools += toolBump
-		}
-
-		prompt := fmt.Sprintf("Budget reached (%s). Extend to %d steps", status.Kind, nextSteps)
-		if nextTools > 0 {
-			prompt += fmt.Sprintf(" and %d tool calls", nextTools)
-		}
-		if status.RequestedTool != "" {
-			prompt += fmt.Sprintf(" before %q", status.RequestedTool)
-		}
-		prompt += "? [y/N]: "
+		prompt := fmt.Sprintf("Model-step budget reached. Extend to %d steps? [y/N]: ", nextSteps)
 		if _, err := fmt.Fprint(a.stderr, prompt); err != nil {
 			return agent.BudgetDecision{}, err
 		}
@@ -1780,10 +1738,7 @@ func (a *App) budgetHandler() agent.BudgetHandler {
 		if answer != "y" && answer != "yes" {
 			return agent.BudgetDecision{}, nil
 		}
-		return agent.BudgetDecision{
-			ExtendSteps:     stepBump,
-			ExtendToolCalls: toolBump,
-		}, nil
+		return agent.BudgetDecision{ExtendSteps: stepBump}, nil
 	}
 }
 

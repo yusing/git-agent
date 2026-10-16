@@ -310,6 +310,9 @@ func (a *App) runExploreBatch(
 	if err != nil {
 		return nil, err
 	}
+	// Exploration uses the SDK's request policy rather than the normal
+	// generation-command timeout; caller cancellation still reaches the runtime.
+	cfg.Timeout = 0
 	selectedTarget := items[0].QueryTarget
 	instructionTarget := explore.SystemPromptTarget(parent, selectedTarget)
 	promptItems := make([]explore.PromptItem, 0, len(items))
@@ -339,7 +342,6 @@ func (a *App) runExploreBatch(
 	}
 	registry := tools.NewExploreRegistry(root, repo)
 	toolSpecs := registry.Definitions(tools.ExploreToolNames())
-	allowedTools := toolDefinitionNames(toolSpecs)
 	parentSearchID := ""
 	if parent != nil {
 		parentSearchID = parent.ID
@@ -353,10 +355,6 @@ func (a *App) runExploreBatch(
 	}); err != nil {
 		return nil, err
 	}
-	client := a.responseClient
-	if client == nil {
-		client = openai.NewHTTPClient(&http.Client{})
-	}
 	var parentLineage *followup.Lineage
 	if parent != nil {
 		lineage := followup.Lineage{
@@ -367,7 +365,7 @@ func (a *App) runExploreBatch(
 	}
 	lineage := followup.Next(parentLineage, items[0].ID, "explore:"+items[0].ID)
 	runner := agent.OpenAIRunner{
-		Config: cfg, Client: client, Tools: registry, ToolSpecs: toolSpecs,
+		Config: cfg, Tools: registry, ToolSpecs: toolSpecs,
 		Validator: explore.ValidateAnswers(itemIDs), Trace: recorder, Budget: a.budgetHandler(),
 		PromptCacheKey: lineage.PromptCacheKey,
 		UsageOutput:    a.stderr,
@@ -385,12 +383,12 @@ func (a *App) runExploreBatch(
 		}
 	}
 	request := agent.Request{
-		SystemPrompt: explore.SystemPromptFor(instructionTarget), TextFormat: explore.TextFormat(), AllowedToolNames: allowedTools,
-		ParallelToolCalls: true, MaxSteps: cfg.MaxSteps, RepairOnValidator: true,
+		SystemPrompt: explore.SystemPromptFor(instructionTarget), TextFormat: explore.TextFormat(),
+		MaxSteps: cfg.MaxSteps, RepairOnValidator: true,
 	}
 	if parent == nil {
 		request.ToolPolicy = toolPolicy()
-		request.Environment = environmentContextForRoot(root, root, "explore", "codebase", cfg.GuidanceFamily, cfg.MaxSteps, cfg.MaxToolCalls)
+		request.Environment = environmentContextForRoot(root, root, "explore", "codebase", cfg.GuidanceFamily, cfg.MaxSteps)
 		request.ProjectGuidance = renderedGuidance
 		request.DeveloperInstructions = explore.InitialTargetInstruction(selectedTarget)
 		request.UserPrompt = userPrompt

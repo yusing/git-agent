@@ -764,10 +764,9 @@ func (c PreparedCommitContext) compactCurrentForPrompt() bool {
 	return contextpack.IsLargeGeneratedHeavy(c.ContextPack)
 }
 
-func UserPromptWithPreparedCommitContext(prepared PreparedCommitContext, maxSteps, maxToolCalls int) string {
+func UserPromptWithPreparedCommitContext(prepared PreparedCommitContext, maxSteps int) string {
 	return executeUserPrompt(userPreparedCommitPromptTemplate, userPromptData{
 		MaxSteps:        maxSteps,
-		MaxToolCalls:    maxToolCalls,
 		PreparedContext: prepared.RenderForPrompt(),
 		StyleReferences: conventionReferences(prepared.RecentCommits, ""),
 	})
@@ -798,10 +797,9 @@ func conventionReferences(commits []gitctx.CommitInfo, excludeSHA string) string
 	return string(references)
 }
 
-func UserPromptWithPreparedAmendContext(prepared PreparedAmendContext, maxSteps, maxToolCalls int) string {
+func UserPromptWithPreparedAmendContext(prepared PreparedAmendContext, maxSteps int) string {
 	return executeUserPrompt(userPreparedAmendPromptTemplate, userPromptData{
 		MaxSteps:        maxSteps,
-		MaxToolCalls:    maxToolCalls,
 		PreparedContext: prepared.RenderForPrompt(),
 		StyleReferences: conventionReferences(prepared.RecentCommits, prepared.Head.SHA),
 	})
@@ -1015,10 +1013,9 @@ func (c PreparedPRContext) Render() string {
 	return string(data)
 }
 
-func UserPromptWithPreparedPRContext(prepared PreparedPRContext, maxSteps, maxToolCalls int) string {
+func UserPromptWithPreparedPRContext(prepared PreparedPRContext, maxSteps int) string {
 	return executeUserPrompt(userPreparedPRPromptTemplate, userPromptData{
 		MaxSteps:        maxSteps,
-		MaxToolCalls:    maxToolCalls,
 		PreparedContext: prepared.Render(),
 	})
 }

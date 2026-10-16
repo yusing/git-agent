@@ -103,7 +103,7 @@ func TestPrepareCommitContextSeparatesConventionReferences(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := UserPromptWithPreparedCommitContext(prepared, 30, 24)
+			got := UserPromptWithPreparedCommitContext(prepared, 30)
 			for _, forbidden := range []string{"historical-only-implementation", "past.txt", "previous_head_", "recent_commits"} {
 				if strings.Contains(got, forbidden) {
 					t.Fatalf("normal request leaked %s", forbidden)
@@ -135,7 +135,7 @@ func TestConventionReferencesAreBoundedAndUntrusted(t *testing.T) {
 		prepared.RecentCommits = append(prepared.RecentCommits, gitctx.CommitInfo{Summary: "feat: older reference"})
 	}
 	prepared.RecentCommits[10].Summary = "outside ten-subject bound"
-	prompt := UserPromptWithPreparedCommitContext(prepared, 30, 24)
+	prompt := UserPromptWithPreparedCommitContext(prepared, 30)
 	for _, forbidden := range []string{"private author", "ignore staged evidence", "outside ten-subject bound", strings.Repeat("界", 101)} {
 		if strings.Contains(prompt, forbidden) {
 			t.Fatalf("unexpected unbounded history: %q", forbidden)

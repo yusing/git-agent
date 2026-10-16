@@ -1,18 +1,23 @@
 package agent
 
 import (
+	"bytes"
 	"context"
-	"crypto/rand"
+	_ "embed"
+	jsonv1 "encoding/json"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"time"
-
-	json "encoding/json/v2"
 
 	"github.com/yusing/git-agent/internal/config"
 	"github.com/yusing/git-agent/internal/gitctx"
@@ -20,6 +25,9 @@ import (
 	"github.com/yusing/git-agent/internal/tools"
 	"github.com/yusing/git-agent/internal/trace"
 )
+
+//go:embed dist/runtime.mjs
+var runtimeBundle []byte
 
 type Runner interface {
 	Run(context.Context, Request) (Result, error)
@@ -34,13 +42,9 @@ type Request struct {
 	DeveloperInstructions string
 	UserPrompt            string
 	TextFormat            *openai.TextFormat
-	AllowedToolNames      []string
-	ParallelToolCalls     bool
 	MaxSteps              int
 	RepairOnValidator     bool
 	Input                 []openai.Item
-	TurnState             string
-	TurnID                string
 }
 
 type Result struct {
@@ -59,29 +63,8 @@ type Validator func(string) []string
 
 type TextNormalizer func(string) string
 
-type BudgetKind string
-
-const (
-	BudgetKindModelSteps BudgetKind = "model_steps"
-	BudgetKindToolCalls  BudgetKind = "tool_calls"
-	BudgetKindNoProgress BudgetKind = "no_progress"
-	BudgetKindContext    BudgetKind = "context"
-)
-
-type BudgetStatus struct {
-	Kind          BudgetKind
-	Limit         int
-	Used          int
-	Step          int
-	MaxSteps      int
-	MaxToolCalls  int
-	RequestedTool string
-}
-
-type BudgetDecision struct {
-	ExtendSteps     int
-	ExtendToolCalls int
-}
+type BudgetStatus struct{ MaxSteps int }
+type BudgetDecision struct{ ExtendSteps int }
 
 type Timing struct {
 	Phase    string
@@ -99,123 +82,264 @@ type ToolExecutor interface {
 type BudgetHandler func(context.Context, BudgetStatus) (BudgetDecision, error)
 
 type OpenAIRunner struct {
-	Config           config.Config
-	Client           openai.Client
-	Tools            ToolExecutor
-	ToolSpecs        []tools.Definition
-	Validator        Validator
-	Normalize        TextNormalizer
-	Trace            *trace.Recorder
-	Budget           BudgetHandler
-	ReasoningSummary string
-	PromptCacheKey   string
-	UsageOutput      io.Writer
-	Timing           func(Timing)
+	Config         config.Config
+	Tools          ToolExecutor
+	ToolSpecs      []tools.Definition
+	Validator      Validator
+	Normalize      TextNormalizer
+	Trace          *trace.Recorder
+	Budget         BudgetHandler
+	PromptCacheKey string
+	UsageOutput    io.Writer
+	Timing         func(Timing)
 }
 
-type runState struct {
-	turnState string
-	turnID    string
+type runtimeEvent struct {
+	Type       string         `json:"type"`
+	ID         int            `json:"id"`
+	Name       string         `json:"name"`
+	Args       jsontext.Value `json:"args"`
+	Text       string         `json:"text"`
+	Message    string         `json:"message"`
+	Phase      string         `json:"phase"`
+	Kind       string         `json:"kind"`
+	Value      jsontext.Value `json:"value"`
+	Step       int            `json:"step"`
+	DurationMS float64        `json:"duration_ms"`
+	Usage      struct {
+		Input   int64 `json:"inputTokens"`
+		Output  int64 `json:"outputTokens"`
+		Details struct {
+			Cached  int64 `json:"cached_tokens"`
+			Written int64 `json:"cache_write_tokens"`
+		} `json:"inputTokensDetails"`
+	} `json:"usage"`
+	ToolCalls   int           `json:"toolCalls"`
+	RepairCalls int           `json:"repairCalls"`
+	History     []openai.Item `json:"history"`
+	Budget      BudgetStatus  `json:"budget"`
 }
 
+// Run delegates model execution and history to the embedded Agents SDK runtime.
+// Only fixed runtime code is launched; model-generated code stays in QuickJS.
 func (r *OpenAIRunner) Run(ctx context.Context, request Request) (Result, error) {
-	if r.Client == nil {
-		return Result{}, errors.New("openai client is required")
-	}
 	if request.MaxSteps <= 0 {
 		request.MaxSteps = r.Config.MaxSteps
 	}
-
-	messages, toolSpecs, stableInstructions := r.requestContext(request)
-
-	state := &runState{
-		turnState: request.TurnState,
-		turnID:    request.TurnID,
-	}
-	if state.turnID == "" {
-		state.turnID = rand.Text()
-	}
-	parallelToolCalls := request.ParallelToolCalls
-	runResult, err := r.runUntilOutcome(ctx, stableInstructions, messages, toolSpecs, request.TextFormat, request.MaxSteps, state, parallelToolCalls)
+	messages, specs, instructions := r.requestContext(request)
+	dir, err := os.MkdirTemp("", "git-agent-runtime-")
 	if err != nil {
 		return Result{}, err
 	}
-	result := runResult
-	r.normalizeResult(&result)
-
-	if r.Validator != nil {
-		var validationStarted time.Time
-		if r.Timing != nil {
-			validationStarted = time.Now()
+	defer os.RemoveAll(dir)
+	runtimePath := filepath.Join(dir, "runtime.mjs")
+	if err := os.WriteFile(runtimePath, runtimeBundle, 0o600); err != nil {
+		return Result{}, err
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	command := exec.CommandContext(runCtx, "node", runtimePath)
+	command.WaitDelay = 2 * time.Second
+	stdin, err := command.StdinPipe()
+	if err != nil {
+		return Result{}, err
+	}
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return Result{}, err
+	}
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		return Result{}, fmt.Errorf("start Agents SDK runtime (Node.js 22.12+ required): %w", err)
+	}
+	var writeMu sync.Mutex
+	send := func(value any) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return json.MarshalEncode(jsontext.NewEncoder(stdin), value, jsonv1.FormatDurationAsNano(true), json.Deterministic(true))
+	}
+	err = send(map[string]any{"config": r.Config, "instructions": instructions, "input": messages, "tools": specs, "cacheKey": r.PromptCacheKey, "maxSteps": request.MaxSteps, "repair": request.RepairOnValidator, "textFormat": request.TextFormat, "finalPrompt": strings.TrimSpace(forcedFinalizationPrompt)})
+	var mu sync.Mutex
+	var failure error
+	fail := func(err error) {
+		if err == nil {
+			return
 		}
-		errs := r.Validator(result.Text)
-		if r.Timing != nil {
-			r.Timing(Timing{Phase: "validation", Duration: time.Since(validationStarted)})
+		mu.Lock()
+		if failure == nil {
+			failure = err
 		}
-		if len(errs) > 0 {
-			if !request.RepairOnValidator {
-				return Result{}, fmt.Errorf("validation failed: %v", errs)
+		mu.Unlock()
+		cancel()
+	}
+	if err != nil {
+		fail(err)
+	}
+	var outputMu sync.Mutex
+	timing := func(event Timing) {
+		outputMu.Lock()
+		defer outputMu.Unlock()
+		if r.Timing != nil {
+			r.Timing(event)
+		}
+	}
+	var providerStarted time.Time
+	var workers sync.WaitGroup
+	cancellations := make(map[int]context.CancelFunc)
+	var result Result
+	finished := false
+	decoder := jsontext.NewDecoder(stdout)
+	for {
+		var event runtimeEvent
+		if err := json.UnmarshalDecode(decoder, &event); err != nil {
+			if !errors.Is(err, io.EOF) {
+				fail(fmt.Errorf("decode SDK runtime event: %w", err))
 			}
-			repairMessages := slices.Clone(result.messages)
-			if len(repairMessages) == 0 {
-				repairMessages = append(slices.Clone(messages), openai.NewMessage("assistant", result.Text))
+			break
+		}
+		switch event.Type {
+		case "tool":
+			if r.Tools == nil || !slices.ContainsFunc(specs, func(spec tools.Definition) bool { return spec.Name == event.Name }) {
+				fail(fmt.Errorf("runtime requested unregistered tool %q", event.Name))
+				break
 			}
-			repairPrompt := openai.NewMessage("user", renderRepairPrompt(errs))
-			repairMessages = append(repairMessages, repairPrompt)
-			repairInput := requestInputWithBudget(repairMessages, 1, 1, 0, r.Config.MaxToolCalls, r.PromptCacheKey != "")
-			repairTokens := estimateRequestTokens(r.providerRequest(stableInstructions, repairInput, nil, request.TextFormat, false))
-			if r.Config.ContextTokens > 0 && repairTokens >= r.Config.ContextTokens {
-				repairMessages = append(slices.Clone(messages), openai.NewMessage("assistant", result.Text), repairPrompt)
-				if err := r.Trace.Write("budget", map[string]any{
-					"kind": BudgetKindContext, "decision": "compact", "reason": "repair_history_compacted",
-					"used": repairTokens, "limit": r.Config.ContextTokens,
-				}); err != nil {
-					return Result{}, err
+			toolCtx, stop := context.WithCancel(runCtx)
+			mu.Lock()
+			cancellations[event.ID] = stop
+			mu.Unlock()
+			workers.Go(func() {
+				defer stop()
+				defer func() { mu.Lock(); delete(cancellations, event.ID); mu.Unlock() }()
+				started := time.Now()
+				if err := r.Trace.Write("tool-call", map[string]any{"name": event.Name, "arguments": string(event.Args)}); err != nil {
+					fail(err)
+					return
+				}
+				output, err := r.Tools.Execute(toolCtx, tools.Invocation{Name: event.Name, Arguments: string(event.Args)})
+				if snapshotErr := r.Tools.CheckSnapshot(); snapshotErr != nil {
+					fail(snapshotErr)
+					return
+				}
+				if runCtx.Err() != nil {
+					return
+				}
+				if toolCtx.Err() != nil {
+					return
+				}
+				if err != nil {
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, gitctx.ErrChangeSnapshotStale) {
+						fail(err)
+						return
+					}
+					output, err = tools.ErrorResult(event.Name, err)
+				}
+				if err != nil {
+					fail(err)
+					return
+				}
+				timing(Timing{Phase: "tool", Duration: time.Since(started), Step: event.Step, Tool: event.Name})
+				if err := r.Trace.Write("tool-output", map[string]any{"name": event.Name, "content": output.Content, "truncated": output.Truncated}); err != nil {
+					fail(err)
+					return
+				}
+				fail(send(map[string]any{"id": event.ID, "result": jsontext.Value(output.Content)}))
+			})
+		case "cancel-tool":
+			mu.Lock()
+			stop := cancellations[event.ID]
+			mu.Unlock()
+			if stop != nil {
+				stop()
+			}
+		case "snapshot":
+			if r.Tools != nil {
+				if err := r.Tools.CheckSnapshot(); err != nil {
+					fail(err)
+					break
 				}
 			}
-			var repairStarted time.Time
-			if r.Timing != nil {
-				repairStarted = time.Now()
+			fail(send(map[string]any{"id": event.ID, "result": true}))
+		case "validate":
+			started := time.Now()
+			text := event.Text
+			if r.Normalize != nil {
+				text = r.Normalize(text)
 			}
-			repairedOutcome, err := r.runUntilOutcome(ctx, stableInstructions, repairMessages, nil, request.TextFormat, 1, state, false)
-			if r.Timing != nil {
-				r.Timing(Timing{Phase: "repair", Duration: time.Since(repairStarted)})
+			var validationErrors []string
+			if r.Validator != nil {
+				validationErrors = r.Validator(text)
+			}
+			timing(Timing{Phase: "validation", Duration: time.Since(started)})
+			fail(send(map[string]any{"id": event.ID, "result": map[string]any{"text": text, "errors": validationErrors, "repairPrompt": renderRepairPrompt(validationErrors)}}))
+		case "budget":
+			var decision BudgetDecision
+			var err error
+			if r.Budget != nil {
+				decision, err = r.Budget(runCtx, event.Budget)
 			}
 			if err != nil {
-				return Result{}, err
+				fail(err)
+				break
 			}
-			repaired := repairedOutcome
-			result.RepairCalls++
-			result.Text = repaired.Text
-			result.messages = slices.Clone(repaired.messages)
-			r.normalizeResult(&result)
-			if r.Timing != nil {
-				validationStarted = time.Now()
+			fail(send(map[string]any{"id": event.ID, "result": decision}))
+		case "usage":
+			if !providerStarted.IsZero() {
+				timing(Timing{Phase: "provider_request", Duration: time.Since(providerStarted), Step: event.Step})
 			}
-			errs = r.Validator(result.Text)
-			if r.Timing != nil {
-				r.Timing(Timing{Phase: "validation", Duration: time.Since(validationStarted)})
+			outputMu.Lock()
+			r.writeUsageMetrics(event.Step, openai.Usage{InputTokens: event.Usage.Input, OutputTokens: event.Usage.Output, CachedInputTokens: event.Usage.Details.Cached, CacheWriteInputTokens: event.Usage.Details.Written})
+			outputMu.Unlock()
+		case "progress":
+			if event.Phase == "requesting" || event.Phase == "compacting" {
+				providerStarted = time.Now()
 			}
-			if len(errs) > 0 {
-				return Result{}, fmt.Errorf("validation failed after repair: %v", errs)
+			fail(r.Trace.Write("runtime-status", map[string]any{"phase": event.Phase, "model": r.Config.Model}))
+		case "timing":
+			timing(Timing{Phase: event.Phase, Duration: time.Duration(event.DurationMS * float64(time.Millisecond)), Step: event.Step})
+		case "trace":
+			fail(r.Trace.Write(event.Kind, event.Value))
+		case "error":
+			fail(errors.New(event.Message))
+		case "result":
+			result = Result{Text: event.Text, ToolCalls: event.ToolCalls, RepairCalls: event.RepairCalls, messages: event.History}
+			finished = true
+		default:
+			fail(fmt.Errorf("unknown SDK runtime event %q", event.Type))
+		}
+	}
+	_ = stdin.Close()
+	waitErr := command.Wait()
+	cancel()
+	workers.Wait()
+	if ctx.Err() != nil {
+		return Result{}, ctx.Err()
+	}
+	mu.Lock()
+	err = failure
+	mu.Unlock()
+	if err == nil && waitErr != nil {
+		err = fmt.Errorf("SDK runtime: %w: %s", waitErr, strings.TrimSpace(stderr.String()))
+	}
+	if err == nil && !finished {
+		err = errors.New("SDK runtime ended without a result")
+	}
+	if err != nil {
+		message := err.Error()
+		for _, secret := range []string{r.Config.APIKey, r.Config.AuthAccountID} {
+			if secret != "" {
+				message = strings.ReplaceAll(message, secret, "[REDACTED]")
 			}
 		}
+		if message == err.Error() {
+			return Result{}, err
+		}
+		return Result{}, errors.New(message)
 	}
 	return result, nil
 }
 
-// EstimateInitialRequestTokens uses the same request layers and estimator as Run.
-func (r *OpenAIRunner) EstimateInitialRequestTokens(request Request) int {
-	messages, toolSpecs, instructions := r.requestContext(request)
-	maxSteps := request.MaxSteps
-	if maxSteps <= 0 {
-		maxSteps = r.Config.MaxSteps
-	}
-	input := requestInputWithBudget(messages, 1, maxSteps, 0, r.Config.MaxToolCalls, r.PromptCacheKey != "")
-	return estimateRequestTokens(r.providerRequest(instructions, input, toolSpecs, request.TextFormat, request.ParallelToolCalls))
-}
-
-func (r *OpenAIRunner) requestContext(request Request) ([]openai.Item, []openai.ToolSpec, string) {
+func (r *OpenAIRunner) requestContext(request Request) ([]openai.Item, []tools.Definition, string) {
 	messages := slices.Clone(request.Input)
 	if request.Input == nil {
 		if request.ToolPolicy != "" {
@@ -236,294 +360,7 @@ func (r *OpenAIRunner) requestContext(request Request) ([]openai.Item, []openai.
 		messages = append(messages, openai.NewMessage("user", request.UserPrompt))
 	}
 
-	toolSpecs := make([]openai.ToolSpec, 0, len(r.ToolSpecs))
-	for _, def := range r.ToolSpecs {
-		if len(request.AllowedToolNames) > 0 && !slices.Contains(request.AllowedToolNames, def.Name) {
-			continue
-		}
-		toolSpecs = append(toolSpecs, openai.ToolSpec{Name: def.Name, Description: def.Description, Schema: def.Schema, Strict: def.Strict})
-	}
-
-	return messages, toolSpecs, requestInstructions(request.SystemPrompt, toolSpecs)
-}
-
-func (r *OpenAIRunner) normalizeResult(result *Result) {
-	if r.Normalize != nil {
-		result.Text = r.Normalize(result.Text)
-	}
-}
-
-func (r *OpenAIRunner) runUntilOutcome(ctx context.Context, stableInstructions string, messages []openai.Item, toolSpecs []openai.ToolSpec, textFormat *openai.TextFormat, maxSteps int, state *runState, parallelToolCalls bool) (Result, error) {
-	var result Result
-	maxToolCalls := r.Config.MaxToolCalls
-	started := time.Now()
-	seenCalls := map[string]struct{}{}
-	seenCallIDs := map[string]struct{}{}
-	for index, item := range messages {
-		if item.Type != "function_call" {
-			continue
-		}
-		callID, name, arguments, err := functionCallIdentity(item)
-		if err != nil {
-			return Result{}, fmt.Errorf("input item %d: %w", index, err)
-		}
-		if _, duplicate := seenCallIDs[callID]; duplicate {
-			return Result{}, fmt.Errorf("input item %d: duplicate function call ID %q", index, callID)
-		}
-		seenCallIDs[callID] = struct{}{}
-		seenCalls[toolCallSignature(openai.ToolCall{Name: name, Arguments: arguments})] = struct{}{}
-	}
-	for step := 0; step < maxSteps; step++ {
-		requestMessages := requestInputWithBudget(
-			messages, step+1, maxSteps, result.ToolCalls, maxToolCalls, r.PromptCacheKey != "",
-		)
-		req := r.providerRequest(
-			stableInstructions,
-			requestMessages,
-			toolSpecs,
-			textFormat,
-			parallelToolCalls,
-		)
-		req.TurnState = state.turnState
-		req.TurnID = state.turnID
-		estimatedTokens := estimateRequestTokens(req)
-		r.attachRetryStatus(&req, step+1, maxSteps, result.ToolCalls, maxToolCalls, estimatedTokens, started)
-		if err := r.writeRuntimeStatus("requesting", step+1, maxSteps, result.ToolCalls, maxToolCalls, estimatedTokens, 0, started); err != nil {
-			return Result{}, err
-		}
-		if step == 0 && r.Config.ContextTokens > 0 && estimatedTokens >= r.Config.ContextTokens {
-			if err := r.Trace.Write("budget", map[string]any{
-				"kind": BudgetKindContext, "decision": "reject", "reason": "initial_context_budget_exhausted",
-				"step": step + 1, "used": estimatedTokens, "limit": r.Config.ContextTokens,
-			}); err != nil {
-				return Result{}, err
-			}
-			return Result{}, fmt.Errorf("initial request estimated at %d tokens meets or exceeds context budget %d", estimatedTokens, r.Config.ContextTokens)
-		}
-		// Local function calls stay under the runner's budget.
-		if err := writeTraceRequest(r.Trace, req); err != nil {
-			return Result{}, err
-		}
-		timing := r.Timing
-		var providerStarted time.Time
-		if timing != nil {
-			providerStarted = time.Now()
-		}
-		response, err := r.Client.CreateResponse(ctx, req)
-		if timing != nil {
-			timing(Timing{Phase: "provider_request", Duration: time.Since(providerStarted), Step: step + 1})
-		}
-		if response.TurnState != "" {
-			state.turnState = response.TurnState
-		}
-		if err != nil {
-			return Result{}, err
-		}
-		messages = requestMessages
-		usage := response.Usage
-		r.writeUsageMetrics(step+1, usage)
-		if err := writeTraceResponse(r.Trace, response); err != nil {
-			return Result{}, err
-		}
-		inputTokens := int(usage.InputTokens)
-		if err := r.writeRuntimeStatus("response_received", step+1, maxSteps, result.ToolCalls, maxToolCalls, estimatedTokens, inputTokens, started); err != nil {
-			return Result{}, err
-		}
-		if r.Config.ContextTokens > 0 && inputTokens >= r.Config.ContextTokens && len(response.ToolCalls) > 0 {
-			final, err := r.finalizeForGuard(ctx, stableInstructions, messages, result, textFormat, state, BudgetStatus{
-				Kind: BudgetKindContext, Used: inputTokens, Step: step + 1,
-				Limit: r.Config.ContextTokens, MaxSteps: maxSteps, MaxToolCalls: maxToolCalls,
-			}, "context_budget_exhausted", started)
-			return final, err
-		}
-		if len(response.ToolCalls) == 0 {
-			if response.Text == "" {
-				return Result{}, errors.New("provider returned no text and no tool calls")
-			}
-			result.Text = response.Text
-			result.messages = appendResponseMessages(messages, response)
-			return result, nil
-		}
-		batch, err := validateToolCallBatch(response.ToolCalls, toolSpecs, seenCalls, seenCallIDs)
-		if err != nil {
-			return Result{}, err
-		}
-		if r.Tools == nil {
-			return Result{}, errors.New("provider requested tools but no registry is configured")
-		}
-		batchMessages := appendToolCallBatch(messages, response, batch.calls)
-		if batch.duplicateTool != "" {
-			final, err := r.finalizeForGuard(ctx, stableInstructions, batchMessages, result, textFormat, state, BudgetStatus{
-				Kind: BudgetKindNoProgress, Used: result.ToolCalls, Step: step + 1,
-				MaxSteps: maxSteps, MaxToolCalls: maxToolCalls, RequestedTool: batch.duplicateTool,
-			}, "repeated_tool_call", started)
-			return final, err
-		}
-		for maxToolCalls > 0 && result.ToolCalls+len(batch.calls) > maxToolCalls {
-			remaining := max(0, maxToolCalls-result.ToolCalls)
-			requestedTool := batch.calls[min(remaining, len(batch.calls)-1)].Name
-			recovered, updatedSteps, updatedTools, err := r.resolveBudgetExhaustion(ctx, stableInstructions, batchMessages, result, textFormat, state, BudgetStatus{
-				Kind:          BudgetKindToolCalls,
-				Limit:         maxToolCalls,
-				Used:          result.ToolCalls,
-				Step:          step + 1,
-				MaxSteps:      maxSteps,
-				MaxToolCalls:  maxToolCalls,
-				RequestedTool: requestedTool,
-			}, started)
-			if err != nil {
-				return Result{}, err
-			}
-			if recovered.Text != "" {
-				return recovered, nil
-			}
-			maxSteps = updatedSteps
-			maxToolCalls = updatedTools
-		}
-		messages = batchMessages
-		for signature := range batch.signatures {
-			seenCalls[signature] = struct{}{}
-		}
-		for _, call := range batch.calls {
-			seenCallIDs[call.CallID] = struct{}{}
-		}
-		localCalls := batch.calls
-		for _, call := range localCalls {
-			if err := r.Trace.Write("tool-call", call); err != nil {
-				return Result{}, err
-			}
-		}
-		timing = r.Timing
-		var toolBatchStarted time.Time
-		if timing != nil && len(localCalls) > 0 {
-			toolBatchStarted = time.Now()
-		}
-		executions := r.executeToolCalls(ctx, localCalls, timing != nil)
-		if timing != nil && len(localCalls) > 0 {
-			for index, call := range localCalls {
-				timing(Timing{Phase: "tool", Duration: executions[index].duration, Step: step + 1, Tool: call.Name})
-			}
-			timing(Timing{Phase: "tool_batch", Duration: time.Since(toolBatchStarted), Step: step + 1})
-		}
-		if len(localCalls) > 0 {
-			if err := r.Tools.CheckSnapshot(); err != nil {
-				return Result{}, err
-			}
-		}
-		for index, call := range localCalls {
-			toolResult := executions[index].result
-			err := executions[index].err
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return Result{}, fmt.Errorf("tool %s canceled: %w", call.Name, ctxErr)
-			}
-			if err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, gitctx.ErrChangeSnapshotStale) {
-					return Result{}, fmt.Errorf("tool %s failed: %w", call.Name, err)
-				}
-				toolResult, err = tools.ErrorResult(call.Name, err)
-				if err != nil {
-					return Result{}, fmt.Errorf("encode tool %s error: %w", call.Name, err)
-				}
-			}
-			if err := r.Trace.Write("tool-output", map[string]any{
-				"name":      call.Name,
-				"call_id":   call.CallID,
-				"content":   toolResult.Content,
-				"truncated": toolResult.Truncated,
-			}); err != nil {
-				return Result{}, err
-			}
-			result.ToolCalls++
-			messages = append(messages, openai.NewFunctionCallOutput(call.CallID, toolResult.Content))
-		}
-		nextRequest := r.providerRequest(stableInstructions, requestInputWithBudget(messages, step+2, maxSteps, result.ToolCalls, maxToolCalls, r.PromptCacheKey != ""), toolSpecs, textFormat, parallelToolCalls)
-		nextTokens := estimateRequestTokens(nextRequest)
-		if r.Config.ContextTokens > 0 && nextTokens >= r.Config.ContextTokens {
-			final, err := r.finalizeForGuard(ctx, stableInstructions, messages, result, textFormat, state, BudgetStatus{
-				Kind: BudgetKindContext, Used: nextTokens, Step: step + 1,
-				Limit: r.Config.ContextTokens, MaxSteps: maxSteps, MaxToolCalls: maxToolCalls,
-			}, "context_budget_exhausted", started)
-			return final, err
-		}
-		if step == maxSteps-1 {
-			recovered, updatedSteps, updatedTools, err := r.resolveBudgetExhaustion(ctx, stableInstructions, messages, result, textFormat, state, BudgetStatus{
-				Kind:         BudgetKindModelSteps,
-				Limit:        maxSteps,
-				Used:         step + 1,
-				Step:         step + 1,
-				MaxSteps:     maxSteps,
-				MaxToolCalls: maxToolCalls,
-			}, started)
-			if err != nil {
-				return Result{}, err
-			}
-			if recovered.Text != "" {
-				return recovered, nil
-			}
-			maxSteps = updatedSteps
-			maxToolCalls = updatedTools
-		}
-	}
-	return Result{}, fmt.Errorf("agent exceeded maximum model steps (%d)", maxSteps)
-}
-
-func (r *OpenAIRunner) finalizeForGuard(ctx context.Context, instructions string, messages []openai.Item, current Result, textFormat *openai.TextFormat, state *runState, status BudgetStatus, reason string, started time.Time) (Result, error) {
-	finalized, err := r.finalizeWithoutTools(ctx, instructions, messages, textFormat, state, status, current.ToolCalls, started)
-	if err != nil {
-		return Result{}, err
-	}
-	finalized.copyActivity(current)
-	if err := r.Trace.Write("budget", map[string]any{
-		"kind": status.Kind, "decision": "finalize", "reason": reason,
-		"step": status.Step, "used": status.Used, "limit": status.Limit,
-		"tool": status.RequestedTool,
-	}); err != nil {
-		return Result{}, err
-	}
-	return finalized, nil
-}
-
-func (r *OpenAIRunner) writeRuntimeStatus(phase string, step, maxSteps, toolCalls, maxToolCalls, estimatedTokens, inputTokens int, started time.Time) error {
-	if r.Trace == nil {
-		return nil
-	}
-	return r.Trace.Write("runtime.status", r.runtimeStatusValue(phase, step, maxSteps, toolCalls, maxToolCalls, estimatedTokens, inputTokens, started))
-}
-
-func (r *OpenAIRunner) attachRetryStatus(request *openai.Request, step, maxSteps, toolCalls, maxToolCalls, estimatedTokens int, started time.Time) {
-	if r.Trace == nil {
-		return
-	}
-	request.OnRetry = func(event openai.RetryEvent) error {
-		value := r.runtimeStatusValue("retrying_provider", step, maxSteps, toolCalls, maxToolCalls, estimatedTokens, 0, started)
-		value["retry_attempt"] = event.Attempt
-		value["max_retry_attempts"] = event.MaxAttempts
-		value["retry_reason"] = event.Reason
-		value["abandoned_provider_attempt"] = event.Attempt
-		value["provider_attempt"] = event.Attempt + 1
-		return r.Trace.Write("runtime.status", value)
-	}
-}
-
-func (r *OpenAIRunner) runtimeStatusValue(phase string, step, maxSteps, toolCalls, maxToolCalls, estimatedTokens, inputTokens int, started time.Time) map[string]any {
-	return map[string]any{
-		"phase": phase, "step": step, "max_steps": maxSteps,
-		"tool_calls": toolCalls, "max_tool_calls": maxToolCalls,
-		"elapsed_ms":               time.Since(started).Milliseconds(),
-		"estimated_context_tokens": estimatedTokens, "input_tokens": inputTokens,
-		"context_budget_tokens": r.Config.ContextTokens,
-	}
-}
-
-func estimateRequestTokens(request openai.Request) int {
-	data, _ := json.Marshal(struct {
-		Instructions      string             `json:"instructions"`
-		Input             []openai.Item      `json:"input"`
-		Tools             []openai.ToolSpec  `json:"tools"`
-		TextFormat        *openai.TextFormat `json:"text_format"`
-		ParallelToolCalls bool               `json:"parallel_tool_calls"`
-	}{request.Instructions, request.Input, request.Tools, request.TextFormat, request.ParallelToolCalls})
-	return (len(data) + 3) / 4
+	return messages, r.ToolSpecs, requestInstructions(request.SystemPrompt, r.ToolSpecs)
 }
 
 func (r *OpenAIRunner) writeUsageMetrics(step int, usage openai.Usage) {
@@ -539,393 +376,7 @@ func (r *OpenAIRunner) writeUsageMetrics(step int, usage openai.Usage) {
 	)
 }
 
-func toolCallSignature(call openai.ToolCall) string {
-	arguments := strings.TrimSpace(call.Arguments)
-	var value any
-	if json.Unmarshal([]byte(arguments), &value) == nil {
-		if canonical, err := json.Marshal(&value, json.Deterministic(true)); err == nil {
-			arguments = string(canonical)
-		}
-	}
-	return call.Name + "\x00" + arguments
-}
-
-type toolCallBatch struct {
-	calls         []openai.ToolCall
-	signatures    map[string]struct{}
-	duplicateTool string
-}
-
-type toolExecution struct {
-	result   tools.Result
-	err      error
-	duration time.Duration
-}
-
-func (r *OpenAIRunner) executeToolCalls(ctx context.Context, calls []openai.ToolCall, measureDuration bool) []toolExecution {
-	executions := make([]toolExecution, len(calls))
-	var wait sync.WaitGroup
-	for index, call := range calls {
-		wait.Go(func() {
-			var started time.Time
-			if measureDuration {
-				started = time.Now()
-			}
-			executions[index].result, executions[index].err = r.Tools.Execute(ctx, tools.Invocation{
-				Name: call.Name, Arguments: call.Arguments,
-			})
-			if measureDuration {
-				executions[index].duration = time.Since(started)
-			}
-		})
-	}
-	wait.Wait()
-	return executions
-}
-
-func validateToolCallBatch(
-	calls []openai.ToolCall,
-	toolSpecs []openai.ToolSpec,
-	seenCalls map[string]struct{},
-	seenCallIDs map[string]struct{},
-) (toolCallBatch, error) {
-	batch := toolCallBatch{
-		calls:      make([]openai.ToolCall, 0, len(calls)),
-		signatures: make(map[string]struct{}, len(calls)),
-	}
-	batchCallIDs := make(map[string]struct{}, len(calls))
-	for _, call := range calls {
-		callID := call.CallID
-		if callID == "" {
-			callID = call.ID
-		}
-		if callID == "" {
-			return toolCallBatch{}, errors.New("function call ID is required")
-		}
-		if _, duplicate := seenCallIDs[callID]; duplicate {
-			return toolCallBatch{}, fmt.Errorf("duplicate function call ID %q", callID)
-		}
-		if _, duplicate := batchCallIDs[callID]; duplicate {
-			return toolCallBatch{}, fmt.Errorf("duplicate function call ID %q within provider response", callID)
-		}
-		if call.Name == "" {
-			return toolCallBatch{}, fmt.Errorf("function call %q name is required", callID)
-		}
-		if !toolAllowed(call.Name, toolSpecs) {
-			return toolCallBatch{}, fmt.Errorf("tool %s is not allowed for this request", call.Name)
-		}
-
-		call.CallID = callID
-		signature := toolCallSignature(call)
-		if batch.duplicateTool == "" {
-			_, seenBefore := seenCalls[signature]
-			_, repeatedInBatch := batch.signatures[signature]
-			if seenBefore || repeatedInBatch {
-				batch.duplicateTool = call.Name
-			}
-		}
-		batchCallIDs[callID] = struct{}{}
-		batch.signatures[signature] = struct{}{}
-		batch.calls = append(batch.calls, call)
-	}
-	return batch, nil
-}
-
-func appendToolCallBatch(messages []openai.Item, response openai.Response, calls []openai.ToolCall) []openai.Item {
-	result := append(slices.Clone(messages), response.Continuation...)
-	if len(response.Continuation) == 0 {
-		for _, call := range calls {
-			result = append(result, openai.NewFunctionCall(call))
-		}
-	}
-	return result
-}
-
-func (r *OpenAIRunner) resolveBudgetExhaustion(ctx context.Context, instructions string, messages []openai.Item, current Result, textFormat *openai.TextFormat, state *runState, status BudgetStatus, started time.Time) (Result, int, int, error) {
-	if r.Budget != nil {
-		decision, err := r.Budget(ctx, status)
-		if err != nil {
-			return Result{}, 0, 0, err
-		}
-		extensionApplies := decision.ExtendSteps > 0 || decision.ExtendToolCalls > 0
-		switch status.Kind {
-		case BudgetKindModelSteps:
-			extensionApplies = decision.ExtendSteps > 0
-		case BudgetKindToolCalls:
-			extensionApplies = decision.ExtendToolCalls > 0
-		}
-		if extensionApplies {
-			nextSteps := status.MaxSteps + max(0, decision.ExtendSteps)
-			nextTools := status.MaxToolCalls
-			if nextTools > 0 || decision.ExtendToolCalls > 0 {
-				nextTools += max(0, decision.ExtendToolCalls)
-			}
-			if err := r.Trace.Write("budget", map[string]any{
-				"kind":                   status.Kind,
-				"decision":               "extend",
-				"previous_max_steps":     status.MaxSteps,
-				"previous_max_toolcalls": status.MaxToolCalls,
-				"next_max_steps":         nextSteps,
-				"next_max_toolcalls":     nextTools,
-			}); err != nil {
-				return Result{}, 0, 0, err
-			}
-			return Result{}, nextSteps, nextTools, nil
-		}
-	}
-
-	finalized, err := r.finalizeWithoutTools(ctx, instructions, messages, textFormat, state, status, current.ToolCalls, started)
-	if err != nil {
-		return Result{}, 0, 0, err
-	}
-	finalized.copyActivity(current)
-	if err := r.Trace.Write("budget", map[string]any{
-		"kind":          status.Kind,
-		"decision":      "finalize",
-		"max_steps":     status.MaxSteps,
-		"max_toolcalls": status.MaxToolCalls,
-		"used":          status.Used,
-	}); err != nil {
-		return Result{}, 0, 0, err
-	}
-	return finalized, status.MaxSteps, status.MaxToolCalls, nil
-}
-
-func (r *Result) copyActivity(source Result) {
-	r.ToolCalls = source.ToolCalls
-	r.RepairCalls = source.RepairCalls
-}
-
-type conversationFunctionCall struct {
-	name     string
-	answered bool
-}
-
-func completePendingFunctionCalls(messages []openai.Item) ([]openai.Item, error) {
-	calls := make(map[string]*conversationFunctionCall)
-	order := make([]string, 0)
-	for index, item := range messages {
-		switch item.Type {
-		case "function_call":
-			callID, name, _, err := functionCallIdentity(item)
-			if err != nil {
-				return nil, fmt.Errorf("input item %d: %w", index, err)
-			}
-			if _, exists := calls[callID]; exists {
-				return nil, fmt.Errorf("input item %d: duplicate function call ID %q", index, callID)
-			}
-			calls[callID] = &conversationFunctionCall{name: name}
-			order = append(order, callID)
-		case "function_call_output":
-			callID, err := functionCallOutputID(item)
-			if err != nil {
-				return nil, fmt.Errorf("input item %d: %w", index, err)
-			}
-			call, exists := calls[callID]
-			if !exists {
-				return nil, fmt.Errorf("input item %d: function call output %q has no preceding call", index, callID)
-			}
-			if call.answered {
-				return nil, fmt.Errorf("input item %d: duplicate function call output %q", index, callID)
-			}
-			call.answered = true
-		}
-	}
-
-	completed := slices.Clone(messages)
-	for _, callID := range order {
-		call := calls[callID]
-		if call.answered {
-			continue
-		}
-		result, err := tools.ErrorResult(call.name, errors.New("tool call was not executed because the agent is finalizing without tools"))
-		if err != nil {
-			return nil, fmt.Errorf("encode skipped tool output %q: %w", callID, err)
-		}
-		completed = append(completed, openai.NewFunctionCallOutput(callID, result.Content))
-	}
-	return completed, nil
-}
-
-func functionCallIdentity(item openai.Item) (string, string, string, error) {
-	id, callID, name, arguments, err := functionItemFields(item, "function_call")
-	if err != nil {
-		return "", "", "", err
-	}
-	if callID == "" {
-		callID = id
-	}
-	if callID == "" {
-		return "", "", "", errors.New("function call ID is required")
-	}
-	if name == "" {
-		return "", "", "", fmt.Errorf("function call %q name is required", callID)
-	}
-	return callID, name, arguments, nil
-}
-
-func functionCallOutputID(item openai.Item) (string, error) {
-	_, callID, _, _, err := functionItemFields(item, "function_call_output")
-	if err != nil {
-		return "", err
-	}
-	if callID == "" {
-		return "", errors.New("function call output ID is required")
-	}
-	return callID, nil
-}
-
-func functionItemFields(item openai.Item, expectedType string) (string, string, string, string, error) {
-	if item.RawJSON == "" {
-		return item.ID, item.CallID, item.Name, item.Arguments, nil
-	}
-	var raw struct {
-		Type      string `json:"type"`
-		ID        string `json:"id"`
-		CallID    string `json:"call_id"`
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	}
-	if err := json.Unmarshal([]byte(item.RawJSON), &raw); err != nil {
-		return "", "", "", "", fmt.Errorf("decode %s: %w", strings.ReplaceAll(expectedType, "_", " "), err)
-	}
-	if raw.Type != expectedType {
-		return "", "", "", "", fmt.Errorf("raw item type %q does not match %s", raw.Type, expectedType)
-	}
-	return raw.ID, raw.CallID, raw.Name, raw.Arguments, nil
-}
-
-func (r *OpenAIRunner) finalizeWithoutTools(ctx context.Context, instructions string, messages []openai.Item, textFormat *openai.TextFormat, state *runState, status BudgetStatus, toolCalls int, started time.Time) (Result, error) {
-	completedMessages, err := completePendingFunctionCalls(messages)
-	if err != nil {
-		return Result{}, fmt.Errorf("prepare forced finalization input: %w", err)
-	}
-	finalMessage := openai.NewMessage("developer", finalizationNotice(status)+"\n\n"+strings.TrimSpace(forcedFinalizationPrompt))
-	finalMessage.PromptCacheBreakpoint = r.PromptCacheKey != ""
-	finalMessages := append(completedMessages, finalMessage)
-	req := r.providerRequest(instructions, finalMessages, nil, textFormat, false)
-	req.TurnState = state.turnState
-	req.TurnID = state.turnID
-	r.attachRetryStatus(&req, status.Step, status.MaxSteps, toolCalls, status.MaxToolCalls, estimateRequestTokens(req), started)
-	if err := writeTraceRequest(r.Trace, req); err != nil {
-		return Result{}, err
-	}
-	timing := r.Timing
-	var providerStarted time.Time
-	if timing != nil {
-		providerStarted = time.Now()
-	}
-	response, err := r.Client.CreateResponse(ctx, req)
-	if timing != nil {
-		timing(Timing{Phase: "provider_request", Duration: time.Since(providerStarted), Step: status.Step})
-	}
-	if err != nil {
-		return Result{}, err
-	}
-	if response.TurnState != "" {
-		state.turnState = response.TurnState
-	}
-	usage := response.Usage
-	r.writeUsageMetrics(status.Step, usage)
-	if err := writeTraceResponse(r.Trace, response); err != nil {
-		return Result{}, err
-	}
-	if len(response.ToolCalls) > 0 {
-		return Result{}, fmt.Errorf("provider requested tools during forced finalization")
-	}
-	if response.Text == "" {
-		return Result{}, errors.New("provider returned no text during forced finalization")
-	}
-	resultMessages := appendResponseMessages(finalMessages, response)
-	return Result{Text: response.Text, messages: resultMessages}, nil
-}
-
-func appendResponseMessages(messages []openai.Item, response openai.Response) []openai.Item {
-	result := append(slices.Clone(messages), response.Continuation...)
-	if len(response.Continuation) == 0 {
-		result = append(result, openai.NewMessage("assistant", response.Text))
-	}
-	return result
-}
-
-func (r *OpenAIRunner) providerRequest(instructions string, input []openai.Item, toolSpecs []openai.ToolSpec, textFormat *openai.TextFormat, parallelToolCalls bool) openai.Request {
-	request := openai.Request{
-		Model:             r.Config.Model,
-		ServiceTier:       r.Config.ServiceTier,
-		ThinkingMode:      r.Config.ThinkingEffort,
-		ReasoningSummary:  r.ReasoningSummary,
-		BaseURL:           r.Config.BaseURL,
-		APIKey:            r.Config.APIKey,
-		AuthAccountID:     r.Config.AuthAccountID,
-		Instructions:      instructions,
-		PromptCacheKey:    r.PromptCacheKey,
-		ParallelToolCalls: parallelToolCalls,
-		Input:             input,
-		Tools:             toolSpecs,
-		TextFormat:        textFormat,
-	}
-	if r.Trace != nil {
-		request.OnStreamEvent = func(event openai.StreamEvent) error {
-			return r.Trace.Write(event.Kind, event)
-		}
-	}
-	return request
-}
-
-func finalizationNotice(status BudgetStatus) string {
-	reason := fmt.Sprintf("model-step budget reached at %d/%d", status.Used, status.Limit)
-	switch status.Kind {
-	case BudgetKindToolCalls:
-		reason = fmt.Sprintf("tool-call budget reached at %d/%d before %q", status.Used, status.Limit, status.RequestedTool)
-	case BudgetKindContext:
-		reason = fmt.Sprintf("context budget reached at %d/%d tokens", status.Used, status.Limit)
-	case BudgetKindNoProgress:
-		reason = fmt.Sprintf("no semantic progress before repeated %q tool call", status.RequestedTool)
-	}
-	return renderBudgetExhaustedPrompt(budgetExhaustedPromptData{
-		Reason:       reason,
-		MaxSteps:     status.MaxSteps,
-		MaxToolCalls: status.MaxToolCalls,
-	})
-}
-
-func toolAllowed(name string, toolSpecs []openai.ToolSpec) bool {
-	return slices.ContainsFunc(toolSpecs, func(spec openai.ToolSpec) bool {
-		return spec.Name == name
-	})
-}
-
-func writeTraceRequest(recorder *trace.Recorder, request openai.Request) error {
-	if recorder == nil {
-		return nil
-	}
-	value, err := request.TraceValue()
-	if err != nil {
-		return recorder.WriteStructured("request", map[string]any{"error": err.Error()})
-	}
-	return recorder.WriteStructured("request", value)
-}
-
-func writeTraceResponse(recorder *trace.Recorder, response openai.Response) error {
-	if recorder == nil {
-		return nil
-	}
-	continuationTypes := make([]string, 0, len(response.Continuation))
-	for _, item := range response.Continuation {
-		continuationTypes = append(continuationTypes, item.Type)
-	}
-	return recorder.Write("response", map[string]any{
-		"id":                  response.ID,
-		"text":                response.Text,
-		"tool_calls":          response.ToolCalls,
-		"continuation_types":  continuationTypes,
-		"finish_kind":         response.FinishKind,
-		"input_tokens":        response.Usage.InputTokens,
-		"cached_input_tokens": response.Usage.CachedInputTokens,
-	})
-}
-
-func requestInstructions(taskInstructions string, toolSpecs []openai.ToolSpec) string {
+func requestInstructions(taskInstructions string, toolSpecs []tools.Definition) string {
 	prefix := taskInstructions
 	if prefix != "" {
 		prefix += "\n\n"
@@ -935,20 +386,13 @@ func requestInstructions(taskInstructions string, toolSpecs []openai.ToolSpec) s
 	}
 	promptTools := make([]requestPromptTool, 0, len(toolSpecs))
 	for _, spec := range toolSpecs {
-		promptTools = append(promptTools, requestPromptTool{Name: spec.Name, Description: spec.Description})
+		parameters, _ := json.Marshal(spec.Schema, json.Deterministic(true))
+		promptTools = append(promptTools, requestPromptTool{Name: spec.Name, Description: spec.Description, Parameters: string(parameters)})
 	}
 	return prefix + renderRequestPrompt(requestPromptData{
 		Tools: promptTools,
-		ReadFileAvailable: slices.ContainsFunc(toolSpecs, func(spec openai.ToolSpec) bool {
+		ReadFileAvailable: slices.ContainsFunc(toolSpecs, func(spec tools.Definition) bool {
 			return spec.Name == "read_file"
 		}),
 	})
-}
-
-func requestInputWithBudget(messages []openai.Item, step, maxSteps, usedTools, maxTools int, cacheBreakpoint bool) []openai.Item {
-	budget := openai.NewMessage("developer", renderBudgetStatusPrompt(budgetStatusPromptData{
-		Step: step, MaxSteps: maxSteps, RemainingTools: max(0, maxTools-usedTools), MaxTools: maxTools,
-	}))
-	budget.PromptCacheBreakpoint = cacheBreakpoint
-	return append(slices.Clone(messages), budget)
 }

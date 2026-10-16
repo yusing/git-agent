@@ -4,12 +4,13 @@
 
 ### Purpose
 
-`git-agent` is a standalone Go binary for Git-related generation workflows.
+`git-agent` is a Go CLI with an embedded TypeScript agent runtime for
+Git-related generation workflows. Model-backed commands require Node.js.
 It:
 
 - gathers Git and repository context without shelling out to ad hoc scripts
-- uses the official OpenAI Go SDK against an OpenAI-compatible Responses API
-  endpoint
+- uses `@openai/agents` for Responses API execution and the OpenAI Go SDK for
+  embeddings
 - runs a bounded, read-only, tool-calling agent loop
 - emits final generation artifacts or exploration envelopes on stdout
 - can optionally create the Git commit after generating a message
@@ -280,10 +281,10 @@ leader's events. Debug timing and trace output never changes the strict JSON
 stdout result.
 
 Explore is a foreground workflow. It does not detach, create a wait endpoint,
-or support `--wait`. It imposes no internal wall-clock or HTTP timeout on
-semantic retrieval, provider requests or streams, or the multi-turn agent loop;
-it runs until completion or caller cancellation, subject to the agent's bounded
-step and tool-call budgets. Independently launched processes reserve their
+or support `--wait`. The CLI imposes no overall wall-clock deadline on semantic
+retrieval or the multi-turn agent loop. Provider request timeouts and retries
+belong to the SDK; the normal command timeout is not applied to exploration.
+The SDK model-step budget and caller cancellation still apply. Independently launched processes reserve their
 intent before semantic retrieval. Compatible ready intents elect one foreground
 leader and form batches of at most three; followers wait for the leader and
 receive only their own result. A batch is confined to one cleaned absolute
@@ -300,24 +301,16 @@ shared with sibling items.
 Successful sessions persist in the current project's owner-only metadata
 directory. A session records its selected grounded items, parent ID, follow-up depth,
 stable-instruction target, active target, one prompt-cache key, and replayable
-Responses API item history. Missing target fields in an existing session mean
-the universal target.
-An initial batch derives one key from its first sorted item ID and persists that
-key for every sibling. Every model request within one agent run keeps
-`instructions` byte-stable. Changing model-step and remaining-tool budgets are
-appended as developer input and persisted in replay history, so each completed
-request input is an exact prefix of the next request input, except when a
-validation repair must shorten an over-budget transcript as described in
-[Repair strategy](#repair-strategy). For
-GPT-5.6- and GPT-6-family models, each appended budget message is an explicit
-cache breakpoint and requests use explicit-only cache mode. Follow-ups inherit
-the key and replayable input; a depth reset creates a new key. Official OpenAI
-models outside these families send the key while retaining provider-default
-caching. The authenticated ChatGPT Codex endpoint sends the stable key without
-explicit breakpoint options, captures the opaque `x-codex-turn-state` response
-header, and replays it on every later request in that agent run to preserve
-sticky routing.
-Custom endpoints receive no prompt-cache fields or Codex turn-state header.
+SDK item history. Sessions created before the SDK migration remain replayable.
+Missing target fields mean the universal target.
+An initial batch derives one prompt-cache key from its first sorted item ID and
+persists that key for every sibling. Follow-ups inherit the key; a depth reset
+creates a new one. Stable task instructions stay unchanged during a run. The
+SDK owns conversation persistence and compaction instead of application-authored
+budget messages or cache breakpoints.
+The authenticated ChatGPT/Codex endpoint captures its opaque turn-state response
+header and replays it within the agent run for sticky routing. Custom endpoints
+receive no Codex routing headers.
 Provider prefix-length, retention, routing, and eviction rules remain
 authoritative, so a nonzero cached-token count is not guaranteed.
 `--follow-up <search-id>` appends the new natural-language question to stored
@@ -1336,21 +1329,17 @@ Nonzero exit codes are returned for:
 
 ### Build and install
 
-The repository provides Shadowtree recipes with:
+Builds require Go 1.27+, Node.js 22.12+ and npm. Run `npm ci` before the
+Shadowtree build, test or install workflows. The runtime bundle includes the
+Agents SDK and the sandbox interpreter and is embedded in the Go executable.
+Generated bundles and dependency directories are build outputs, not source.
+Generation and exploration require Node.js on `PATH`; they start a fixed
+runtime, never a model-supplied executable or argument list.
 
-- `shadowtree build`: run the Go profile's package-aware build
-- `shadowtree test`: run `go test ./...`
-- `shadowtree install`: build and install the binary to
-  `<destdir><prefix>/bin/git-agent`
-  and, if the fish config dir exists, install fish completions
-
-Defaults:
-
-- `prefix`: `$HOME/.local`
-- `destdir`: empty
-- `fish_config_dir`: `$XDG_CONFIG_HOME/fish`, falling back to
-  `$HOME/.config/fish`
-- fish completions directory: `<fish_config_dir>/completions`
+`shadowtree install` builds the runtime and installs the Go binary using
+`go install`. Fish completions are installed when the selected Fish configuration
+directory exists. The default directory is `$XDG_CONFIG_HOME/fish`, or
+`$HOME/.config/fish` when unset.
 
 ## 3. Architecture
 
@@ -1359,9 +1348,9 @@ Defaults:
 - `cmd/git-agent`: process entrypoint
 - `internal/cli`: argument parsing and command dispatch
 - `internal/config`: environment and flag materialization
-- `internal/agent`: bounded agent loop contract
-- `internal/openai`: official OpenAI Go SDK adapter for the Responses API and
-  minimal embeddings adapter for `search`
+- `internal/agent`: task validation and fixed SDK-runtime process bridge
+- `runtime`: TypeScript Agents SDK orchestration and isolated JavaScript executor
+- `internal/openai`: shared provider data and OpenAI Go SDK embeddings adapter
 - `internal/guidance`: project guidance discovery and rendering
 - `internal/gitctx`: typed repository inspection
 - `internal/projectidentity`: shared normalized-origin or path-fallback project
@@ -1398,7 +1387,8 @@ Every task request is assembled using Codex-style layering:
    `skills-mgr list`
 5. developer message containing project guidance
 6. task-specific user prompt
-7. strict function tool registry for that task, if that task exposes tools
+7. one strict `exec` function tool, with the allowed `tools.*` signatures and
+   argument schemas in the task instructions, if that task exposes tools
 
 The project guidance block is not treated as ordinary user text. It is a
 separate injected layer mirroring Codex’s style.
@@ -1424,73 +1414,35 @@ context is treated as data rather than instructions. Project guidance may shape
 style and repository conventions, but it must not override the authoritative
 diff or release-range evidence.
 
-The OpenAI adapter uses the official `github.com/openai/openai-go/v3` package.
-It converts internal request items into `responses.ResponseNewParams`,
-including:
-
-- `Instructions`
-- structured input message items
-- `function_call` items
-- `function_call_output` items
-- strict function tool definitions
-- `Store: false`
-- request-scoped `ParallelToolCalls` for local function tools
-- local function-call ceilings enforced in the runner
+The TypeScript runtime uses `@openai/agents` for the model loop, streaming,
+provider transport, tool dispatch, and conversation history. Go prepares task
+context, executes typed repository operations, and validates final artifacts.
+The fixed Node.js subprocess communicates over private standard-input/output
+pipes; credentials travel only in the initialization message, never arguments
+or model-visible tool state. Remote SDK tracing is disabled.
 
 ### Agent loop lifecycle
 
-1. apply the optional global `--cwd` directory before command dispatch
-2. parse shared flags and validate auth-independent options
-3. for commit-message tasks, collect staged paths
-4. precompute normal staged context early enough to detect deterministic
-   submodule-only messages before provider auth is required
-5. for normal submodule-only staged changes without a nonblank caller prompt,
-   format and return the local message without the SDK-backed agent loop
-6. resolve provider config and create a stdout-streaming human console trace
-   for `commit` / `commit --amend`
-7. precompute task context before the first provider call: staged context for
-   normal commit messages, amend context for `--amend`, PR context for
-   `pr-message`, or release-note context for `release-note` including resolved
-   refs, parent commits, submodule gitlink changes, submodule history when
-   locally available, and repository ownership/link hints
-8. resolve project guidance for the task target paths, after context prep when
-   prepared paths define the target scope
-9. when `skills-mgr` is available, call `skills-mgr list`, inject its Markdown
-   output verbatim as a developer prompt layer, then build the remaining task-specific
-   instructions, developer context, and initial user prompt, appending any
-   escaped `--hint` content with normal commit intent precedence or
-   the lower-priority hint contract for other modes
-10. send a streaming request to the Responses API through the official OpenAI
-   Go SDK
-11. stream each provider request and response into the process-local trace;
-    retry an interrupted eligible stream once without changing request semantics
-12. if the model requests one or more tools, validate the complete response
-    batch before execution: require every call ID and allowed name, reject
-    repeated calls and repeated batch IDs, and admit the batch only when every
-    call fits the remaining local budget
-13. execute all admitted registered read-only calls concurrently and
-    collect their results by provider position; after the batch joins, recheck
-    any configured repository snapshot before emitting outputs; return recoverable
-    execution errors as structured failed tool outputs so the model can correct
-    arguments or choose other evidence, but fail on cancellation, deadline, or
-    repository snapshot drift
-14. stream admitted tool calls in provider order before execution and stream
-    their successful or failed outputs in provider order after the batch
-    completes when tracing is active
-15. append complete provider continuation output followed by one matching
-    function-call-output per executed tool call in provider order
-16. evaluate the next-request context budget and continue until final text is
-    returned
-17. if the local budget is exhausted, force a no-tool finalization request while
-    preserving any structured text format required by the task
-18. validate output against task rules
-19. if invalid and repair budget remains, run exactly one repair pass
-20. for normal mixed staged changes, append the prepared submodule changelog
-    block locally after model generation
-21. print final text to stdout for generation-only commands, write it to
-    `--out` for `release-note --out <file>`, or stream human console trace
-    lines while generating the message and then print Git's raw commit summary
-    after creating or amending through `git commit`
+1. Resolve the command, repository, configuration, prepared evidence and scoped
+   guidance. Deterministic submodule-only generation remains local.
+2. Start the embedded SDK runtime and provide the task, allowed repository
+   operations and prior conversation when continuing an exploration.
+3. The SDK streams model requests and exposes a single `exec` function tool.
+   Its JavaScript can call the allowed `tools.*` functions and emit results with
+   `text(value)`. Independent calls may run with `Promise.all`.
+4. Go executes repository operations through their existing typed implementations.
+   Snapshot checks, path confinement, argument validation, result caps and fatal
+   cancellation behavior apply to every invocation. Tool execution failures are
+   returned as structured error envelopes. Snapshot drift terminates the run.
+5. SDK history preserves the JavaScript calls and emitted results. Runtime
+   progress, usage and tool events feed the existing CLI output owners.
+6. The SDK owns session compaction and its trigger policy. The Codex provider
+   adapts compaction to its Responses `compaction_trigger` protocol; API-key
+   providers use the standard compaction endpoint.
+7. Validate and normalize the generated artifact in Go. When requested, run one
+   tool-free repair through the SDK and validate again.
+8. Publish the artifact, save the exploration branch, or perform the explicit
+   native Git commit. Existing stdout/stderr contracts remain authoritative.
 
 ### Subcommand execution flow graphs
 
@@ -1513,11 +1465,11 @@ flowchart TD
     Skills --> Registry[Register read-only commit-message tools and optional skills_read]
     Registry --> Runner[Build OpenAI runner with validator and tool specs]
     Runner --> Request[Assemble request layers]
-    Request --> Model[Call Responses API]
+    Request --> Model[Run Agents SDK streaming turn]
     Model --> ToolDecision{Tool calls?}
-    ToolDecision -- yes --> ToolBudget{Within tool budget?}
-    ToolBudget -- yes --> ExecuteTools[Execute allowed read-only tools]
-    ExecuteTools --> Continue[Append function call and output items]
+    ToolDecision -- yes --> ToolBudget{Within SDK step budget?}
+    ToolBudget -- yes --> ExecuteTools[Execute isolated JavaScript and allowed Go tools]
+    ExecuteTools --> Continue[SDK records exec call and emitted output]
     Continue --> Model
     ToolBudget -- no --> Budget[Extend interactively or force final artifact]
     Budget --> Model
@@ -1549,12 +1501,12 @@ flowchart TD
     Skills --> Registry[Register read-only commit-message tools and optional skills_read]
     Registry --> Runner[Build OpenAI runner with amend validator and tool specs]
     Runner --> Request[Assemble amend request layers with prepared amend context]
-    Request --> Model[Call Responses API]
+    Request --> Model[Run Agents SDK streaming turn]
     Model --> ToolDecision{Tool calls?}
-    ToolDecision -- yes --> ToolBudget{Within tool budget?}
-    ToolBudget -- yes --> ExecuteTools[Execute allowed read-only tools]
+    ToolDecision -- yes --> ToolBudget{Within SDK step budget?}
+    ToolBudget -- yes --> ExecuteTools[Execute isolated JavaScript and allowed Go tools]
     ExecuteTools --> FinalDiff[Model uses prepared final diff or narrower git_final_amended_diff as authoritative evidence]
-    FinalDiff --> Continue[Append function call and output items]
+    FinalDiff --> Continue[SDK records exec call and emitted output]
     Continue --> Model
     ToolBudget -- no --> Budget[Extend interactively or force final artifact]
     Budget --> Model
@@ -1595,11 +1547,11 @@ flowchart TD
     Trace --> Registry[Register read-only commit-message tools and optional skills_read]
     Registry --> Runner[Build OpenAI runner with validator and tool specs]
     Runner --> Request[Assemble request layers]
-    Request --> Model[Call Responses API]
+    Request --> Model[Run Agents SDK streaming turn]
     Model --> ToolDecision{Tool calls?}
-    ToolDecision -- yes --> ExecuteTools[Execute allowed read-only tools]
+    ToolDecision -- yes --> ExecuteTools[Execute isolated JavaScript and allowed Go tools]
     ExecuteTools --> RecordTools[Stream trace event]
-    RecordTools --> Continue[Append function call and output items]
+    RecordTools --> Continue[SDK records exec call and emitted output]
     Continue --> Model
     ToolDecision -- no --> Validate[Validate and shape commit message]
     Validate --> Trailer[Append normal staged or amend final submodule trailer locally]
@@ -1630,10 +1582,10 @@ flowchart TD
     Skills --> Registry[Register optional skills_read]
     Registry --> Runner[Build OpenAI runner with prepared context]
     Runner --> Request[Assemble request layers with prepared PR context]
-    Request --> Model[Call Responses API]
+    Request --> Model[Run Agents SDK streaming turn]
     Model --> ToolDecision{Skill read?}
     ToolDecision -- yes --> ExecuteSkill[Execute skills-mgr get]
-    ExecuteSkill --> Continue[Append function call and output items]
+    ExecuteSkill --> Continue[SDK records exec call and emitted output]
     Continue --> Model
     ToolDecision -- no --> Shape[Shape body wrapping]
     Shape --> Validate[Validate shaped squash commit message]
@@ -1674,11 +1626,11 @@ flowchart TD
     Submodules --> SubHistory[Collect local submodule history when available]
     SubHistory --> Runner[Build OpenAI runner with release-note validator and JSON format]
     Runner --> Request[Assemble request layers with prepared release context]
-    Request --> Model[Call Responses API]
+    Request --> Model[Run Agents SDK streaming turn]
     Model --> ToolDecision{Evidence or skill read?}
-    ToolDecision -- yes --> ToolBudget{Within tool budget?}
-    ToolBudget -- yes --> ExecuteTool[Execute git_show_commit, file reads, or skills-mgr get]
-    ExecuteTool --> Continue[Append function call and output items]
+    ToolDecision -- yes --> ToolBudget{Within SDK step budget?}
+    ToolBudget -- yes --> ExecuteTool[Execute JavaScript using allowed evidence or skill functions]
+    ExecuteTool --> Continue[SDK records exec call and emitted output]
     Continue --> Model
     ToolBudget -- no --> Budget[Extend interactively or force final artifact]
     Budget --> Model
@@ -1699,8 +1651,8 @@ flowchart TD
 
 The runtime must enforce:
 
-- maximum model steps
-- maximum tool calls
+- maximum model steps, followed by one tool-free finalization turn when an
+  interactive extension is unavailable or declined
 - maximum bytes/lines per tool result
 - per-request timeout where a command default or explicit `--timeout` applies
 - overall task timeout where a command default or explicit `--timeout` applies;
@@ -1821,6 +1773,20 @@ from the current-branch diff against `origin/HEAD`.
 - repository paths are root-confined; walk tools skip symlinks and repository
   readers cannot follow symlinks outside the repository
 - bounded output with explicit truncation markers
+
+### JavaScript tooling interface
+
+The model sees one SDK function tool, `exec`, accepting a JavaScript `code`
+string. Each invocation runs in a fresh isolated interpreter. Only the
+command's registered read-only functions appear on `tools`; their input
+schemas and descriptions are supplied in the task instructions. `text(value)`
+emits bounded model-visible output. JavaScript can await calls, compose results,
+and execute independent operations concurrently with `Promise.all`.
+
+The interpreter has no filesystem, network, subprocess, module-loading or Node.js
+capabilities. Memory, execution time and emitted output are bounded.
+Unawaited calls are canceled when the invocation finishes. Tool results remain untrusted
+repository data. Shell tools, write tools and hosted file search are absent.
 
 ### Shared repository tools
 
@@ -1976,9 +1942,11 @@ Recoverable tool execution errors use the same channel:
 }
 ```
 
-Failed invocations consume one tool call and are appended as
-`function_call_output`, allowing the model to correct a path or arguments on a
-later step. Context cancellation and deadline errors remain terminal.
+Failed nested invocations consume one tool call and return an error envelope
+to JavaScript, allowing the program or a later model step to correct arguments.
+Sandbox execution failures return their diagnostic to the model, including
+actionable output-limit errors, with credentials redacted. Context cancellation
+and command deadline errors remain terminal.
 
 The tool loop records both the model's function-call arguments and the exact
 tool-output envelope sent back to the model.
@@ -2164,14 +2132,6 @@ Behavior:
 - classify changed paths into operator-facing signals such as runtime, config
   schema, API, CLI, docs, generated, tests, dependency-only, and submodule-only
   changes
-- size the complete initial request against the configured context budget
-  and reserve headroom for follow-up evidence and output
-- when needed, progressively shorten changed-file lists, messages, candidate
-  draft facts, and patch excerpts; retain every prepared commit SHA and summary,
-  range metadata, submodule ownership, and the complete local changelog data
-- mark shortened evidence so the model can retrieve details with existing
-  read-only tools; reject before provider work if fixed instructions or the
-  minimum commit inventory still exceeds the context budget
 - precompute candidate release-note items with draft facts, recommended sections,
   confidence, refs, and evidence; the model should polish these candidates rather
   than inventing new behavior
@@ -2257,12 +2217,9 @@ Release note validator checks at minimum:
 If validation fails:
 
 1. summarize the validation errors
-2. run one repair pass through the model; normally preserve the gathered
-   transcript, but if the repair request would exceed the context budget,
-   retain the initial task input, final draft, and validation errors instead of
-   replaying this run's tool and reasoning transcript. Keep stable instructions,
-   caller intent, output schema, and the initial-request budget guard. Persist
-   the shortened input actually used for repair when keeping session history
+2. run one tool-free repair pass through the SDK session with the validation
+   errors; preserve task instructions, caller intent and the output schema.
+   The SDK session compacts conversation history when needed
 3. revalidate
 4. return an error if still invalid
 
@@ -2299,10 +2256,9 @@ Use a local fake OpenAI-compatible server to test:
 - finish states
 - validation repair pass behavior
 - malformed and missing-terminal provider streams
-- equivalent streaming retry wire shape, bounded progress, cancellation, and
-  one-retry enforcement
-- retry classification for positive, negative, unrelated-collision, and
-  unknown/future transport failures
+- SDK streaming transport, cancellation and provider error propagation
+- sandbox isolation, resource limits and parallel tool execution
+- session replay, compaction and Codex routing adaptation
 - official SDK request compatibility
 - stdout-only artifact behavior
 
@@ -2350,7 +2306,8 @@ details.
 Mitigation:
 
 - keep the SDK adapter thin
-- isolate provider translation and SDK type conversion in `internal/openai`
+- isolate Responses provider adaptation in `runtime/provider.ts` and embeddings
+  adaptation in `internal/openai`
 - test against a fake server and at least one real provider
 
 ### Release-note formatting regressions
@@ -2398,7 +2355,8 @@ The in-repository implementation is complete when:
 - guidance rendering uses repository-relative `<PROJECT_DOC path="...">` tags
 - normal commit-message guidance resolves against staged paths, while amend
   guidance resolves against the final amended paths
-- repository tools are read-only; all tools use strict function schemas
+- repository operations are read-only and validate their declared arguments;
+  the single model-visible JavaScript tool uses a strict function schema
 - tool outputs use the stable JSON envelope
 - generation-only stdout contains only the final generated artifact, except
   `release-note --out <file>` streams human console trace lines and writes the

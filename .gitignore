@@ -2,6 +2,8 @@
 /.git-agent/
 /bin/
 /dist/
+/node_modules/
+/internal/agent/dist/
 /coverage.out
 *.env
 *.patch

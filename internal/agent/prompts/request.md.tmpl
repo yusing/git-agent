@@ -1,5 +1,9 @@
-# Available tools
-{{range .Tools}}- {{.Name}}: {{.Description}}
+# JavaScript tooling interface
+Use exec with a code string. Each invocation is a fresh sandbox with no imports, Node.js, filesystem, network, or subprocess access.
+Call the functions below through tools.NAME(arguments). Each returns a Promise of a JSON envelope: {ok, tool, data, truncated}, or {ok:false, tool, error, truncated}.
+Await independent calls with Promise.all. Use text(value) to emit relevant evidence; only emitted output enters model context. Preserve source paths and line references. Await every call before finishing.
+{{range .Tools}}- tools.{{.Name}}: {{.Description}}
+  Arguments: {{.Parameters}}
 {{end}}
 # Agent loop
 You are in a bounded agent loop.

@@ -159,16 +159,13 @@ func TestCommitMsgEndToEndWithRealisticFixture(t *testing.T) {
 
 	mode, cleanup := configureE2EProvider(t, newScriptedResponsesServer(t, []func(string) string{
 		func(body string) string {
-			if !strings.Contains(body, `"parallel_tool_calls":true`) {
-				t.Fatalf("commit-msg request disabled parallel provider tool calls\n%s", body)
-			}
 			for _, want := range []string{
 				`prepared_commit_context`,
 				`staged_stats`,
 				`commit_style`,
 				`diff_truncated`,
-				`"git_staged_diff_for_paths"`,
-				`"read_file"`,
+				`tools.git_staged_diff_for_paths:`,
+				`tools.read_file:`,
 			} {
 				if !strings.Contains(body, want) {
 					t.Fatalf("first request missing tool %s\n%s", want, body)
@@ -179,15 +176,15 @@ func TestCommitMsgEndToEndWithRealisticFixture(t *testing.T) {
 					t.Fatalf("normal request leaked historical field %s", field)
 				}
 			}
-			for _, name := range []string{`"git_staged_paths"`, `"git_staged_status"`, `"git_staged_stat"`, `"git_staged_diff"`, `"git_recent_commits"`} {
+			for _, name := range []string{`tools.git_staged_paths:`, `tools.git_staged_status:`, `tools.git_staged_stat:`, `tools.git_staged_diff:`, `tools.git_recent_commits:`} {
 				if strings.Contains(body, name) {
 					t.Fatalf("first request should not expose inventory tool %s\n%s", name, body)
 				}
 			}
 			return responseWithToolCalls("resp_commit_1",
-				toolCallSpec{ID: "fc_1", CallID: "call_1", Name: "read_file", Arguments: `{"path":"internal/route/do_parser.go","max_bytes":8192,"max_lines":260}`},
-				toolCallSpec{ID: "fc_2", CallID: "call_2", Name: "read_file", Arguments: `{"path":"internal/route/do_types.go","max_bytes":8192,"max_lines":260}`},
-				toolCallSpec{ID: "fc_3", CallID: "call_3", Name: "read_file", Arguments: `{"path":"docs/routing.md","max_bytes":8192,"max_lines":260}`},
+				toolCallSpec{Name: "read_file", Arguments: `{"path":"internal/route/do_parser.go","max_bytes":8192,"max_lines":260}`},
+				toolCallSpec{Name: "read_file", Arguments: `{"path":"internal/route/do_types.go","max_bytes":8192,"max_lines":260}`},
+				toolCallSpec{Name: "read_file", Arguments: `{"path":"docs/routing.md","max_bytes":8192,"max_lines":260}`},
 			)
 		},
 		func(body string) string {
@@ -321,9 +318,6 @@ func TestCommitMsgAmendEndToEndWithRealisticFixture(t *testing.T) {
 
 	mode, cleanup := configureE2EProvider(t, newScriptedResponsesServer(t, []func(string) string{
 		func(body string) string {
-			if !strings.Contains(body, `"parallel_tool_calls":true`) {
-				t.Fatalf("commit-msg amend request disabled parallel provider tool calls\n%s", body)
-			}
 			for _, want := range []string{
 				`prepared_amend_context`,
 				`original_head_message`,
@@ -334,21 +328,21 @@ func TestCommitMsgAmendEndToEndWithRealisticFixture(t *testing.T) {
 				`internal/agent/verify.go`,
 				`docs/verify.md`,
 				`fix(agent): persist verified providers`,
-				`"git_final_amended_diff"`,
-				`"read_file"`,
+				`tools.git_final_amended_diff:`,
+				`tools.read_file:`,
 			} {
 				if !strings.Contains(body, want) {
 					t.Fatalf("first request missing tool %s\n%s", want, body)
 				}
 			}
-			for _, name := range []string{`"git_head_show"`, `"git_diff_against_parent"`, `"git_amend_delta"`, `"git_recent_commits"`, `"git_staged_diff_for_paths"`} {
+			for _, name := range []string{`tools.git_head_show:`, `tools.git_diff_against_parent:`, `tools.git_amend_delta:`, `tools.git_recent_commits:`, `tools.git_staged_diff_for_paths:`} {
 				if strings.Contains(body, name) {
 					t.Fatalf("first request should not expose inventory tool %s\n%s", name, body)
 				}
 			}
 			return responseWithToolCalls("resp_amend_1",
-				toolCallSpec{ID: "fc_1", CallID: "call_1", Name: "git_final_amended_diff", Arguments: `{"max_bytes":32768,"max_lines":900}`},
-				toolCallSpec{ID: "fc_2", CallID: "call_2", Name: "read_file", Arguments: `{"path":"internal/agent/verify.go","max_bytes":8192,"max_lines":260}`},
+				toolCallSpec{Name: "git_final_amended_diff", Arguments: `{"max_bytes":32768,"max_lines":900}`},
+				toolCallSpec{Name: "read_file", Arguments: `{"path":"internal/agent/verify.go","max_bytes":8192,"max_lines":260}`},
 			)
 		},
 		func(body string) string {
@@ -438,7 +432,7 @@ func TestPRMessageEndToEndWithRealisticFixture(t *testing.T) {
 					t.Fatalf("first request missing %s\n%s", want, body)
 				}
 			}
-			if strings.Contains(body, `"git_pr_`) || strings.Contains(body, `"read_file"`) {
+			if strings.Contains(body, `"git_pr_`) || strings.Contains(body, `tools.read_file:`) {
 				t.Fatalf("pr-message request should not expose tools\n%s", body)
 			}
 			return responseWithText("resp_pr_1", `feat(auth): add strict session policy reasons
@@ -522,9 +516,6 @@ func TestReleaseNoteEndToEndWithRealisticFixture(t *testing.T) {
 			if err := json.Unmarshal([]byte(body), &payload); err != nil {
 				t.Fatalf("request body is not valid json: %v\n%s", err, body)
 			}
-			if payload["parallel_tool_calls"] != true {
-				t.Fatalf("release-note request disabled parallel provider tool calls\n%s", body)
-			}
 			text, ok := payload["text"].(map[string]any)
 			if !ok {
 				t.Fatalf("request missing text config\n%s", body)
@@ -540,10 +531,10 @@ func TestReleaseNoteEndToEndWithRealisticFixture(t *testing.T) {
 				t.Fatalf("text.format.name = %#v\n%s", format["name"], body)
 			}
 			for _, want := range []string{
-				`"repo_summary"`,
-				`"git_show_commit"`,
-				`"git_show_file_at_rev"`,
-				`"read_file"`,
+				`tools.repo_summary:`,
+				`tools.git_show_commit:`,
+				`tools.git_show_file_at_rev:`,
+				`tools.read_file:`,
 				`\"required_submodule_groups\": [`,
 				`\"goutils\"`,
 				`\"webui\"`,
@@ -562,7 +553,7 @@ func TestReleaseNoteEndToEndWithRealisticFixture(t *testing.T) {
 				}
 			}
 			if strings.Contains(body, `"resolve_ref"`) ||
-				strings.Contains(body, `"git_log_range"`) ||
+				strings.Contains(body, `tools.git_log_range:`) ||
 				strings.Contains(body, `"submodule_log_range"`) ||
 				strings.Contains(body, `"submodule_gitlink_range"`) ||
 				strings.Contains(body, `"gitmodules_table"`) {
@@ -1415,8 +1406,6 @@ func buildSubmoduleRepo(t *testing.T, name string, commits []submoduleCommit) su
 }
 
 type toolCallSpec struct {
-	ID        string
-	CallID    string
 	Name      string
 	Arguments string
 }
@@ -1455,17 +1444,12 @@ func newScriptedResponsesServer(t *testing.T, steps []func(string) string) *http
 }
 
 func responseWithToolCalls(id string, calls ...toolCallSpec) string {
-	output := make([]map[string]any, 0, len(calls))
+	program := make([]string, 0, len(calls))
 	for _, call := range calls {
-		output = append(output, map[string]any{
-			"id":        call.ID,
-			"type":      "function_call",
-			"status":    "completed",
-			"call_id":   call.CallID,
-			"name":      call.Name,
-			"arguments": call.Arguments,
-		})
+		program = append(program, "tools."+call.Name+"("+call.Arguments+")")
 	}
+	arguments, _ := json.Marshal(map[string]any{"code": "text(await Promise.all([" + strings.Join(program, ",") + "]));"})
+	output := []map[string]any{{"id": id + "_exec", "type": "function_call", "status": "completed", "call_id": id + "_call", "name": "exec", "arguments": string(arguments)}}
 	return marshalResponse(map[string]any{
 		"id":         id,
 		"object":     "response",
@@ -1510,11 +1494,14 @@ func streamCompletedEvent(responseJSON string) string {
 	if err := json.Unmarshal([]byte(responseJSON), &payload); err != nil {
 		panic(err)
 	}
-	return marshalResponse(map[string]any{
-		"type":            "response.completed",
-		"sequence_number": 1,
-		"response":        payload,
-	})
+	var events []string
+	for index, item := range payload["output"].([]any) {
+		for _, kind := range []string{"response.output_item.added", "response.output_item.done"} {
+			events = append(events, marshalResponse(map[string]any{"type": kind, "output_index": index, "item": item}))
+		}
+	}
+	events = append(events, marshalResponse(map[string]any{"type": "response.completed", "response": payload}))
+	return strings.Join(events, "\n\ndata: ")
 }
 
 func writeFixtureFile(t *testing.T, path, content string) {

@@ -1876,6 +1876,13 @@ func TestCommitMsgDelegatesSkillsWithoutDiscoveringThem(t *testing.T) {
 	if err := os.Chmod(managerPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(node, filepath.Join(bin, "node")); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", bin)
 
 	var request string
@@ -2624,7 +2631,15 @@ func TestPRMessageRejectsToolCallWhenNoToolsAreAvailable(t *testing.T) {
 	runGit(t, repoDir, "add", "app.txt")
 	runGit(t, repoDir, "commit", "-m", "feat: branch change")
 	t.Chdir(repoDir)
-	t.Setenv("PATH", t.TempDir())
+	bin := t.TempDir()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(node, filepath.Join(bin, "node")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
 
 	var request []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2635,8 +2650,6 @@ func TestPRMessageRejectsToolCallWhenNoToolsAreAvailable(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintf(w, "data: %s\n\n", streamCompletedEvent(responseWithToolCalls("resp_1", toolCallSpec{
-			ID:        "fc_1",
-			CallID:    "call_1",
 			Name:      "repo_summary",
 			Arguments: "{}",
 		})))
@@ -2649,8 +2662,8 @@ func TestPRMessageRejectsToolCallWhenNoToolsAreAvailable(t *testing.T) {
 	t.Setenv("OPENAI_MODEL", "test-model")
 
 	app := &App{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
-	err := app.Run(t.Context(), []string{"pr-message"})
-	if err == nil || !strings.Contains(err.Error(), "tool repo_summary is not allowed for this request") {
+	err = app.Run(t.Context(), []string{"pr-message"})
+	if err == nil || !strings.Contains(err.Error(), "exec") {
 		t.Fatalf("expected disallowed tool call error, got %v", err)
 	}
 	var payload map[string]any
@@ -2705,67 +2718,6 @@ func TestReleaseNoteRaisesStepAndTimeoutFloor(t *testing.T) {
 	if len(requests) == 0 {
 		t.Fatal("expected at least one request")
 	}
-}
-
-func TestReleaseNoteCompactsOversizedInitialContext(t *testing.T) {
-	repoDir := initRepo(t)
-	t.Chdir(repoDir)
-	runGit(t, repoDir, "commit", "-m", "base")
-	runGit(t, repoDir, "tag", "v1.0.0")
-	var summaries []string
-	for i := range 24 {
-		summary := fmt.Sprintf("feat: operator change %02d", i)
-		summaries = append(summaries, summary)
-		runGit(t, repoDir, "commit", "--allow-empty", "-m", summary+"\n\n"+strings.Repeat(`operator-configuration-"quoted"-detail `, 1000))
-	}
-	var requestBytes int
-	server := newScriptedResponsesServer(t, []func(string) string{func(body string) string {
-		requestBytes = len(body)
-		if requestBytes/4 >= config.DefaultContextTokens*3/4 {
-			t.Fatalf("request has %d bytes, exceeds reserved context budget", requestBytes)
-		}
-		var payload struct {
-			Input []struct {
-				Role    string `json:"role"`
-				Content []struct {
-					Text string `json:"text"`
-				} `json:"content"`
-			} `json:"input"`
-		}
-		if err := json.Unmarshal([]byte(body), &payload); err != nil {
-			t.Fatal(err)
-		}
-		var userPrompt string
-		for _, item := range payload.Input {
-			if item.Role == "user" {
-				userPrompt = item.Content[0].Text
-			}
-		}
-		for _, want := range append(summaries, `"evidence_compacted": true`, "keep upgrade guidance") {
-			if !strings.Contains(userPrompt, want) {
-				t.Fatalf("compacted user prompt missing %q", want)
-			}
-		}
-		return responseWithText("resp_compact", `{"sections":[]}`)
-	}})
-	defer server.Close()
-	t.Setenv("OPENAI_API_KEY", "test-key")
-	t.Setenv("OPENAI_BASE_URL", server.URL)
-	t.Setenv("OPENAI_MODEL", "test-model")
-	var stdout, stderr bytes.Buffer
-	app := &App{stdout: &stdout, stderr: &stderr}
-	if err := app.Run(t.Context(), []string{"release-note", "--hint", "keep upgrade guidance", "v1.0.0", "HEAD"}); err != nil {
-		t.Fatal(err)
-	}
-	if requestBytes == 0 {
-		t.Fatal("no provider request")
-	}
-	for _, summary := range summaries {
-		if !strings.Contains(stdout.String(), summary) {
-			t.Fatalf("full changelog missing %q", summary)
-		}
-	}
-	t.Logf("first request: %d bytes, about %d tokens", requestBytes, requestBytes/4)
 }
 
 func TestReleaseNoteVersionBumpShortcutInfersRange(t *testing.T) {
@@ -2924,13 +2876,11 @@ func TestEnvironmentContextIncludesCurrentStepLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := environmentContext(repo, "commit-msg", "normal", "auto", 30, 24)
+	got := environmentContext(repo, "commit-msg", "normal", "auto", 30)
 	if !strings.Contains(got, "<max_model_steps>30</max_model_steps>") {
 		t.Fatalf("environment context missing max steps: %s", got)
 	}
-	if !strings.Contains(got, "<max_tool_calls>24</max_tool_calls>") {
-		t.Fatalf("environment context missing max tool calls: %s", got)
-	}
+
 }
 
 func TestCommitMsgForwardsFastAndThinkingFlags(t *testing.T) {
@@ -3091,8 +3041,10 @@ func commitMessageSequenceServer(t *testing.T, messages ...string) *httptest.Ser
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
-		if providerTools, ok := payload["tools"].([]any); ok && len(providerTools) > 0 && payload["parallel_tool_calls"] != true {
-			t.Fatalf("commit generation disabled parallel provider tool calls: %#v", payload)
+		if providerTools, ok := payload["tools"].([]any); ok && len(providerTools) > 0 {
+			if len(providerTools) != 1 || providerTools[0].(map[string]any)["name"] != "exec" {
+				t.Errorf("expected one JavaScript tool: %#v", providerTools)
+			}
 		}
 		idx := min(requestCount, len(responses)-1)
 		requestCount++

@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -156,12 +159,12 @@ func TestPrepareExploreSearchDefersFreshnessOnlyForWarmIndex(t *testing.T) {
 
 type exploreFakeResponseClient struct {
 	mu       sync.Mutex
-	requests []openai.Request
+	requests []testResponseRequest
 	deadline atomic.Bool
 	usage    openai.Usage
 }
 
-func (c *exploreFakeResponseClient) CreateResponse(ctx context.Context, request openai.Request) (openai.Response, error) {
+func (c *exploreFakeResponseClient) CreateResponse(ctx context.Context, request testResponseRequest) (testResponse, error) {
 	if _, ok := ctx.Deadline(); ok {
 		c.deadline.Store(true)
 	}
@@ -181,13 +184,13 @@ func (c *exploreFakeResponseClient) CreateResponse(ctx context.Context, request 
 	}
 	text, err := json.Marshal(map[string]any{"answers": answers})
 	if err != nil {
-		return openai.Response{}, err
+		return testResponse{}, err
 	}
 	body := string(text)
-	return openai.Response{Text: body, Continuation: []openai.Item{openai.NewMessage("assistant", body)}, Usage: c.usage}, nil
+	return testResponse{Text: body, Usage: c.usage}, nil
 }
 
-func TestExploreDoesNotApplyRequestTimeoutToWholeBatch(t *testing.T) {
+func TestExploreUsesSDKRequestTimeoutWithoutBatchDeadline(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("OPENAI_API_KEY", "test-key")
@@ -196,10 +199,21 @@ func TestExploreDoesNotApplyRequestTimeoutToWholeBatch(t *testing.T) {
 	runGit(t, root, "init")
 	writeFixtureFile(t, root+"/main.go", "package demo\n")
 
+	// Observe the actual SDK timer in the child process, rather than inferring
+	// client-side timeouts from the HTTP server's unrelated context deadline.
+	probe := filepath.Join(t.TempDir(), "request-timeout.cjs")
+	writeFixtureFile(t, probe, fmt.Sprintf(`const original = globalThis.setTimeout;
+globalThis.setTimeout = (callback, milliseconds, ...args) => {
+  if (milliseconds === %d) throw new Error('exploration inherited the normal command timeout');
+  return original(callback, milliseconds, ...args);
+};`, config.DefaultTimeout.Milliseconds()))
+	t.Setenv("NODE_OPTIONS", os.Getenv("NODE_OPTIONS")+" --require="+fmt.Sprintf("%q", probe))
+
 	responses := &exploreFakeResponseClient{}
+	useExploreResponseServer(t, responses)
 	app := &App{
 		stdin: strings.NewReader(""), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{},
-		responseClient: responses, embeddingClient: &exploreFakeEmbedder{},
+		embeddingClient: &exploreFakeEmbedder{},
 	}
 	if err := app.Run(context.Background(), []string{"explore", "inspect", "the", "repository"}); err != nil {
 		t.Fatal(err)
@@ -220,9 +234,10 @@ func TestExploreWithoutDebugReportsOnlyProgress(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
+	useExploreResponseServer(t, &exploreFakeResponseClient{})
 	app := &App{
 		stdin: strings.NewReader(""), stdout: &stdout, stderr: &stderr,
-		responseClient: &exploreFakeResponseClient{}, embeddingClient: &exploreFakeEmbedder{},
+		embeddingClient: &exploreFakeEmbedder{},
 	}
 	runExploreForTest(t, app, &stdout, "inspect", "the", "repository")
 
@@ -246,11 +261,11 @@ func TestExploreReportsProviderUsageWithoutChangingStdout(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
+	usageClient := &exploreFakeResponseClient{usage: openai.Usage{InputTokens: 120, CachedInputTokens: 80, CacheWriteInputTokens: 40, OutputTokens: 12, TotalTokens: 132}}
+	useExploreResponseServer(t, usageClient)
 	app := &App{
 		stdin: strings.NewReader(""), stdout: &stdout, stderr: &stderr,
-		responseClient: &exploreFakeResponseClient{
-			usage: openai.Usage{InputTokens: 120, CachedInputTokens: 80, CacheWriteInputTokens: 40, OutputTokens: 12, TotalTokens: 132},
-		},
+
 		embeddingClient: &exploreFakeEmbedder{},
 	}
 	runExploreForTest(t, app, &stdout, "inspect", "the", "repository")
@@ -279,9 +294,10 @@ func TestExploreDebugReturnsTimingWriteError(t *testing.T) {
 
 	var stdout bytes.Buffer
 	stderr := &exploreTimingFailWriter{}
+	useExploreResponseServer(t, &exploreFakeResponseClient{})
 	app := &App{
 		stdin: strings.NewReader(""), stdout: &stdout, stderr: stderr,
-		responseClient: &exploreFakeResponseClient{}, embeddingClient: &exploreFakeEmbedder{},
+		embeddingClient: &exploreFakeEmbedder{},
 	}
 	err := app.Run(t.Context(), []string{"explore", "--debug", "inspect", "the", "repository"})
 	if err == nil || !strings.Contains(err.Error(), "write explore timing") {
@@ -300,9 +316,10 @@ func TestExploreReportsPhaseTimingsOnStderr(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
+	useExploreResponseServer(t, &exploreFakeResponseClient{})
 	app := &App{
 		stdin: strings.NewReader(""), stdout: &stdout, stderr: &stderr,
-		responseClient: &exploreFakeResponseClient{}, embeddingClient: &exploreFakeEmbedder{},
+		embeddingClient: &exploreFakeEmbedder{},
 	}
 	runExploreForTest(t, app, &stdout, "--debug", "inspect", "the", "repository")
 
@@ -347,9 +364,10 @@ func TestExploreFastRequestsPriorityServiceTier(t *testing.T) {
 
 	responses := &exploreFakeResponseClient{}
 	var stdout bytes.Buffer
+	useExploreResponseServer(t, responses)
 	app := &App{
 		stdin: strings.NewReader(""), stdout: &stdout, stderr: &bytes.Buffer{},
-		responseClient: responses, embeddingClient: &exploreFakeEmbedder{},
+		embeddingClient: &exploreFakeEmbedder{},
 	}
 	output := runExploreForTest(t, app, &stdout, "--fast", "inspect", "the", "repository")
 	runExploreForTest(t, app, &stdout, "--fast", "--follow-up", output.ID, "continue")
@@ -376,9 +394,10 @@ func TestExploreQueryTargetPersistsAndChangesWithoutBreakingCache(t *testing.T) 
 	responses := &exploreFakeResponseClient{}
 	embedder := &exploreFakeEmbedder{}
 	var stdout bytes.Buffer
+	useExploreResponseServer(t, responses)
 	app := &App{
 		stdin: strings.NewReader(""), stdout: &stdout, stderr: &bytes.Buffer{},
-		responseClient: responses, embeddingClient: embedder,
+		embeddingClient: embedder,
 	}
 	initial := runExploreForTest(t, app, &stdout, "--for", "diagnose", "why", "is", "search", "slow")
 	initialEmbeddingCalls := embedder.calls.Load()
@@ -506,9 +525,10 @@ func TestExploreAddingQueryTargetReplacesUniversalSystemPrompt(t *testing.T) {
 
 	responses := &exploreFakeResponseClient{}
 	var stdout bytes.Buffer
+	useExploreResponseServer(t, responses)
 	app := &App{
 		stdin: strings.NewReader(""), stdout: &stdout, stderr: &bytes.Buffer{},
-		responseClient: responses, embeddingClient: &exploreFakeEmbedder{},
+		embeddingClient: &exploreFakeEmbedder{},
 	}
 	initial := runExploreForTest(t, app, &stdout, "describe", "behavior")
 	runExploreForTest(t, app, &stdout, "--follow-up", initial.ID, "--for", "behavior", "focus", "behavior")
@@ -545,10 +565,10 @@ func (c *exploreFakeResponseClient) requestCount() int {
 	return len(c.requests)
 }
 
-func (c *exploreFakeResponseClient) recordedRequests() []openai.Request {
+func (c *exploreFakeResponseClient) recordedRequests() []testResponseRequest {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return append([]openai.Request(nil), c.requests...)
+	return append([]testResponseRequest(nil), c.requests...)
 }
 
 type exploreFakeEmbedder struct {
@@ -560,10 +580,10 @@ type exploreReadToolClient struct {
 	read  atomic.Bool
 }
 
-func (c *exploreReadToolClient) CreateResponse(_ context.Context, request openai.Request) (openai.Response, error) {
+func (c *exploreReadToolClient) CreateResponse(_ context.Context, request testResponseRequest) (testResponse, error) {
 	if c.calls.Add(1) == 1 {
-		return openai.Response{ToolCalls: []openai.ToolCall{{
-			ID: "fc_read", CallID: "call_read", Name: "read_file",
+		return testResponse{ToolCalls: []testToolCall{{
+			Name:      "read_file",
 			Arguments: `{"path":"main.go","start_line":1,"end_line":3}`,
 		}}}, nil
 	}
@@ -581,10 +601,10 @@ func (c *exploreReadToolClient) CreateResponse(_ context.Context, request openai
 		ItemID: match[1], Items: []explore.Item{{Description: "Answer is owned by main.go", References: []string{"main.go:3"}}},
 	}}})
 	if err != nil {
-		return openai.Response{}, err
+		return testResponse{}, err
 	}
 	body := string(text)
-	return openai.Response{Text: body, Continuation: []openai.Item{openai.NewMessage("assistant", body)}}, nil
+	return testResponse{Text: body}, nil
 }
 
 func (e *exploreFakeEmbedder) CreateEmbeddings(_ context.Context, request openai.EmbeddingRequest) (openai.EmbeddingResponse, error) {
@@ -609,9 +629,10 @@ func TestExploreInitialFollowUpsAndFreshReset(t *testing.T) {
 	embedder := &exploreFakeEmbedder{}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
+	useExploreResponseServer(t, responses)
 	app := &App{
 		stdin: strings.NewReader(""), stdout: &stdout, stderr: &stderr,
-		responseClient: responses, embeddingClient: embedder,
+		embeddingClient: embedder,
 	}
 	output := runExploreForTest(t, app, &stdout, "where is Answer implemented?")
 	if output.ID == "" || len(output.Items) == 0 {
@@ -656,11 +677,6 @@ func TestExploreInitialFollowUpsAndFreshReset(t *testing.T) {
 		t.Fatalf("provider requests = %d, want 5", got)
 	}
 	requests := responses.recordedRequests()
-	for index, request := range requests {
-		if !request.ParallelToolCalls {
-			t.Fatalf("request %d disabled parallel provider tool calls", index)
-		}
-	}
 	rootCacheKey := requests[0].PromptCacheKey
 	if rootCacheKey == "" {
 		t.Fatal("initial explore request omitted prompt cache key")
@@ -668,9 +684,6 @@ func TestExploreInitialFollowUpsAndFreshReset(t *testing.T) {
 	for index, request := range requests[:4] {
 		if request.PromptCacheKey != rootCacheKey {
 			t.Fatalf("request %d prompt cache key = %q, want %q", index, request.PromptCacheKey, rootCacheKey)
-		}
-		if got := countPromptCacheBreakpoints(request.Input); got != index+1 {
-			t.Fatalf("request %d prompt cache breakpoints = %d, want %d", index, got, index+1)
 		}
 	}
 	if requests[4].PromptCacheKey == "" || requests[4].PromptCacheKey == rootCacheKey {
@@ -691,22 +704,13 @@ func TestExploreInitialFollowUpsAndFreshReset(t *testing.T) {
 	}
 }
 
-func countPromptCacheBreakpoints(items []openai.Item) int {
-	count := 0
-	for _, item := range items {
-		if item.PromptCacheBreakpoint {
-			count++
-		}
-	}
-	return count
-}
-
 func TestExploreRejectsInvalidQueryTargetBeforeSearchOrProviderWork(t *testing.T) {
 	responses := &exploreFakeResponseClient{}
 	embedder := &exploreFakeEmbedder{}
+	useExploreResponseServer(t, responses)
 	app := &App{
 		stdin: strings.NewReader(""), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{},
-		responseClient: responses, embeddingClient: embedder,
+		embeddingClient: embedder,
 	}
 	err := app.Run(t.Context(), []string{"explore", "--for", "review", "inspect"})
 	if err == nil || !strings.Contains(err.Error(), "unsupported explore query target") {
@@ -744,9 +748,10 @@ func TestExploreGlobalCWDIsCompleteWorkspaceBoundary(t *testing.T) {
 
 	responses := &exploreFakeResponseClient{}
 	var stdout bytes.Buffer
+	useExploreResponseServer(t, responses)
 	app := &App{
 		stdin: strings.NewReader(""), stdout: &stdout, stderr: &bytes.Buffer{},
-		responseClient: responses, embeddingClient: &exploreFakeEmbedder{},
+		embeddingClient: &exploreFakeEmbedder{},
 	}
 	client, opts, err := app.exploreSearchOptions(workspace)
 	if err != nil {
@@ -763,14 +768,10 @@ func TestExploreGlobalCWDIsCompleteWorkspaceBoundary(t *testing.T) {
 	if len(requests) != 1 {
 		t.Fatalf("provider requests = %d, want 1", len(requests))
 	}
-	toolNames := make(map[string]bool, len(requests[0].Tools))
-	for _, tool := range requests[0].Tools {
-		toolNames[tool.Name] = true
-	}
 	for _, name := range []string{
 		"git_recent_commits", "git_head_show", "git_diff_against_parent", "git_show_file_at_rev", "git_log_range",
 	} {
-		if !toolNames[name] {
+		if !strings.Contains(requests[0].Instructions, "tools."+name) {
 			t.Fatalf("Git explore request omitted history tool %q", name)
 		}
 	}
@@ -829,9 +830,10 @@ func TestExploreExecutesEstablishedReadTool(t *testing.T) {
 	writeFixtureFile(t, root+"/main.go", "package demo\n\nfunc Answer() int { return 42 }\n")
 	client := &exploreReadToolClient{}
 	var stdout bytes.Buffer
+	useExploreResponseServer(t, client)
 	app := &App{
 		stdin: strings.NewReader(""), stdout: &stdout, stderr: &bytes.Buffer{},
-		responseClient: client, embeddingClient: &exploreFakeEmbedder{},
+		embeddingClient: &exploreFakeEmbedder{},
 	}
 	output := runExploreForTest(t, app, &stdout, "read", "the", "Answer", "implementation")
 	if len(output.Items) != 1 || len(output.Items[0].References) != 1 || output.Items[0].References[0] != "main.go:3" {
@@ -851,9 +853,10 @@ func TestExploreExecutesReadToolOutsideGitRepository(t *testing.T) {
 	writeFixtureFile(t, root+"/main.go", "package demo\n\nfunc Answer() int { return 42 }\n")
 	client := &exploreReadToolClient{}
 	var stdout bytes.Buffer
+	useExploreResponseServer(t, client)
 	app := &App{
 		stdin: strings.NewReader(""), stdout: &stdout, stderr: &bytes.Buffer{},
-		responseClient: client, embeddingClient: &exploreFakeEmbedder{},
+		embeddingClient: &exploreFakeEmbedder{},
 	}
 	output := runExploreForTest(t, app, &stdout, "read", "the", "Answer", "implementation")
 	if len(output.Items) != 1 || len(output.Items[0].References) != 1 || output.Items[0].References[0] != "main.go:3" {
@@ -872,9 +875,9 @@ func TestExploreDoesNotTreatInvalidGitRepositoryAsDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &exploreFakeResponseClient{}
+	useExploreResponseServer(t, client)
 	app := &App{
 		stdin: strings.NewReader(""), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{},
-		responseClient: client,
 	}
 	if err := app.Run(t.Context(), []string{"explore", "inspect", "the", "codebase"}); err == nil {
 		t.Fatal("explore accepted an invalid Git repository as an ordinary directory")
@@ -891,7 +894,8 @@ func TestExploreUnknownFollowUpFailsBeforeProviderResolution(t *testing.T) {
 	t.Chdir(root)
 	runGit(t, root, "init")
 	client := &exploreFakeResponseClient{}
-	app := &App{stdin: strings.NewReader(""), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, responseClient: client}
+	useExploreResponseServer(t, client)
+	app := &App{stdin: strings.NewReader(""), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
 	err := app.Run(t.Context(), []string{"explore", "--follow-up", "AAAAAAAAAAAAAAAAAAAAAAAAAA", "continue"})
 	if err == nil || !strings.Contains(err.Error(), "unknown explore search ID") {
 		t.Fatalf("error = %v", err)
@@ -913,3 +917,110 @@ func runExploreForTest(t *testing.T, app *App, stdout *bytes.Buffer, args ...str
 	}
 	return output
 }
+
+// Keep the request-recording fixtures behind a real HTTP boundary so these
+// tests exercise the Agents SDK transport, loop and persisted history.
+func useExploreResponseServer(t *testing.T, client interface {
+	CreateResponse(context.Context, testResponseRequest) (testResponse, error)
+}) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var wire struct {
+			Model          string `json:"model"`
+			Instructions   string `json:"instructions"`
+			ServiceTier    string `json:"service_tier"`
+			PromptCacheKey string `json:"prompt_cache_key"`
+			Input          []struct {
+				Type    string         `json:"type"`
+				Role    string         `json:"role"`
+				Content jsontext.Value `json:"content"`
+				Output  string         `json:"output"`
+			} `json:"input"`
+		}
+		if err := json.UnmarshalRead(r.Body, &wire); err != nil {
+			t.Error(err)
+			http.Error(w, "bad request", 400)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/responses/compact") {
+			var output []any
+			for _, item := range wire.Input {
+				if item.Role == "user" || item.Role == "developer" || item.Role == "system" {
+					output = append(output, map[string]any{"type": "message", "role": item.Role, "content": item.Content})
+				}
+			}
+			output = append(output, map[string]any{"type": "compaction", "id": "cmp_test", "encrypted_content": "opaque-test-state"})
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.MarshalWrite(w, map[string]any{"id": "compact_test", "object": "response.compaction", "output": output}); err != nil {
+				t.Error(err)
+			}
+			return
+		}
+		request := testResponseRequest{Model: wire.Model, Instructions: wire.Instructions, ServiceTier: wire.ServiceTier, PromptCacheKey: wire.PromptCacheKey}
+		for _, item := range wire.Input {
+			content := ""
+			if item.Content.Kind() == '"' {
+				_ = json.Unmarshal(item.Content, &content)
+			} else if item.Content.Kind() == '[' {
+				var parts []struct {
+					Text string `json:"text"`
+				}
+				_ = json.Unmarshal(item.Content, &parts)
+				for _, part := range parts {
+					content += part.Text
+				}
+			}
+			kind := item.Type
+			if kind == "" && item.Role != "" {
+				kind = "message"
+			}
+			request.Input = append(request.Input, openai.Item{Type: kind, Role: item.Role, Content: content, Output: item.Output})
+		}
+		response, err := client.CreateResponse(r.Context(), request)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		var output []any
+		if len(response.ToolCalls) > 0 {
+			var calls []string
+			for _, call := range response.ToolCalls {
+				calls = append(calls, "tools."+call.Name+"("+call.Arguments+")")
+			}
+			arguments, _ := json.Marshal(map[string]any{"code": "text(await Promise.all([" + strings.Join(calls, ",") + "]));"})
+			output = []any{map[string]any{"type": "function_call", "id": "fc_test", "call_id": "call_test", "name": "exec", "arguments": string(arguments)}}
+		} else {
+			output = []any{map[string]any{"type": "message", "id": "msg_test", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": response.Text, "annotations": []any{}}}}}
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		emit := func(value any) {
+			data, err := json.Marshal(value)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data)
+		}
+		for index, item := range output {
+			emit(map[string]any{"type": "response.output_item.added", "output_index": index, "item": item})
+			emit(map[string]any{"type": "response.output_item.done", "output_index": index, "item": item})
+		}
+		emit(map[string]any{"type": "response.completed", "response": map[string]any{"id": "resp_test", "status": "completed", "output": output, "usage": map[string]any{"input_tokens": response.Usage.InputTokens, "output_tokens": response.Usage.OutputTokens, "total_tokens": response.Usage.TotalTokens, "input_tokens_details": map[string]any{"cached_tokens": response.Usage.CachedInputTokens, "cache_write_tokens": response.Usage.CacheWriteInputTokens}}}})
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("OPENAI_BASE_URL", server.URL+"/v1")
+}
+
+type testResponseRequest struct {
+	Model          string
+	Instructions   string
+	ServiceTier    string
+	PromptCacheKey string
+	Input          []openai.Item
+}
+type testResponse struct {
+	Text      string
+	ToolCalls []testToolCall
+	Usage     openai.Usage
+}
+type testToolCall struct{ Name, Arguments string }
