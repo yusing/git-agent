@@ -24,7 +24,10 @@
   documentation. DO NOT REPEAT CONTRACT FROM SPEC TO README.
 - `completions/git-agent.*`: shell completions; current support is fish.
 - `.shadowtree.toml`: Go profile and installation recipe.
-- `bin/` and `internal/agent/dist/`: generated build output, not source.
+- `bin/`: untracked local build output.
+- `internal/agent/dist/runtime.mjs`: tracked generated bundle shipped in Go
+  modules. Regenerate with `npm run build` when runtime sources or dependencies
+  change; edit the owning sources in `runtime/` instead of the bundle.
 
 ## Constraints
 

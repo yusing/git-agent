@@ -23,9 +23,8 @@ inspection and context-preserving questions.
 ## Quick Start
 
 ```sh
-# 1. From a source checkout, install dependencies and build
-npm ci
-shadowtree install
+# 1. Install
+go install github.com/yusing/git-agent/cmd/git-agent@latest
 
 # 2. Generate a commit message from staged changes
 git-agent commit-msg
@@ -38,8 +37,8 @@ By default, message-generation commands use ChatGPT/Codex auth from
 `~/.codex/auth.json`. `OPENAI_API_KEY` is the fallback for OpenAI-compatible
 provider auth when that file is absent.
 
-Builds require Go 1.27+, Node.js 22.12+ and npm. Generation and exploration
-require Node.js on `PATH`; the built binary embeds its JavaScript runtime.
+Installation requires Go 1.27+; npm is not needed. Generation and exploration
+require Node.js 22.12+ on `PATH`; the built binary embeds its JavaScript runtime.
 Local Git and search operations remain in Go. Installation writes to
 `$(go env GOPATH)/bin` by default; make sure that directory is on `PATH`.
 
@@ -543,6 +542,8 @@ flowchart TD
 
 ## Local Development
 
+Rebuilding the JavaScript runtime requires Node.js 22.12+ and npm:
+
 ```sh
 npm ci
 shadowtree install
@@ -550,6 +551,11 @@ shadowtree install
 
 The install recipe builds and installs the binary and installs Fish
 completions when the configured Fish directory exists.
+
+After changing runtime sources or npm dependencies, run `npm run build` and
+include `internal/agent/dist/runtime.mjs` with the source changes. `npm run check`
+verifies that this generated bundle is current so Go-only installations can
+embed it without running npm.
 
 ## Security and Privacy
 

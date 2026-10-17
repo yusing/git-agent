@@ -1329,11 +1329,15 @@ Nonzero exit codes are returned for:
 
 ### Build and install
 
-Builds require Go 1.27+, Node.js 22.12+ and npm. Run `npm ci` before the
-Shadowtree build, test or install workflows. The runtime bundle includes the
-Agents SDK and the sandbox interpreter and is embedded in the Go executable.
-Generated bundles and dependency directories are build outputs, not source.
-Generation and exploration require Node.js on `PATH`; they start a fixed
+`go install github.com/yusing/git-agent/cmd/git-agent@<version>` requires Go
+1.27+ and no npm build step. The Go module ships a generated runtime bundle
+containing the Agents SDK and sandbox interpreter, embedded in the executable.
+Runtime source and dependency changes include a regenerated bundle;
+`npm run check` rejects a missing or stale bundle.
+
+Rebuilding the bundle requires Node.js 22.12+ and npm. Run `npm ci` before the
+Shadowtree build, test or install workflows. Generation and exploration require
+Node.js 22.12+ on `PATH`; they start a fixed
 runtime, never a model-supplied executable or argument list.
 
 `shadowtree install` builds the runtime and installs the Go binary using
@@ -2335,8 +2339,8 @@ The in-repository implementation is complete when:
 
 - `shadowtree build` succeeds without writing a repository artifact
 - `shadowtree test` passes
-- `shadowtree install destdir=<tmp> prefix=/usr/local` installs an executable
-  binary
+- `go install` from the distributed module installs an executable without npm
+- `shadowtree install` rebuilds the runtime and installs an executable binary
 - `git-agent commit-msg` and `git-agent commit-msg --amend` route through the
   bounded SDK-backed agent loop except for normal submodule-only staged changes
   without a nonblank caller prompt, which are formatted locally without provider auth
