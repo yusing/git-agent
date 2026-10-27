@@ -79,12 +79,9 @@ type Coordinator struct {
 	Timing            func(string, time.Duration)
 }
 
-func NewCoordinator(store *Store, workspace string, fast bool, target QueryTarget) *Coordinator {
+func NewCoordinator(store *Store, workspace, model, serviceTier string, target QueryTarget) *Coordinator {
 	workspace = filepath.Clean(workspace)
-	batchIdentity := workspace + "\x00target=" + string(target)
-	if fast {
-		batchIdentity += "\x00priority"
-	}
+	batchIdentity := workspace + "\x00model=" + model + "\x00service-tier=" + serviceTier + "\x00target=" + string(target)
 	sum := sha256.Sum256([]byte(batchIdentity))
 	return &Coordinator{
 		store:             store,

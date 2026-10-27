@@ -239,10 +239,9 @@ tests, then return a non-empty `items` array. Every item contains one direct,
 self-contained `description` and a non-empty `references` array of
 exploration-root-relative paths. References include line ranges when the
 evidence is line-specific. Indexing, batch-wait, tool, and provider progress is
-written only to stderr. With `--fast`, the Responses API request sends only
-`service_tier=priority`; it does not select a different prompt, model, reasoning
-effort, budget, cache policy, or search path. Without it, `service_tier` is
-omitted.
+written only to stderr. `--fast` selects `service_tier=priority` without changing
+the prompt, model, reasoning effort, budget, cache policy, or search path. Model
+defaults apply as described under flag behavior.
 
 `--for` selects a compact, target-neutral exploration system prompt and supplies
 the selected target as a separate developer instruction. `diagnose` prioritizes
@@ -291,9 +290,9 @@ receive only their own result. A batch is confined to one cleaned absolute
 working directory even when project metadata is shared by clones with the same
 origin.
 Initial searches in that workspace are mutually compatible only when
-they use the same service tier and selected query target. Follow-ups are
+they use the same model, service tier, and selected query target. Follow-ups are
 compatible only when they name the same parent search ID and use the same
-service tier and selected query target.
+model, service tier, and selected query target.
 Every successful batch item receives a distinct opaque ID even when its provider
 conversation was
 shared with sibling items.
@@ -1196,7 +1195,7 @@ with the shared service-tier behavior, and its command-specific
 
 Flag behavior:
 
-- `--fast`: send `service_tier=priority`
+- `--fast`: send `service_tier=priority` on generation requests
 - `--low`: send `reasoning.effort=low`
 - `--medium`: send `reasoning.effort=medium`
 - `--high`: send `reasoning.effort=high`
@@ -1211,8 +1210,11 @@ Flag behavior:
   IDs must be preserved. Amend retains its original-subject anchor.
 - `--pprof <addr>`: bind the requested address and serve `/debug/pprof/`
   endpoints until the command exits
-- default: omit `service_tier`; choose reasoning effort after resolving the
-  command model (`--model`, then `OPENAI_MODEL`, then command default):
+- default: choose service tier and reasoning effort after resolving the command
+  model (`--model`, then `OPENAI_MODEL`, then command default).
+  `gpt-6.1-terra` generation requests use `service_tier=priority` and reasoning
+  effort `high`; other models omit `service_tier` unless `--fast` is set.
+  SDK compaction requests do not set a service tier.
   `gpt-5.3-codex-spark`, `gpt-5.6-luna`, and `gpt-6-luna` use `xhigh`;
   `gpt-5.6-sol`, `gpt-6-sol`, and `gpt-6-astra` use `medium`.
   Defaults match the configured model ID. Other model IDs omit `reasoning.effort` and use the provider's default.

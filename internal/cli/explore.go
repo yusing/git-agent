@@ -109,7 +109,13 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 		selectedTarget = inheritedTarget
 	}
 
-	coordinator := explore.NewCoordinator(store, workspace, fast, selectedTarget)
+	cfg, err := config.Resolve(config.Options{Fast: fast, Debug: debug})
+	if err != nil {
+		return err
+	}
+	// Exploration uses the SDK's request policy instead of a command timeout.
+	cfg.Timeout = 0
+	coordinator := explore.NewCoordinator(store, workspace, cfg.Model, cfg.ServiceTier, selectedTarget)
 	if debug {
 		coordinator.Timing = timing.recordSimple
 	}
@@ -134,7 +140,7 @@ func (a *App) runExplore(ctx context.Context, args []string) error {
 	output, err := coordinator.Run(ctx, parent, question, prepare, func(
 		batchCtx context.Context, batchParent *explore.Session, items []explore.BatchItem,
 	) (map[string]explore.BatchResult, error) {
-		return a.runExploreBatch(batchCtx, workspace, repo, batchParent, items, fast, debug, recorder, timing)
+		return a.runExploreBatch(batchCtx, workspace, repo, batchParent, items, cfg, recorder, timing)
 	})
 	if err != nil {
 		return errors.Join(err, timing.err())
@@ -300,19 +306,11 @@ func (a *App) runExploreBatch(
 	repo *gitctx.Repository,
 	parent *explore.Session,
 	items []explore.BatchItem,
-	fast bool,
-	debug bool,
+	cfg config.Config,
 	recorder *trace.Recorder,
 	timing *explorePhaseTrace,
 ) (map[string]explore.BatchResult, error) {
 	promptSetupStarted := time.Now()
-	cfg, err := config.Resolve(config.Options{Fast: fast, Debug: debug})
-	if err != nil {
-		return nil, err
-	}
-	// Exploration uses the SDK's request policy rather than the normal
-	// generation-command timeout; caller cancellation still reaches the runtime.
-	cfg.Timeout = 0
 	selectedTarget := items[0].QueryTarget
 	instructionTarget := explore.SystemPromptTarget(parent, selectedTarget)
 	promptItems := make([]explore.PromptItem, 0, len(items))
@@ -370,7 +368,7 @@ func (a *App) runExploreBatch(
 		PromptCacheKey: lineage.PromptCacheKey,
 		UsageOutput:    a.stderr,
 	}
-	if debug {
+	if cfg.Debug {
 		runner.Timing = func(event agent.Timing) {
 			fields := map[string]any{}
 			if event.Step > 0 {

@@ -398,6 +398,7 @@ func TestResolveModelReasoningDefaults(t *testing.T) {
 		{"gpt-6-luna", "xhigh"},
 		{"gpt-6-sol", "medium"},
 		{"gpt-6-astra", "medium"},
+		{"gpt-6.1-terra", "high"},
 		{"gpt-5.6-terra", ""},
 		{"gpt-5.3-codex", ""},
 		{"custom-luna", ""},
@@ -411,6 +412,13 @@ func TestResolveModelReasoningDefaults(t *testing.T) {
 			if cfg.ThinkingEffort != tc.want {
 				t.Fatalf("effort = %q, want %q", cfg.ThinkingEffort, tc.want)
 			}
+			wantTier := ""
+			if tc.model == "gpt-6.1-terra" {
+				wantTier = "priority"
+			}
+			if cfg.ServiceTier != wantTier {
+				t.Fatalf("service tier = %q, want %q", cfg.ServiceTier, wantTier)
+			}
 			// The explicit model wins over the environment's model and effort.
 			cfg, err = Resolve(Options{Model: "gpt-6-astra"})
 			if err != nil {
@@ -418,6 +426,9 @@ func TestResolveModelReasoningDefaults(t *testing.T) {
 			}
 			if cfg.ThinkingEffort != "medium" {
 				t.Fatalf("flag model effort = %q", cfg.ThinkingEffort)
+			}
+			if cfg.ServiceTier != "" {
+				t.Fatalf("flag model service tier = %q", cfg.ServiceTier)
 			}
 			for _, opts := range []Options{{Low: true}, {Medium: true}, {High: true}, {XHigh: true}} {
 				cfg, err = Resolve(opts)
@@ -436,7 +447,18 @@ func TestResolveModelReasoningDefaults(t *testing.T) {
 				if cfg.ThinkingEffort != want {
 					t.Fatalf("explicit effort = %q, want %q", cfg.ThinkingEffort, want)
 				}
+				if cfg.ServiceTier != wantTier {
+					t.Fatalf("explicit effort service tier = %q, want %q", cfg.ServiceTier, wantTier)
+				}
 			}
 		})
+	}
+	t.Setenv("OPENAI_MODEL", "gpt-6-luna")
+	cfg, err := Resolve(Options{Model: "gpt-6.1-terra"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model != "gpt-6.1-terra" || cfg.ThinkingEffort != "high" || cfg.ServiceTier != "priority" {
+		t.Fatalf("explicit terra configuration = %#v", cfg)
 	}
 }

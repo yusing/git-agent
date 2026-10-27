@@ -354,31 +354,42 @@ func TestExploreReportsPhaseTimingsOnStderr(t *testing.T) {
 }
 
 func TestExploreFastRequestsPriorityServiceTier(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("OPENAI_API_KEY", "test-key")
-	t.Setenv("OPENAI_EMBEDDING_DIMENSIONS", "3")
-	t.Chdir(root)
-	runGit(t, root, "init")
-	writeFixtureFile(t, root+"/main.go", "package demo\n")
+	for _, tc := range []struct {
+		model, effort string
+		flags         []string
+	}{
+		{model: "gpt-6-luna", effort: "xhigh", flags: []string{"--fast"}},
+		{model: "gpt-6.1-terra", effort: "high"},
+	} {
+		t.Run(tc.model, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("OPENAI_API_KEY", "test-key")
+			t.Setenv("OPENAI_MODEL", tc.model)
+			t.Setenv("OPENAI_EMBEDDING_DIMENSIONS", "3")
+			t.Chdir(root)
+			runGit(t, root, "init")
+			writeFixtureFile(t, root+"/main.go", "package demo\n")
 
-	responses := &exploreFakeResponseClient{}
-	var stdout bytes.Buffer
-	useExploreResponseServer(t, responses)
-	app := &App{
-		stdin: strings.NewReader(""), stdout: &stdout, stderr: &bytes.Buffer{},
-		embeddingClient: &exploreFakeEmbedder{},
-	}
-	output := runExploreForTest(t, app, &stdout, "--fast", "inspect", "the", "repository")
-	runExploreForTest(t, app, &stdout, "--fast", "--follow-up", output.ID, "continue")
-	requests := responses.recordedRequests()
-	if len(requests) != 2 {
-		t.Fatalf("provider requests = %d, want 2", len(requests))
-	}
-	for index, request := range requests {
-		if got := request.ServiceTier; got != "priority" {
-			t.Fatalf("request %d service tier = %q, want priority", index, got)
-		}
+			responses := &exploreFakeResponseClient{}
+			var stdout bytes.Buffer
+			useExploreResponseServer(t, responses)
+			app := &App{
+				stdin: strings.NewReader(""), stdout: &stdout, stderr: &bytes.Buffer{},
+				embeddingClient: &exploreFakeEmbedder{},
+			}
+			output := runExploreForTest(t, app, &stdout, append(tc.flags, "inspect", "the", "repository")...)
+			runExploreForTest(t, app, &stdout, append(tc.flags, "--follow-up", output.ID, "continue")...)
+			requests := responses.recordedRequests()
+			if len(requests) != 2 {
+				t.Fatalf("provider requests = %d, want 2", len(requests))
+			}
+			for index, request := range requests {
+				if request.Model != tc.model || request.ServiceTier != "priority" || request.ThinkingEffort != tc.effort {
+					t.Fatalf("request %d model = %q, service tier = %q, effort = %q", index, request.Model, request.ServiceTier, request.ThinkingEffort)
+				}
+			}
+		})
 	}
 }
 
@@ -930,7 +941,10 @@ func useExploreResponseServer(t *testing.T, client interface {
 			Instructions   string `json:"instructions"`
 			ServiceTier    string `json:"service_tier"`
 			PromptCacheKey string `json:"prompt_cache_key"`
-			Input          []struct {
+			Reasoning      struct {
+				Effort string `json:"effort"`
+			} `json:"reasoning"`
+			Input []struct {
 				Type    string         `json:"type"`
 				Role    string         `json:"role"`
 				Content jsontext.Value `json:"content"`
@@ -956,7 +970,7 @@ func useExploreResponseServer(t *testing.T, client interface {
 			}
 			return
 		}
-		request := testResponseRequest{Model: wire.Model, Instructions: wire.Instructions, ServiceTier: wire.ServiceTier, PromptCacheKey: wire.PromptCacheKey}
+		request := testResponseRequest{Model: wire.Model, Instructions: wire.Instructions, ServiceTier: wire.ServiceTier, ThinkingEffort: wire.Reasoning.Effort, PromptCacheKey: wire.PromptCacheKey}
 		for _, item := range wire.Input {
 			content := ""
 			if item.Content.Kind() == '"' {
@@ -1015,6 +1029,7 @@ type testResponseRequest struct {
 	Model          string
 	Instructions   string
 	ServiceTier    string
+	ThinkingEffort string
 	PromptCacheKey string
 	Input          []openai.Item
 }

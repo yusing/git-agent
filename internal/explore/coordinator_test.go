@@ -216,8 +216,8 @@ func TestCoordinatorCapsConcurrentBatchAtThree(t *testing.T) {
 
 func TestCoordinatorDoesNotBatchDifferentWorkspaces(t *testing.T) {
 	store := testStore(t)
-	first := NewCoordinator(store, "/workspace/one", false, QueryTargetUniversal)
-	second := NewCoordinator(store, "/workspace/two", false, QueryTargetUniversal)
+	first := NewCoordinator(store, "/workspace/one", "test-model", "", QueryTargetUniversal)
+	second := NewCoordinator(store, "/workspace/two", "test-model", "", QueryTargetUniversal)
 	for _, coordinator := range []*Coordinator{first, second} {
 		coordinator.pollInterval = time.Millisecond
 		coordinator.heartbeatInterval = 5 * time.Millisecond
@@ -268,56 +268,65 @@ func TestCoordinatorRejectsParentFromDifferentWorkspace(t *testing.T) {
 	}
 }
 
-func TestCoordinatorDoesNotBatchDifferentServiceTiers(t *testing.T) {
-	store := testStore(t)
-	standard := NewCoordinator(store, testWorkspace, false, QueryTargetUniversal)
-	priority := NewCoordinator(store, testWorkspace, true, QueryTargetUniversal)
-	for _, coordinator := range []*Coordinator{standard, priority} {
-		coordinator.pollInterval = time.Millisecond
-		coordinator.heartbeatInterval = 5 * time.Millisecond
-		coordinator.heartbeatStale = 100 * time.Millisecond
-	}
-	var prepared atomic.Int32
-	release := make(chan struct{})
-	prepare := func(context.Context) (Prepared, error) {
-		if prepared.Add(1) == 2 {
-			close(release)
-		}
-		<-release
-		return Prepared{SemanticResults: `{"results":[]}`}, nil
-	}
-	var runs atomic.Int32
-	runner := func(ctx context.Context, _ *Session, items []BatchItem) (map[string]BatchResult, error) {
-		if len(items) != 1 {
-			return nil, fmt.Errorf("different service tiers formed batch of %d", len(items))
-		}
-		runs.Add(1)
-		return answerRunner(ctx, nil, items)
-	}
-	var wg sync.WaitGroup
-	errors := make(chan error, 2)
-	for index, coordinator := range []*Coordinator{standard, priority} {
-		wg.Go(func() {
-			_, err := coordinator.Run(t.Context(), nil, fmt.Sprintf("tier %d", index), prepare, runner)
-			errors <- err
+func TestCoordinatorDoesNotBatchDifferentModelsOrServiceTiers(t *testing.T) {
+	for _, tc := range []struct {
+		name, model1, tier1, model2, tier2 string
+	}{
+		{"service tier", "gpt-6.1-terra", "", "gpt-6.1-terra", "priority"},
+		{"model", "gpt-6.1-terra", "priority", "gpt-6-luna", "priority"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := testStore(t)
+			first := NewCoordinator(store, testWorkspace, tc.model1, tc.tier1, QueryTargetUniversal)
+			second := NewCoordinator(store, testWorkspace, tc.model2, tc.tier2, QueryTargetUniversal)
+			for _, coordinator := range []*Coordinator{first, second} {
+				coordinator.pollInterval = time.Millisecond
+				coordinator.heartbeatInterval = 5 * time.Millisecond
+				coordinator.heartbeatStale = 100 * time.Millisecond
+			}
+			var prepared atomic.Int32
+			release := make(chan struct{})
+			prepare := func(context.Context) (Prepared, error) {
+				if prepared.Add(1) == 2 {
+					close(release)
+				}
+				<-release
+				return Prepared{SemanticResults: `{"results":[]}`}, nil
+			}
+			var runs atomic.Int32
+			runner := func(ctx context.Context, _ *Session, items []BatchItem) (map[string]BatchResult, error) {
+				if len(items) != 1 {
+					return nil, fmt.Errorf("incompatible requests formed batch of %d", len(items))
+				}
+				runs.Add(1)
+				return answerRunner(ctx, nil, items)
+			}
+			var wg sync.WaitGroup
+			errors := make(chan error, 2)
+			for index, coordinator := range []*Coordinator{first, second} {
+				wg.Go(func() {
+					_, err := coordinator.Run(t.Context(), nil, fmt.Sprintf("request %d", index), prepare, runner)
+					errors <- err
+				})
+			}
+			wg.Wait()
+			close(errors)
+			for err := range errors {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if runs.Load() != 2 {
+				t.Fatalf("batch runs = %d, want 2", runs.Load())
+			}
 		})
-	}
-	wg.Wait()
-	close(errors)
-	for err := range errors {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if runs.Load() != 2 {
-		t.Fatalf("batch runs = %d, want 2", runs.Load())
 	}
 }
 
 func TestCoordinatorDoesNotBatchDifferentQueryTargets(t *testing.T) {
 	store := testStore(t)
-	universal := NewCoordinator(store, testWorkspace, false, QueryTargetUniversal)
-	diagnose := NewCoordinator(store, testWorkspace, false, QueryTargetDiagnose)
+	universal := NewCoordinator(store, testWorkspace, "test-model", "", QueryTargetUniversal)
+	diagnose := NewCoordinator(store, testWorkspace, "test-model", "", QueryTargetDiagnose)
 	for _, coordinator := range []*Coordinator{universal, diagnose} {
 		coordinator.pollInterval = time.Millisecond
 		coordinator.heartbeatInterval = 5 * time.Millisecond
@@ -693,7 +702,7 @@ func testStore(t *testing.T) *Store {
 }
 
 func testCoordinator(store *Store) *Coordinator {
-	coordinator := NewCoordinator(store, testWorkspace, false, QueryTargetUniversal)
+	coordinator := NewCoordinator(store, testWorkspace, "test-model", "", QueryTargetUniversal)
 	coordinator.batchWait = time.Second
 	coordinator.joinGrace = 50 * time.Millisecond
 	coordinator.pollInterval = time.Millisecond

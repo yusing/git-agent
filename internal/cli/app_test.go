@@ -2910,27 +2910,41 @@ func TestCommitMsgForwardsFastAndThinkingFlags(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	for _, tc := range []struct {
-		model string
-		flag  string
-		want  string
+		model    string
+		flag     string
+		fast     bool
+		want     string
+		wantTier string
 	}{
-		{"gpt-5.3-codex-spark", "", "xhigh"},
-		{"gpt-5.6-luna", "", "xhigh"},
-		{"gpt-5.6-sol", "", "medium"},
-		{"gpt-6-luna", "", "xhigh"},
-		{"gpt-6-sol", "", "medium"},
-		{"gpt-6-astra", "", "medium"},
-		{"gpt-5.6-terra", "", ""},
-		{"gpt-5.6", "", ""},
-		{"test-model", "", ""},
-		{"gpt-5.6-luna", "--medium", "medium"},
+		{"gpt-5.3-codex-spark", "", true, "xhigh", "priority"},
+		{"gpt-5.6-luna", "", true, "xhigh", "priority"},
+		{"gpt-5.6-sol", "", true, "medium", "priority"},
+		{"gpt-6-luna", "", true, "xhigh", "priority"},
+		{"gpt-6-sol", "", true, "medium", "priority"},
+		{"gpt-6-astra", "", true, "medium", "priority"},
+		{"gpt-5.6-terra", "", true, "", "priority"},
+		{"gpt-5.6", "", true, "", "priority"},
+		{"test-model", "", false, "", ""},
+		{"gpt-5.6-luna", "--medium", true, "medium", "priority"},
+		{"gpt-6.1-terra", "", false, "high", "priority"},
+		{"gpt-6.1-terra", "--low", false, "low", "priority"},
+		{"gpt-6.1-terra", "--model", false, "high", "priority"},
 	} {
 		t.Run(tc.model+tc.flag, func(t *testing.T) {
 			t.Setenv("OPENAI_MODEL", tc.model)
+			if tc.flag == "--model" {
+				t.Setenv("OPENAI_MODEL", "gpt-6-luna")
+			}
 			requests = nil
-			args := []string{"commit-msg", "--fast"}
+			args := []string{"commit-msg"}
+			if tc.fast {
+				args = append(args, "--fast")
+			}
 			if tc.flag != "" {
 				args = append(args, tc.flag)
+				if tc.flag == "--model" {
+					args = append(args, tc.model)
+				}
 			}
 			app := &App{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
 			if err := app.Run(t.Context(), args); err != nil {
@@ -2939,8 +2953,8 @@ func TestCommitMsgForwardsFastAndThinkingFlags(t *testing.T) {
 			if len(requests) != 1 {
 				t.Fatalf("request count = %d", len(requests))
 			}
-			if got := requests[0]["service_tier"]; got != "priority" {
-				t.Fatalf("service_tier = %#v", got)
+			if got, ok := requests[0]["service_tier"]; tc.wantTier == "" && ok || tc.wantTier != "" && got != tc.wantTier {
+				t.Fatalf("service_tier = %#v, want %q", got, tc.wantTier)
 			}
 			if got := requests[0]["model"]; got != tc.model {
 				t.Fatalf("model = %#v, want %q", got, tc.model)

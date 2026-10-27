@@ -104,6 +104,9 @@ func ResolveFromLocal(opts Options, cfg Config) (Config, error) {
 	cfg.AuthAccountID = auth.accountID
 	cfg.BaseURL = resolveBaseURL(opts.BaseURL, auth)
 	cfg.Model = firstNonEmpty(opts.Model, os.Getenv("OPENAI_MODEL"), DefaultModel)
+	if cfg.ServiceTier == "" && cfg.Model == "gpt-6.1-terra" {
+		cfg.ServiceTier = "priority"
+	}
 	if cfg.ThinkingEffort == "" {
 		cfg.ThinkingEffort = DefaultThinkingEffort(cfg.Model)
 	}
@@ -118,6 +121,8 @@ func DefaultThinkingEffort(model string) string {
 		return "xhigh"
 	case "gpt-5.6-sol", "gpt-6-sol", "gpt-6-astra":
 		return "medium"
+	case "gpt-6.1-terra":
+		return "high"
 	default:
 		return ""
 	}

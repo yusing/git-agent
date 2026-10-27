@@ -164,10 +164,11 @@ git-agent explore --follow-up <search-id> "which tests define its failure contra
 git-agent explore --follow-up <search-id> --for owner "which callers reach it?"
 ```
 
-Concurrent initial calls with the same service tier and query target batch
-automatically. Concurrent follow-ups naming the same parent ID, service tier,
-and query target become independent sibling branches. Three follow-ups preserve
-context; the next invocation succeeds as a fresh search with a reset allowance.
+Concurrent initial calls with the same model, service tier, and query target
+batch automatically. Concurrent follow-ups naming the same parent ID, model,
+service tier, and query target become independent sibling branches. Three
+follow-ups preserve context; the next invocation succeeds as a fresh search with
+a reset allowance.
 An initial batch and its context-preserving follow-ups are assigned one
 prompt-cache key. The SDK manages transport, conversation history, and compaction.
 ChatGPT/Codex authentication uses its Responses compaction protocol. Custom endpoints must
@@ -514,10 +515,13 @@ unchanged.
 
 Behavior defaults:
 
-- `service_tier` is omitted unless `--fast` is set.
+- `gpt-6.1-terra` generation requests use `service_tier=priority` by default.
+  For other models, `service_tier` is omitted unless `--fast` is set. Priority
+  processing can cost more than standard processing; there is no flag to
+  disable it for Terra.
 - Reasoning effort defaults to `xhigh` for `gpt-5.3-codex-spark`,
   `gpt-5.6-luna`, and `gpt-6-luna`; `medium` for `gpt-5.6-sol`,
-  `gpt-6-sol`, and `gpt-6-astra`.
+  `gpt-6-sol`, and `gpt-6-astra`; and `high` for `gpt-6.1-terra`.
   These defaults match the configured model ID; other IDs omit the effort and
   use the provider's default.
 - `--low`, `--medium`, `--high`, and `--xhigh` override the model default.
