@@ -2926,11 +2926,16 @@ func TestCommitMsgForwardsFastAndThinkingFlags(t *testing.T) {
 		{"gpt-5.6", "", true, "", "priority"},
 		{"test-model", "", false, "", ""},
 		{"gpt-5.6-luna", "--medium", true, "medium", "priority"},
+		{"", "", false, "high", "priority"},
 		{"gpt-6.1-terra", "", false, "high", "priority"},
 		{"gpt-6.1-terra", "--low", false, "low", "priority"},
 		{"gpt-6.1-terra", "--model", false, "high", "priority"},
 	} {
-		t.Run(tc.model+tc.flag, func(t *testing.T) {
+		name := tc.model + tc.flag
+		if name == "" {
+			name = "default"
+		}
+		t.Run(name, func(t *testing.T) {
 			t.Setenv("OPENAI_MODEL", tc.model)
 			if tc.flag == "--model" {
 				t.Setenv("OPENAI_MODEL", "gpt-6-luna")
@@ -2956,8 +2961,12 @@ func TestCommitMsgForwardsFastAndThinkingFlags(t *testing.T) {
 			if got, ok := requests[0]["service_tier"]; tc.wantTier == "" && ok || tc.wantTier != "" && got != tc.wantTier {
 				t.Fatalf("service_tier = %#v, want %q", got, tc.wantTier)
 			}
-			if got := requests[0]["model"]; got != tc.model {
-				t.Fatalf("model = %#v, want %q", got, tc.model)
+			wantModel := tc.model
+			if wantModel == "" {
+				wantModel = "gpt-6.1-terra"
+			}
+			if got := requests[0]["model"]; got != wantModel {
+				t.Fatalf("model = %#v, want %q", got, wantModel)
 			}
 			reasoning, ok := requests[0]["reasoning"].(map[string]any)
 			if tc.want == "" {

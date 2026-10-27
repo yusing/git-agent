@@ -344,7 +344,7 @@ func TestResolveUsesRaisedDefaultMaxSteps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Model != "gpt-6-luna" {
+	if cfg.Model != "gpt-6.1-terra" {
 		t.Fatalf("default Model = %q", cfg.Model)
 	}
 	if cfg.MaxSteps != DefaultMaxSteps {
@@ -353,10 +353,10 @@ func TestResolveUsesRaisedDefaultMaxSteps(t *testing.T) {
 	if cfg.MaxSteps != 30 {
 		t.Fatalf("default MaxSteps = %d", cfg.MaxSteps)
 	}
-	if cfg.ServiceTier != "" {
+	if cfg.ServiceTier != "priority" {
 		t.Fatalf("ServiceTier = %q", cfg.ServiceTier)
 	}
-	if cfg.ThinkingEffort != "xhigh" {
+	if cfg.ThinkingEffort != "high" {
 		t.Fatalf("ThinkingEffort = %q", cfg.ThinkingEffort)
 	}
 }

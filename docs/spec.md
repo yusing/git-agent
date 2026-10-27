@@ -1262,7 +1262,7 @@ Supported environment variables:
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL` (overrides the default message-generation model,
-  `gpt-6-luna`)
+  `gpt-6.1-terra`)
 - `OPENAI_EMBEDDING_API_KEY`
 - `OPENAI_EMBEDDING_BASE_URL`
 - `OPENAI_EMBEDDING_MODEL`
